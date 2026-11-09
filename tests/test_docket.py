@@ -16,6 +16,7 @@ from agent_bailiff.docket import (
     DocketClient,
     DocketCorrupt,
     DocketError,
+    DocketLocked,
     DocketSink,
     Entry,
     Head,
@@ -468,3 +469,33 @@ def test_client_raises_when_the_sink_is_down(paths):
 def test_kid_pinned_for_two_writers_is_a_configuration_error():
     with pytest.raises(ValueError, match="more than one writer"):
         build_kid_index({"a": {"k": DECIDE_KEY.public_key()}, "b": {"k": DECIDE_KEY.public_key()}})
+
+
+def test_second_sink_on_the_same_docket_refuses_to_start(paths, start_sink, workdir):
+    start_sink()
+    second = DocketSink(paths[0], workdir / "t" / "other.sock", WRITERS, {os.getuid()})
+    with pytest.raises(DocketLocked):
+        asyncio.run(second.start())
+    assert decide_client(paths).append(make_entry(1)).seq == 1
+
+
+def test_second_sink_on_the_same_socket_refuses_to_start(paths, start_sink, workdir):
+    start_sink()
+    second = DocketSink(workdir / "other.log", paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(DocketLocked):
+        asyncio.run(second.start())
+    assert decide_client(paths).append(make_entry(1)).seq == 1
+
+
+def test_closing_a_sink_removes_its_socket(paths, start_sink):
+    start_sink().stop()
+    assert not paths[1].exists()
+
+
+def test_closing_a_sink_leaves_a_socket_it_does_not_own(paths, start_sink):
+    handle = start_sink()
+    paths[1].unlink()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as other:
+        other.bind(str(paths[1]))
+        handle.stop()
+        assert stat.S_ISSOCK(os.lstat(paths[1]).st_mode)

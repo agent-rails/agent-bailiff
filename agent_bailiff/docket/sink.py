@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import os
 import stat
 from collections.abc import Callable, Iterable, Mapping
@@ -39,6 +40,10 @@ class VerifyReport:
     line: int | None = None
     reason: str = ""
     detail: str = ""
+
+
+class DocketLocked(Exception):
+    pass
 
 
 class DocketCorrupt(Exception):
@@ -129,6 +134,8 @@ class DocketSink:
         self._fsync = fsync
         self._heads: dict[str, Head] = {}
         self._fd: int | None = None
+        self._socket_lock_fd: int | None = None
+        self._socket_identity: tuple[int, int] | None = None
         self._server: asyncio.Server | None = None
         self._active = 0
         self._failed = False
@@ -138,16 +145,27 @@ class DocketSink:
         return dict(self._heads)
 
     async def start(self) -> None:
+        try:
+            await self._start()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _start(self) -> None:
         self._fd = _open_docket(self._docket_path)
+        _lock(self._fd, self._docket_path)
         report = verify_docket(self._docket_path, self._writers)
         if not report.ok:
-            os.close(self._fd)
-            self._fd = None
             raise DocketCorrupt(report)
         self._heads = dict(report.heads)
         _prepare_socket_dir(self._socket_path.parent, self._socket_gid)
+        lock_path = self._socket_path.with_name(f"{self._socket_path.name}.lock")
+        self._socket_lock_fd = _open_lock_file(lock_path)
+        _lock(self._socket_lock_fd, lock_path)
         _remove_stale_socket(self._socket_path)
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self._socket_path))
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self._socket_path), cleanup_socket=False)
+        info = os.lstat(self._socket_path)
+        self._socket_identity = (info.st_dev, info.st_ino)
         os.chown(self._socket_path, -1, self._socket_gid)
         os.chmod(self._socket_path, SOCKET_MODE)
 
@@ -156,10 +174,14 @@ class DocketSink:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-            self._socket_path.unlink(missing_ok=True)
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        if self._socket_identity is not None:
+            _unlink_if_same(self._socket_path, self._socket_identity)
+            self._socket_identity = None
+        for name in ("_socket_lock_fd", "_fd"):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self._active >= self._max_connections:
@@ -286,3 +308,28 @@ def _remove_stale_socket(path: Path) -> None:
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
         raise PermissionError(f"{path} exists and is not a socket owned by uid {os.geteuid()}")
     path.unlink()
+
+
+def _lock(fd: int, path: Path) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise DocketLocked(f"{path} is locked by another process") from exc
+
+
+def _open_lock_file(path: Path) -> int:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        os.close(fd)
+        raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()}")
+    return fd
+
+
+def _unlink_if_same(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if (info.st_dev, info.st_ino) == identity:
+        path.unlink()
