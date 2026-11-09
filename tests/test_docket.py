@@ -270,7 +270,8 @@ def test_unknown_operation_is_refused(paths, start_sink):
 
 def test_fsync_failure_gives_no_ack_and_stops_appends(paths, start_sink):
     def failing_fsync(fd):
-        raise OSError(5, "injected fsync failure")
+        if fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
 
     handle = start_sink(fsync=failing_fsync)
     client = decide_client(paths)
@@ -289,6 +290,8 @@ def test_ack_waits_for_fsync(paths, start_sink):
     synced = []
 
     def slow_fsync(fd):
+        if fd_kind(fd) == "dir":
+            return
         entered.set()
         assert release.wait(5)
         os.fsync(fd)
@@ -517,3 +520,32 @@ def test_sink_refuses_a_symlinked_docket_directory(paths, workdir):
     with pytest.raises(OSError):
         asyncio.run(sink.start())
     assert not (real / "docket.log").exists()
+
+
+def fd_kind(fd):
+    return "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+
+
+def test_docket_directory_is_synced_before_the_first_ack(paths, start_sink):
+    synced = []
+
+    def recording_fsync(fd):
+        synced.append(fd_kind(fd))
+        os.fsync(fd)
+
+    start_sink(fsync=recording_fsync)
+    decide_client(paths).append(make_entry(1))
+    assert synced == ["dir", "file"]
+
+
+def test_docket_directory_sync_failure_latches(paths, start_sink):
+    def failing_dir_fsync(fd):
+        if fd_kind(fd) == "dir":
+            raise OSError(5, "injected directory fsync failure")
+        os.fsync(fd)
+
+    start_sink(fsync=failing_dir_fsync)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths).append(make_entry(1))
+    assert error.value.reason == "sink_failed"
+    assert paths[0].read_bytes() == b""

@@ -162,7 +162,7 @@ class DocketSink:
             raise
 
     async def _start(self) -> None:
-        self._fd = _open_docket(self._docket_path)
+        self._fd = self._open_docket()
         _lock(self._fd, self._docket_path)
         _check_docket_file(self._fd, self._docket_path)
         report = _verify_fd(self._fd, self._index)
@@ -179,6 +179,19 @@ class DocketSink:
         self._socket_identity = (info.st_dev, info.st_ino)
         os.chown(self._socket_path, -1, self._socket_gid)
         os.chmod(self._socket_path, SOCKET_MODE)
+
+    def _open_docket(self) -> int:
+        directory_fd = _open_private_dir(self._docket_path.parent)
+        try:
+            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+            fd = os.open(self._docket_path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+            try:
+                self._fsync(directory_fd)
+            except OSError:
+                self._failed = True
+            return fd
+        finally:
+            os.close(directory_fd)
 
     async def close(self) -> None:
         if self._server is not None:
@@ -282,15 +295,6 @@ class DocketSink:
 
 def _refusal(reason: str) -> dict[str, Any]:
     return {"ok": False, "reason": reason}
-
-
-def _open_docket(path: Path) -> int:
-    directory_fd = _open_private_dir(path.parent)
-    try:
-        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-        return os.open(path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
-    finally:
-        os.close(directory_fd)
 
 
 def _check_docket_file(fd: int, path: Path) -> None:
