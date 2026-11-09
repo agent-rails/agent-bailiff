@@ -7,7 +7,7 @@ import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -19,6 +19,7 @@ from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 DOCKET_MODE = 0o600
 SOCKET_DIR_MODE = 0o750
 SOCKET_MODE = 0o660
+PRIVATE_DIR_FORBIDDEN = 0o022
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_MAX_CONNECTIONS = 16
 
@@ -78,18 +79,27 @@ def check_chain(heads: Mapping[str, Head], record: Record) -> Refused | None:
 
 
 def verify_docket(path: Path, writers: Writers) -> VerifyReport:
-    index = build_kid_index(writers)
+    with open(path, "rb") as docket:
+        return _verify_stream(docket, build_kid_index(writers))
+
+
+def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
+    with os.fdopen(os.dup(fd), "rb") as docket:
+        docket.seek(0)
+        return _verify_stream(docket, index)
+
+
+def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
     heads: dict[str, Head] = {}
     count = 0
-    with open(path, "rb") as docket:
-        while raw := docket.readline(MAX_TOKEN_CHARS + 2):
-            line_number = count + 1
-            if not raw.endswith(b"\n"):
-                return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete")
-            refusal = _apply_line(raw[:-1], index, heads)
-            if refusal is not None:
-                return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail)
-            count = line_number
+    while raw := docket.readline(MAX_TOKEN_CHARS + 2):
+        line_number = count + 1
+        if not raw.endswith(b"\n"):
+            return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete")
+        refusal = _apply_line(raw[:-1], index, heads)
+        if refusal is not None:
+            return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail)
+        count = line_number
     return VerifyReport(True, count, heads)
 
 
@@ -154,7 +164,8 @@ class DocketSink:
     async def _start(self) -> None:
         self._fd = _open_docket(self._docket_path)
         _lock(self._fd, self._docket_path)
-        report = verify_docket(self._docket_path, self._writers)
+        _check_docket_file(self._fd, self._docket_path)
+        report = _verify_fd(self._fd, self._index)
         if not report.ok:
             raise DocketCorrupt(report)
         self._heads = dict(report.heads)
@@ -177,11 +188,12 @@ class DocketSink:
         if self._socket_identity is not None:
             _unlink_if_same(self._socket_path, self._socket_identity)
             self._socket_identity = None
-        for name in ("_socket_lock_fd", "_fd"):
-            fd = getattr(self, name)
-            if fd is not None:
-                os.close(fd)
-                setattr(self, name, None)
+        if self._socket_lock_fd is not None:
+            os.close(self._socket_lock_fd)
+            self._socket_lock_fd = None
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self._active >= self._max_connections:
@@ -273,12 +285,26 @@ def _refusal(reason: str) -> dict[str, Any]:
 
 
 def _open_docket(path: Path) -> int:
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(path, flags, DOCKET_MODE)
+    directory_fd = _open_private_dir(path.parent)
+    try:
+        flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+        return os.open(path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _check_docket_file(fd: int, path: Path) -> None:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
-        os.close(fd)
         raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
+
+
+def _open_private_dir(directory: Path) -> int:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & PRIVATE_DIR_FORBIDDEN:
+        os.close(fd)
+        raise PermissionError(f"{directory} must be owned by uid {os.geteuid()} and not writable by group or others")
     return fd
 
 
@@ -314,7 +340,7 @@ def _lock(fd: int, path: Path) -> None:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
-        raise DocketLocked(f"{path} is locked by another process") from exc
+        raise DocketLocked(f"{path} is held by another sink") from exc
 
 
 def _open_lock_file(path: Path) -> int:

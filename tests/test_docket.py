@@ -499,3 +499,21 @@ def test_closing_a_sink_leaves_a_socket_it_does_not_own(paths, start_sink):
         other.bind(str(paths[1]))
         handle.stop()
         assert stat.S_ISSOCK(os.lstat(paths[1]).st_mode)
+
+
+def test_sink_refuses_a_docket_directory_writable_by_others(paths, workdir):
+    os.chmod(workdir, 0o777)
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(PermissionError, match="writable"):
+        asyncio.run(sink.start())
+    assert not paths[0].exists()
+
+
+def test_sink_refuses_a_symlinked_docket_directory(paths, workdir):
+    real = workdir / "real"
+    real.mkdir(mode=0o700)
+    (workdir / "link").symlink_to(real)
+    sink = DocketSink(workdir / "link" / "docket.log", paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(OSError):
+        asyncio.run(sink.start())
+    assert not (real / "docket.log").exists()
