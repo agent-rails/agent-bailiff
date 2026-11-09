@@ -114,8 +114,13 @@ def start_sink(paths):
             handle.stop()
 
 
+def make_client(paths, writer, kid, key, **options):
+    options.setdefault("sink_uid", os.getuid())
+    return DocketClient(paths[1], writer, kid, key, **options)
+
+
 def decide_client(paths, **options):
-    return DocketClient(paths[1], "decide", "decide-1", DECIDE_KEY, **options)
+    return make_client(paths, "decide", "decide-1", DECIDE_KEY, **options)
 
 
 def send_raw(socket_path, payload):
@@ -135,7 +140,7 @@ def lines(docket_path):
 def test_appended_entries_are_chained_per_writer(paths, start_sink):
     start_sink()
     decide = decide_client(paths)
-    custodian = DocketClient(paths[1], "custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_client(paths, "custodian", "custodian-1", CUSTODIAN_KEY)
     first = decide.append(make_entry(1))
     other = custodian.append(make_entry(2, hop="custodian", component="custodian"))
     second = decide.append(make_entry(3))
@@ -212,7 +217,7 @@ def test_writer_using_another_writers_key_is_refused(paths, start_sink):
 
 def test_unknown_writer_has_no_head(paths, start_sink):
     start_sink()
-    client = DocketClient(paths[1], "rogue", "decide-1", DECIDE_KEY)
+    client = make_client(paths, "rogue", "decide-1", DECIDE_KEY)
     with pytest.raises(DocketError) as error:
         client.append(make_entry(1))
     assert error.value.reason == "unknown_writer"
@@ -620,3 +625,12 @@ def test_connection_is_closed_at_its_max_lifetime(paths, start_sink):
             assert time.monotonic() - started < 3
             time.sleep(0.05)
     assert time.monotonic() - started >= 0.5
+
+
+def test_client_refuses_a_sink_with_the_wrong_uid(paths, start_sink):
+    handle = start_sink()
+    with pytest.raises(DocketError) as error:
+        decide_client(paths, sink_uid=os.getuid() + 1).append(make_entry(1))
+    assert error.value.reason == "sink_not_trusted"
+    assert handle.sink.heads == {}
+    assert paths[0].read_bytes() == b""

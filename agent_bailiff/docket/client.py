@@ -8,6 +8,7 @@ from typing import Any
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.docket.entry import Entry, Record, encode_record
+from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.protocol import (
     MAX_RESPONSE_BYTES,
     OP_APPEND,
@@ -35,9 +36,11 @@ class DocketClient:
         kid: str,
         private_key: Ed25519PrivateKey,
         *,
+        sink_uid: int,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._socket_path = socket_path
+        self._sink_uid = sink_uid
         self._writer = writer
         self._kid = kid
         self._private_key = private_key
@@ -73,6 +76,7 @@ class DocketClient:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self._timeout)
                 connection.connect(str(self._socket_path))
+                self._check_sink(connection)
                 connection.sendall(encode_frame(payload))
                 response = decode_response(read_frame(connection, MAX_RESPONSE_BYTES))
         except (OSError, ValueError) as exc:
@@ -81,6 +85,14 @@ class DocketClient:
             reason = response.get("reason")
             raise DocketError(reason if isinstance(reason, str) else "refused")
         return response
+
+    def _check_sink(self, connection: socket.socket) -> None:
+        try:
+            uid = peer_uid(connection)
+        except PeerCredentialsUnavailable as exc:
+            raise DocketError("sink_not_trusted", str(exc)) from exc
+        if uid != self._sink_uid:
+            raise DocketError("sink_not_trusted", f"sink peer uid {uid} is not {self._sink_uid}")
 
 
 def _head_from(response: dict[str, Any]) -> Head:

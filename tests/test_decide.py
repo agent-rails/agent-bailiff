@@ -201,7 +201,7 @@ def make_decider(workdir, docket_paths, sink, ledger):
             ),
             "policy": PolicyRef.from_dict("default", "1", POLICY),
             "suspension": Suspension(),
-            "docket": DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY),
+            "docket": DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, sink_uid=os.getuid()),
             "signing_key": DECIDE_KEY,
             "costs": COSTS,
         }
@@ -652,7 +652,7 @@ def test_binding_custodian_must_be_a_known_custodian():
 def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, ledger, docket_paths):
     root = make_root()
     request = make_request(root)
-    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, sink_uid=os.getuid())
     decider = make_decider(docket=AckLostDocket(inner))
     decision = decider.check(request, NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
@@ -675,7 +675,7 @@ def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, le
     ],
 )
 def test_mismatched_docket_acknowledgement_is_refused(make_decider, docket_paths, ack):
-    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, sink_uid=os.getuid())
     decision = make_decider(docket=AckDocket(inner, ack)).check(make_request(), NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
     allow, refuse = docket_entries(docket_paths)
