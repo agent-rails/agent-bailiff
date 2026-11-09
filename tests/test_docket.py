@@ -5,6 +5,7 @@ import socket
 import stat
 import tempfile
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -549,3 +550,73 @@ def test_docket_directory_sync_failure_latches(paths, start_sink):
         decide_client(paths).append(make_entry(1))
     assert error.value.reason == "sink_failed"
     assert paths[0].read_bytes() == b""
+
+
+def connect_raw(socket_path):
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.settimeout(5)
+    connection.connect(str(socket_path))
+    return connection
+
+
+def foreign_peers(monkeypatch, count):
+    calls = []
+
+    def fake_peer_uid(sock):
+        calls.append(sock)
+        return os.getuid() + 1 if len(calls) <= count else os.getuid()
+
+    monkeypatch.setattr("agent_bailiff.docket.sink.peer_uid", fake_peer_uid)
+
+
+def test_idle_connections_are_evicted_and_free_the_cap(paths, start_sink):
+    start_sink(idle_timeout=0.3)
+    idle = [connect_raw(paths[1]) for _ in range(16)]
+    try:
+        for connection in idle:
+            assert connection.recv(64) == b""
+        assert decide_client(paths).append(make_entry(1)).seq == 1
+    finally:
+        for connection in idle:
+            connection.close()
+
+
+def test_unauthorized_connections_do_not_take_a_slot(paths, start_sink, monkeypatch):
+    foreign_peers(monkeypatch, 16)
+    start_sink()
+    held = [connect_raw(paths[1]) for _ in range(16)]
+    try:
+        for connection in held:
+            (length,) = LENGTH.unpack(connection.recv(LENGTH.size))
+            assert decode_response(connection.recv(length)) == {"ok": False, "reason": "peer_not_allowed"}
+        assert decide_client(paths).append(make_entry(1)).seq == 1
+    finally:
+        for connection in held:
+            connection.close()
+
+
+def test_unauthorized_peer_is_refused_before_the_cap(paths, start_sink, monkeypatch):
+    start_sink(max_connections=1)
+    with connect_raw(paths[1]) as idle:
+        idle.sendall(encode_frame(OP_HEAD + b"decide"))
+        assert idle.recv(64)
+        foreign_peers(monkeypatch, 1)
+        with connect_raw(paths[1]) as foreign:
+            (length,) = LENGTH.unpack(foreign.recv(LENGTH.size))
+            assert decode_response(foreign.recv(length)) == {"ok": False, "reason": "peer_not_allowed"}
+
+
+def test_connection_is_closed_at_its_max_lifetime(paths, start_sink):
+    start_sink(max_lifetime=0.5)
+    started = time.monotonic()
+    with connect_raw(paths[1]) as busy:
+        while True:
+            try:
+                busy.sendall(encode_frame(OP_HEAD + b"decide"))
+                if not busy.recv(64):
+                    break
+            except ConnectionError:
+                break
+            assert time.monotonic() - started < 3
+            time.sleep(0.05)
+    assert time.monotonic() - started >= 0.5

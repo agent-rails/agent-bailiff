@@ -21,6 +21,8 @@ SOCKET_DIR_MODE = 0o750
 SOCKET_MODE = 0o660
 PRIVATE_DIR_FORBIDDEN = 0o022
 DEFAULT_FRAME_TIMEOUT = 5.0
+DEFAULT_IDLE_TIMEOUT = 5.0
+DEFAULT_MAX_LIFETIME = 60.0
 DEFAULT_MAX_CONNECTIONS = 16
 
 Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
@@ -129,6 +131,8 @@ class DocketSink:
         socket_gid: int | None = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        max_lifetime: float = DEFAULT_MAX_LIFETIME,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         fsync: Callable[[int], None] = os.fsync,
     ) -> None:
@@ -140,6 +144,8 @@ class DocketSink:
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
         self._max_frame_bytes = max_frame_bytes
         self._frame_timeout = frame_timeout
+        self._idle_timeout = idle_timeout
+        self._max_lifetime = max_lifetime
         self._max_connections = max_connections
         self._fsync = fsync
         self._heads: dict[str, Head] = {}
@@ -209,28 +215,37 @@ class DocketSink:
             self._fd = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if self._active >= self._max_connections:
-            writer.close()
-            return
-        self._active += 1
         try:
-            await self._serve(reader, writer)
+            if not await self._admit(writer):
+                return
+            self._active += 1
+            try:
+                async with asyncio.timeout(self._max_lifetime):
+                    await self._serve(reader, writer)
+            except TimeoutError:
+                return
+            finally:
+                self._active -= 1
         finally:
-            self._active -= 1
             writer.close()
 
-    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _admit(self, writer: asyncio.StreamWriter) -> bool:
         try:
             uid = peer_uid(writer.get_extra_info("socket"))
         except (OSError, PeerCredentialsUnavailable):
-            return
+            return False
         if uid not in self._allowed_uids:
             await self._reply(writer, _refusal("peer_not_allowed"))
-            return
+            return False
+        return self._active < self._max_connections
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
             try:
+                async with asyncio.timeout(self._idle_timeout):
+                    header = await reader.readexactly(LENGTH.size)
                 async with asyncio.timeout(self._frame_timeout):
-                    (length,) = LENGTH.unpack(await reader.readexactly(LENGTH.size))
+                    (length,) = LENGTH.unpack(header)
                     if length > self._max_frame_bytes:
                         await self._reply(writer, _refusal("frame_too_large"))
                         return
