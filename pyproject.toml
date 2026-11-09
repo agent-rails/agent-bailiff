@@ -1,0 +1,44 @@
+[project]
+name = "agent-bailiff"
+version = "0.0.0"
+description = "Separate enforcement layer for agent tool calls: verified single-operation clearances, credential custody and a signed end-to-end security trace."
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "voltagebots" }]
+dependencies = [
+    "agent-warrant==0.1.0",
+    "cryptography==50.0.2",
+    "toolcall-authz==0.3.0",
+]
+
+[project.urls]
+Repository = "https://github.com/agent-rails/agent-bailiff"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_bailiff*"]
+
+[tool.setuptools.package-data]
+agent_bailiff = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["agent_bailiff"]

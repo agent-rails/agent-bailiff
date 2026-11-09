@@ -1,0 +1,3 @@
+# agent-bailiff
+
+agent-bailiff is a separate enforcement layer for AI agent tool calls. It runs beside a gateway as its own processes: a decision core issues signed single-operation clearances, a custodian releases a credential only for a clearance it has verified itself, and a docket sink keeps an append-only, signed, per-writer hash-chained security trace of every hop. It builds on [agent-warrant](https://github.com/agent-rails/agent-warrant) and [toolcall-authz](https://github.com/agent-rails/toolcall-authz). Status: pre-release; interfaces and wire formats may change, and it is not ready for production use.
