@@ -25,8 +25,8 @@ class CostTable:
                 raise ValueError("tool names must be non-empty str")
             if isinstance(rule, bool) or not isinstance(rule, int | str):
                 raise ValueError(f"cost rule for {tool!r} must be an integer or an argument name")
-            if isinstance(rule, int) and not 0 <= rule <= MAX_SAFE_INTEGER:
-                raise ValueError(f"cost for {tool!r} must be between 0 and {MAX_SAFE_INTEGER}")
+            if isinstance(rule, int) and not 1 <= rule <= MAX_SAFE_INTEGER:
+                raise ValueError(f"cost for {tool!r} must be between 1 and {MAX_SAFE_INTEGER}")
             if isinstance(rule, str) and not rule:
                 raise ValueError(f"argument name for {tool!r} must be non-empty")
         object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
@@ -38,6 +38,6 @@ class CostTable:
         if isinstance(rule, int):
             return rule
         value = args.get(rule)
-        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SAFE_INTEGER:
-            raise CostError(f"argument {rule!r} must be a non-negative integer to price {tool!r}")
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SAFE_INTEGER:
+            raise CostError(f"argument {rule!r} must be an integer between 1 and {MAX_SAFE_INTEGER} to price {tool!r}")
         return value

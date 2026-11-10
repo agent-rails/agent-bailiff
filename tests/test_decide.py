@@ -335,6 +335,7 @@ def test_delegated_request_binds_the_leaf_link(make_decider, docket_paths):
         ("out_of_scope", {"resource": "env/prod/api"}),
         ("unknown_cost", {"tool": "deploy.restart"}),
         ("unknown_cost", {"tool": "signer.withdraw", "resource": "wallet/w1", "args": {"amount": "1"}}),
+        ("unknown_cost", {"tool": "signer.withdraw", "resource": "wallet/w1", "args": {"amount": 0}}),
         ("cost_over_call_cap", {"tool": "deploy.rollback"}),
         ("no_binding", {"tool": "deploy.scale"}),
         ("policy_denied", {"tool": "deploy.delete"}),
