@@ -171,3 +171,23 @@ def test_create_never_replaces_a_store(state, store, backend):
 def test_context_refuses_empty_fields():
     with pytest.raises(ValueError, match="target"):
         credential_context("tenant-a", "deploy-api", "")
+
+
+def replace_with_another_store(path, backend):
+    CredentialStore.create(path.parent / "other.db", backend).close()
+    os.replace(path.parent / "other.db", path)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda path, backend: os.chmod(path, 0o644),
+        lambda path, backend: os.link(path, path.parent / "credentials-copy.db"),
+        replace_with_another_store,
+    ],
+)
+def test_store_changed_after_open_is_refused(state, store, backend, tamper):
+    store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
+    tamper(state / "credentials.db", backend)
+    with pytest.raises(CredentialUnavailable, match="unreadable"):
+        store.get("tenant-a", "deploy-api", "deploy.example")

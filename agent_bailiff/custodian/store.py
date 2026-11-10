@@ -10,7 +10,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_bailiff.custodian.backend import BackendError, KeyBackend
-from agent_bailiff.custodian.files import connect_owned
+from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned
 
 DEK_BYTES = 32
 NONCE_BYTES = 12
@@ -41,18 +41,19 @@ def credential_context(tenant: str, credential_id: str, target: str) -> bytes:
 
 
 class CredentialStore:
-    def __init__(self, connection: sqlite3.Connection, backend: KeyBackend) -> None:
+    def __init__(self, connection: sqlite3.Connection, pinned: PinnedFile, backend: KeyBackend) -> None:
         self._connection = connection
+        self._pinned = pinned
         self._backend = backend
         self._lock = threading.Lock()
 
     @classmethod
     def create(cls, path: Path, backend: KeyBackend) -> CredentialStore:
-        return cls(connect_owned(path, STORE_LABEL, SCHEMA), backend)
+        return cls(*connect_owned(path, STORE_LABEL, SCHEMA), backend)
 
     @classmethod
     def open(cls, path: Path, backend: KeyBackend) -> CredentialStore:
-        return cls(connect_owned(path, STORE_LABEL, None), backend)
+        return cls(*connect_owned(path, STORE_LABEL, None), backend)
 
     def put(self, tenant: str, credential_id: str, target: str, secret: bytes) -> None:
         if not isinstance(secret, bytes) or not secret:
@@ -63,6 +64,7 @@ class CredentialStore:
         ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
         wrapped = self._backend.wrap(dek, context)
         with self._lock:
+            self._pinned.check()
             self._connection.execute(
                 "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext) "
                 "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
@@ -74,12 +76,13 @@ class CredentialStore:
         context = credential_context(tenant, credential_id, target)
         try:
             with self._lock:
+                self._pinned.check()
                 row = self._connection.execute(
                     "SELECT wrapped_dek, nonce, ciphertext FROM credentials "
                     "WHERE tenant = ? AND credential_id = ? AND target = ?",
                     (tenant, credential_id, target),
                 ).fetchone()
-        except sqlite3.Error:
+        except (sqlite3.Error, OwnedFileError):
             raise CredentialUnavailable("credential store is unreadable") from None
         if row is None:
             raise CredentialUnavailable("no credential is stored for this binding")

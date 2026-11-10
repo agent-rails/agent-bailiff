@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -13,6 +14,24 @@ BUSY_TIMEOUT_SECONDS = 30
 
 class OwnedFileError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class PinnedFile:
+    path: Path
+    label: str
+    identity: tuple[int, int]
+
+    def check(self) -> None:
+        try:
+            info = os.lstat(self.path)
+        except OSError as exc:
+            raise OwnedFileError(f"cannot inspect the {self.label}: {exc.strerror}") from None
+        if (info.st_dev, info.st_ino) != self.identity:
+            raise OwnedFileError(f"the {self.label} was replaced after it was opened")
+        problem = _file_problem(info)
+        if problem:
+            raise OwnedFileError(f"the {self.label} {problem}")
 
 
 def read_owned(path: Path, label: str, max_bytes: int) -> bytes:
@@ -47,14 +66,19 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
     _sync_parent(path)
 
 
-def check_owned(path: Path, label: str) -> None:
-    os.close(_open_owned(path, label, os.O_RDONLY))
+def pin_owned(path: Path, label: str) -> PinnedFile:
+    fd = _open_owned(path, label, os.O_RDONLY)
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return PinnedFile(path, label, (info.st_dev, info.st_ino))
 
 
-def connect_owned(path: Path, label: str, schema: str | None) -> sqlite3.Connection:
+def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.Connection, PinnedFile]:
     if schema is not None:
         create_owned(path, label, b"")
-    check_owned(path, label)
+    pinned = pin_owned(path, label)
     try:
         connection = sqlite3.connect(
             f"file:{quote(str(path.absolute()), safe='/')}?mode=rw",
@@ -73,8 +97,12 @@ def connect_owned(path: Path, label: str, schema: str | None) -> sqlite3.Connect
     except sqlite3.Error as exc:
         connection.close()
         raise OwnedFileError(f"the {label} is not a usable database: {exc}") from None
-    check_owned(path, label)
-    return connection
+    try:
+        pinned.check()
+    except OwnedFileError:
+        connection.close()
+        raise
+    return connection, pinned
 
 
 def _open_owned(path: Path, label: str, flags: int) -> int:

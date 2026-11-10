@@ -7,6 +7,7 @@ from agent_bailiff.custodian import (
     BindingTable,
     BindingTableError,
     ClaimsStore,
+    ClaimsUnavailable,
     CredentialBinding,
     OwnedFileError,
     TaskRateLimiter,
@@ -174,3 +175,28 @@ def test_rate_limit_is_per_task_and_slides():
 def test_rate_limit_refuses_bad_configuration(limit, window):
     with pytest.raises(ValueError):
         TaskRateLimiter(limit, window)
+
+
+def replace_with_another_database(path):
+    ClaimsStore.create(path.parent / "other.db").close()
+    os.replace(path.parent / "other.db", path)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda path: os.chmod(path, 0o644),
+        lambda path: os.link(path, path.parent / "claims-copy.db"),
+        replace_with_another_database,
+    ],
+)
+def test_claims_database_changed_after_open_is_refused(state, tamper):
+    claims = ClaimsStore.create(state / "claims.db")
+    try:
+        tamper(state / "claims.db")
+        with pytest.raises(ClaimsUnavailable):
+            claims.claim("op-1", NOW)
+        with pytest.raises(ClaimsUnavailable):
+            claims.is_denied("tenant-a", "task-1")
+    finally:
+        claims.close()
