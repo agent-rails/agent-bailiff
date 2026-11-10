@@ -129,8 +129,8 @@ class Custodian:
             raise _Refusal("canary")
         if not self._limiter.allow(clearance.tenant, clearance.task, now):
             raise _Refusal("rate_limited")
-        self._claim(clearance, now)
         header_value = self._decrypt(binding)
+        self._claim(clearance, now)
         release_entry = replace(
             entry,
             entry_id=uuid.uuid4().hex,

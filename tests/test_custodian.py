@@ -581,3 +581,21 @@ def test_canary_hit_by_a_rate_limited_task_still_denies_and_alerts(make_custodia
         assert claims.is_denied(TENANT, "task-1")
     finally:
         claims.close()
+
+
+def test_credential_failure_before_the_claim_leaves_the_op_id_releasable(make_custodian, issue, state):
+    request, token = issue()
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute("DELETE FROM credentials WHERE credential_id = 'deploy-api'")
+    connection.commit()
+    connection.close()
+    custodian = make_custodian()
+    assert custodian.release(token, request, NOW + 1) == Refused("credential_unavailable")
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    try:
+        store.put(TENANT, "deploy-api", "deploy.example", DEPLOY_SECRET)
+    finally:
+        store.close()
+    result = custodian.release(token, request, NOW + 2)
+    assert isinstance(result, Released)
+    assert result.header_value == DEPLOY_SECRET.decode()
