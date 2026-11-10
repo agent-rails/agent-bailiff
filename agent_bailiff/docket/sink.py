@@ -43,6 +43,7 @@ class VerifyReport:
     line: int | None = None
     reason: str = ""
     detail: str = ""
+    valid_bytes: int = 0
 
 
 class DocketLocked(Exception):
@@ -94,15 +95,61 @@ def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
 def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
     heads: dict[str, Head] = {}
     count = 0
+    offset = 0
     while raw := docket.readline(MAX_TOKEN_CHARS + 2):
         line_number = count + 1
         if not raw.endswith(b"\n"):
-            return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete")
+            if docket.read(1):
+                return VerifyReport(False, count, heads, line_number, "malformed", "line exceeds the limit", offset)
+            return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete", offset)
         refusal = _apply_line(raw[:-1], index, heads)
         if refusal is not None:
-            return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail)
+            return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail, offset)
         count = line_number
-    return VerifyReport(True, count, heads)
+        offset += len(raw)
+    return VerifyReport(True, count, heads, valid_bytes=offset)
+
+
+def repair(docket_path: Path, side_path: Path, writers: Writers) -> VerifyReport:
+    index = build_kid_index(writers)
+    directory_fd = open_private_dir(docket_path.parent)
+    try:
+        fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+        try:
+            _lock(fd, docket_path)
+            _check_docket_file(fd, docket_path)
+            report = _verify_fd(fd, index)
+            if report.ok:
+                return report
+            if report.reason != "torn_tail":
+                raise DocketCorrupt(report)
+            tail = os.pread(fd, os.fstat(fd).st_size - report.valid_bytes, report.valid_bytes)
+            _write_side_file(side_path, tail)
+            os.ftruncate(fd, report.valid_bytes)
+            os.fsync(fd)
+            os.fsync(directory_fd)
+            repaired = _verify_fd(fd, index)
+            if not repaired.ok:
+                raise DocketCorrupt(repaired)
+            return repaired
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _write_side_file(path: Path, content: bytes) -> None:
+    directory_fd = open_private_dir(path.parent)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+        with os.fdopen(fd, "wb") as side:
+            side.write(content)
+            side.flush()
+            os.fsync(side.fileno())
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _apply_line(raw: bytes, index: KidIndex, heads: dict[str, Head]) -> Refused | None:

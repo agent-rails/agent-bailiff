@@ -24,11 +24,12 @@ from agent_bailiff.docket import (
     Head,
     decode_record,
     encode_record,
+    repair,
     verify_docket,
 )
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, decode_response, encode_frame
 from agent_bailiff.docket.sink import build_kid_index
-from agent_bailiff.signing import Refused, sign
+from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
 
 AT = 1_700_000_000
 DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
@@ -723,3 +724,66 @@ def test_client_refuses_an_invalid_state_file(paths, content):
 def test_client_refuses_an_unsafe_writer_name(paths):
     with pytest.raises(ValueError, match="writer"):
         make_client(paths, "../decide", "decide-1", DECIDE_KEY)
+
+
+def test_repair_moves_a_torn_tail_aside(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    side = workdir / "torn.tail"
+    report = repair(paths[0], side, WRITERS)
+    assert (report.ok, report.entries) == (True, 3)
+    assert side.read_bytes() == b"partial"
+    assert stat.S_IMODE(os.lstat(side).st_mode) == 0o600
+    assert lines(paths[0]) == [record.token for record in records]
+    assert verify_docket(paths[0], WRITERS).ok
+    start_sink()
+    assert decide_client(paths).append(make_entry(4)).seq == 4
+
+
+def test_repair_leaves_a_clean_docket_alone(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    before = paths[0].read_bytes()
+    assert repair(paths[0], workdir / "torn.tail", WRITERS).ok
+    assert paths[0].read_bytes() == before
+    assert not (workdir / "torn.tail").exists()
+
+
+def test_repair_refuses_an_invalid_line_before_the_tail(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    content = lines(paths[0])
+    paths[0].write_text("\n".join([content[0], content[2], content[1]]) + "\npartial")
+    before = paths[0].read_bytes()
+    with pytest.raises(DocketCorrupt) as error:
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert error.value.report.line == 2
+    assert paths[0].read_bytes() == before
+    assert not (workdir / "torn.tail").exists()
+
+
+def test_repair_refuses_an_existing_side_file(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    before = paths[0].read_bytes()
+    side = workdir / "torn.tail"
+    side.write_bytes(b"keep")
+    with pytest.raises(FileExistsError):
+        repair(paths[0], side, WRITERS)
+    assert paths[0].read_bytes() == before
+    assert side.read_bytes() == b"keep"
+
+
+def test_repair_refuses_while_a_sink_holds_the_docket(paths, start_sink, workdir):
+    start_sink()
+    with pytest.raises(DocketLocked):
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+
+
+def test_overlong_line_before_the_end_is_not_a_torn_tail(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    paths[0].write_text("A" * (MAX_TOKEN_CHARS + 10) + "\n" + records[0].token + "\n")
+    report = verify_docket(paths[0], WRITERS)
+    assert (report.ok, report.line, report.reason) == (False, 1, "malformed")
+    with pytest.raises(DocketCorrupt):
+        repair(paths[0], workdir / "torn.tail", WRITERS)
