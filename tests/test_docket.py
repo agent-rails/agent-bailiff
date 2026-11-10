@@ -18,6 +18,7 @@ from agent_bailiff.docket import (
     DocketCorrupt,
     DocketError,
     DocketLocked,
+    DocketRollback,
     DocketSink,
     Entry,
     Head,
@@ -114,8 +115,15 @@ def start_sink(paths):
             handle.stop()
 
 
+def state_dir(paths):
+    directory = paths[0].parent / "state"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    return directory
+
+
 def make_client(paths, writer, kid, key, **options):
     options.setdefault("sink_uid", os.getuid())
+    options.setdefault("state_dir", state_dir(paths))
     return DocketClient(paths[1], writer, kid, key, **options)
 
 
@@ -634,3 +642,84 @@ def test_client_refuses_a_sink_with_the_wrong_uid(paths, start_sink):
     assert error.value.reason == "sink_not_trusted"
     assert handle.sink.heads == {}
     assert paths[0].read_bytes() == b""
+
+
+def roll_back_to(paths, count):
+    content = lines(paths[0])
+    paths[0].write_text("".join(f"{line}\n" for line in content[:count]))
+
+
+def test_restarted_client_detects_a_rolled_back_sink(paths, start_sink):
+    first_run = start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    client.append(make_entry(2))
+    first_run.stop()
+    roll_back_to(paths, 1)
+    start_sink()
+    restarted = decide_client(paths)
+    with pytest.raises(DocketRollback) as error:
+        restarted.append(make_entry(3))
+    assert error.value.reason == "rollback"
+    with pytest.raises(DocketRollback):
+        restarted.head()
+    assert len(lines(paths[0])) == 1
+
+
+def test_running_client_detects_rollback_on_a_refused_append(paths, start_sink):
+    first_run = start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    client.append(make_entry(2))
+    first_run.stop()
+    roll_back_to(paths, 1)
+    start_sink()
+    with pytest.raises(DocketRollback):
+        client.append(make_entry(3))
+    assert len(lines(paths[0])) == 1
+
+
+def test_client_detects_a_replaced_entry_at_its_acked_seq(paths, start_sink, workdir):
+    first_run = start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    client.append(make_entry(2))
+    first_run.stop()
+    roll_back_to(paths, 1)
+    start_sink()
+    other_state = workdir / "other-state"
+    other_state.mkdir(mode=0o700)
+    decide_client(paths, state_dir=other_state).append(make_entry(2, decision="deny"))
+    with pytest.raises(DocketRollback):
+        client.head()
+
+
+def test_client_state_file_is_private(paths, start_sink):
+    start_sink()
+    record = decide_client(paths).append(make_entry(1))
+    state = state_dir(paths) / "decide.head"
+    assert stat.S_IMODE(os.lstat(state).st_mode) == 0o600
+    assert state.read_bytes() == f'{{"hash":"{record.hash}","seq":1}}'.encode()
+    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.head"]
+
+
+def test_client_refuses_a_state_directory_writable_by_others(paths):
+    directory = state_dir(paths)
+    os.chmod(directory, 0o777)
+    with pytest.raises(PermissionError, match="writable"):
+        decide_client(paths)
+
+
+@pytest.mark.parametrize("content", [b"", b"garbage", b'{"seq":0,"hash":"x"}', b'{"seq":1}'])
+def test_client_refuses_an_invalid_state_file(paths, content):
+    state = state_dir(paths) / "decide.head"
+    state.write_bytes(content)
+    os.chmod(state, 0o600)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths)
+    assert error.value.reason == "state_invalid"
+
+
+def test_client_refuses_an_unsafe_writer_name(paths):
+    with pytest.raises(ValueError, match="writer"):
+        make_client(paths, "../decide", "decide-1", DECIDE_KEY)

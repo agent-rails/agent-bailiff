@@ -13,13 +13,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.entry import Record, decode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
+from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 
 DOCKET_MODE = 0o600
 SOCKET_DIR_MODE = 0o750
 SOCKET_MODE = 0o660
-PRIVATE_DIR_FORBIDDEN = 0o022
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
@@ -187,7 +187,7 @@ class DocketSink:
         os.chmod(self._socket_path, SOCKET_MODE)
 
     def _open_docket(self) -> int:
-        directory_fd = _open_private_dir(self._docket_path.parent)
+        directory_fd = open_private_dir(self._docket_path.parent)
         try:
             flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
             fd = os.open(self._docket_path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
@@ -316,15 +316,6 @@ def _check_docket_file(fd: int, path: Path) -> None:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
         raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
-
-
-def _open_private_dir(directory: Path) -> int:
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    info = os.fstat(fd)
-    if info.st_uid != os.geteuid() or info.st_mode & PRIVATE_DIR_FORBIDDEN:
-        os.close(fd)
-        raise PermissionError(f"{directory} must be owned by uid {os.geteuid()} and not writable by group or others")
-    return fd
 
 
 def _prepare_socket_dir(directory: Path, gid: int) -> None:
