@@ -10,8 +10,8 @@ from typing import Any
 from agent_warrant.canonical import MAX_SAFE_INTEGER, canonicalize
 from agent_warrant.encoding import sha256_b64u
 
-REQUEST_DOMAIN = b"agentic-security-reference/request/v1\x00"
-OP_ID_DOMAIN = b"agentic-security-reference/op-id/v1\x00"
+REQUEST_DOMAIN = b"agent-bailiff/request/v1\x00"
+OP_ID_DOMAIN = b"agent-bailiff/op-id/v1\x00"
 MAX_ARGS_DEPTH = 32
 MAX_ARGS_BYTES = 65536
 SURROGATES = re.compile("[\ud800-\udfff]")

@@ -3,6 +3,8 @@ import pytest
 from agent_bailiff.decide.identity import (
     MAX_ARGS_BYTES,
     MAX_ARGS_DEPTH,
+    OP_ID_DOMAIN,
+    REQUEST_DOMAIN,
     ArgsError,
     args_digest,
     args_problem,
@@ -15,16 +17,29 @@ ARGS = {"service": "api", "replicas": 3, "tags": ["a", "b"], "meta": {"z": 1, "a
 LEAF = "A" * 43
 
 
+OLD_REQUEST_VECTORS = ("w5NobNsfMQOVMTMM7bnEUuagVEBb5OBaLwLr_1i_MLE", "E83xwalBQf9nB-5SK_dIWhs30XXBk_Mh611F92B2dWo")
+OLD_OP_ID_VECTOR = "IZYT9xMwqFw3Kx8x4p05q8CMKKF4hEY_2P0U9qv0oDI"
+
+
+def test_domain_tags_name_the_project():
+    assert REQUEST_DOMAIN == b"agent-bailiff/request/v1\x00"
+    assert OP_ID_DOMAIN == b"agent-bailiff/op-id/v1\x00"
+
+
 def test_request_digest_matches_the_reference_vector():
-    assert request_digest("deploy.service", "env/staging/api", ARGS, "n-1") == (
-        "w5NobNsfMQOVMTMM7bnEUuagVEBb5OBaLwLr_1i_MLE"
+    vectors = (
+        request_digest("deploy.service", "env/staging/api", ARGS, "n-1"),
+        request_digest("t", "r", {}, "n"),
     )
-    assert request_digest("t", "r", {}, "n") == "E83xwalBQf9nB-5SK_dIWhs30XXBk_Mh611F92B2dWo"
+    assert vectors == ("xGseYdHBF3kM_9trUZr95ww-o1FLS7f7oZiA4Eq0kY0", "9bdWjYJjLrnhaZkak5vHlYZQocIj0elcMvH6UOmPeAI")
+    assert not set(vectors) & set(OLD_REQUEST_VECTORS)
 
 
 def test_derive_op_id_matches_the_reference_vector():
     digest = request_digest("deploy.service", "env/staging/api", ARGS, "n-1")
-    assert derive_op_id("tenant-a", "task-1", LEAF, digest) == "IZYT9xMwqFw3Kx8x4p05q8CMKKF4hEY_2P0U9qv0oDI"
+    op_id = derive_op_id("tenant-a", "task-1", LEAF, digest)
+    assert op_id == "C_-w2j08BoWgeV1TrH3bJckD_5n0MbWQYphHrCVtW1Y"
+    assert op_id != OLD_OP_ID_VECTOR
 
 
 def test_args_digest_matches_the_reference_vector():
