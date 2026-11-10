@@ -24,6 +24,7 @@ from agent_bailiff.decide.costs import CostError, CostTable
 from agent_bailiff.decide.identity import ArgsError, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
+from agent_bailiff.signing import token_hash
 
 HOP = "decide"
 MAX_TRACE_ID_CHARACTERS = 128
@@ -243,7 +244,9 @@ class Decider:
         linked = replace(entry, parent_entry=entry_id)
         with self._lock:
             self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, linked)
-        allow_entry = replace(entry, entry_id=entry_id, decision="allow", reason="ok")
+        allow_entry = replace(
+            entry, entry_id=entry_id, decision="allow", reason="ok", clearance_digest=token_hash(token)
+        )
         try:
             record = self._docket.append(allow_entry)
         except Exception:

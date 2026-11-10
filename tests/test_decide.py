@@ -32,7 +32,7 @@ from agent_bailiff.decide import (
 )
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record
 from agent_bailiff.docket.sink import build_kid_index
-from agent_bailiff.signing import Refused
+from agent_bailiff.signing import Refused, token_hash
 
 NOW = 1_800_000_000
 DECIDER_ID = "decide.example"
@@ -694,3 +694,10 @@ def test_docket_writer_must_be_named():
         DeciderConfig(
             DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS, ""
         )
+
+
+def test_allow_entry_records_the_hash_of_the_clearance_it_released(make_decider, docket_paths):
+    decision = make_decider().check(make_request(make_root()), NOW)
+    [entry] = docket_entries(docket_paths)
+    assert entry.decision == "allow"
+    assert entry.clearance_digest == token_hash(decision.clearance)
