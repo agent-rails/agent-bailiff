@@ -243,11 +243,15 @@ class Decider:
         linked = replace(entry, parent_entry=entry_id)
         with self._lock:
             self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, linked)
+        allow_entry = replace(entry, entry_id=entry_id, decision="allow", reason="ok")
         try:
-            self._docket.append(replace(entry, entry_id=entry_id, decision="allow", reason="ok"))
+            record = self._docket.append(allow_entry)
         except Exception:
             logger.exception("docket entry for an issued operation was not acknowledged")
             raise _Refusal("docket_unavailable", linked) from None
+        if not self._acknowledges(record, allow_entry):
+            logger.error("docket acknowledgement does not match the allow entry")
+            raise _Refusal("docket_unavailable", linked)
         return Decision(allowed=True, reason="ok", clearance=token, entry_id=entry_id, op_id=op_id)
 
     def _reserve_and_issue(
@@ -293,6 +297,15 @@ class Decider:
         except LedgerUnavailable:
             raise _Refusal("ledger_unavailable", entry) from None
         return issued.expires_at
+
+    def _acknowledges(self, record: object, entry: Entry) -> bool:
+        return (
+            isinstance(record, Record)
+            and record.entry == entry
+            and record.writer == self._config.docket_writer
+            and isinstance(record.token, str)
+            and bool(record.token)
+        )
 
     def _refuse(self, reason: str, entry: Entry) -> Decision:
         entry_id: str | None

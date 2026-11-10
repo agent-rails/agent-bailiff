@@ -59,9 +59,10 @@ class DeciderConfig:
     custodian_ids: frozenset[str]
     max_proof_age: int
     bindings: tuple[TargetBinding, ...]
+    docket_writer: str
 
     def __post_init__(self) -> None:
-        for name in ("decider_id", "kid"):
+        for name in ("decider_id", "kid", "docket_writer"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty str")

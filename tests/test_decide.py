@@ -120,6 +120,16 @@ class AckLostDocket:
         return record
 
 
+class AckDocket:
+    def __init__(self, inner, ack):
+        self.inner = inner
+        self.ack = ack
+
+    def append(self, entry):
+        record = self.inner.append(entry)
+        return self.ack(record) if entry.decision == "allow" else record
+
+
 class UnavailableLedger(TaskLedger):
     def open_task(self, result, now):
         raise LedgerUnavailable("disk gone")
@@ -173,7 +183,12 @@ def make_decider(workdir, docket_paths, sink, ledger):
     def make(**overrides):
         options = {
             "config": DeciderConfig(
-                DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS
+                DECIDER_ID,
+                "decide-1",
+                frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}),
+                MAX_PROOF_AGE,
+                BINDINGS,
+                "decide",
             ),
             "ledger": ledger,
             "resolver": PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
@@ -613,7 +628,7 @@ def test_clearance_audience_comes_from_the_target_binding(make_decider):
         TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", SIGNER_CUSTODIAN_ID),
     )
     config = DeciderConfig(
-        DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, bindings
+        DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, bindings, "decide"
     )
     decision = make_decider(config=config).check(make_request(), NOW)
     clearance = decode_clearance(decision.clearance, PINNED, max_lifetime=MAX_PROOF_AGE)
@@ -629,7 +644,7 @@ def test_request_cannot_name_a_custodian():
 
 def test_binding_custodian_must_be_a_known_custodian():
     with pytest.raises(ValueError, match="custodian"):
-        DeciderConfig(DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS)
+        DeciderConfig(DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS, "decide")
     with pytest.raises(ValueError, match="custodian"):
         TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", "")
 
@@ -647,3 +662,28 @@ def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, le
     assert decision.entry_id == refuse.entry_id
     assert decider.reconcile(NOW + MAX_PROOF_AGE) == (decision.op_id,)
     assert docket_entries(docket_paths)[-1].parent_entry == allow.entry_id
+
+
+@pytest.mark.parametrize(
+    "ack",
+    [
+        lambda record: None,
+        lambda record: replace(record, entry=replace(record.entry, entry_id="other-entry")),
+        lambda record: replace(record, entry=replace(record.entry, args_digest="other-digest")),
+        lambda record: replace(record, writer="custodian"),
+        lambda record: replace(record, token=""),
+    ],
+)
+def test_mismatched_docket_acknowledgement_is_refused(make_decider, docket_paths, ack):
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+    decision = make_decider(docket=AckDocket(inner, ack)).check(make_request(), NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
+    allow, refuse = docket_entries(docket_paths)
+    assert (allow.decision, refuse.decision, refuse.parent_entry) == ("allow", "refuse", allow.entry_id)
+
+
+def test_docket_writer_must_be_named():
+    with pytest.raises(ValueError, match="docket_writer"):
+        DeciderConfig(
+            DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS, ""
+        )
