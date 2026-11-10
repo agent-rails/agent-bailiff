@@ -306,6 +306,8 @@ def test_delegated_request_binds_the_leaf_link(make_decider, docket_paths):
     [
         ("malformed_request", {"nonce": "has space"}),
         ("malformed_request", {"tool": "deploy.*"}),
+        ("malformed_request", {"args": {"replicas": 1.5}, "proof_args": ARGS}),
+        ("malformed_request", {"args": {"replicas": 2**53}, "proof_args": ARGS}),
         ("unknown_audience", {"audience": "elsewhere.example"}),
         ("chain_invalid", {"proof_audience": "other-decider.example"}),
         ("chain_invalid", {"proof_args": {"service": "web", "replicas": 2}}),

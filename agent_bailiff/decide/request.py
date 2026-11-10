@@ -5,7 +5,7 @@ from typing import Any
 
 from agent_warrant.scope import validate_entry
 
-from agent_bailiff.decide.identity import request_digest
+from agent_bailiff.decide.identity import args_problem, request_digest
 
 MAX_LINKS = 16
 MAX_NONCE_CHARACTERS = 64
@@ -32,8 +32,9 @@ class OperationRequest:
             problem = validate_entry(value)
             if problem or "*" in value:
                 return f"{name} must be a concrete id: {problem or 'no wildcards'}"
-        if not isinstance(self.args, dict):
-            return "args must be an object"
+        problem = args_problem(self.args)
+        if problem:
+            return f"args: {problem}"
         nonce = self.nonce
         if not isinstance(nonce, str) or not 0 < len(nonce) <= MAX_NONCE_CHARACTERS:
             return f"nonce must be a non-empty str of at most {MAX_NONCE_CHARACTERS} characters"
@@ -45,8 +46,4 @@ class OperationRequest:
         for name in ("task_root", "leaf_proof", "trace_id", "audience"):
             if not isinstance(getattr(self, name), str):
                 return f"{name} must be a str"
-        try:
-            self.digest()
-        except (ValueError, TypeError) as exc:
-            return f"args cannot be canonicalized: {exc}"
         return None

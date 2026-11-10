@@ -1,4 +1,15 @@
-from agent_bailiff.decide.identity import args_digest, derive_op_id, request_digest
+import pytest
+
+from agent_bailiff.decide.identity import (
+    MAX_ARGS_BYTES,
+    MAX_ARGS_DEPTH,
+    ArgsError,
+    args_digest,
+    args_problem,
+    derive_op_id,
+    request_digest,
+    snapshot_args,
+)
 
 ARGS = {"service": "api", "replicas": 3, "tags": ["a", "b"], "meta": {"z": 1, "a": "x"}}
 LEAF = "A" * 43
@@ -38,3 +49,51 @@ def test_derive_op_id_changes_with_each_input_and_resists_field_shifting():
         changed[position] = changed[position] + "x"
         assert derive_op_id(*changed) != derive_op_id(*base)
     assert derive_op_id("t1", "a|b", "l", "d") != derive_op_id("t1", "a", "b|l", "d")
+
+
+def nested(depth):
+    value = "leaf"
+    for _ in range(depth - 1):
+        value = [value]
+    return {"k": value}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"ratio": 1.5},
+        {"ratio": 1.0},
+        {"ratio": float("nan")},
+        {"ratio": float("inf")},
+        {"n": 2**53},
+        {"n": -(2**53)},
+        {1: "x"},
+        {"k": ("a",)},
+        {"k": b"x"},
+        {"k": "\ud800"},
+        {"\udc00": "x"},
+        nested(MAX_ARGS_DEPTH),
+        {"k": "x" * MAX_ARGS_BYTES},
+        ["not", "an", "object"],
+        None,
+    ],
+)
+def test_ingress_domain_refuses_values_outside_it(args):
+    assert args_problem(args) is not None
+    with pytest.raises(ArgsError):
+        snapshot_args(args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"n": 2**53 - 1, "m": -(2**53 - 1), "b": True, "z": None, "s": "x", "l": [1, {"a": []}]},
+        nested(MAX_ARGS_DEPTH - 1),
+    ],
+)
+def test_ingress_domain_accepts_json_values(args):
+    assert args_problem(args) is None
+    snapshot = snapshot_args(args)
+    assert snapshot.thaw() == args
+    assert request_digest("t", "r", args, "n")
