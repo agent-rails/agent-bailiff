@@ -4,9 +4,10 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
+
+from agent_warrant.scope import covers, validate_entry
 
 from agent_bailiff.custodian.files import read_owned
 
@@ -35,13 +36,19 @@ class CredentialBinding:
             value = getattr(self, name)
             if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
                 raise BindingTableError(f"{name} must be a non-empty ASCII printable str without whitespace")
+        if validate_entry(self.tool) or "*" in self.tool:
+            raise BindingTableError("tool must be an exact scope id")
+        reason = validate_entry(self.resource)
+        if reason:
+            raise BindingTableError(f"resource is not a valid scope entry: {reason}")
         if not HEADER_NAME.fullmatch(self.header_name):
             raise BindingTableError("header_name must be an HTTP field name token")
         if not isinstance(self.canary, bool):
             raise BindingTableError("canary must be a bool")
 
     def matches(self, tenant: str, tool: str, resource: str) -> bool:
-        return self.tenant == tenant and self.tool == tool and fnmatchcase(resource, self.resource)
+        scope = {"tools": [self.tool], "resources": [self.resource], "max_cost_per_call": 0}
+        return self.tenant == tenant and covers(scope, tool, resource)
 
 
 BINDING_FIELDS = frozenset(item.name for item in fields(CredentialBinding))

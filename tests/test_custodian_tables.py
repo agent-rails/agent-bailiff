@@ -83,6 +83,35 @@ def test_malformed_binding_table_is_refused(state, document):
         BindingTable.load(write_table(state / "bindings.json", document))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("resource", "env/*/api"),
+        ("resource", "env/staging*"),
+        ("resource", "env/../prod/*"),
+        ("tool", "deploy.*"),
+    ],
+)
+def test_binding_outside_the_scope_grammar_is_refused(field, value):
+    with pytest.raises(BindingTableError):
+        CredentialBinding(**{**DEPLOY, field: value})
+
+
+@pytest.mark.parametrize(
+    ("pattern", "resource"), [("env/staging/?", "env/staging/x"), ("env/staging/[ab]", "env/staging/a")]
+)
+def test_glob_characters_in_a_binding_are_literal(pattern, resource):
+    binding = CredentialBinding(**{**DEPLOY, "resource": pattern})
+    table = BindingTable([binding])
+    assert table.resolve("tenant-a", "deploy.service", resource) is None
+    assert table.resolve("tenant-a", "deploy.service", pattern) == binding
+
+
+@pytest.mark.parametrize("resource", ["env/staging/../prod/api", "env/staging/./api", "env/staging//api"])
+def test_binding_does_not_match_a_resource_the_scope_grammar_refuses(resource):
+    assert BindingTable([CredentialBinding(**DEPLOY)]).resolve("tenant-a", "deploy.service", resource) is None
+
+
 def test_duplicate_keys_are_refused(state):
     path = state / "bindings.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
