@@ -193,12 +193,22 @@ def test_claims_database_with_a_loose_mode_is_refused(state):
 
 def test_rate_limit_is_per_task_and_slides():
     limiter = TaskRateLimiter(2, 10)
-    assert limiter.allow("tenant-a", "task-1", NOW)
-    assert limiter.allow("tenant-a", "task-1", NOW + 1)
-    assert not limiter.allow("tenant-a", "task-1", NOW + 2)
-    assert limiter.allow("tenant-a", "task-2", NOW + 2)
-    assert limiter.allow("tenant-a", "task-1", NOW + 10)
-    assert not limiter.allow("tenant-a", "task-1", NOW + 10)
+    assert not limiter.exhausted("tenant-a", "task-1", NOW)
+    limiter.record("tenant-a", "task-1", NOW)
+    limiter.record("tenant-a", "task-1", NOW + 1)
+    assert limiter.exhausted("tenant-a", "task-1", NOW + 2)
+    assert not limiter.exhausted("tenant-a", "task-2", NOW + 2)
+    assert not limiter.exhausted("tenant-a", "task-1", NOW + 10)
+    limiter.record("tenant-a", "task-1", NOW + 10)
+    assert limiter.exhausted("tenant-a", "task-1", NOW + 10)
+
+
+def test_checking_the_rate_limit_spends_no_budget():
+    limiter = TaskRateLimiter(1, 10)
+    for _ in range(5):
+        assert not limiter.exhausted("tenant-a", "task-1", NOW)
+    limiter.record("tenant-a", "task-1", NOW)
+    assert limiter.exhausted("tenant-a", "task-1", NOW)
 
 
 @pytest.mark.parametrize(("limit", "window"), [(0, 10), (1, 0), (True, 10)])

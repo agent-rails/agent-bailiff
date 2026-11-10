@@ -16,17 +16,20 @@ class TaskRateLimiter:
         self._releases: dict[tuple[str, str], deque[int]] = {}
         self._lock = threading.Lock()
 
-    def allow(self, tenant: str, task: str, now: int) -> bool:
+    def exhausted(self, tenant: str, task: str, now: int) -> bool:
+        with self._lock:
+            releases = self._releases.get((tenant, task))
+            if releases is None:
+                return False
+            while releases and releases[0] <= now - self._window:
+                releases.popleft()
+            return len(releases) >= self._limit
+
+    def record(self, tenant: str, task: str, now: int) -> None:
         with self._lock:
             if len(self._releases) >= MAX_TRACKED_TASKS:
                 self._sweep(now)
-            releases = self._releases.setdefault((tenant, task), deque())
-            while releases and releases[0] <= now - self._window:
-                releases.popleft()
-            if len(releases) >= self._limit:
-                return False
-            releases.append(now)
-            return True
+            self._releases.setdefault((tenant, task), deque()).append(now)
 
     def _sweep(self, now: int) -> None:
         stale = [key for key, releases in self._releases.items() if not releases or releases[-1] <= now - self._window]

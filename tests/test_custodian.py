@@ -599,3 +599,16 @@ def test_credential_failure_before_the_claim_leaves_the_op_id_releasable(make_cu
     result = custodian.release(token, request, NOW + 2)
     assert isinstance(result, Released)
     assert result.header_value == DEPLOY_SECRET.decode()
+
+
+def test_refused_attempts_do_not_spend_the_task_rate_budget(make_custodian, issue):
+    root = make_root()
+    custodian = make_custodian()
+    first_request, first_token = issue(root, nonce="n-0")
+    assert isinstance(custodian.release(first_token, first_request, NOW + 1), Released)
+    for _ in range(RATE_LIMIT):
+        assert custodian.release(first_token, first_request, NOW + 1) == Refused("already_issued")
+    issued = [issue(root, nonce=f"n-{index}") for index in range(1, RATE_LIMIT + 1)]
+    results = [custodian.release(token, request, NOW + 1) for request, token in issued]
+    assert all(isinstance(result, Released) for result in results[: RATE_LIMIT - 1])
+    assert results[RATE_LIMIT - 1] == Refused("rate_limited")

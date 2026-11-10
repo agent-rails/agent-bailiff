@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -106,6 +107,7 @@ class Custodian:
         self._trust_policy = trust_policy
         self._docket = docket
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
+        self._admit_lock = threading.Lock()
 
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult:
         try:
@@ -127,10 +129,8 @@ class Custodian:
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
-        if not self._limiter.allow(clearance.tenant, clearance.task, now):
-            raise _Refusal("rate_limited")
         header_value = self._decrypt(binding)
-        self._claim(clearance, now)
+        self._admit(clearance, now)
         release_entry = replace(
             entry,
             entry_id=uuid.uuid4().hex,
@@ -281,13 +281,17 @@ class Custodian:
         except Exception:
             logger.exception("canary alert entry was not acknowledged")
 
-    def _claim(self, clearance: Clearance, now: int) -> None:
-        try:
-            result = self._claims.claim(clearance.op_id, clearance.tenant, clearance.task, now)
-        except ClaimsUnavailable:
-            raise _Refusal("claims_unavailable") from None
-        if result != "claimed":
-            raise _Refusal(result)
+    def _admit(self, clearance: Clearance, now: int) -> None:
+        with self._admit_lock:
+            if self._limiter.exhausted(clearance.tenant, clearance.task, now):
+                raise _Refusal("rate_limited")
+            try:
+                result = self._claims.claim(clearance.op_id, clearance.tenant, clearance.task, now)
+            except ClaimsUnavailable:
+                raise _Refusal("claims_unavailable") from None
+            if result != "claimed":
+                raise _Refusal(result)
+            self._limiter.record(clearance.tenant, clearance.task, now)
 
     def _decrypt(self, binding: CredentialBinding) -> str:
         try:
