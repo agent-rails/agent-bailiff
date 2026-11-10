@@ -129,13 +129,13 @@ def test_binding_table_with_a_loose_mode_is_refused(state):
 
 def test_claim_is_once_per_op_id_and_survives_a_restart(state):
     claims = ClaimsStore.create(state / "claims.db")
-    assert claims.claim("op-1", NOW)
-    assert not claims.claim("op-1", NOW + 1)
+    assert claims.claim("op-1", "tenant-a", "task-1", NOW) == "claimed"
+    assert claims.claim("op-1", "tenant-a", "task-1", NOW + 1) == "already_issued"
     claims.close()
     reopened = ClaimsStore.open(state / "claims.db")
     try:
-        assert not reopened.claim("op-1", NOW + 2)
-        assert reopened.claim("op-2", NOW + 2)
+        assert reopened.claim("op-1", "tenant-a", "task-1", NOW + 2) == "already_issued"
+        assert reopened.claim("op-2", "tenant-a", "task-1", NOW + 2) == "claimed"
     finally:
         reopened.close()
 
@@ -152,6 +152,17 @@ def test_deny_is_per_task_and_survives_a_restart(state):
         assert not reopened.is_denied("tenant-b", "task-1")
     finally:
         reopened.close()
+
+
+def test_claim_is_refused_for_a_denied_task_only(state):
+    claims = ClaimsStore.create(state / "claims.db")
+    try:
+        claims.deny("tenant-a", "task-1", NOW)
+        assert claims.claim("op-1", "tenant-a", "task-1", NOW) == "task_denied"
+        assert claims.claim("op-2", "tenant-a", "task-2", NOW) == "claimed"
+        assert claims.claim("op-3", "tenant-b", "task-1", NOW) == "claimed"
+    finally:
+        claims.close()
 
 
 def test_claims_database_with_a_loose_mode_is_refused(state):
@@ -195,7 +206,7 @@ def test_claims_database_changed_after_open_is_refused(state, tamper):
     try:
         tamper(state / "claims.db")
         with pytest.raises(ClaimsUnavailable):
-            claims.claim("op-1", NOW)
+            claims.claim("op-1", "tenant-a", "task-1", NOW)
         with pytest.raises(ClaimsUnavailable):
             claims.is_denied("tenant-a", "task-1")
     finally:

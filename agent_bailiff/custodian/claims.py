@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
+from typing import Literal
 
 from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned
 
@@ -16,6 +17,9 @@ CREATE TABLE denies (
     PRIMARY KEY (tenant, task)
 );
 """
+
+
+ClaimResult = Literal["claimed", "already_issued", "task_denied"]
 
 
 class ClaimsUnavailable(Exception):
@@ -36,16 +40,20 @@ class ClaimsStore:
     def open(cls, path: Path) -> ClaimsStore:
         return cls(*connect_owned(path, CLAIMS_LABEL, None))
 
-    def claim(self, op_id: str, now: int) -> bool:
+    def claim(self, op_id: str, tenant: str, task: str, now: int) -> ClaimResult:
         try:
             with self._lock:
                 self._pinned.check()
-                self._connection.execute("INSERT INTO claims (op_id, claimed_at) VALUES (?, ?)", (op_id, now))
+                cursor = self._connection.execute(
+                    "INSERT INTO claims (op_id, claimed_at) SELECT ?, ? "
+                    "WHERE NOT EXISTS (SELECT 1 FROM denies WHERE tenant = ? AND task = ?)",
+                    (op_id, now, tenant, task),
+                )
         except sqlite3.IntegrityError:
-            return False
+            return "already_issued"
         except (sqlite3.Error, OwnedFileError):
             raise ClaimsUnavailable("claims database is unavailable") from None
-        return True
+        return "claimed" if cursor.rowcount == 1 else "task_denied"
 
     def deny(self, tenant: str, task: str, now: int) -> None:
         try:

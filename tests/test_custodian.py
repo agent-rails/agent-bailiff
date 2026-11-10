@@ -221,7 +221,7 @@ def make_decider(workdir, private, sink, writer):
 def make_custodian(workdir, private, sink, reader, state):
     opened = []
 
-    def make(docket=None, ledger=None, **config):
+    def make(docket=None, ledger=None, claims=None, **config):
         options = {
             "custodian_id": CUSTODIAN_ID,
             "decider_id": DECIDER_ID,
@@ -235,7 +235,7 @@ def make_custodian(workdir, private, sink, reader, state):
         }
         options.update(config)
         store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
-        claims = ClaimsStore.open(state / "claims.db")
+        claims = claims or ClaimsStore.open(state / "claims.db")
         opened.extend((store, claims))
         return Custodian(
             config=CustodianConfig(**options),
@@ -531,3 +531,22 @@ def test_agent_key_holder_is_recorded(make_custodian, issue, workdir):
     make_custodian().release(token, request, NOW + 1)
     [entry] = custodian_entries(workdir)
     assert entry.agent_key == encode_public_key(AGENT_KEY.public_key())
+
+
+def claims_with_a_deny_landing_before_the_claim(path):
+    class DenyLandsBeforeClaim(ClaimsStore):
+        def claim(self, *args):
+            other = ClaimsStore.open(path)
+            try:
+                other.deny(TENANT, "task-1", NOW)
+            finally:
+                other.close()
+            return super().claim(*args)
+
+    return DenyLandsBeforeClaim.open(path)
+
+
+def test_deny_committed_before_the_claim_stops_the_release(make_custodian, issue, state):
+    request, token = issue()
+    custodian = make_custodian(claims=claims_with_a_deny_landing_before_the_claim(state / "claims.db"))
+    assert custodian.release(token, request, NOW + 1) == Refused("task_denied")

@@ -124,14 +124,12 @@ class Custodian:
         binding = self._binding(verified)
         self._check_reservation(verified, now)
         entry = self._entry(verified, now)
-        if self._denied(clearance.tenant, clearance.task):
-            raise _Refusal("task_denied")
         if not self._limiter.allow(clearance.tenant, clearance.task, now):
             raise _Refusal("rate_limited")
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
-        self._claim(clearance.op_id, now)
+        self._claim(clearance, now)
         header_value = self._decrypt(binding)
         release_entry = replace(
             entry,
@@ -273,12 +271,6 @@ class Custodian:
             handles=handles,
         )
 
-    def _denied(self, tenant: str, task: str) -> bool:
-        try:
-            return self._claims.is_denied(tenant, task)
-        except ClaimsUnavailable:
-            raise _Refusal("claims_unavailable") from None
-
     def _trip_canary(self, tenant: str, task: str, entry: Entry, now: int) -> None:
         try:
             self._claims.deny(tenant, task, now)
@@ -289,13 +281,13 @@ class Custodian:
         except Exception:
             logger.exception("canary alert entry was not acknowledged")
 
-    def _claim(self, op_id: str, now: int) -> None:
+    def _claim(self, clearance: Clearance, now: int) -> None:
         try:
-            claimed = self._claims.claim(op_id, now)
+            result = self._claims.claim(clearance.op_id, clearance.tenant, clearance.task, now)
         except ClaimsUnavailable:
             raise _Refusal("claims_unavailable") from None
-        if not claimed:
-            raise _Refusal("already_issued")
+        if result != "claimed":
+            raise _Refusal(result)
 
     def _decrypt(self, binding: CredentialBinding) -> str:
         try:
