@@ -21,7 +21,6 @@ class OperationRequest:
     links: tuple[str, ...]
     leaf_proof: str
     trace_id: str
-    audience: str
 
     def digest(self) -> str:
         return request_digest(self.tool, self.resource, self.args, self.nonce)
@@ -43,7 +42,7 @@ class OperationRequest:
         links = self.links
         if not isinstance(links, tuple) or len(links) > MAX_LINKS or not all(isinstance(item, str) for item in links):
             return f"links must be a tuple of at most {MAX_LINKS} str"
-        for name in ("task_root", "leaf_proof", "trace_id", "audience"):
+        for name in ("task_root", "leaf_proof", "trace_id"):
             if not isinstance(getattr(self, name), str):
                 return f"{name} must be a str"
         return None

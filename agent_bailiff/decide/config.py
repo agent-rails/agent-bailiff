@@ -16,9 +16,10 @@ class TargetBinding:
     resource: str
     credential_id: str
     target: str
+    custodian: str
 
     def __post_init__(self) -> None:
-        for name in ("tenant", "credential_id", "target"):
+        for name in ("tenant", "credential_id", "target", "custodian"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty str")
@@ -73,6 +74,9 @@ class DeciderConfig:
         object.__setattr__(self, "bindings", tuple(self.bindings))
         if not all(isinstance(item, TargetBinding) for item in self.bindings):
             raise TypeError("bindings must be TargetBinding records")
+        unknown = sorted({item.custodian for item in self.bindings} - self.custodian_ids)
+        if unknown:
+            raise ValueError(f"bindings name a custodian outside custodian_ids: {', '.join(unknown)}")
 
     def binding(self, tenant: str, tool: str, resource: str) -> TargetBinding | None:
         return next((item for item in self.bindings if item.matches(tenant, tool, resource)), None)

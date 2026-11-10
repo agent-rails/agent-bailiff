@@ -37,6 +37,7 @@ from agent_bailiff.signing import Refused
 NOW = 1_800_000_000
 DECIDER_ID = "decide.example"
 CUSTODIAN_ID = "custodian.example"
+SIGNER_CUSTODIAN_ID = "signer-custodian.example"
 ISSUER_ID = "issuer.example"
 TENANT = "tenant-a"
 PRINCIPAL = "user:alice"
@@ -70,10 +71,10 @@ COSTS = CostTable(
     },
 )
 BINDINGS = (
-    TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example"),
-    TargetBinding(TENANT, "deploy.delete", "env/staging/*", "deploy-api", "deploy.example"),
-    TargetBinding(TENANT, "deploy.rollback", "env/staging/*", "deploy-api", "deploy.example"),
-    TargetBinding(TENANT, "signer.withdraw", "wallet/*", "signer", "signer.example"),
+    TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", CUSTODIAN_ID),
+    TargetBinding(TENANT, "deploy.delete", "env/staging/*", "deploy-api", "deploy.example", CUSTODIAN_ID),
+    TargetBinding(TENANT, "deploy.rollback", "env/staging/*", "deploy-api", "deploy.example", CUSTODIAN_ID),
+    TargetBinding(TENANT, "signer.withdraw", "wallet/*", "signer", "signer.example", SIGNER_CUSTODIAN_ID),
 )
 ARGS = {"service": "api", "replicas": 2}
 
@@ -160,7 +161,9 @@ def ledger(workdir):
 def make_decider(workdir, docket_paths, sink, ledger):
     def make(**overrides):
         options = {
-            "config": DeciderConfig(DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS),
+            "config": DeciderConfig(
+                DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS
+            ),
             "ledger": ledger,
             "resolver": PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
             "trust_policy": IssuerTrustPolicy(
@@ -208,7 +211,6 @@ def make_request(
     resource="env/staging/api",
     args=ARGS,
     nonce="n-1",
-    audience=CUSTODIAN_ID,
     proof_audience=DECIDER_ID,
     proof_args=None,
     at=NOW,
@@ -227,7 +229,6 @@ def make_request(
         links=tuple(link.encode() for link in links),
         leaf_proof=proof.encode(),
         trace_id=trace_id,
-        audience=audience,
     )
 
 
@@ -328,7 +329,6 @@ def test_delegated_request_binds_the_leaf_link(make_decider, docket_paths):
         ("malformed_request", {"tool": "deploy.*"}),
         ("malformed_request", {"args": {"replicas": 1.5}, "proof_args": ARGS}),
         ("malformed_request", {"args": {"replicas": 2**53}, "proof_args": ARGS}),
-        ("unknown_audience", {"audience": "elsewhere.example"}),
         ("chain_invalid", {"proof_audience": "other-decider.example"}),
         ("chain_invalid", {"proof_args": {"service": "web", "replicas": 2}}),
         ("chain_invalid", {"at": NOW - MAX_PROOF_AGE - 1}),
@@ -593,3 +593,29 @@ def test_args_snapshot_is_deeply_frozen():
     thawed = snapshot.thaw()
     thawed["a"]["b"].append(3)
     assert snapshot.thaw() == {"a": {"b": [1, {"c": 2}]}}
+
+
+def test_clearance_audience_comes_from_the_target_binding(make_decider):
+    bindings = (
+        TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", SIGNER_CUSTODIAN_ID),
+    )
+    config = DeciderConfig(
+        DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, bindings
+    )
+    decision = make_decider(config=config).check(make_request(), NOW)
+    clearance = decode_clearance(decision.clearance, PINNED, max_lifetime=MAX_PROOF_AGE)
+    assert clearance.aud == SIGNER_CUSTODIAN_ID
+
+
+def test_request_cannot_name_a_custodian():
+    request = make_request()
+    with pytest.raises(TypeError):
+        replace(request, audience=SIGNER_CUSTODIAN_ID)
+    assert not hasattr(request, "audience")
+
+
+def test_binding_custodian_must_be_a_known_custodian():
+    with pytest.raises(ValueError, match="custodian"):
+        DeciderConfig(DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS)
+    with pytest.raises(ValueError, match="custodian"):
+        TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", "")

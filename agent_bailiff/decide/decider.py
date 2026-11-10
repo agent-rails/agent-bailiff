@@ -163,8 +163,6 @@ class Decider:
             raise _Refusal("malformed_request", entry)
         operation_args_digest = snapshot.digest
         entry = replace(entry, tool=request.tool, resource=request.resource, args_digest=operation_args_digest)
-        if request.audience not in self._config.custodian_ids:
-            raise _Refusal("unknown_audience", entry)
         digest = request_digest(request.tool, request.resource, snapshot.thaw(), request.nonce)
         chain = verify_chain(
             request.task_root,
@@ -233,7 +231,7 @@ class Decider:
             )
         clearance = Clearance(
             iss=self._config.decider_id,
-            aud=request.audience,
+            aud=binding.custodian,
             iat=now,
             exp=expires_at,
             op_id=op_id,
