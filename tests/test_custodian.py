@@ -565,3 +565,19 @@ def test_canary_deny_that_fails_to_persist_still_stops_later_releases(make_custo
     connection.commit()
     connection.close()
     assert custodian.release(later_token, later_request, NOW + 2) == Refused("task_denied")
+
+
+def test_canary_hit_by_a_rate_limited_task_still_denies_and_alerts(make_custodian, issue, workdir, state):
+    root = make_root()
+    custodian = make_custodian()
+    for index in range(RATE_LIMIT):
+        request, token = issue(root, nonce=f"n-{index}")
+        assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    canary_request, canary_token = issue(root, tool="deploy.canary")
+    assert custodian.release(canary_token, canary_request, NOW + 1) == Refused("canary")
+    assert [entry.reason for entry in custodian_entries(workdir) if entry.decision == "alert"] == ["canary"]
+    claims = ClaimsStore.open(state / "claims.db")
+    try:
+        assert claims.is_denied(TENANT, "task-1")
+    finally:
+        claims.close()

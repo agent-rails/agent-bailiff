@@ -124,11 +124,11 @@ class Custodian:
         binding = self._binding(verified)
         self._check_reservation(verified, now)
         entry = self._entry(verified, now)
-        if not self._limiter.allow(clearance.tenant, clearance.task, now):
-            raise _Refusal("rate_limited")
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
+        if not self._limiter.allow(clearance.tenant, clearance.task, now):
+            raise _Refusal("rate_limited")
         self._claim(clearance, now)
         header_value = self._decrypt(binding)
         release_entry = replace(
