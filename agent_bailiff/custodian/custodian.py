@@ -121,11 +121,26 @@ class Custodian:
     def _release(self, clearance_token: object, request: object, now: int) -> Released:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
             raise ValueError("now must be a non-negative integer")
-        verified = self._verify(clearance_token, request, now)
+        try:
+            verified = self._verify(clearance_token, request, now)
+        except _Refusal as refusal:
+            logger.warning("custodian refused an unverified request: %s", refusal.reason)
+            raise
+        entry = self._entry(verified, now)
+        try:
+            return self._release_verified(verified, entry, now)
+        except _Refusal as refusal:
+            self._record_refusal(entry, refusal.reason)
+            raise
+        except Exception:
+            logger.exception("custodian release failed with an internal error")
+            self._record_refusal(entry, "internal_error")
+            raise _Refusal("internal_error") from None
+
+    def _release_verified(self, verified: _Verified, entry: Entry, now: int) -> Released:
         clearance = verified.clearance
         binding = self._binding(verified)
         self._check_reservation(verified, now)
-        entry = self._entry(verified, now)
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
@@ -138,7 +153,6 @@ class Custodian:
             reason="ok",
             performed=True,
             credential_tier=TIER,
-            clearance_digest=token_hash(verified.token),
         )
         self._record(release_entry)
         return Released(binding.header_name, header_value, TIER, clearance.op_id, release_entry.entry_id)
@@ -268,6 +282,7 @@ class Custodian:
             resource=clearance.resource,
             args_digest=clearance.args_digest,
             cost=clearance.cost,
+            clearance_digest=token_hash(verified.token),
             handles=handles,
         )
 
@@ -302,6 +317,12 @@ class Custodian:
         if value is None:
             raise _Refusal("credential_unavailable")
         return value
+
+    def _record_refusal(self, entry: Entry, reason: str) -> None:
+        try:
+            self._docket.append(replace(entry, entry_id=uuid.uuid4().hex, decision="refuse", reason=reason))
+        except Exception:
+            logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
 
     def _record(self, entry: Entry) -> None:
         try:

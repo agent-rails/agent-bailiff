@@ -98,6 +98,15 @@ class AckDocket:
         return self.ack(self.inner.append(entry))
 
 
+class FailingDocket:
+    def __init__(self):
+        self.entries = []
+
+    def append(self, entry):
+        self.entries.append(entry)
+        raise OSError("docket sink is down")
+
+
 class ShiftedExpiryReader:
     def __init__(self, inner, shift):
         self.inner = inner
@@ -462,7 +471,8 @@ def test_canary_release_records_a_deny_and_an_alert_and_later_calls_are_refused(
     later_request, later_token = issue(root, nonce="n-2")
     custodian = make_custodian()
     assert custodian.release(canary_token, canary_request, NOW + 1) == Refused("canary")
-    [alert] = custodian_entries(workdir)
+    alert, refusal = custodian_entries(workdir)
+    assert (refusal.decision, refusal.reason, refusal.op_id) == ("refuse", "canary", alert.op_id)
     assert (alert.decision, alert.reason, alert.performed, alert.credential_tier) == ("alert", "canary", False, None)
     assert dict(alert.handles)["task"] == "task-1"
     claims = ClaimsStore.open(state / "claims.db")
@@ -612,3 +622,40 @@ def test_refused_attempts_do_not_spend_the_task_rate_budget(make_custodian, issu
     results = [custodian.release(token, request, NOW + 1) for request, token in issued]
     assert all(isinstance(result, Released) for result in results[: RATE_LIMIT - 1])
     assert results[RATE_LIMIT - 1] == Refused("rate_limited")
+
+
+def test_refusals_after_verification_are_recorded_in_the_docket(make_custodian, issue, workdir):
+    request, token = issue()
+    custodian = make_custodian()
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    assert custodian.release(token, request, NOW + 2) == Refused("already_issued")
+    release, refusal = custodian_entries(workdir)
+    assert (refusal.decision, refusal.reason, refusal.performed, refusal.credential_tier) == (
+        "refuse",
+        "already_issued",
+        False,
+        None,
+    )
+    assert (refusal.op_id, refusal.trace_id, refusal.parent_entry) == (release.op_id, "trace-1", release.parent_entry)
+    assert refusal.clearance_digest == token_hash(token)
+    assert refusal.entry_id != release.entry_id
+
+
+def test_binding_refusal_is_recorded_in_the_docket(make_custodian, make_decider, workdir):
+    bindings = (TargetBinding(TENANT, "deploy.service", "env/staging/*", "signer", "deploy.example", CUSTODIAN_ID),)
+    request = make_request(make_root())
+    decision = make_decider(bindings).check(request, NOW)
+    assert make_custodian().release(decision.clearance, request, NOW + 1) == Refused("binding_mismatch")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "binding_mismatch")]
+
+
+def test_refusal_stands_when_its_docket_entry_fails_and_unverified_calls_are_not_recorded(make_custodian, issue):
+    root = make_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    docket = FailingDocket()
+    custodian = make_custodian(docket=docket)
+    assert custodian.release(None, request, NOW + 1) == Refused("clearance_missing")
+    assert docket.entries == []
+    assert custodian.release(token, request, NOW + 1) == Refused("reservation_missing")
+    assert [(entry.decision, entry.reason) for entry in docket.entries] == [("refuse", "reservation_missing")]
