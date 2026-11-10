@@ -219,16 +219,6 @@ class Decider:
         with self._lock:
             self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, entry)
         entry_id = uuid.uuid4().hex
-        allow_entry = replace(entry, entry_id=entry_id, decision="allow", reason="ok")
-        try:
-            self._docket.append(allow_entry)
-        except Exception:
-            logger.exception("docket entry for an issued operation was not acknowledged")
-            raise _Refusal("docket_unavailable", entry) from None
-        with self._lock:
-            self._issued[op_id] = _Issued(
-                root.tenant_id, root.task_id, expires_at, replace(entry, parent_entry=entry_id)
-            )
         clearance = Clearance(
             iss=self._config.decider_id,
             aud=binding.custodian,
@@ -250,6 +240,14 @@ class Decider:
             entry_id=entry_id,
         )
         token = encode_clearance(clearance, self._signing_key, self._config.kid)
+        linked = replace(entry, parent_entry=entry_id)
+        with self._lock:
+            self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, linked)
+        try:
+            self._docket.append(replace(entry, entry_id=entry_id, decision="allow", reason="ok"))
+        except Exception:
+            logger.exception("docket entry for an issued operation was not acknowledged")
+            raise _Refusal("docket_unavailable", linked) from None
         return Decision(allowed=True, reason="ok", clearance=token, entry_id=entry_id, op_id=op_id)
 
     def _reserve_and_issue(

@@ -109,6 +109,17 @@ def mutating_costs(args):
     return MutatingCosts(COSTS.version, COSTS.tools)
 
 
+class AckLostDocket:
+    def __init__(self, inner):
+        self.inner = inner
+
+    def append(self, entry):
+        record = self.inner.append(entry)
+        if entry.decision == "allow":
+            raise ConnectionError("acknowledgement lost")
+        return record
+
+
 class UnavailableLedger(TaskLedger):
     def open_task(self, result, now):
         raise LedgerUnavailable("disk gone")
@@ -396,12 +407,14 @@ def test_unexpected_error_is_refused_as_internal_error(make_decider, docket_path
     assert entry.reason == "internal_error"
 
 
-def test_error_after_issue_returns_no_clearance_and_leaves_the_reservation_issued(make_decider, ledger):
+def test_signing_failure_writes_no_allow_entry_and_leaves_the_reservation_issued(make_decider, ledger, docket_paths):
     root = make_root()
     request = make_request(root)
     decider = make_decider(signing_key=object())
     decision = decider.check(request, NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "internal_error", None)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.parent_entry) == ("refuse", "internal_error", None)
     op_id = op_id_for(request, root)
     assert ledger.reservation(TENANT, "task-1", op_id, NOW).state == "issued"
     assert decider.reconcile(NOW + MAX_PROOF_AGE) == (op_id,)
@@ -619,3 +632,18 @@ def test_binding_custodian_must_be_a_known_custodian():
         DeciderConfig(DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS)
     with pytest.raises(ValueError, match="custodian"):
         TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", "")
+
+
+def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, ledger, docket_paths):
+    root = make_root()
+    request = make_request(root)
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+    decider = make_decider(docket=AckLostDocket(inner))
+    decision = decider.check(request, NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
+    allow, refuse = docket_entries(docket_paths)
+    assert (allow.decision, refuse.decision, refuse.reason) == ("allow", "refuse", "docket_unavailable")
+    assert refuse.parent_entry == allow.entry_id
+    assert decision.entry_id == refuse.entry_id
+    assert decider.reconcile(NOW + MAX_PROOF_AGE) == (decision.op_id,)
+    assert docket_entries(docket_paths)[-1].parent_entry == allow.entry_id
