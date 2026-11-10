@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.config import DeciderConfig, PolicyRef
 from agent_bailiff.decide.costs import CostError, CostTable
-from agent_bailiff.decide.identity import args_digest, derive_op_id
+from agent_bailiff.decide.identity import ArgsError, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
 
@@ -155,12 +155,17 @@ class Decider:
     def _check(self, request: OperationRequest, now: int, entry: Entry) -> Decision:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
             raise ValueError("now must be a non-negative integer")
+        try:
+            snapshot = snapshot_args(request.args)
+        except ArgsError:
+            raise _Refusal("malformed_request", entry) from None
         if request.refusal() is not None:
             raise _Refusal("malformed_request", entry)
-        entry = replace(entry, tool=request.tool, resource=request.resource, args_digest=args_digest(request.args))
+        operation_args_digest = snapshot.digest
+        entry = replace(entry, tool=request.tool, resource=request.resource, args_digest=operation_args_digest)
         if request.audience not in self._config.custodian_ids:
             raise _Refusal("unknown_audience", entry)
-        digest = request.digest()
+        digest = request_digest(request.tool, request.resource, snapshot.thaw(), request.nonce)
         chain = verify_chain(
             request.task_root,
             list(request.links),
@@ -183,7 +188,7 @@ class Decider:
         if not covers(scope, request.tool, request.resource):
             raise _Refusal("out_of_scope", entry)
         try:
-            cost = self._costs.cost(request.tool, request.args)
+            cost = self._costs.cost(request.tool, snapshot.value)
         except CostError:
             raise _Refusal("unknown_cost", entry) from None
         entry = replace(entry, cost=cost)
@@ -193,7 +198,7 @@ class Decider:
         if binding is None:
             raise _Refusal("no_binding", entry)
         allowed, verdict = Guard(self._policy.policy, MemoryAuditSink(), agent_id=chain.leaf_subject).decide(
-            request.tool, request.args
+            request.tool, snapshot.thaw()
         )
         entry = replace(
             entry,
@@ -210,7 +215,6 @@ class Decider:
             raise _Refusal("suspended", entry)
         op_id = derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest)
         entry = replace(entry, op_id=op_id)
-        operation_args_digest = args_digest(request.args)
         expires_at = self._reserve_and_issue(
             root, links, leaf_binding, op_id, request, operation_args_digest, cost, now, entry
         )

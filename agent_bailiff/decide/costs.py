@@ -31,7 +31,7 @@ class CostTable:
                 raise ValueError(f"argument name for {tool!r} must be non-empty")
         object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
 
-    def cost(self, tool: str, args: dict[str, Any]) -> int:
+    def cost(self, tool: str, args: Mapping[str, Any]) -> int:
         if tool not in self.tools:
             raise CostError(f"tool {tool!r} is not in cost table v{self.version}")
         rule = self.tools[tool]

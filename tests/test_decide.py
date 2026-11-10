@@ -10,7 +10,7 @@ import pytest
 from agent_warrant.chain import delegate, prove_leaf
 from agent_warrant.encoding import b64u, b64u_decode
 from agent_warrant.identity import encode_public_key
-from agent_warrant.ledger import LedgerUnavailable, TaskLedger
+from agent_warrant.ledger import LedgerUnavailable, Operation, TaskLedger
 from agent_warrant.ledger import Refused as LedgerRefused
 from agent_warrant.resolver import PinnedResolver
 from agent_warrant.task_root import issue_task_root
@@ -28,6 +28,7 @@ from agent_bailiff.decide import (
     decode_clearance,
     derive_op_id,
     request_digest,
+    snapshot_args,
 )
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record
 from agent_bailiff.docket.sink import build_kid_index
@@ -86,6 +87,25 @@ class ExplodingSuspension:
     @property
     def suspended(self):
         raise RuntimeError("suspension state unreadable")
+
+
+class MutatingSuspension:
+    def __init__(self, args):
+        self.args = args
+
+    @property
+    def suspended(self):
+        self.args["replicas"] = 99
+        return False
+
+
+def mutating_costs(args):
+    class MutatingCosts(CostTable):
+        def cost(self, tool, call_args):
+            args["replicas"] = 99
+            return super().cost(tool, call_args)
+
+    return MutatingCosts(COSTS.version, COSTS.tools)
 
 
 class UnavailableLedger(TaskLedger):
@@ -528,3 +548,47 @@ def test_invalid_trace_id_is_replaced(make_decider, docket_paths):
     clearance = decode_clearance(decision.clearance, PINNED, max_lifetime=MAX_PROOF_AGE)
     assert clearance.trace_id != "bad trace"
     assert len(clearance.trace_id) == 32
+
+
+@pytest.mark.parametrize("hook", ["suspension", "costs"])
+def test_args_mutated_during_check_change_no_digest(make_decider, ledger, docket_paths, hook):
+    args = dict(ARGS)
+    root = make_root()
+    request = make_request(root, args=args)
+    expected_request = request.digest()
+    expected_args = args_digest(args)
+    override = {"suspension": MutatingSuspension(args)} if hook == "suspension" else {"costs": mutating_costs(args)}
+    decision = make_decider(**override).check(request, NOW)
+    assert args["replicas"] == 99
+    assert decision.allowed
+    clearance = decode_clearance(decision.clearance, PINNED, max_lifetime=MAX_PROOF_AGE)
+    op_id = derive_op_id(TENANT, "task-1", root.binding(), expected_request)
+    assert (clearance.request_digest, clearance.args_digest) == (expected_request, expected_args)
+    assert decision.op_id == clearance.op_id == op_id
+    [entry] = docket_entries(docket_paths)
+    assert (entry.args_digest, entry.op_id) == (expected_args, op_id)
+    operation = Operation(
+        op_id=op_id,
+        tenant_id=TENANT,
+        task_id="task-1",
+        leaf_binding=root.binding(),
+        tool="deploy.service",
+        resource="env/staging/api",
+        args_digest=expected_args,
+        cost=1,
+        verdict_allowed=True,
+        expires_at=clearance.exp,
+    )
+    assert ledger.reservation(TENANT, "task-1", op_id, NOW).digest == operation.digest()
+
+
+def test_args_snapshot_is_deeply_frozen():
+    snapshot = snapshot_args({"a": {"b": [1, {"c": 2}]}})
+    with pytest.raises(TypeError):
+        snapshot.value["a"]["x"] = 1
+    with pytest.raises(TypeError):
+        snapshot.value["a"]["b"][1]["c"] = 3
+    assert isinstance(snapshot.value["a"]["b"], tuple)
+    thawed = snapshot.thaw()
+    thawed["a"]["b"].append(3)
+    assert snapshot.thaw() == {"a": {"b": [1, {"c": 2}]}}
