@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 
 import pytest
 
@@ -162,6 +163,24 @@ def test_claim_is_refused_for_a_denied_task_only(state):
         assert claims.claim("op-2", "tenant-a", "task-2", NOW) == "claimed"
         assert claims.claim("op-3", "tenant-b", "task-1", NOW) == "claimed"
     finally:
+        claims.close()
+
+
+def test_deny_holds_in_memory_when_it_cannot_be_written(state):
+    claims = ClaimsStore.create(state / "claims.db")
+    connection = sqlite3.connect(state / "claims.db")
+    try:
+        connection.execute("CREATE TRIGGER fail_deny BEFORE INSERT ON denies BEGIN SELECT RAISE(ABORT, 'disk'); END")
+        connection.commit()
+        with pytest.raises(ClaimsUnavailable):
+            claims.deny("tenant-a", "task-1", NOW)
+        connection.execute("DROP TRIGGER fail_deny")
+        connection.commit()
+        assert claims.is_denied("tenant-a", "task-1")
+        assert claims.claim("op-1", "tenant-a", "task-1", NOW) == "task_denied"
+        assert claims.claim("op-2", "tenant-a", "task-2", NOW) == "claimed"
+    finally:
+        connection.close()
         claims.close()
 
 

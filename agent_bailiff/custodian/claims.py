@@ -30,6 +30,7 @@ class ClaimsStore:
     def __init__(self, connection: sqlite3.Connection, pinned: PinnedFile) -> None:
         self._connection = connection
         self._pinned = pinned
+        self._latched: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
 
     @classmethod
@@ -43,6 +44,8 @@ class ClaimsStore:
     def claim(self, op_id: str, tenant: str, task: str, now: int) -> ClaimResult:
         try:
             with self._lock:
+                if (tenant, task) in self._latched:
+                    return "task_denied"
                 self._pinned.check()
                 cursor = self._connection.execute(
                     "INSERT INTO claims (op_id, claimed_at) SELECT ?, ? "
@@ -58,6 +61,7 @@ class ClaimsStore:
     def deny(self, tenant: str, task: str, now: int) -> None:
         try:
             with self._lock:
+                self._latched.add((tenant, task))
                 self._pinned.check()
                 self._connection.execute(
                     "INSERT OR IGNORE INTO denies (tenant, task, denied_at) VALUES (?, ?, ?)", (tenant, task, now)
@@ -68,6 +72,8 @@ class ClaimsStore:
     def is_denied(self, tenant: str, task: str) -> bool:
         try:
             with self._lock:
+                if (tenant, task) in self._latched:
+                    return True
                 self._pinned.check()
                 row = self._connection.execute(
                     "SELECT 1 FROM denies WHERE tenant = ? AND task = ?", (tenant, task)

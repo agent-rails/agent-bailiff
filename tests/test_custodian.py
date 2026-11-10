@@ -550,3 +550,18 @@ def test_deny_committed_before_the_claim_stops_the_release(make_custodian, issue
     request, token = issue()
     custodian = make_custodian(claims=claims_with_a_deny_landing_before_the_claim(state / "claims.db"))
     assert custodian.release(token, request, NOW + 1) == Refused("task_denied")
+
+
+def test_canary_deny_that_fails_to_persist_still_stops_later_releases(make_custodian, issue, state):
+    root = make_root()
+    canary_request, canary_token = issue(root, tool="deploy.canary")
+    later_request, later_token = issue(root, nonce="n-2")
+    connection = sqlite3.connect(state / "claims.db")
+    connection.execute("CREATE TRIGGER fail_deny BEFORE INSERT ON denies BEGIN SELECT RAISE(ABORT, 'disk'); END")
+    connection.commit()
+    custodian = make_custodian()
+    assert custodian.release(canary_token, canary_request, NOW + 1) == Refused("canary")
+    connection.execute("DROP TRIGGER fail_deny")
+    connection.commit()
+    connection.close()
+    assert custodian.release(later_token, later_request, NOW + 2) == Refused("task_denied")

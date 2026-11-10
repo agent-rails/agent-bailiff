@@ -275,7 +275,7 @@ class Custodian:
         try:
             self._claims.deny(tenant, task, now)
         except ClaimsUnavailable:
-            logger.error("canary deny for a task was not recorded")
+            logger.error("canary deny for a task is held in memory only; it was not written to the claims database")
         try:
             self._docket.append(replace(entry, entry_id=uuid.uuid4().hex, decision="alert", reason="canary"))
         except Exception:
