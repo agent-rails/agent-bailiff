@@ -62,6 +62,36 @@ def decode_clearance(
     return Clearance(**result.payload)
 
 
+def verify_clearance(
+    token: object,
+    pinned_keys: Mapping[str, Ed25519PublicKey],
+    *,
+    now: int,
+    expected_aud: str,
+    expected_iss: str,
+    skew_seconds: int,
+    max_lifetime: int,
+) -> Clearance | Refused:
+    for name, value in (("now", now), ("skew_seconds", skew_seconds)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    for name, text in (("expected_aud", expected_aud), ("expected_iss", expected_iss)):
+        if not isinstance(text, str) or not text:
+            raise ValueError(f"{name} must be a non-empty str")
+    clearance = decode_clearance(token, pinned_keys, max_lifetime=max_lifetime)
+    if isinstance(clearance, Refused):
+        return clearance
+    if clearance.iss != expected_iss:
+        return Refused("wrong_issuer", "clearance was issued by another decider")
+    if clearance.aud != expected_aud:
+        return Refused("wrong_audience", "clearance is addressed to another custodian")
+    if clearance.iat > now + skew_seconds:
+        return Refused("not_yet_valid", "clearance is issued in the future")
+    if now >= clearance.exp:
+        return Refused("expired", "clearance has expired")
+    return clearance
+
+
 def _field_problem(body: Mapping[str, Any]) -> str | None:
     for name in sorted(CLEARANCE_FIELDS):
         value = body[name]

@@ -1,4 +1,10 @@
-from agent_bailiff.decide.clearance import CLEARANCE_TYP, Clearance, decode_clearance, encode_clearance
+from agent_bailiff.decide.clearance import (
+    CLEARANCE_TYP,
+    Clearance,
+    decode_clearance,
+    encode_clearance,
+    verify_clearance,
+)
 from agent_bailiff.decide.config import DeciderConfig, PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostError, CostTable
 from agent_bailiff.decide.decider import Decider, Decision, DocketWriter, SuspensionCheck
@@ -35,4 +41,5 @@ __all__ = [
     "encode_clearance",
     "request_digest",
     "snapshot_args",
+    "verify_clearance",
 ]

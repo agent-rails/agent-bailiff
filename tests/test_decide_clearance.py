@@ -12,6 +12,7 @@ from agent_bailiff.decide.clearance import (
     Clearance,
     decode_clearance,
     encode_clearance,
+    verify_clearance,
 )
 from agent_bailiff.signing import Refused, sign
 
@@ -163,3 +164,61 @@ def test_invalid_clearance_cannot_be_encoded():
 def test_non_string_token_is_refused():
     result = decode(None)
     assert isinstance(result, Refused) and result.reason == "malformed"
+
+
+SKEW = 5
+TOKEN = encode_clearance(CLEARANCE, KEY, "decide-1")
+
+
+def verify(token=TOKEN, **options):
+    options.setdefault("now", CLEARANCE.iat + 1)
+    options.setdefault("expected_aud", CLEARANCE.aud)
+    options.setdefault("expected_iss", CLEARANCE.iss)
+    options.setdefault("skew_seconds", SKEW)
+    options.setdefault("max_lifetime", MAX_LIFETIME)
+    return verify_clearance(token, PINNED, **options)
+
+
+@pytest.mark.parametrize("now", [CLEARANCE.iat - SKEW, CLEARANCE.iat, CLEARANCE.exp - 1])
+def test_verify_accepts_a_clearance_inside_its_window(now):
+    assert verify(now=now) == CLEARANCE
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"now": CLEARANCE.exp}, "expired"),
+        ({"now": CLEARANCE.exp + 100}, "expired"),
+        ({"now": CLEARANCE.iat - SKEW - 1}, "not_yet_valid"),
+        ({"expected_aud": "signer-custodian.example"}, "wrong_audience"),
+        ({"expected_iss": "other-decider.example"}, "wrong_issuer"),
+        ({"token": None}, "malformed"),
+        ({"token": "x.y"}, "malformed"),
+        ({"token": encode_clearance(CLEARANCE, OTHER_KEY, "decide-1")}, "bad_signature"),
+        (
+            {"token": sign(KEY, "decide-1", CLEARANCE_TYP, {**asdict(CLEARANCE), "exp": CLEARANCE.iat + 61})},
+            "lifetime_exceeded",
+        ),
+    ],
+)
+def test_verify_refuses_without_raising(options, reason):
+    result = verify(**options)
+    assert isinstance(result, Refused)
+    assert result.reason == reason
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"now": -1},
+        {"now": True},
+        {"skew_seconds": -1},
+        {"skew_seconds": 1.5},
+        {"expected_aud": ""},
+        {"expected_iss": None},
+        {"max_lifetime": 0},
+    ],
+)
+def test_verify_rejects_invalid_configuration(options):
+    with pytest.raises(ValueError):
+        verify(**options)
