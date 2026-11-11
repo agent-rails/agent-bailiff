@@ -33,3 +33,13 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 - Params may hold only `name`, `arguments` and `_meta`. Any other key is refused as `malformed_request`.
 - `_meta` may hold only `progressToken` (string or integer), `io.modelcontextprotocol/protocolVersion` (string), `io.modelcontextprotocol/clientInfo` (object) and `io.modelcontextprotocol/clientCapabilities` (object). Any other key or type is refused as `malformed_request`.
 - These `_meta` values are not part of the request digest, the leaf proof or the clearance; they reach the upstream unbound. Binding them needs a change to the agent-side proof.
+
+## Proof headers on notifications
+
+- Client notifications fan out to every upstream and carry the agent's `x-bailiff-*` headers, including the leaf proof for whatever request the agent is about to make.
+- A leaf proof binds one request: tool id, resource, arguments and nonce. Its op_id is claimed once, and the route table maps each tool id and resource to one upstream. The worst case is therefore an upstream that submits the operation first: it runs once, at the upstream routed for it, with the agent's arguments, and the agent's own call is refused (`already_issued` from decide). The credential is not released to the upstream that replayed the proof. This reasoning has not been executed as a test.
+- Agent clients should send the `x-bailiff-*` headers only on `tools/call`.
+
+## Batches
+
+- agentgateway v1.7.0 rejects a JSON-RPC batch with HTTP 400 ("fail to deserialize request body: unrecognized JSON-RPC message") before any processor or upstream call.
