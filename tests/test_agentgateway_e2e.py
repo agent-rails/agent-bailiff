@@ -212,6 +212,9 @@ class Agent:
         if not notify:
             message["id"] = self.next_id
             self.next_id += 1
+        return self.send(message, headers)
+
+    def send(self, message, headers=None):
         request_headers = {
             "content-type": "application/json",
             "accept": "application/json, text/event-stream",
@@ -233,7 +236,12 @@ def _json_rpc(text):
     for line in text.splitlines():
         if line.startswith("data: "):
             return json.loads(line[len("data: ") :])
-    return json.loads(text) if text.strip() else {}
+    if not text.strip():
+        return {}
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {"text": text}
 
 
 def agent_headers(request):
@@ -405,6 +413,31 @@ def test_a_notification_reaches_the_upstream_without_agent_credentials(stack):
     [headers] = stack["upstream"].calls("notifications/roots/list_changed")
     assert not {"authorization", "proxy-authorization", "cookie"} & set(headers)
     assert headers["x-bailiff-nonce"] == request.nonce
+
+
+def batch_of(*messages):
+    return [{"jsonrpc": "2.0", "id": 100 + index, **message} for index, message in enumerate(messages)]
+
+
+@pytest.mark.parametrize("name", ["read_and_list", "call_without_proof_and_list", "call_with_proof_and_list"])
+def test_the_gateway_rejects_json_rpc_batches_before_any_upstream_call(stack, workdir, name):
+    request = make_request()
+    call = {"method": "tools/call", "params": {"name": "deploy_service", "arguments": request.args}}
+    batches = {
+        "read_and_list": (
+            batch_of({"method": "resources/read", "params": {"uri": "file:///r"}}, {"method": "tools/list"}),
+            {},
+        ),
+        "call_without_proof_and_list": (batch_of(call, {"method": "tools/list"}), {"authorization": AGENT_TOKEN}),
+        "call_with_proof_and_list": (batch_of(call, {"method": "tools/list"}), agent_headers(request)),
+    }
+    payload, headers = batches[name]
+    status, body = stack["agent"].send(payload, headers)
+    assert (status, body) == (400, {"text": "fail to deserialize request body: unrecognized JSON-RPC message"})
+    with stack["upstream"].lock:
+        methods = [method for method, _ in stack["upstream"].requests]
+    assert set(methods) <= {"initialize", "notifications/initialized"}, methods
+    assert [entry for entry in docket_entries(workdir) if entry.decision in ("allow", "release")] == []
 
 
 def test_an_unreachable_custodian_fails_closed(stack):
