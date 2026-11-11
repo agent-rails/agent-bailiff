@@ -10,6 +10,8 @@ authors = [{ name = "voltagebots" }]
 dependencies = [
     "agent-warrant==0.1.0",
     "cryptography==50.0.2",
+    "grpcio==1.85.1",
+    "protobuf==7.36.2",
     "toolcall-authz==0.3.0",
 ]
 
@@ -17,7 +19,7 @@ dependencies = [
 Repository = "https://github.com/agent-rails/agent-bailiff"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "grpcio-tools==1.85.1"]
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -34,6 +36,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["agent_bailiff/adapters/agentgateway/_proto"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -42,3 +45,11 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.13"
 strict = true
 files = ["agent_bailiff"]
+
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*", "google.protobuf", "google.protobuf.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["agent_bailiff.adapters.agentgateway._proto.*"]
+ignore_errors = true

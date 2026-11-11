@@ -6,8 +6,14 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parent.parent
-PINS = {"agent-warrant==0.1.0", "toolcall-authz==0.3.0", "cryptography==50.0.2"}
-PINNED_NAMES = ("agent-warrant", "toolcall-authz", "cryptography")
+PINS = {
+    "agent-warrant==0.1.0",
+    "toolcall-authz==0.3.0",
+    "cryptography==50.0.2",
+    "grpcio==1.85.1",
+    "protobuf==7.36.2",
+}
+PINNED_NAMES = ("agent-warrant", "toolcall-authz", "cryptography", "grpcio", "protobuf")
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 

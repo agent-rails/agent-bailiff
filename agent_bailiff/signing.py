@@ -68,6 +68,8 @@ def verify(
 ) -> VerifyResult:
     fields = _body_fields(allowed_fields)
     _check_pinned_keys(pinned_keys)
+    if not isinstance(expected_typ, str) or not expected_typ:
+        raise ValueError("expected_typ must be a non-empty str")
     if not isinstance(token, str):
         return Refused("malformed", f"token must be str, got {type(token).__name__}")
     if len(token) > max_chars:
@@ -120,6 +122,8 @@ def _body_fields(allowed_fields: Iterable[str]) -> frozenset[str]:
     if isinstance(allowed_fields, str):
         raise TypeError("allowed_fields must be a collection of field names, not a str")
     fields = frozenset(allowed_fields)
+    if not all(isinstance(name, str) and name for name in fields):
+        raise TypeError("allowed_fields must contain only non-empty str field names")
     clashing = sorted(RESERVED_FIELDS & fields)
     if clashing:
         raise ValueError(f"allowed_fields must not include reserved fields: {', '.join(clashing)}")
@@ -127,6 +131,8 @@ def _body_fields(allowed_fields: Iterable[str]) -> frozenset[str]:
 
 
 def _check_pinned_keys(pinned_keys: Mapping[str, Ed25519PublicKey]) -> None:
+    if not isinstance(pinned_keys, Mapping):
+        raise TypeError("pinned_keys must be a Mapping of key ids to Ed25519PublicKey")
     for kid, key in pinned_keys.items():
-        if not isinstance(kid, str) or not isinstance(key, Ed25519PublicKey):
-            raise TypeError("pinned_keys must map str key ids to Ed25519PublicKey")
+        if not isinstance(kid, str) or not kid or not isinstance(key, Ed25519PublicKey):
+            raise TypeError("pinned_keys must map non-empty str key ids to Ed25519PublicKey")

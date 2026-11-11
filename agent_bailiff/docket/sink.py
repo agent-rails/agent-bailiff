@@ -6,19 +6,28 @@ import stat
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.entry import Record, decode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
+from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
+from agent_bailiff.docket.socket_dir import (
+    SOCKET_MODE,
+    open_lock_file,
+    prepare_socket_dir,
+    remove_stale_socket,
+    try_lock,
+    unlink_if_same,
+)
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 
 DOCKET_MODE = 0o600
-SOCKET_DIR_MODE = 0o750
-SOCKET_MODE = 0o660
 DEFAULT_FRAME_TIMEOUT = 5.0
+DEFAULT_IDLE_TIMEOUT = 5.0
+DEFAULT_MAX_LIFETIME = 60.0
 DEFAULT_MAX_CONNECTIONS = 16
 
 Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
@@ -39,6 +48,11 @@ class VerifyReport:
     line: int | None = None
     reason: str = ""
     detail: str = ""
+    valid_bytes: int = 0
+
+
+class DocketLocked(Exception):
+    pass
 
 
 class DocketCorrupt(Exception):
@@ -73,19 +87,74 @@ def check_chain(heads: Mapping[str, Head], record: Record) -> Refused | None:
 
 
 def verify_docket(path: Path, writers: Writers) -> VerifyReport:
-    index = build_kid_index(writers)
+    with open(path, "rb") as docket:
+        return _verify_stream(docket, build_kid_index(writers))
+
+
+def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
+    with os.fdopen(os.dup(fd), "rb") as docket:
+        docket.seek(0)
+        return _verify_stream(docket, index)
+
+
+def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
     heads: dict[str, Head] = {}
     count = 0
-    with open(path, "rb") as docket:
-        while raw := docket.readline(MAX_TOKEN_CHARS + 2):
-            line_number = count + 1
-            if not raw.endswith(b"\n"):
-                return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete")
-            refusal = _apply_line(raw[:-1], index, heads)
-            if refusal is not None:
-                return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail)
-            count = line_number
-    return VerifyReport(True, count, heads)
+    offset = 0
+    while raw := docket.readline(MAX_TOKEN_CHARS + 2):
+        line_number = count + 1
+        if not raw.endswith(b"\n"):
+            if docket.read(1):
+                return VerifyReport(False, count, heads, line_number, "malformed", "line exceeds the limit", offset)
+            return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete", offset)
+        refusal = _apply_line(raw[:-1], index, heads)
+        if refusal is not None:
+            return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail, offset)
+        count = line_number
+        offset += len(raw)
+    return VerifyReport(True, count, heads, valid_bytes=offset)
+
+
+def repair(docket_path: Path, side_path: Path, writers: Writers) -> VerifyReport:
+    index = build_kid_index(writers)
+    directory_fd = open_private_dir(docket_path.parent)
+    try:
+        fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+        try:
+            _lock(fd, docket_path)
+            _check_docket_file(fd, docket_path)
+            report = _verify_fd(fd, index)
+            if report.ok:
+                return report
+            if report.reason != "torn_tail":
+                raise DocketCorrupt(report)
+            tail = os.pread(fd, os.fstat(fd).st_size - report.valid_bytes, report.valid_bytes)
+            _write_side_file(side_path, tail)
+            os.ftruncate(fd, report.valid_bytes)
+            os.fsync(fd)
+            os.fsync(directory_fd)
+            repaired = _verify_fd(fd, index)
+            if not repaired.ok:
+                raise DocketCorrupt(repaired)
+            return repaired
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _write_side_file(path: Path, content: bytes) -> None:
+    directory_fd = open_private_dir(path.parent)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+        with os.fdopen(fd, "wb") as side:
+            side.write(content)
+            side.flush()
+            os.fsync(side.fileno())
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _apply_line(raw: bytes, index: KidIndex, heads: dict[str, Head]) -> Refused | None:
@@ -114,6 +183,8 @@ class DocketSink:
         socket_gid: int | None = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        max_lifetime: float = DEFAULT_MAX_LIFETIME,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         fsync: Callable[[int], None] = os.fsync,
     ) -> None:
@@ -125,10 +196,14 @@ class DocketSink:
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
         self._max_frame_bytes = max_frame_bytes
         self._frame_timeout = frame_timeout
+        self._idle_timeout = idle_timeout
+        self._max_lifetime = max_lifetime
         self._max_connections = max_connections
         self._fsync = fsync
         self._heads: dict[str, Head] = {}
         self._fd: int | None = None
+        self._socket_lock_fd: int | None = None
+        self._socket_identity: tuple[int, int] | None = None
         self._server: asyncio.Server | None = None
         self._active = 0
         self._failed = False
@@ -138,52 +213,91 @@ class DocketSink:
         return dict(self._heads)
 
     async def start(self) -> None:
-        self._fd = _open_docket(self._docket_path)
-        report = verify_docket(self._docket_path, self._writers)
+        try:
+            await self._start()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _start(self) -> None:
+        self._fd = self._open_docket()
+        _lock(self._fd, self._docket_path)
+        _check_docket_file(self._fd, self._docket_path)
+        report = _verify_fd(self._fd, self._index)
         if not report.ok:
-            os.close(self._fd)
-            self._fd = None
             raise DocketCorrupt(report)
         self._heads = dict(report.heads)
-        _prepare_socket_dir(self._socket_path.parent, self._socket_gid)
-        _remove_stale_socket(self._socket_path)
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self._socket_path))
+        prepare_socket_dir(self._socket_path.parent, self._socket_gid)
+        lock_path = self._socket_path.with_name(f"{self._socket_path.name}.lock")
+        self._socket_lock_fd = open_lock_file(lock_path)
+        _lock(self._socket_lock_fd, lock_path)
+        remove_stale_socket(self._socket_path)
+        self._server = await asyncio.start_unix_server(self._handle, path=str(self._socket_path), cleanup_socket=False)
+        info = os.lstat(self._socket_path)
+        self._socket_identity = (info.st_dev, info.st_ino)
         os.chown(self._socket_path, -1, self._socket_gid)
         os.chmod(self._socket_path, SOCKET_MODE)
+
+    def _open_docket(self) -> int:
+        directory_fd = open_private_dir(self._docket_path.parent)
+        try:
+            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+            fd = os.open(self._docket_path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+            try:
+                self._fsync(directory_fd)
+            except OSError:
+                self._failed = True
+            return fd
+        finally:
+            os.close(directory_fd)
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-            self._socket_path.unlink(missing_ok=True)
+        if self._socket_identity is not None:
+            unlink_if_same(self._socket_path, self._socket_identity)
+            self._socket_identity = None
+        if self._socket_lock_fd is not None:
+            os.close(self._socket_lock_fd)
+            self._socket_lock_fd = None
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if self._active >= self._max_connections:
-            writer.close()
-            return
-        self._active += 1
         try:
-            await self._serve(reader, writer)
+            if not await self._admit(writer):
+                return
+            self._active += 1
+            try:
+                async with asyncio.timeout(self._max_lifetime):
+                    await self._serve(reader, writer)
+            except TimeoutError:
+                return
+            finally:
+                self._active -= 1
         finally:
-            self._active -= 1
             writer.close()
 
-    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _admit(self, writer: asyncio.StreamWriter) -> bool:
         try:
             uid = peer_uid(writer.get_extra_info("socket"))
         except (OSError, PeerCredentialsUnavailable):
-            return
+            return False
         if uid not in self._allowed_uids:
             await self._reply(writer, _refusal("peer_not_allowed"))
-            return
+            return False
+        return self._active < self._max_connections
+
+    async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
             try:
+                async with asyncio.timeout(self._idle_timeout):
+                    header = await reader.readexactly(LENGTH.size)
                 async with asyncio.timeout(self._frame_timeout):
-                    (length,) = LENGTH.unpack(await reader.readexactly(LENGTH.size))
+                    (length,) = LENGTH.unpack(header)
                     if length > self._max_frame_bytes:
                         await self._reply(writer, _refusal("frame_too_large"))
                         return
@@ -250,39 +364,12 @@ def _refusal(reason: str) -> dict[str, Any]:
     return {"ok": False, "reason": reason}
 
 
-def _open_docket(path: Path) -> int:
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(path, flags, DOCKET_MODE)
+def _check_docket_file(fd: int, path: Path) -> None:
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
-        os.close(fd)
         raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
-    return fd
 
 
-def _prepare_socket_dir(directory: Path, gid: int) -> None:
-    try:
-        os.mkdir(directory, 0o700)
-    except FileExistsError:
-        pass
-    else:
-        os.chown(directory, -1, gid)
-        os.chmod(directory, SOCKET_DIR_MODE)
-    info = os.lstat(directory)
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or info.st_gid != gid
-        or stat.S_IMODE(info.st_mode) != SOCKET_DIR_MODE
-    ):
-        raise PermissionError(f"{directory} must be a directory owned by uid {os.geteuid()}, group {gid}, mode 0750")
-
-
-def _remove_stale_socket(path: Path) -> None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
-        raise PermissionError(f"{path} exists and is not a socket owned by uid {os.geteuid()}")
-    path.unlink()
+def _lock(fd: int, path: Path) -> None:
+    if not try_lock(fd):
+        raise DocketLocked(f"{path} is held by another sink")

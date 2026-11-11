@@ -159,3 +159,23 @@ def test_token_hash_is_base64url_sha256():
     digest = token_hash(sign(KEY, "k1", TYP, BODY))
     assert len(b64u_decode(digest)) == 32
     assert digest != token_hash(sign(KEY, "k1", TYP, {**BODY, "cost": 4}))
+
+
+@pytest.mark.parametrize(
+    ("pinned", "typ", "fields", "error"),
+    [
+        ([("k1", KEY.public_key())], TYP, FIELDS, TypeError),
+        (None, TYP, FIELDS, TypeError),
+        ({"": KEY.public_key()}, TYP, FIELDS, TypeError),
+        (PINNED, TYP, (1,), TypeError),
+        (PINNED, TYP, ("",), TypeError),
+        (PINNED, TYP, None, TypeError),
+        (PINNED, "", FIELDS, ValueError),
+        (PINNED, 7, FIELDS, ValueError),
+    ],
+)
+def test_invalid_configuration_raises_before_the_token_is_read(pinned, typ, fields, error):
+    token = sign(KEY, "k1", TYP, BODY)
+    for candidate in (token, "malformed"):
+        with pytest.raises(error):
+            verify(candidate, pinned, typ, fields)
