@@ -88,6 +88,11 @@ class _Refusal(Exception):
         self.reason = reason
 
 
+class _UnacknowledgedRelease(_Refusal):
+    def __init__(self) -> None:
+        super().__init__("docket_unavailable")
+
+
 class Custodian:
     def __init__(
         self,
@@ -133,6 +138,8 @@ class Custodian:
         entry = self._entry(verified, now)
         try:
             return self._release_verified(verified, entry, now)
+        except _UnacknowledgedRelease:
+            raise
         except _Refusal as refusal:
             self._record_refusal(verified.clearance, entry, refusal.reason)
             raise
@@ -359,7 +366,7 @@ class Custodian:
             record = self._docket.append(entry)
         except Exception:
             logger.exception("docket entry for a release was not acknowledged")
-            raise _Refusal("docket_unavailable") from None
+            raise _UnacknowledgedRelease from None
         if not (
             isinstance(record, Record)
             and record.entry == entry
@@ -368,7 +375,7 @@ class Custodian:
             and bool(record.token)
         ):
             logger.error("docket acknowledgement does not match the release entry")
-            raise _Refusal("docket_unavailable")
+            raise _UnacknowledgedRelease
 
 
 def _header_value(secret: bytes) -> str | None:

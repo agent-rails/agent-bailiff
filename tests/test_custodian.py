@@ -755,3 +755,13 @@ def test_recorded_refusals_are_bounded_and_evict_the_oldest(make_custodian, issu
         custodian.release(token, request, NOW + 2)
     custodian.release(first_token, first_request, NOW + 2)
     assert refusals(workdir) == [(first, "already_issued"), (second, "already_issued"), (first, "already_issued")]
+
+
+def test_lost_release_acknowledgement_leaves_only_the_release_entry(make_custodian, issue, workdir, private):
+    request, token = issue()
+    inner = docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_custodian(docket=AckDocket(inner, lambda record: None))
+    assert custodian.release(token, request, NOW + 1) == Refused("docket_unavailable")
+    entries = [(entry.decision, entry.reason, entry.performed) for entry in custodian_entries(workdir)]
+    assert entries == [("release", "ok", True)]
+    assert make_custodian().release(token, request, NOW + 2) == Refused("already_issued")
