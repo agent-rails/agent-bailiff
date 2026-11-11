@@ -336,7 +336,7 @@ def test_a_replayed_call_is_refused_and_reaches_the_upstream_once(stack):
 def test_a_custodian_refusal_after_decide_allows_reaches_no_upstream(stack, workdir):
     request = make_request(tool="deploy.canary")
     status, body = stack["agent"].call("deploy_canary", request.args, agent_headers(request))
-    assert refused(body, "canary"), body
+    assert refused(body, "release_refused"), body
     assert stack["upstream"].calls() == []
     entries = docket_entries(workdir)
     assert [entry.decision for entry in entries if entry.hop == "decide"] == ["allow"]

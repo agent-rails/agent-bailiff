@@ -153,10 +153,11 @@ def test_custodian_refuses_without_a_string_clearance(context):
     assert custodian.calls == []
 
 
-def test_custodian_refusal_returns_the_reason_without_a_header():
-    custodian = FakeCustodian(Refused("already_issued"))
+@pytest.mark.parametrize("reason", ["canary", "already_issued", "clearance_mismatch", "rate_limited", "task_denied"])
+def test_custodian_refusals_share_one_generic_reason_without_a_header(reason):
+    custodian = FakeCustodian(Refused(reason))
     result = CustodianProcessor(custodian, ROUTES, clock=lambda: NOW).check_request(with_clearance(message()))
-    assert (result_kind(result), result.error.code, result.error.reason) == ("error", DENIED, "already_issued")
+    assert (result_kind(result), result.error.code, result.error.reason) == ("error", DENIED, "release_refused")
     assert not result.HasField("header_mutation")
 
 
@@ -201,7 +202,7 @@ def test_a_decide_clearance_releases_the_credential_once_through_both_processors
     [header] = released.header_mutation.set
     assert (header.key, header.value) == ("Authorization", DEPLOY_SECRET)
     replayed = custodian.check_request(gateway_call(request, metadata=decided.metadata))
-    assert (result_kind(replayed), replayed.error.reason) == ("error", "already_issued")
+    assert (result_kind(replayed), replayed.error.reason) == ("error", "release_refused")
     assert not replayed.HasField("header_mutation")
     redecided = decide.check_request(gateway_call(request))
     assert (result_kind(redecided), redecided.error.reason) == ("error", "already_issued")
@@ -220,5 +221,5 @@ def test_a_clearance_for_other_arguments_is_refused_by_the_custodian(make_decide
     custodian = CustodianProcessor(make_custodian(), GATEWAY_ROUTES, clock=lambda: NOW + 1)
     decided = decide.check_request(gateway_call(request))
     result = custodian.check_request(gateway_call(other, metadata=decided.metadata))
-    assert (result_kind(result), result.error.reason) == ("error", "clearance_mismatch")
+    assert (result_kind(result), result.error.reason) == ("error", "release_refused")
     assert not result.HasField("header_mutation")

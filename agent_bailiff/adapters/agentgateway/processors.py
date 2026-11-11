@@ -23,6 +23,7 @@ from agent_bailiff.decide.decider import Decision
 from agent_bailiff.decide.request import OperationRequest
 
 CLEARANCE_KEY = "clearance"
+RELEASE_REFUSED = "release_refused"
 STRIPPED_HEADERS = (LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER)
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,8 @@ class CustodianProcessor:
             return refuse(refusal.reason)
         result = self._custodian.release(clearance, request, self._clock())
         if not isinstance(result, Released):
-            return refuse(result.reason)
+            logger.warning("custodian processor refused a release: %s", result.reason)
+            return refuse(RELEASE_REFUSED)
         mutation = ext_mcp_pb2.HeaderMutation(
             set=[ext_mcp_pb2.McpHeader(key=result.header_name, value=result.header_value.encode("ascii"))],
             remove=list(STRIPPED_HEADERS),
