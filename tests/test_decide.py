@@ -179,7 +179,14 @@ def ledger(workdir):
 
 
 @pytest.fixture
-def make_decider(workdir, docket_paths, sink, ledger):
+def client_options(workdir):
+    state = workdir / "writer-state"
+    state.mkdir(mode=0o700)
+    return {"sink_uid": os.getuid(), "state_dir": state}
+
+
+@pytest.fixture
+def make_decider(workdir, docket_paths, sink, ledger, client_options):
     def make(**overrides):
         options = {
             "config": DeciderConfig(
@@ -201,7 +208,7 @@ def make_decider(workdir, docket_paths, sink, ledger):
             ),
             "policy": PolicyRef.from_dict("default", "1", POLICY),
             "suspension": Suspension(),
-            "docket": DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY),
+            "docket": DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options),
             "signing_key": DECIDE_KEY,
             "costs": COSTS,
         }
@@ -649,10 +656,10 @@ def test_binding_custodian_must_be_a_known_custodian():
         TargetBinding(TENANT, "deploy.service", "env/staging/*", "deploy-api", "deploy.example", "")
 
 
-def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, ledger, docket_paths):
+def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, ledger, docket_paths, client_options):
     root = make_root()
     request = make_request(root)
-    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options)
     decider = make_decider(docket=AckLostDocket(inner))
     decision = decider.check(request, NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
@@ -674,8 +681,8 @@ def test_failure_after_the_allow_entry_appends_a_linked_refusal(make_decider, le
         lambda record: replace(record, token=""),
     ],
 )
-def test_mismatched_docket_acknowledgement_is_refused(make_decider, docket_paths, ack):
-    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY)
+def test_mismatched_docket_acknowledgement_is_refused(make_decider, docket_paths, ack, client_options):
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options)
     decision = make_decider(docket=AckDocket(inner, ack)).check(make_request(), NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "docket_unavailable", None)
     allow, refuse = docket_entries(docket_paths)
