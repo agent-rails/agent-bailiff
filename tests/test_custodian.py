@@ -659,3 +659,49 @@ def test_refusal_stands_when_its_docket_entry_fails_and_unverified_calls_are_not
     assert docket.entries == []
     assert custodian.release(token, request, NOW + 1) == Refused("reservation_missing")
     assert [(entry.decision, entry.reason) for entry in docket.entries] == [("refuse", "reservation_missing")]
+
+
+def count_decrypts(monkeypatch):
+    calls = []
+    original = CredentialStore.get
+
+    def counted(self, *args):
+        calls.append(args)
+        return original(self, *args)
+
+    monkeypatch.setattr(CredentialStore, "get", counted)
+    return calls
+
+
+def test_replayed_clearance_is_refused_without_decrypting(make_custodian, issue, monkeypatch):
+    decrypts = count_decrypts(monkeypatch)
+    request, token = issue()
+    custodian = make_custodian()
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    assert [custodian.release(token, request, NOW + 2) for _ in range(50)] == [Refused("already_issued")] * 50
+    assert make_custodian().release(token, request, NOW + 3) == Refused("already_issued")
+    assert len(decrypts) == 1
+
+
+def test_clearance_for_a_denied_task_is_refused_without_decrypting(make_custodian, issue, state, monkeypatch):
+    decrypts = count_decrypts(monkeypatch)
+    request, token = issue()
+    claims = ClaimsStore.open(state / "claims.db")
+    try:
+        claims.deny(TENANT, "task-1", NOW)
+    finally:
+        claims.close()
+    assert make_custodian().release(token, request, NOW + 1) == Refused("task_denied")
+    assert decrypts == []
+
+
+def test_rate_limited_task_is_refused_without_decrypting(make_custodian, issue, monkeypatch):
+    root = make_root()
+    custodian = make_custodian()
+    issued = [issue(root, nonce=f"n-{index}") for index in range(RATE_LIMIT + 1)]
+    for request, token in issued[:RATE_LIMIT]:
+        assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    decrypts = count_decrypts(monkeypatch)
+    request, token = issued[RATE_LIMIT]
+    assert custodian.release(token, request, NOW + 1) == Refused("rate_limited")
+    assert decrypts == []

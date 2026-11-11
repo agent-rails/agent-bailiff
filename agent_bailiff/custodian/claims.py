@@ -82,6 +82,15 @@ class ClaimsStore:
             raise ClaimsUnavailable("claims database is unavailable") from None
         return row is not None
 
+    def is_claimed(self, op_id: str) -> bool:
+        try:
+            with self._lock:
+                self._pinned.check()
+                row = self._connection.execute("SELECT 1 FROM claims WHERE op_id = ?", (op_id,)).fetchone()
+        except (sqlite3.Error, OwnedFileError):
+            raise ClaimsUnavailable("claims database is unavailable") from None
+        return row is not None
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()

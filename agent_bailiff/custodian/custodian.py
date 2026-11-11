@@ -144,6 +144,7 @@ class Custodian:
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
+        self._precheck(clearance, now)
         header_value = self._decrypt(binding)
         self._admit(clearance, now)
         release_entry = replace(
@@ -295,6 +296,17 @@ class Custodian:
             self._docket.append(replace(entry, entry_id=uuid.uuid4().hex, decision="alert", reason="canary"))
         except Exception:
             logger.exception("canary alert entry was not acknowledged")
+
+    def _precheck(self, clearance: Clearance, now: int) -> None:
+        try:
+            if self._claims.is_denied(clearance.tenant, clearance.task):
+                raise _Refusal("task_denied")
+            if self._claims.is_claimed(clearance.op_id):
+                raise _Refusal("already_issued")
+        except ClaimsUnavailable:
+            raise _Refusal("claims_unavailable") from None
+        if self._limiter.exhausted(clearance.tenant, clearance.task, now):
+            raise _Refusal("rate_limited")
 
     def _admit(self, clearance: Clearance, now: int) -> None:
         with self._admit_lock:

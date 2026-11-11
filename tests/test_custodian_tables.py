@@ -141,6 +141,19 @@ def test_claim_is_once_per_op_id_and_survives_a_restart(state):
         reopened.close()
 
 
+def test_claimed_op_id_is_seen_after_a_restart(state):
+    claims = ClaimsStore.create(state / "claims.db")
+    assert not claims.is_claimed("op-1")
+    claims.claim("op-1", "tenant-a", "task-1", NOW)
+    claims.close()
+    reopened = ClaimsStore.open(state / "claims.db")
+    try:
+        assert reopened.is_claimed("op-1")
+        assert not reopened.is_claimed("op-2")
+    finally:
+        reopened.close()
+
+
 def test_deny_is_per_task_and_survives_a_restart(state):
     claims = ClaimsStore.create(state / "claims.db")
     claims.deny("tenant-a", "task-1", NOW)
