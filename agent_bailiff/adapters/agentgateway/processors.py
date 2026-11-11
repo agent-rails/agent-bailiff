@@ -25,6 +25,8 @@ from agent_bailiff.decide.request import OperationRequest
 
 CLEARANCE_KEY = "clearance"
 RELEASE_REFUSED = "release_refused"
+METHOD_REFUSED = "method_refused"
+SESSION_METHODS = frozenset({"initialize", "ping", "tools/list"})
 AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
 CHAIN_HEADERS = frozenset({LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER})
 
@@ -59,8 +61,11 @@ class DecideProcessor:
             return refuse("internal_error")
 
     def _check(self, message: ext_mcp_pb2.McpRequest) -> ext_mcp_pb2.McpRequestResult:
-        if message.method != TOOLS_CALL:
+        if message.method in SESSION_METHODS:
             return passed()
+        if message.method != TOOLS_CALL:
+            logger.warning("decide processor refused a method outside the allowlist: %r", message.method[:64])
+            return refuse(METHOD_REFUSED)
         try:
             request = read_call(message, self._routes)
         except CallRefused as refusal:

@@ -70,13 +70,40 @@ def result_kind(result):
     return result.WhichOneof("result")
 
 
-def test_decide_passes_methods_other_than_tools_call_untouched():
+@pytest.mark.parametrize("method", ["initialize", "ping", "tools/list"])
+def test_decide_passes_the_allowed_session_methods_untouched(method):
     decider = FakeDecider()
     result = DecideProcessor(decider, ROUTES, clock=lambda: NOW).check_request(
-        ext_mcp_pb2.McpRequest(method="tools/list", service_names=["deploy"])
+        ext_mcp_pb2.McpRequest(method=method, service_names=["deploy"])
     )
     assert result_kind(result) == "pass"
     assert not result.HasField("metadata") and not result.HasField("header_mutation")
+    assert decider.calls == []
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "prompts/get",
+        "prompts/list",
+        "resources/read",
+        "resources/list",
+        "resources/templates/list",
+        "logging/setLevel",
+        "server/discover",
+        "subscriptions/listen",
+        "tools/call/extra",
+        "TOOLS/CALL",
+        "",
+    ],
+)
+def test_decide_refuses_every_other_method_with_a_generic_reason(method):
+    decider = FakeDecider()
+    result = DecideProcessor(decider, ROUTES, clock=lambda: NOW).check_request(
+        ext_mcp_pb2.McpRequest(method=method, service_names=["deploy"])
+    )
+    assert (result_kind(result), result.error.code, result.error.reason) == ("error", DENIED, "method_refused")
+    assert not result.HasField("metadata")
     assert decider.calls == []
 
 
