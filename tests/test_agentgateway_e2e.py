@@ -322,6 +322,24 @@ def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(st
     assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
 
 
+@pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])
+def test_a_call_with_spec_meta_is_released(stack, meta):
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "_meta": meta}
+    status, body = stack["agent"].post({"method": "tools/call", "params": params}, agent_headers(request))
+    assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
+    [headers] = stack["upstream"].calls()
+    assert headers["authorization"] == DEPLOY_SECRET.decode()
+
+
+def test_a_call_with_unknown_meta_is_refused_and_reaches_no_upstream(stack):
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "_meta": {"dangerousMode": "yes"}}
+    status, body = stack["agent"].post({"method": "tools/call", "params": params}, agent_headers(request))
+    assert refused(body, "malformed_request"), body
+    assert stack["upstream"].calls() == []
+
+
 def test_an_out_of_scope_call_is_refused_and_reaches_no_upstream(stack):
     request = make_request(resource="env/prod/api")
     status, body = stack["agent"].call("deploy_production", request.args, agent_headers(request))

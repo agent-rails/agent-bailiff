@@ -187,12 +187,43 @@ def test_route_documents_with_wrong_shape_are_refused(document):
         ToolRoutes.from_document(document)
 
 
+ENVELOPE = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": {"name": "c", "version": "1"},
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
 @pytest.mark.parametrize(
     "extra",
-    [{"_meta": {"dangerousMode": True}}, {"_meta": {}}, {"task": {"ttl": 1}}, {"arguments2": {}}],
+    [
+        {"_meta": {"dangerousMode": True}},
+        {"_meta": {**ENVELOPE, "dangerousMode": True}},
+        {"_meta": {"dangerousMode": "yes"}},
+        {"_meta": {"io.modelcontextprotocol/other": {}}},
+        {"_meta": []},
+        {"_meta": None},
+        {"_meta": {"progressToken": True}},
+        {"_meta": {"progressToken": 1.5}},
+        {"_meta": {"progressToken": None}},
+        {"_meta": {"progressToken": {}}},
+        {"_meta": {"io.modelcontextprotocol/protocolVersion": 20260728}},
+        {"_meta": {"io.modelcontextprotocol/clientInfo": "c"}},
+        {"_meta": {"io.modelcontextprotocol/clientCapabilities": []}},
+        {"task": {"ttl": 1}},
+        {"arguments2": {}},
+    ],
 )
-def test_params_beyond_name_and_arguments_are_refused(extra):
+def test_params_beyond_name_arguments_and_spec_meta_are_refused(extra):
     assert refusal(message(params={**PARAMS, **extra})) == "malformed_request"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{}, {"progressToken": 2}, {"progressToken": "token-1"}, ENVELOPE, {**ENVELOPE, "progressToken": 3}],
+)
+def test_spec_meta_keys_are_allowed_and_not_part_of_the_operation(meta):
+    assert read_call(message(params={**PARAMS, "_meta": meta}), ROUTES) == read_call(message(), ROUTES)
 
 
 def test_routes_refuse_one_tool_and_resource_on_two_services():

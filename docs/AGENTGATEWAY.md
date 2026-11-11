@@ -18,3 +18,9 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 
 - `python -m agent_bailiff.adapters.agentgateway check-config` validates a JSON gateway config at startup only.
 - agentgateway watches its config file and reloads it on change, so a later edit is not checked. The config file must be writable only by its owner, and that owner must be neither the gateway's user nor an agent's user.
+
+## tools/call params
+
+- Params may hold only `name`, `arguments` and `_meta`. Any other key is refused as `malformed_request`.
+- `_meta` may hold only `progressToken` (string or integer), `io.modelcontextprotocol/protocolVersion` (string), `io.modelcontextprotocol/clientInfo` (object) and `io.modelcontextprotocol/clientCapabilities` (object). Any other key or type is refused as `malformed_request`.
+- These `_meta` values are not part of the request digest, the leaf proof or the clearance; they reach the upstream unbound. Binding them needs a change to the agent-side proof.

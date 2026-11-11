@@ -21,7 +21,13 @@ TRACEPARENT_HEADER = "traceparent"
 REQUIRED_HEADERS = frozenset({TASK_ROOT_HEADER, LEAF_PROOF_HEADER, NONCE_HEADER})
 CALL_HEADERS = REQUIRED_HEADERS | {LINKS_HEADER, TRACEPARENT_HEADER}
 MAX_PARAMS_BYTES = 2 * MAX_ARGS_BYTES
-CALL_PARAMS = frozenset({"name", "arguments"})
+CALL_PARAMS = frozenset({"name", "arguments", "_meta"})
+META_TYPES: dict[str, tuple[type, ...]] = {
+    "progressToken": (str, int),
+    "io.modelcontextprotocol/protocolVersion": (str,),
+    "io.modelcontextprotocol/clientInfo": (dict,),
+    "io.modelcontextprotocol/clientCapabilities": (dict,),
+}
 TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
@@ -126,7 +132,18 @@ def _params(message: ext_mcp_pb2.McpRequest) -> tuple[str, dict[str, Any]]:
     arguments = params.get("arguments", {})
     if not isinstance(name, str) or not name or not isinstance(arguments, dict):
         raise CallRefused("malformed_request")
+    if "_meta" in params and not _spec_meta(params["_meta"]):
+        raise CallRefused("malformed_request")
     return name, arguments
+
+
+def _spec_meta(meta: object) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    return all(
+        key in META_TYPES and isinstance(value, META_TYPES[key]) and not isinstance(value, bool)
+        for key, value in meta.items()
+    )
 
 
 def _call_headers(message: ext_mcp_pb2.McpRequest) -> dict[str, str]:
