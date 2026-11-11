@@ -111,7 +111,7 @@ def _params(message: ext_mcp_pb2.McpRequest) -> tuple[str, dict[str, Any]]:
     if not message.HasField("mcp_request") or len(message.mcp_request) > MAX_PARAMS_BYTES:
         raise CallRefused("malformed_request")
     try:
-        params = json.loads(message.mcp_request, object_pairs_hook=_unique_keys, parse_constant=_no_constant)
+        params = parse_strict_json(message.mcp_request)
     except (ValueError, UnicodeDecodeError):
         raise CallRefused("malformed_request") from None
     if not isinstance(params, dict):
@@ -143,6 +143,10 @@ def _call_headers(message: ext_mcp_pb2.McpRequest) -> dict[str, str]:
     if not REQUIRED_HEADERS <= headers.keys():
         raise CallRefused("malformed_request")
     return headers
+
+
+def parse_strict_json(raw: bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=_unique_keys, parse_constant=_no_constant)
 
 
 def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
