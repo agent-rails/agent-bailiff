@@ -29,7 +29,15 @@ from agent_bailiff.docket import (
     repair,
     verify_docket,
 )
-from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, decode_response, encode_frame
+from agent_bailiff.docket.protocol import (
+    LENGTH,
+    MAX_FRAME_BYTES,
+    OP_APPEND,
+    OP_HEAD,
+    decode_response,
+    encode_frame,
+    encode_response,
+)
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
 
@@ -429,6 +437,36 @@ def test_peer_uid_outside_the_allowlist_is_refused(paths, start_sink):
         decide_client(paths).append(make_entry(1))
     assert error.value.reason == "peer_not_allowed"
     assert paths[0].read_bytes() == b""
+
+
+def test_a_refusal_sent_before_the_request_is_reported(paths, monkeypatch):
+    socket_path = paths[1]
+    socket_path.parent.mkdir(mode=0o700)
+    closed = threading.Event()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(socket_path))
+        server.listen(1)
+
+        def refuse_and_close():
+            connection, _ = server.accept()
+            connection.sendall(encode_response({"ok": False, "reason": "peer_not_allowed"}))
+            connection.close()
+            closed.set()
+
+        thread = threading.Thread(target=refuse_and_close)
+        thread.start()
+        client = decide_client(paths)
+        check_sink = client._check_sink
+
+        def check_then_wait(connection):
+            check_sink(connection)
+            assert closed.wait(5)
+
+        monkeypatch.setattr(client, "_check_sink", check_then_wait)
+        with pytest.raises(DocketError) as error:
+            client.append(make_entry(1))
+        thread.join(5)
+    assert error.value.reason == "peer_not_allowed"
 
 
 def test_socket_directory_and_socket_modes(paths, start_sink):

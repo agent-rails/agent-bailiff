@@ -151,8 +151,12 @@ class DocketClient:
                 connection.settimeout(self._timeout)
                 connection.connect(str(self._socket_path))
                 self._check_sink(connection)
-                connection.sendall(encode_frame(payload))
-                response = decode_response(read_frame(connection, MAX_RESPONSE_BYTES))
+                try:
+                    connection.sendall(encode_frame(payload))
+                except OSError as exc:
+                    response = _early_refusal(connection, exc)
+                else:
+                    response = decode_response(read_frame(connection, MAX_RESPONSE_BYTES))
         except (OSError, ValueError) as exc:
             raise DocketError("no_ack", str(exc)) from exc
         if response["ok"] is not True:
@@ -167,6 +171,13 @@ class DocketClient:
             raise DocketError("sink_not_trusted", str(exc)) from exc
         if uid != self._sink_uid:
             raise DocketError("sink_not_trusted", f"sink peer uid {uid} is not {self._sink_uid}")
+
+
+def _early_refusal(connection: socket.socket, send_error: OSError) -> dict[str, Any]:
+    response = decode_response(read_frame(connection, MAX_RESPONSE_BYTES))
+    if response["ok"] is True:
+        raise DocketError("no_ack", str(send_error))
+    return response
 
 
 def _acked_from(content: bytes) -> Head:
