@@ -55,13 +55,18 @@ ROUTE_FIELDS = frozenset(item.name for item in fields(ToolRoute))
 class ToolRoutes:
     def __init__(self, routes: Iterable[ToolRoute]) -> None:
         table: dict[tuple[str, str], ToolRoute] = {}
+        operations: set[tuple[str, str]] = set()
         for route in routes:
             if not isinstance(route, ToolRoute):
                 raise TypeError("routes must be ToolRoute records")
             key = (route.service, route.name)
             if key in table:
                 raise ValueError(f"duplicate route for tool {route.name!r} on service {route.service!r}")
+            operation = (route.tool, route.resource)
+            if operation in operations:
+                raise ValueError(f"tool {route.tool!r} on resource {route.resource!r} is routed more than once")
             table[key] = route
+            operations.add(operation)
         self._table = table
 
     @classmethod

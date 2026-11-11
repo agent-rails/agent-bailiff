@@ -193,3 +193,33 @@ def test_route_documents_with_wrong_shape_are_refused(document):
 )
 def test_params_beyond_name_and_arguments_are_refused(extra):
     assert refusal(message(params={**PARAMS, **extra})) == "malformed_request"
+
+
+def test_routes_refuse_one_tool_and_resource_on_two_services():
+    with pytest.raises(ValueError, match="deploy.service"):
+        ToolRoutes(
+            [
+                ToolRoute("service-a", "run", "deploy.service", "env/staging/api"),
+                ToolRoute("service-b", "run", "deploy.service", "env/staging/api"),
+            ]
+        )
+
+
+def test_routes_refuse_one_tool_and_resource_under_two_names():
+    with pytest.raises(ValueError, match="deploy.service"):
+        ToolRoutes(
+            [
+                ToolRoute("deploy", "run", "deploy.service", "env/staging/api"),
+                ToolRoute("deploy", "run_again", "deploy.service", "env/staging/api"),
+            ]
+        )
+
+
+def test_routes_allow_one_tool_on_distinct_resources():
+    routes = ToolRoutes(
+        [
+            ToolRoute("service-a", "run", "deploy.service", "env/staging/a"),
+            ToolRoute("service-b", "run", "deploy.service", "env/staging/b"),
+        ]
+    )
+    assert routes.services == frozenset({"service-a", "service-b"})

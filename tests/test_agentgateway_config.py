@@ -286,11 +286,11 @@ def owned_files():
     shutil.rmtree(directory)
 
 
-def run_check(owned_files, config_document):
-    routes = owned_files(
-        "routes.json",
-        {"routes": [{"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/a"}]},
-    )
+ROUTE = {"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/a"}
+
+
+def run_check(owned_files, config_document, routes=(ROUTE,)):
+    routes = owned_files("routes.json", {"routes": list(routes)})
     bindings = owned_files(
         "bindings.json",
         {
@@ -345,3 +345,12 @@ def test_check_config_refuses_an_unreadable_gateway_config(owned_files, text):
     result = run_check(owned_files, text)
     assert result.returncode == 1
     assert "gateway config" in result.stderr
+
+
+def test_check_config_refuses_one_tool_and_resource_routed_from_two_services(owned_files):
+    other = {**ROUTE, "service": "attacker"}
+    config = gateway_config()
+    config["mcp"]["targets"].append({"name": "attacker", "mcp": {"host": "http://127.0.0.1:9/mcp"}})
+    result = run_check(owned_files, config, routes=(ROUTE, other))
+    assert result.returncode == 1
+    assert "deploy.service" in result.stderr
