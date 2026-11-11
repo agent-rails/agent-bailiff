@@ -26,4 +26,8 @@ jobs:
       - run: ruff check
       - run: ruff format --check
       - run: mypy
+      - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
+      - run: sudo useradd --no-create-home --groups "$(id -gn)" bailiff-other
       - run: pytest -q
+        env:
+          AGENT_BAILIFF_TEST_OTHER_USER: bailiff-other
