@@ -2,7 +2,7 @@
 
 Lets an AI agent use a credential for one approved tool call without ever holding that credential.
 
-Status: pre-release. Interfaces and wire formats may change. Not ready for production use.
+Status: pre-release. Interfaces and wire formats may change. Not ready for production use. Not built yet: commands to run the decide, custodian and docket services, a key and config `init` command, and revoke and suspend controls.
 
 ## Why
 
@@ -12,7 +12,7 @@ agent-bailiff splits that job:
 
 - Each effect is bounded to the agent's task: one call, one operation, one credential release.
 - The component that decides holds no secrets. The component that holds secrets re-checks the authority itself before every decrypt, so a compromised decider cannot bulk-decrypt the store.
-- Every decision and release is signed into one trace you can follow end to end.
+- Every decision and release is a signed docket entry, joined by trace id and operation id.
 
 ## How it works
 
@@ -27,16 +27,16 @@ flowchart LR
 ```
 
 1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no secrets.
-2. **custodian** re-verifies the chain, proof and reservation on its own, claims the operation once, applies a per-task rate limit and canary checks, then decrypts the credential and sets it as a header on the upstream request. It removes any credential the agent sent.
+2. **custodian** re-verifies the chain, proof and reservation on its own, claims the operation once, applies a per-task rate limit and canary checks, then decrypts the credential and sets it as a header on the upstream request. It removes the agent's own `authorization`, `cookie` and credential headers.
 3. **docket** is a separate process that appends a signed, hash-chained entry for each decision and release.
 
-Each component runs as its own OS user and listens on a Unix socket that accepts only its expected peer.
+Each component is meant to run as its own OS user. Each listens on a Unix socket that accepts only its configured peer uids.
 
 ## What it does not protect
 
 - The upstream MCP server receives the credential and is trusted.
 - Root on the host can read every component's keys.
-- A completed effect is not undone; revocation stops later calls only.
+- A completed effect is not undone.
 - agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
 
 ## Packages
@@ -92,10 +92,6 @@ PYTHON=.venv/bin/python sh adapters/agentgateway/scripts/fetch_proto.sh
 `fetch_proto.sh` downloads the agentgateway `ExtMcp` proto (v1.7.0, commit `26f5aeb`), checks its sha256 and generates the Python stubs; they are not committed.
 
 The end-to-end tests run against the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads it into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it those tests are skipped.
-
-## Acknowledgements
-
-The custodian design draws on the IETF CB4A draft and Solo.io's agentgateway blog series on credential brokering.
 
 ## License
 
