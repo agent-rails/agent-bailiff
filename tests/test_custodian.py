@@ -42,6 +42,7 @@ from agent_bailiff.custodian import (
     Refused,
     Released,
 )
+from agent_bailiff.custodian import custodian as custodian_module
 from agent_bailiff.decide import (
     Clearance,
     CostTable,
@@ -705,3 +706,52 @@ def test_rate_limited_task_is_refused_without_decrypting(make_custodian, issue, 
     request, token = issued[RATE_LIMIT]
     assert custodian.release(token, request, NOW + 1) == Refused("rate_limited")
     assert decrypts == []
+
+
+def refusals(workdir):
+    return [(entry.op_id, entry.reason) for entry in custodian_entries(workdir) if entry.decision == "refuse"]
+
+
+def test_replays_write_one_refuse_entry_per_op_id_until_a_restart(make_custodian, issue, workdir):
+    request, token = issue()
+    custodian = make_custodian()
+    release = custodian.release(token, request, NOW + 1)
+    for _ in range(50):
+        custodian.release(token, request, NOW + 2)
+    assert refusals(workdir) == [(release.op_id, "already_issued")]
+    make_custodian().release(token, request, NOW + 3)
+    assert refusals(workdir) == [(release.op_id, "already_issued")] * 2
+
+
+def test_calls_for_a_denied_task_write_one_refuse_entry_per_op_id(make_custodian, issue, workdir, state):
+    root = make_root()
+    first_request, first_token = issue(root, nonce="n-1")
+    second_request, second_token = issue(root, nonce="n-2")
+    claims = ClaimsStore.open(state / "claims.db")
+    try:
+        claims.deny(TENANT, "task-1", NOW)
+    finally:
+        claims.close()
+    custodian = make_custodian()
+    for _ in range(5):
+        assert custodian.release(first_token, first_request, NOW + 1) == Refused("task_denied")
+        assert custodian.release(second_token, second_request, NOW + 1) == Refused("task_denied")
+    first, second = (
+        decode_clearance(token, WRITERS["decide"], max_lifetime=MAX_PROOF_AGE).op_id
+        for token in (first_token, second_token)
+    )
+    assert refusals(workdir) == [(first, "task_denied"), (second, "task_denied")]
+
+
+def test_recorded_refusals_are_bounded_and_evict_the_oldest(make_custodian, issue, workdir, monkeypatch):
+    monkeypatch.setattr(custodian_module, "MAX_RECORDED_REFUSALS", 1, raising=False)
+    root = make_root()
+    custodian = make_custodian()
+    first_request, first_token = issue(root, nonce="n-1")
+    second_request, second_token = issue(root, nonce="n-2")
+    first = custodian.release(first_token, first_request, NOW + 1).op_id
+    second = custodian.release(second_token, second_request, NOW + 1).op_id
+    for request, token in ((first_request, first_token),) * 2 + ((second_request, second_token),) * 2:
+        custodian.release(token, request, NOW + 2)
+    custodian.release(first_token, first_request, NOW + 2)
+    assert refusals(workdir) == [(first, "already_issued"), (second, "already_issued"), (first, "already_issued")]

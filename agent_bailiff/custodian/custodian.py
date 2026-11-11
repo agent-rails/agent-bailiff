@@ -34,6 +34,8 @@ CLEARANCE_REFUSALS = {
     "expired": "clearance_expired",
     "not_yet_valid": "clearance_not_yet_valid",
 }
+ONCE_REFUSALS = frozenset({"already_issued", "task_denied"})
+MAX_RECORDED_REFUSALS = 65536
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,8 @@ class Custodian:
         self._docket = docket
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
         self._admit_lock = threading.Lock()
+        self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
+        self._refusals_lock = threading.Lock()
 
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult:
         try:
@@ -130,11 +134,11 @@ class Custodian:
         try:
             return self._release_verified(verified, entry, now)
         except _Refusal as refusal:
-            self._record_refusal(entry, refusal.reason)
+            self._record_refusal(verified.clearance, entry, refusal.reason)
             raise
         except Exception:
             logger.exception("custodian release failed with an internal error")
-            self._record_refusal(entry, "internal_error")
+            self._record_refusal(verified.clearance, entry, "internal_error")
             raise _Refusal("internal_error") from None
 
     def _release_verified(self, verified: _Verified, entry: Entry, now: int) -> Released:
@@ -330,11 +334,25 @@ class Custodian:
             raise _Refusal("credential_unavailable")
         return value
 
-    def _record_refusal(self, entry: Entry, reason: str) -> None:
+    def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str) -> None:
+        key = (clearance.tenant, clearance.task, clearance.op_id, reason)
+        if reason in ONCE_REFUSALS and not self._mark_refusal(key):
+            return
         try:
             self._docket.append(replace(entry, entry_id=uuid.uuid4().hex, decision="refuse", reason=reason))
         except Exception:
             logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
+            with self._refusals_lock:
+                self._recorded_refusals.pop(key, None)
+
+    def _mark_refusal(self, key: tuple[str, str, str, str]) -> bool:
+        with self._refusals_lock:
+            if key in self._recorded_refusals:
+                return False
+            if len(self._recorded_refusals) >= MAX_RECORDED_REFUSALS:
+                del self._recorded_refusals[next(iter(self._recorded_refusals))]
+            self._recorded_refusals[key] = None
+            return True
 
     def _record(self, entry: Entry) -> None:
         try:
