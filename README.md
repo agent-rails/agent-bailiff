@@ -21,11 +21,14 @@ The sink and client need peer credentials on Unix sockets: Linux (`SO_PEERCRED`)
 
 ## Development
 
+The agentgateway `ExtMcp` proto is not vendored. `adapters/agentgateway/scripts/fetch_proto.sh` downloads it from agentgateway v1.7.0 (commit `26f5aeb`), checks its sha256 and generates the Python stubs into `agent_bailiff/adapters/agentgateway/_proto/` (gitignored). Run it before the checks.
+
 Python 3.13.
 
 ```sh
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-ci.txt
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+PYTHON=.venv/bin/python sh adapters/agentgateway/scripts/fetch_proto.sh
 .venv/bin/ruff check && .venv/bin/ruff format --check && .venv/bin/mypy && .venv/bin/pytest -q
 ```
