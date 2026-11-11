@@ -185,3 +185,11 @@ def test_routes_load_from_a_strict_document():
 def test_route_documents_with_wrong_shape_are_refused(document):
     with pytest.raises(ValueError):
         ToolRoutes.from_document(document)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"_meta": {"dangerousMode": True}}, {"_meta": {}}, {"task": {"ttl": 1}}, {"arguments2": {}}],
+)
+def test_params_beyond_name_and_arguments_are_refused(extra):
+    assert refusal(message(params={**PARAMS, **extra})) == "malformed_request"

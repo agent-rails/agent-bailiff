@@ -21,6 +21,7 @@ TRACEPARENT_HEADER = "traceparent"
 REQUIRED_HEADERS = frozenset({TASK_ROOT_HEADER, LEAF_PROOF_HEADER, NONCE_HEADER})
 CALL_HEADERS = REQUIRED_HEADERS | {LINKS_HEADER, TRACEPARENT_HEADER}
 MAX_PARAMS_BYTES = 2 * MAX_ARGS_BYTES
+CALL_PARAMS = frozenset({"name", "arguments"})
 TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
@@ -114,7 +115,7 @@ def _params(message: ext_mcp_pb2.McpRequest) -> tuple[str, dict[str, Any]]:
         params = parse_strict_json(message.mcp_request)
     except (ValueError, UnicodeDecodeError):
         raise CallRefused("malformed_request") from None
-    if not isinstance(params, dict):
+    if not isinstance(params, dict) or not params.keys() <= CALL_PARAMS:
         raise CallRefused("malformed_request")
     name = params.get("name")
     arguments = params.get("arguments", {})
