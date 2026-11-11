@@ -173,6 +173,13 @@ def _check_header_filter(problems: list[str], label: str, header_filter: object)
     missing = sorted(REQUIRED_HEADERS - names)
     if missing:
         problems.append(f"the {label} processor allowlist is missing {', '.join(missing)}")
+    disallowed = header_filter.get("disallowed", [])
+    if not isinstance(disallowed, list) or not all(isinstance(name, str) for name in disallowed):
+        problems.append(f"the {label} processor requestHeaders disallowed must be a list of names")
+        return
+    dropped = sorted(name for name in disallowed if name.lower() in CALL_HEADERS)
+    if dropped:
+        problems.append(f"the {label} processor disallowed list drops chain headers: {', '.join(dropped)}")
 
 
 def _check_credential_headers(problems: list[str], document: object, headers: frozenset[str]) -> None:

@@ -354,3 +354,21 @@ def test_check_config_refuses_one_tool_and_resource_routed_from_two_services(own
     result = run_check(owned_files, config, routes=(ROUTE, other))
     assert result.returncode == 1
     assert "deploy.service" in result.stderr
+
+
+@pytest.mark.parametrize("index", [1, 2])
+@pytest.mark.parametrize("name", CHAIN_HEADERS + ["X-Bailiff-Nonce"])
+def test_a_chain_header_in_disallowed_is_refused(index, name):
+    problems = problems_after(lambda config: processors(config)[index]["requestHeaders"].update(disallowed=[name]))
+    assert any("disallowed" in problem and name in problem for problem in problems)
+
+
+def test_an_unrelated_disallowed_header_is_accepted():
+    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=["cookie"]))
+    assert problems == ()
+
+
+@pytest.mark.parametrize("disallowed", ["cookie", [1], {}])
+def test_a_malformed_disallowed_list_is_refused(disallowed):
+    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=disallowed))
+    assert any("disallowed" in problem for problem in problems)
