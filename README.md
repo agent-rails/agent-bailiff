@@ -1,42 +1,85 @@
 # agent-bailiff
 
-agent-bailiff is a separate enforcement layer for AI agent tool calls, built on [agent-warrant](https://github.com/agent-rails/agent-warrant) and [toolcall-authz](https://github.com/agent-rails/toolcall-authz).
+Lets an AI agent use a credential for one approved tool call without ever holding that credential.
 
 Status: pre-release. Interfaces and wire formats may change. Not ready for production use.
 
-## What exists
+## Why
 
-- `agent_bailiff.signing`: Ed25519 signed, typed, versioned records over canonical JSON.
-  - `sign(private_key, kid, typ, body)` returns a compact `payload.signature` token.
-  - `verify(token, pinned_keys, expected_typ, allowed_fields)` returns `Verified` or `Refused(reason)` for any token input. Invalid configuration (`pinned_keys` not a mapping of non-empty str key ids to Ed25519 public keys, `allowed_fields` not a collection of non-empty str names, an empty or non-str `expected_typ`) raises `TypeError` or `ValueError` before the token is read.
-  - `token_hash(token)` is the base64url SHA-256 of a token.
-- `agent_bailiff.docket`: an append-only, signed, per-writer hash-chained security trace.
-  - `DocketSink` serves appends on a Unix socket and fsyncs each entry before acknowledging it.
-  - `DocketClient` signs and appends entries, authenticates the sink by peer uid and detects a sink rolled back behind entries it saw acknowledged.
-  - `verify_docket` checks every signature and chain link; `repair` moves a torn final line aside.
-- `agent_bailiff.decide`: holds no secrets.
-  - `Decider.check(request, now)` verifies the delegation chain and leaf proof, checks scope, cost, policy and suspension, reserves the operation in the agent-warrant ledger, records a docket entry and returns a signed single-operation `Clearance`.
-  - `Decider.record_outcome` and `Decider.reconcile` move issued operations to a terminal state.
-- `agent_bailiff.custodian`: holds the credentials.
-  - `CredentialStore` keeps credentials envelope-encrypted under a `KeyBackend` (`LocalBackend` for a separate local OS user).
-  - `Custodian.release(clearance, request, now)` re-verifies the chain, leaf proof and ledger reservation itself, checks the `BindingTable`, the one-use `ClaimsStore` claim, the per-task rate limit and canaries, then returns the credential header and records a docket entry.
-- `agent_bailiff.adapters.agentgateway`: agentgateway v1.7.0 `ExtMcp` processors.
-  - `DecideProcessor` passes the clearance to the next processor as metadata; `CustodianProcessor` sets the credential header and strips agent credentials from the upstream request.
-  - `ProcessorServer` serves each processor on a Unix socket that accepts only the gateway's uid.
-  - `python -m agent_bailiff.adapters.agentgateway check-config` refuses a gateway config the processors cannot enforce.
+An agent that holds API keys can use them for anything, including after a prompt injection. Keeping keys in a gateway helps, but if the component that decides a call also holds the keys, one compromise of it exposes every credential.
 
-See [docs/DOCKET.md](docs/DOCKET.md) for the docket trust model and operations.
-See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for the agentgateway adapter's exposure, socket and config limits.
+agent-bailiff splits that job:
 
-The sink and client need peer credentials on Unix sockets: Linux (`SO_PEERCRED`) or macOS (`getpeereid`).
+- Each effect is bounded to the agent's task: one call, one operation, one credential release.
+- The component that decides holds no secrets. The component that holds secrets re-checks the authority itself before every decrypt, so a compromised decider cannot bulk-decrypt the store.
+- Every decision and release is signed into one trace you can follow end to end.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[agent] -->|MCP tools/call| G[agentgateway]
+    G -->|1 check| D[decide]
+    G -->|2 check + clearance| C[custodian]
+    G -->|request + credential header| U[upstream MCP server]
+    D --> K[docket]
+    C --> K
+```
+
+1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no secrets.
+2. **custodian** re-verifies the chain, proof and reservation on its own, claims the operation once, applies a per-task rate limit and canary checks, then decrypts the credential and sets it as a header on the upstream request. It removes any credential the agent sent.
+3. **docket** is a separate process that appends a signed, hash-chained entry for each decision and release.
+
+Each component runs as its own OS user and listens on a Unix socket that accepts only its expected peer.
+
+## What it does not protect
+
+- The upstream MCP server receives the credential and is trusted.
+- Root on the host can read every component's keys.
+- A completed effect is not undone; revocation stops later calls only.
+- agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
+
+## Packages
+
+| Module | Role |
+|---|---|
+| `agent_bailiff.decide` | Verify a call and issue a clearance |
+| `agent_bailiff.custodian` | Store credentials encrypted; release one per clearance |
+| `agent_bailiff.docket` | Signed, append-only security trace |
+| `agent_bailiff.adapters.agentgateway` | agentgateway `ExtMcp` processors and `check-config` |
+| `agent_bailiff.signing` | Ed25519 signed records over canonical JSON |
+
+Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roots, delegation chains, ledger) and [toolcall-authz](https://github.com/agent-rails/toolcall-authz) (policy).
+
+## Requirements
+
+- Python 3.13
+- Linux or macOS (peer credentials on Unix sockets)
+- [agentgateway](https://github.com/agentgateway/agentgateway) v1.7.0 for the gateway adapter
+
+## Usage
+
+Not yet on PyPI; install from source (see Development).
+
+Check a gateway config before starting agentgateway. Run it as the custodian's user, because it reads the credential binding table:
+
+```sh
+python -m agent_bailiff.adapters.agentgateway check-config \
+  --gateway-config gateway.json \
+  --routes routes.json \
+  --bindings bindings.json \
+  --decide-socket /run/bailiff/decide/decide.sock \
+  --custodian-socket /run/bailiff/custodian/custodian.sock
+```
+
+It refuses any config the processors cannot enforce, such as `failOpen`, a missing header allowlist, the wrong processor order or a TCP processor target.
+
+## Documentation
+
+- [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
+- [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 
 ## Development
-
-The agentgateway `ExtMcp` proto is not vendored. `adapters/agentgateway/scripts/fetch_proto.sh` downloads it from agentgateway v1.7.0 (commit `26f5aeb`), checks its sha256 and generates the Python stubs into `agent_bailiff/adapters/agentgateway/_proto/` (gitignored). Run it before the checks.
-
-`tests/test_agentgateway_e2e.py` runs both processors behind the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads that binary (darwin-arm64 or linux-amd64) into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it the test is skipped.
-
-Python 3.13.
 
 ```sh
 python3.13 -m venv .venv
@@ -45,3 +88,15 @@ python3.13 -m venv .venv
 PYTHON=.venv/bin/python sh adapters/agentgateway/scripts/fetch_proto.sh
 .venv/bin/ruff check && .venv/bin/ruff format --check && .venv/bin/mypy && .venv/bin/pytest -q
 ```
+
+`fetch_proto.sh` downloads the agentgateway `ExtMcp` proto (v1.7.0, commit `26f5aeb`), checks its sha256 and generates the Python stubs; they are not committed.
+
+The end-to-end tests run against the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads it into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it those tests are skipped.
+
+## Acknowledgements
+
+The custodian design draws on the IETF CB4A draft and Solo.io's agentgateway blog series on credential brokering.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
