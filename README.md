@@ -16,6 +16,7 @@ Status: pre-release. Interfaces and wire formats may change. Not ready for produ
   - `verify_docket` checks every signature and chain link; `repair` moves a torn final line aside.
 
 See [docs/DOCKET.md](docs/DOCKET.md) for the docket trust model and operations.
+See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for the agentgateway adapter's exposure, socket and config limits.
 
 The sink and client need peer credentials on Unix sockets: Linux (`SO_PEERCRED`) or macOS (`getpeereid`).
 
