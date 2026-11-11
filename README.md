@@ -14,6 +14,16 @@ Status: pre-release. Interfaces and wire formats may change. Not ready for produ
   - `DocketSink` serves appends on a Unix socket and fsyncs each entry before acknowledging it.
   - `DocketClient` signs and appends entries, authenticates the sink by peer uid and detects a sink rolled back behind entries it saw acknowledged.
   - `verify_docket` checks every signature and chain link; `repair` moves a torn final line aside.
+- `agent_bailiff.decide`: holds no secrets.
+  - `Decider.check(request, now)` verifies the delegation chain and leaf proof, checks scope, cost, policy and suspension, reserves the operation in the agent-warrant ledger, records a docket entry and returns a signed single-operation `Clearance`.
+  - `Decider.record_outcome` and `Decider.reconcile` move issued operations to a terminal state.
+- `agent_bailiff.custodian`: holds the credentials.
+  - `CredentialStore` keeps credentials envelope-encrypted under a `KeyBackend` (`LocalBackend` for a separate local OS user).
+  - `Custodian.release(clearance, request, now)` re-verifies the chain, leaf proof and ledger reservation itself, checks the `BindingTable`, the one-use `ClaimsStore` claim, the per-task rate limit and canaries, then returns the credential header and records a docket entry.
+- `agent_bailiff.adapters.agentgateway`: agentgateway v1.7.0 `ExtMcp` processors.
+  - `DecideProcessor` passes the clearance to the next processor as metadata; `CustodianProcessor` sets the credential header and strips agent credentials from the upstream request.
+  - `ProcessorServer` serves each processor on a Unix socket that accepts only the gateway's uid.
+  - `python -m agent_bailiff.adapters.agentgateway check-config` refuses a gateway config the processors cannot enforce.
 
 See [docs/DOCKET.md](docs/DOCKET.md) for the docket trust model and operations.
 See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for the agentgateway adapter's exposure, socket and config limits.
