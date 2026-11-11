@@ -1,8 +1,6 @@
-import asyncio
 import os
 import shutil
 import tempfile
-import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +14,7 @@ from agent_warrant.resolver import PinnedResolver
 from agent_warrant.task_root import issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_docket import RunningSink
 
 from agent_bailiff.decide import (
     CostTable,
@@ -133,21 +132,6 @@ class AckDocket:
 class UnavailableLedger(TaskLedger):
     def open_task(self, result, now):
         raise LedgerUnavailable("disk gone")
-
-
-class RunningSink:
-    def __init__(self, sink):
-        self.sink = sink
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
-        self.thread.start()
-        asyncio.run_coroutine_threadsafe(sink.start(), self.loop).result(5)
-
-    def stop(self):
-        asyncio.run_coroutine_threadsafe(self.sink.close(), self.loop).result(5)
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join(5)
-        self.loop.close()
 
 
 @pytest.fixture

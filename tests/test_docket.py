@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 import shutil
 import socket
@@ -6,6 +7,7 @@ import stat
 import tempfile
 import threading
 import time
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -71,6 +73,9 @@ def make_entry(number=1, **changes):
     return replace(entry, **changes)
 
 
+SETTLE_ITERATIONS = 10
+
+
 class RunningSink:
     def __init__(self, sink):
         self.sink = sink
@@ -80,10 +85,16 @@ class RunningSink:
         asyncio.run_coroutine_threadsafe(sink.start(), self.loop).result(5)
 
     def stop(self):
-        asyncio.run_coroutine_threadsafe(self.sink.close(), self.loop).result(5)
+        asyncio.run_coroutine_threadsafe(_settle_then_close(self.sink), self.loop).result(5)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(5)
         self.loop.close()
+
+
+async def _settle_then_close(sink):
+    for _ in range(SETTLE_ITERATIONS):
+        await asyncio.sleep(0)
+    await sink.close()
 
 
 @pytest.fixture
@@ -787,3 +798,18 @@ def test_overlong_line_before_the_end_is_not_a_torn_tail(paths, start_sink, work
     assert (report.ok, report.line, report.reason) == (False, 1, "malformed")
     with pytest.raises(DocketCorrupt):
         repair(paths[0], workdir / "torn.tail", WRITERS)
+
+
+def test_stopping_a_sink_right_after_a_refused_client_leaves_no_open_transport(paths):
+    leaked = []
+    for _ in range(40):
+        handle = RunningSink(DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}))
+        with pytest.raises(DocketError):
+            decide_client(paths, sink_uid=os.getuid() + 1).append(make_entry(1))
+        handle.stop()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            del handle
+            gc.collect()
+        leaked.extend(str(item.message) for item in caught if "unclosed transport" in str(item.message))
+    assert leaked == []
