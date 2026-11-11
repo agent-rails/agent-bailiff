@@ -433,3 +433,11 @@ def test_an_unrelated_disallowed_header_is_accepted():
 def test_a_malformed_disallowed_list_is_refused(disallowed):
     problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=disallowed))
     assert any("disallowed" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("name", [" authorization", "authorization ", "x a", "", "x-api-key\n", "caf\u00e9", "x:y"])
+def test_every_remove_entry_must_be_a_header_name(name):
+    problems = problems_after(lambda config: modifier(config)["remove"].append(name))
+    assert any(
+        problem.startswith("mcp.policies.requestHeaderModifier") and "field name" in problem for problem in problems
+    )

@@ -199,6 +199,11 @@ def _check_header_modifier(problems: list[str], modifier: object, credential_hea
     ):
         problems.append('mcp.policies.requestHeaderModifier must be exactly {"remove": [header names]}')
         return
+    invalid = sorted(repr(name) for name in remove if not HEADER_NAME.fullmatch(name))
+    if invalid:
+        problems.append(
+            f"mcp.policies.requestHeaderModifier remove has entries that are not field names: {', '.join(invalid)}"
+        )
     names = {name.lower() for name in remove}
     required = AGENT_CREDENTIAL_HEADERS | {name.lower() for name in credential_headers}
     missing = sorted(required - names)
