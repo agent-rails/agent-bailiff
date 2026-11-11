@@ -16,10 +16,15 @@ Status: pre-release. Interfaces and wire formats may change. Not ready for produ
   - `verify_docket` checks every signature and chain link; `repair` moves a torn final line aside.
 
 See [docs/DOCKET.md](docs/DOCKET.md) for the docket trust model and operations.
+See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for the agentgateway adapter's exposure, socket and config limits.
 
 The sink and client need peer credentials on Unix sockets: Linux (`SO_PEERCRED`) or macOS (`getpeereid`).
 
 ## Development
+
+The agentgateway `ExtMcp` proto is not vendored. `adapters/agentgateway/scripts/fetch_proto.sh` downloads it from agentgateway v1.7.0 (commit `26f5aeb`), checks its sha256 and generates the Python stubs into `agent_bailiff/adapters/agentgateway/_proto/` (gitignored). Run it before the checks.
+
+`tests/test_agentgateway_e2e.py` runs both processors behind the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads that binary (darwin-arm64 or linux-amd64) into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it the test is skipped.
 
 Python 3.13.
 
@@ -27,5 +32,6 @@ Python 3.13.
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-ci.txt
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+PYTHON=.venv/bin/python sh adapters/agentgateway/scripts/fetch_proto.sh
 .venv/bin/ruff check && .venv/bin/ruff format --check && .venv/bin/mypy && .venv/bin/pytest -q
 ```

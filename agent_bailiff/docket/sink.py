@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import os
 import stat
 from collections.abc import Callable, Iterable, Mapping
@@ -15,11 +14,17 @@ from agent_bailiff.docket.entry import Record, decode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
+from agent_bailiff.docket.socket_dir import (
+    SOCKET_MODE,
+    open_lock_file,
+    prepare_socket_dir,
+    remove_stale_socket,
+    try_lock,
+    unlink_if_same,
+)
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 
 DOCKET_MODE = 0o600
-SOCKET_DIR_MODE = 0o750
-SOCKET_MODE = 0o660
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
@@ -222,11 +227,11 @@ class DocketSink:
         if not report.ok:
             raise DocketCorrupt(report)
         self._heads = dict(report.heads)
-        _prepare_socket_dir(self._socket_path.parent, self._socket_gid)
+        prepare_socket_dir(self._socket_path.parent, self._socket_gid)
         lock_path = self._socket_path.with_name(f"{self._socket_path.name}.lock")
-        self._socket_lock_fd = _open_lock_file(lock_path)
+        self._socket_lock_fd = open_lock_file(lock_path)
         _lock(self._socket_lock_fd, lock_path)
-        _remove_stale_socket(self._socket_path)
+        remove_stale_socket(self._socket_path)
         self._server = await asyncio.start_unix_server(self._handle, path=str(self._socket_path), cleanup_socket=False)
         info = os.lstat(self._socket_path)
         self._socket_identity = (info.st_dev, info.st_ino)
@@ -252,7 +257,7 @@ class DocketSink:
             await self._server.wait_closed()
             self._server = None
         if self._socket_identity is not None:
-            _unlink_if_same(self._socket_path, self._socket_identity)
+            unlink_if_same(self._socket_path, self._socket_identity)
             self._socket_identity = None
         if self._socket_lock_fd is not None:
             os.close(self._socket_lock_fd)
@@ -365,54 +370,6 @@ def _check_docket_file(fd: int, path: Path) -> None:
         raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
 
 
-def _prepare_socket_dir(directory: Path, gid: int) -> None:
-    try:
-        os.mkdir(directory, 0o700)
-    except FileExistsError:
-        pass
-    else:
-        os.chown(directory, -1, gid)
-        os.chmod(directory, SOCKET_DIR_MODE)
-    info = os.lstat(directory)
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.geteuid()
-        or info.st_gid != gid
-        or stat.S_IMODE(info.st_mode) != SOCKET_DIR_MODE
-    ):
-        raise PermissionError(f"{directory} must be a directory owned by uid {os.geteuid()}, group {gid}, mode 0750")
-
-
-def _remove_stale_socket(path: Path) -> None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
-        raise PermissionError(f"{path} exists and is not a socket owned by uid {os.geteuid()}")
-    path.unlink()
-
-
 def _lock(fd: int, path: Path) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        raise DocketLocked(f"{path} is held by another sink") from exc
-
-
-def _open_lock_file(path: Path) -> int:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-        os.close(fd)
-        raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()}")
-    return fd
-
-
-def _unlink_if_same(path: Path, identity: tuple[int, int]) -> None:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if (info.st_dev, info.st_ino) == identity:
-        path.unlink()
+    if not try_lock(fd):
+        raise DocketLocked(f"{path} is held by another sink")
