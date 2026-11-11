@@ -40,6 +40,7 @@ class Entry:
     performed: bool = False
     outcome: str | None = None
     receipt_digest: str | None = None
+    clearance_digest: str | None = None
     credential_tier: str | None = None
     reason: str | None = None
     latency_ms: int | None = None
