@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Protocol
 
 from google.protobuf import struct_pb2
@@ -18,13 +18,15 @@ from agent_bailiff.adapters.agentgateway.calls import (
     ToolRoutes,
     read_call,
 )
+from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.custodian import Released, ReleaseResult
 from agent_bailiff.decide.decider import Decision
 from agent_bailiff.decide.request import OperationRequest
 
 CLEARANCE_KEY = "clearance"
 RELEASE_REFUSED = "release_refused"
-STRIPPED_HEADERS = (LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER)
+AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+CHAIN_HEADERS = frozenset({LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER})
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +75,20 @@ class DecideProcessor:
 
 
 class CustodianProcessor:
-    def __init__(self, custodian: CredentialReleaser, routes: ToolRoutes, clock: Clock = system_clock) -> None:
+    def __init__(
+        self,
+        custodian: CredentialReleaser,
+        routes: ToolRoutes,
+        credential_headers: Iterable[str],
+        clock: Clock = system_clock,
+    ) -> None:
+        names = frozenset(credential_headers)
+        if not names or not all(isinstance(name, str) and HEADER_NAME.fullmatch(name) for name in names):
+            raise ValueError("credential_headers must be a non-empty set of HTTP field names")
         self._custodian = custodian
         self._routes = routes
         self._clock = clock
+        self._stripped = AGENT_CREDENTIAL_HEADERS | CHAIN_HEADERS | {name.lower() for name in names}
 
     def check_request(self, message: ext_mcp_pb2.McpRequest) -> ext_mcp_pb2.McpRequestResult:
         try:
@@ -87,7 +99,7 @@ class CustodianProcessor:
 
     def _check(self, message: ext_mcp_pb2.McpRequest) -> ext_mcp_pb2.McpRequestResult:
         if message.method != TOOLS_CALL:
-            return passed()
+            return self._passed_without(frozenset())
         clearance = _clearance(message)
         if clearance is None:
             logger.warning("custodian processor refused a call without a clearance in the metadata context")
@@ -101,9 +113,15 @@ class CustodianProcessor:
         if not isinstance(result, Released):
             logger.warning("custodian processor refused a release: %s", result.reason)
             return refuse(RELEASE_REFUSED)
+        released = ext_mcp_pb2.McpHeader(key=result.header_name, value=result.header_value.encode("ascii"))
+        return self._passed_without(frozenset({result.header_name.lower()}), released)
+
+    def _passed_without(
+        self, kept: frozenset[str], released: ext_mcp_pb2.McpHeader | None = None
+    ) -> ext_mcp_pb2.McpRequestResult:
         mutation = ext_mcp_pb2.HeaderMutation(
-            set=[ext_mcp_pb2.McpHeader(key=result.header_name, value=result.header_value.encode("ascii"))],
-            remove=list(STRIPPED_HEADERS),
+            set=[released] if released is not None else [],
+            remove=sorted(self._stripped - kept),
         )
         return ext_mcp_pb2.McpRequestResult(**{"pass": ext_mcp_pb2.Pass()}, header_mutation=mutation)
 

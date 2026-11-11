@@ -18,7 +18,7 @@ import pytest
 import test_custodian
 from agent_warrant.ledger import TaskLedger
 from test_agentgateway_config import gateway_config
-from test_custodian import DEPLOY_SECRET, NOW, docket_entries
+from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.calls import ToolRoute, ToolRoutes
@@ -39,6 +39,7 @@ ROUTES = ToolRoutes(
     ]
 )
 STARTUP_SECONDS = 15
+CREDENTIAL_HEADERS = frozenset(binding.header_name for binding in CUSTODIAN_BINDINGS)
 
 
 def gateway_binary():
@@ -242,6 +243,8 @@ def agent_headers(request):
         "x-bailiff-nonce": request.nonce,
         "traceparent": f"00-{TRACE}-00f067aa0ba902b7-01",
         "authorization": AGENT_TOKEN,
+        "proxy-authorization": AGENT_TOKEN,
+        "cookie": "session=agent",
     }
     if request.links:
         headers["x-bailiff-links"] = ",".join(request.links)
@@ -260,7 +263,7 @@ def stack(binary, workdir, private, make_decider, make_custodian):
             gateway_uid=os.geteuid(),
         ),
         "custodian": ProcessorServer(
-            CustodianProcessor(make_custodian(), ROUTES, clock=lambda: NOW + 1),
+            CustodianProcessor(make_custodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1),
             sockets["custodian"],
             private("custodian-grpc"),
             gateway_uid=os.geteuid(),
@@ -307,6 +310,8 @@ def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(st
     [headers] = stack["upstream"].calls()
     assert headers["authorization"] == DEPLOY_SECRET.decode()
     assert not [name for name in headers if name.startswith("x-bailiff-")]
+    assert "proxy-authorization" not in headers and "cookie" not in headers
+    assert AGENT_TOKEN not in headers.values()
     entries = docket_entries(workdir)
     [allow] = [entry for entry in entries if entry.hop == "decide" and entry.decision == "allow"]
     [release] = [entry for entry in entries if entry.hop == "custodian" and entry.decision == "release"]
