@@ -103,9 +103,9 @@ class Upstream(ThreadingHTTPServer):
     def url(self):
         return f"http://127.0.0.1:{self.server_address[1]}/mcp"
 
-    def calls(self):
+    def calls(self, method="tools/call"):
         with self.lock:
-            return [headers for method, headers in self.requests if method == "tools/call"]
+            return [headers for seen, headers in self.requests if seen == method]
 
     def stop(self):
         self.shutdown()
@@ -271,7 +271,7 @@ def stack(binary, workdir, private, make_decider, make_custodian):
     }
     for server in servers.values():
         server.start()
-    config = gateway_config(sockets["decide"], sockets["custodian"], upstream.url)
+    config = gateway_config(sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS))
     config["config"] = {
         "adminAddr": f"127.0.0.1:{free_port()}",
         "statsAddr": f"127.0.0.1:{free_port()}",
@@ -366,6 +366,47 @@ def test_a_custodian_refusal_after_decide_allows_reaches_no_upstream(stack, work
     assert [entry.reason for entry in entries if entry.hop == "custodian"] == ["canary", "canary"]
 
 
+BLOCKED = {
+    "prompts/get": ({"name": "p"}, -32001, "method_refused"),
+    "resources/read": ({"uri": "file:///r"}, -32001, "method_refused"),
+    "prompts/list": ({}, -32001, "method_refused"),
+    "resources/list": ({}, -32001, "method_refused"),
+    "logging/setLevel": ({"level": "info"}, -32001, "method_refused"),
+    "resources/subscribe": ({"uri": "file:///r"}, -32602, "unknown resource"),
+    "completion/complete": (
+        {"ref": {"type": "ref/prompt", "name": "p"}, "argument": {"name": "a", "value": "b"}},
+        -32602,
+        "unknown resource",
+    ),
+    "tasks/get": ({"taskId": "deploy/t1"}, -32602, "unknown resource"),
+}
+
+
+@pytest.mark.parametrize("method", sorted(BLOCKED))
+def test_methods_outside_the_allowlist_never_reach_the_upstream(stack, method):
+    params, code, message = BLOCKED[method]
+    status, body = stack["agent"].post({"method": method, "params": params}, {"authorization": AGENT_TOKEN})
+    assert body.get("error") == {"code": code, "message": message}, body
+    assert stack["upstream"].calls(method) == []
+
+
+def test_tools_list_reaches_the_upstream(stack):
+    status, body = stack["agent"].post({"method": "tools/list"})
+    assert body["result"]["tools"][0]["name"] == "deploy_service", body
+    assert len(stack["upstream"].calls("tools/list")) == 1
+
+
+def test_a_notification_reaches_the_upstream_without_agent_credentials(stack):
+    request = make_request()
+    status, body = stack["agent"].post(
+        {"method": "notifications/roots/list_changed"}, agent_headers(request), notify=True
+    )
+    assert status == 202
+    [headers] = stack["upstream"].calls("notifications/roots/list_changed")
+    assert not {"authorization", "proxy-authorization", "cookie"} & set(headers)
+    assert headers["x-bailiff-nonce"] == request.nonce
+
+
 def test_an_unreachable_custodian_fails_closed(stack):
     stack["servers"]["custodian"].close()
     request = make_request()
@@ -381,17 +422,24 @@ def test_a_call_without_chain_headers_is_refused(stack):
 
 
 UNSAFE = {
-    "fail_open": lambda processors: processors[2].update(failureMode="failOpen"),
-    "no_header_allowlist": lambda processors: processors[1].pop("requestHeaders"),
-    "custodian_before_decide": lambda processors: processors.insert(1, processors.pop(2)),
-    "custodian_over_tcp": lambda processors: processors[2].update(host="127.0.0.1:9"),
+    "fail_open": lambda policies, processors: processors[2].update(failureMode="failOpen"),
+    "no_header_allowlist": lambda policies, processors: processors[1].pop("requestHeaders"),
+    "custodian_before_decide": lambda policies, processors: processors.insert(1, processors.pop(2)),
+    "custodian_over_tcp": lambda policies, processors: processors[2].update(host="127.0.0.1:9"),
+    "tools_call_only": lambda policies, processors: processors[1].update(methods={"tools/call": "request"}),
+    "no_method_rule": lambda policies, processors: policies.pop("mcpAuthorization"),
+    "header_modifier_sets": lambda policies, processors: policies["requestHeaderModifier"].update(set={"x-a": "1"}),
+    "chain_headers_stripped": lambda policies, processors: policies["requestHeaderModifier"]["remove"].append(
+        "x-bailiff-leaf-proof"
+    ),
 }
 
 
 @pytest.mark.parametrize("name", sorted(UNSAFE))
 def test_check_config_refuses_unsafe_configs_the_gateway_itself_accepts(stack, binary, workdir, name):
     config = copy.deepcopy(stack["config"])
-    UNSAFE[name](config["mcp"]["policies"]["mcpGuardrails"]["processors"])
+    policies = config["mcp"]["policies"]
+    UNSAFE[name](policies, policies["mcpGuardrails"]["processors"])
     path = workdir / f"{name}.json"
     path.write_text(json.dumps(config))
     accepted = subprocess.run([str(binary), "--validate-only", "-f", str(path)], capture_output=True, text=True)

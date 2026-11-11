@@ -22,8 +22,15 @@ EXPECTED = GatewayExpectations(
 )
 
 
+METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
+AGENT_CREDENTIALS = ["authorization", "proxy-authorization", "cookie"]
+
+
 def gateway_config(
-    decide_socket=DECIDE_SOCKET, custodian_socket=CUSTODIAN_SOCKET, upstream="http://127.0.0.1:8080/mcp"
+    decide_socket=DECIDE_SOCKET,
+    custodian_socket=CUSTODIAN_SOCKET,
+    upstream="http://127.0.0.1:8080/mcp",
+    credential_headers=("X-Api-Key",),
 ):
     return {
         "config": {"adminAddr": "127.0.0.1:15000"},
@@ -32,6 +39,8 @@ def gateway_config(
             "statefulMode": "stateless",
             "targets": [{"name": "deploy", "mcp": {"host": upstream}}],
             "policies": {
+                "mcpAuthorization": {"rules": [METHOD_RULE]},
+                "requestHeaderModifier": {"remove": [*AGENT_CREDENTIALS, *credential_headers]},
                 "mcpGuardrails": {
                     "processors": [
                         {
@@ -43,19 +52,19 @@ def gateway_config(
                         {
                             "kind": "remote",
                             "host": f"unix:{decide_socket}",
-                            "methods": {"tools/call": "request"},
+                            "methods": {"*": "request"},
                             "failureMode": "failClosed",
                             "requestHeaders": {"allowed": list(CHAIN_HEADERS)},
                         },
                         {
                             "kind": "remote",
                             "host": f"unix:{custodian_socket}",
-                            "methods": {"tools/call": "request"},
+                            "methods": {"*": "request"},
                             "requestHeaders": {"allowed": list(CHAIN_HEADERS)},
                             "metadata": {"clearance": "mcpGuardrails.clearance"},
                         },
                     ]
-                }
+                },
             },
         },
     }
@@ -146,13 +155,15 @@ def test_a_duplicate_custodian_processor_is_refused():
 @pytest.mark.parametrize(
     "methods",
     [
-        {"tools/call": "full"},
+        {"tools/call": "request"},
+        {"*": "full"},
+        {"*": "response"},
         {"tools/*": "request"},
-        {"*": "request"},
-        {"tools/call": "request", "tools/list": "request"},
+        {"*": "request", "tools/call": "request"},
+        {"*": "request", "notifications/*": "off"},
     ],
 )
-def test_processor_methods_must_be_exactly_tools_call_request(methods):
+def test_processor_methods_must_be_exactly_every_method_request(methods):
     problems = problems_after(lambda config: processors(config)[1].update(methods=methods))
     assert any("methods" in problem for problem in problems)
 
@@ -198,11 +209,61 @@ def test_the_credential_header_name_anywhere_in_the_config_is_refused(where):
     assert any("X-Api-Key" in problem for problem in problems)
 
 
-def test_a_header_name_inside_a_longer_token_is_not_a_match():
+def test_a_header_name_inside_a_longer_token_or_the_remove_list_is_not_a_match():
     expected = GatewayExpectations(DECIDE_SOCKET, CUSTODIAN_SOCKET, frozenset({"deploy"}), frozenset({"authorization"}))
-    config = gateway_config()
-    config["mcp"]["policies"]["mcpAuthorization"] = {"rules": ["true"]}
-    assert validate_gateway_config(config, expected) == ()
+    assert validate_gateway_config(gateway_config(credential_headers=()), expected) == ()
+
+
+def test_the_credential_header_in_the_remove_list_is_not_flagged():
+    assert validate_gateway_config(gateway_config(), EXPECTED) == ()
+
+
+def modifier(config):
+    return config["mcp"]["policies"]["requestHeaderModifier"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda config: config["mcp"]["policies"].pop("mcpAuthorization"),
+        lambda config: config["mcp"]["policies"].update(mcpAuthorization={"rules": ["true"]}),
+        lambda config: config["mcp"]["policies"].update(mcpAuthorization={"rules": [METHOD_RULE, "true"]}),
+        lambda config: config["mcp"]["policies"].update(mcpAuthorization={"rules": [{"allow": METHOD_RULE}]}),
+        lambda config: config["mcp"]["policies"]["mcpAuthorization"].update(extra=1),
+    ],
+)
+def test_the_method_rule_is_required_exactly(change):
+    assert any("mcpAuthorization" in problem for problem in problems_after(change))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda config: config["mcp"]["policies"].pop("requestHeaderModifier"),
+        lambda config: modifier(config).update(add={"x-a": "1"}),
+        lambda config: modifier(config).update(set={"x-a": "1"}),
+        lambda config: modifier(config).update(remove="authorization"),
+        lambda config: modifier(config).update(remove=[1]),
+        lambda config: modifier(config).update(remove=dict.fromkeys(modifier(config)["remove"], 1)),
+        lambda config: modifier(config)["remove"].remove("authorization"),
+        lambda config: modifier(config)["remove"].remove("proxy-authorization"),
+        lambda config: modifier(config)["remove"].remove("cookie"),
+        lambda config: modifier(config)["remove"].remove("X-Api-Key"),
+        lambda config: modifier(config)["remove"].append("x-bailiff-nonce"),
+        lambda config: modifier(config)["remove"].append("X-Bailiff-Links"),
+        lambda config: modifier(config)["remove"].append("x-bailiff-anything"),
+        lambda config: modifier(config)["remove"].append("traceparent"),
+    ],
+)
+def test_the_header_modifier_must_only_strip_agent_credentials(change):
+    assert any(problem.startswith("mcp.policies.requestHeaderModifier") for problem in problems_after(change))
+
+
+def test_the_header_modifier_matches_names_case_insensitively():
+    def change(config):
+        modifier(config)["remove"] = ["Authorization", "PROXY-AUTHORIZATION", "Cookie", "x-api-key", "x-extra"]
+
+    assert problems_after(change) == ()
 
 
 def test_a_stdio_upstream_for_a_gateway_bound_service_is_refused():

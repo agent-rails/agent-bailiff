@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_bailiff.adapters.agentgateway.calls import CALL_HEADERS, REQUIRED_HEADERS, TOOLS_CALL
+from agent_bailiff.adapters.agentgateway.calls import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
 from agent_bailiff.custodian.bindings import HEADER_NAME
 
@@ -18,14 +18,18 @@ MCP_KEYS = frozenset(
 )
 MCP_POLICY_KEYS = frozenset(
     {"mcpGuardrails", "mcpAuthorization", "mcpAuthentication", "authorization", "cors", "csrf", "jwtAuth"}
-    | {"apiKey", "basicAuth", "localRateLimit", "timeout"}
+    | {"apiKey", "basicAuth", "localRateLimit", "timeout", "requestHeaderModifier"}
 )
 TARGET_KEYS = frozenset({"name", "mcp", "sse", "stdio", "openapi", "policies"})
 TARGET_POLICY_KEYS = frozenset({"backendTLS"})
 HTTP_TARGET_KEYS = frozenset({"host", "port", "path"})
 BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "requestHeaders", "metadata"})
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
-BAILIFF_METHODS = {TOOLS_CALL: "request"}
+BAILIFF_METHODS = {"*": "request"}
+METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
+AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+CHAIN_HEADER_PREFIX = "x-bailiff-"
+REMOVE_PATH = "$.mcp.policies.requestHeaderModifier.remove"
 CLEARANCE_EXPRESSION = f"mcpGuardrails.{CLEARANCE_KEY}"
 
 
@@ -111,6 +115,9 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
         problems.append("mcp.policies must be an object")
         return
     _only_keys(problems, "mcp.policies", policies, MCP_POLICY_KEYS)
+    if policies.get("mcpAuthorization") != {"rules": [METHOD_RULE]}:
+        problems.append(f"mcp.policies.mcpAuthorization must be exactly {{'rules': [{METHOD_RULE!r}]}}")
+    _check_header_modifier(problems, policies.get("requestHeaderModifier"), expected.credential_headers)
     guardrails = policies.get("mcpGuardrails")
     if (
         not isinstance(guardrails, dict)
@@ -147,7 +154,7 @@ def _check_bailiff_processor(
 ) -> None:
     _only_keys(problems, f"the {label} processor", processor, BAILIFF_PROCESSOR_KEYS)
     if processor.get("methods") != BAILIFF_METHODS:
-        problems.append(f'the {label} processor methods must be exactly {{"{TOOLS_CALL}": "request"}}')
+        problems.append(f'the {label} processor methods must be exactly {{"*": "request"}}')
     if processor.get("failureMode", "failClosed") != "failClosed":
         problems.append(f"the {label} processor must be failClosed")
     if processor.get("metadata", {}) != metadata:
@@ -182,12 +189,34 @@ def _check_header_filter(problems: list[str], label: str, header_filter: object)
         problems.append(f"the {label} processor disallowed list drops chain headers: {', '.join(dropped)}")
 
 
+def _check_header_modifier(problems: list[str], modifier: object, credential_headers: frozenset[str]) -> None:
+    remove = modifier.get("remove") if isinstance(modifier, dict) else None
+    if (
+        not isinstance(modifier, dict)
+        or set(modifier) != {"remove"}
+        or not isinstance(remove, list)
+        or not all(isinstance(name, str) for name in remove)
+    ):
+        problems.append('mcp.policies.requestHeaderModifier must be exactly {"remove": [header names]}')
+        return
+    names = {name.lower() for name in remove}
+    required = AGENT_CREDENTIAL_HEADERS | {name.lower() for name in credential_headers}
+    missing = sorted(required - names)
+    if missing:
+        problems.append(f"mcp.policies.requestHeaderModifier remove is missing {', '.join(missing)}")
+    chain = sorted(name for name in names if name.startswith(CHAIN_HEADER_PREFIX) or name == TRACEPARENT_HEADER)
+    if chain:
+        problems.append(f"mcp.policies.requestHeaderModifier must not remove chain headers: {', '.join(chain)}")
+
+
 def _check_credential_headers(problems: list[str], document: object, headers: frozenset[str]) -> None:
     patterns = {
         header: re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(header)}(?![A-Za-z0-9_-])", re.IGNORECASE)
         for header in sorted(headers)
     }
     for path, text in _strings(document, "$"):
+        if path.startswith(f"{REMOVE_PATH}["):
+            continue
         for header, pattern in patterns.items():
             if pattern.search(text):
                 problems.append(f"credential header {header} appears in the gateway config at {path}")

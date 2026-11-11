@@ -1,6 +1,15 @@
 # agentgateway adapter
 
-Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then custodian, both on `tools/call` request phase, both `failClosed`.
+Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then custodian, both on every method's request phase (`{"*": "request"}`), both `failClosed`.
+
+## Method surface
+
+- Decide passes `initialize`, `ping` and `tools/list`, decides `tools/call`, and refuses every other hooked method with `method_refused`.
+- On every hooked method the custodian removes `authorization`, `proxy-authorization`, `cookie`, the `x-bailiff-*` headers and every binding-table credential header from the upstream request; on a release it then sets the released credential header.
+- agentgateway v1.7.0 runs no request-phase hook for `resources/subscribe`, `resources/unsubscribe`, `completion/complete` or `tasks/*`. check-config requires `mcpAuthorization.rules` to be exactly `mcp.methodName == "tools/call" || mcp.methodName == "tools/list"`; with a rule present, agentgateway denies those methods before they reach an upstream. Under that rule alone, `prompts/list` and `resources/list` return empty lists; decide refuses both before that.
+- check-config requires `requestHeaderModifier` to be exactly `{"remove": [...]}` naming `authorization`, `proxy-authorization`, `cookie` and every binding-table credential header, and naming no `x-bailiff-*` header or `traceparent`. agentgateway applies it before the processors run, on every message, and it does not remove the header the custodian sets.
+- Client notifications (`notifications/initialized`, `notifications/cancelled`, `notifications/progress`, `notifications/roots/list_changed` and custom notifications) run no processor and no `mcpAuthorization` check in v1.7.0. They reach every upstream carrying the `x-bailiff-*` headers and no agent credential header.
+- Not probed: client responses to server-initiated requests, the SSE GET stream, session DELETE, and stateful mode.
 
 ## Clearance visibility
 
