@@ -21,7 +21,9 @@ from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
+from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
+from agent_bailiff.service.init import InitError, init_control, init_custodian, init_decide, init_docket, read_pin
 from agent_bailiff.service.ledger import LedgerUnsupported
 from agent_bailiff.service.settings import DocketSettings, load_control, load_custodian, load_decide, load_docket
 from agent_bailiff.signing import MAX_TOKEN_CHARS
@@ -63,6 +65,7 @@ def _parser() -> argparse.ArgumentParser:
         help="refuse an agentgateway config the processors cannot enforce (see check-config --help)",
         add_help=False,
     )
+    _add_init(commands)
     for name, handler in (("decide", _run_decide), ("custodian", _run_custodian), ("docket", _run_docket)):
         component = commands.add_parser(name, help=f"the {name} service").add_subparsers(dest="action", required=True)
         serve = component.add_parser("run", help=f"run the {name} service until SIGTERM or SIGINT")
@@ -88,6 +91,85 @@ def _parser() -> argparse.ArgumentParser:
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
     return parser
+
+
+def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    components = commands.add_parser(
+        "init", help="create a component's key and config; run as that component's uid"
+    ).add_subparsers(dest="component", required=True)
+    decide = components.add_parser("decide")
+    decide.add_argument("--custodian", action="append", required=True, help="custodian name; repeat for each")
+    decide.add_argument("--ledger", type=Path, required=True, help="ledger file to create")
+    decide.add_argument("--ledger-group", type=int, required=True, help="group that may read the ledger")
+    custodian = components.add_parser("custodian")
+    custodian.add_argument("--decide-pin", type=Path, required=True, help="decide's public key record")
+    custodian.add_argument("--ledger", type=Path, required=True)
+    custodian.add_argument("--ledger-uid", type=int, required=True, help="decide's uid, the ledger owner")
+    custodian.add_argument("--ledger-group", type=int, required=True)
+    control = components.add_parser("control")
+    control.add_argument("--decide-config", type=Path, required=True)
+    docket = components.add_parser("docket")
+    docket.add_argument("--socket", type=Path, required=True)
+    docket.add_argument("--socket-group", type=int, required=True)
+    docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
+    for parser in (control, docket):
+        parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
+    for parser in (decide, custodian, control, docket):
+        parser.add_argument("--dir", type=Path, required=True, help="the component's 0700 directory")
+        parser.set_defaults(handler=_init)
+    for parser in (decide, custodian, control):
+        parser.add_argument("--name", required=True, help="component name, also its docket writer and key id prefix")
+        parser.add_argument("--docket-socket", required=True)
+        parser.add_argument("--docket-uid", type=int, required=True, help="the docket sink's uid")
+    for parser in (decide, custodian):
+        parser.add_argument("--socket", required=True, help="processor socket the gateway connects to")
+        parser.add_argument("--gateway-uid", type=int, required=True)
+        parser.add_argument("--gateway-group", type=int, required=True)
+
+
+def _init(args: argparse.Namespace) -> int:
+    try:
+        record = _init_component(args)
+    except STARTUP_ERRORS + (InitError,) as exc:
+        return _refused("init", exc)
+    print(f"{PROG} init: wrote {args.dir / 'config.json'}", file=sys.stderr)
+    if record is not None:
+        print(json.dumps(record.to_document(), sort_keys=True))
+    return 0
+
+
+def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
+    if args.component == "docket":
+        pins = [read_pin(path) for path in args.pin]
+        init_docket(
+            args.dir, socket=args.socket, socket_group=args.socket_group, allowed_uids=args.allowed_uid, pins=pins
+        )
+        return None
+    docket = {"socket": args.docket_socket, "sink_uid": args.docket_uid}
+    if args.component == "control":
+        pins = [read_pin(path) for path in args.pin]
+        return init_control(args.dir, name=args.name, decide_config=args.decide_config, pins=pins, docket=docket)
+    gateway = {"uid": args.gateway_uid, "socket": args.socket, "socket_group": args.gateway_group}
+    if args.component == "decide":
+        return init_decide(
+            args.dir,
+            name=args.name,
+            custodians=args.custodian,
+            ledger=args.ledger,
+            ledger_group=args.ledger_group,
+            docket=docket,
+            gateway=gateway,
+        )
+    return init_custodian(
+        args.dir,
+        name=args.name,
+        decide=read_pin(args.decide_pin),
+        ledger=args.ledger,
+        ledger_uid=args.ledger_uid,
+        ledger_group=args.ledger_group,
+        docket=docket,
+        gateway=gateway,
+    )
 
 
 def _run_decide(args: argparse.Namespace) -> int:
