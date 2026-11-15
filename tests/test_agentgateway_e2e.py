@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 import test_custodian
-from agent_warrant.ledger import TaskLedger
 from test_agentgateway_config import gateway_config
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
@@ -62,16 +61,10 @@ def pinned_sha256(path):
 
 
 BINARY = gateway_binary()
-pytestmark = [
-    pytest.mark.skipif(
-        BINARY is None,
-        reason="agentgateway v1.7.0 binary not cached; run adapters/agentgateway/scripts/fetch_gateway.sh",
-    ),
-    pytest.mark.skipif(
-        not hasattr(TaskLedger, "open_read_only"),
-        reason="needs agent-warrant with TaskLedger.open_read_only (unreleased PR #15); move the pin after its release",
-    ),
-]
+pytestmark = pytest.mark.skipif(
+    BINARY is None,
+    reason="agentgateway v1.7.0 binary not cached; run adapters/agentgateway/scripts/fetch_gateway.sh",
+)
 
 ledger_path = test_custodian.ledger_path
 make_custodian = test_custodian.make_custodian

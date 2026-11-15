@@ -1,6 +1,5 @@
 import pytest
 import test_custodian
-from agent_warrant.ledger import TaskLedger
 from google.protobuf import struct_pb2
 from test_agentgateway_calls import HEADERS, ROUTES, message
 from test_custodian import DEPLOY_SECRET, NOW, custodian_entries, docket_entries
@@ -213,10 +212,6 @@ def test_custodian_refuses_an_unreadable_call_without_releasing():
     assert custodian.calls == []
 
 
-needs_read_only_ledger = pytest.mark.skipif(
-    not hasattr(TaskLedger, "open_read_only"),
-    reason="needs agent-warrant with TaskLedger.open_read_only (unreleased PR #15); move the pin after its release",
-)
 GATEWAY_ROUTES = ToolRoutes([ToolRoute("deploy", "deploy_service", "deploy.service", "env/staging/api")])
 
 
@@ -232,7 +227,6 @@ def gateway_call(request: OperationRequest, *, metadata=None):
     return call
 
 
-@needs_read_only_ledger
 def test_a_decide_clearance_releases_the_credential_once_through_both_processors(make_decider, make_custodian, workdir):
     request = make_request(trace_id="")
     decide = DecideProcessor(make_decider(), GATEWAY_ROUTES, clock=lambda: NOW)
@@ -257,7 +251,6 @@ def test_a_decide_clearance_releases_the_credential_once_through_both_processors
     assert (release[0].trace_id, release[0].op_id) == (decide_allow[0].trace_id, decide_allow[0].op_id)
 
 
-@needs_read_only_ledger
 def test_a_clearance_for_other_arguments_is_refused_by_the_custodian(make_decider, make_custodian):
     request = make_request(trace_id="")
     other = make_request(trace_id="", args={"service": "api", "replicas": 3}, nonce="n-2")
