@@ -1,6 +1,6 @@
-agent-warrant==0.1.0 \
-    --hash=sha256:3a1d6c8a220f5938e823c053eaee2e1c44f8249d3be9e460f3b21769a1758769 \
-    --hash=sha256:d7482c8be9def1a2b56583cbe417525bf8146571076df1bc027a1a512c8a2f0a
+agent-warrant==0.2.0 \
+    --hash=sha256:88781d900121dd6e5fb79c8473f1580bdb8a5423287b571ca795a414f9b201df \
+    --hash=sha256:f74ad7959694eaa0b2715989f05210790fc331aa830fed0aeb781b25efdacf1e
     # via agent-bailiff (pyproject.toml)
 ast-serialize==0.13.1 \
     --hash=sha256:02686b281ec9b8e9614f6f0db27e12e4cac515f336c5d05b678bc9eb73ff2af5 \

@@ -60,11 +60,6 @@ from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(TaskLedger, "open_read_only"),
-    reason="needs agent-warrant with TaskLedger.open_read_only (unreleased PR #15); move the pin after its release",
-)
-
 UID = os.geteuid()
 GID = os.getegid()
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(4, 36)))
