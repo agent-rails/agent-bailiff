@@ -105,3 +105,19 @@ def test_an_effector_only_deployment_can_start_without_credential_headers():
         services=frozenset({"k8s"}),
         credential_headers=frozenset(),
     )
+
+
+def test_a_route_document_cannot_route_a_catalog_tool_to_a_fixed_resource():
+    with pytest.raises(ValueError, match="routed only from their catalog"):
+        ToolRoutes.from_document(
+            {
+                "routes": [
+                    {
+                        "service": "k8s",
+                        "name": "scale_deployment",
+                        "tool": "k8s.deployments.scale",
+                        "resource": "k8s/staging/deployments/api",
+                    }
+                ]
+            }
+        )

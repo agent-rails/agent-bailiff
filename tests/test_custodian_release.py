@@ -192,3 +192,14 @@ def test_the_binding_table_loads_effector_bindings(tmp_path):
 def test_a_mixed_table_lists_only_credential_bindings_as_credentials():
     table = BindingTable(EFFECTOR_BINDINGS)
     assert table.credential_bindings == CUSTODIAN_BINDINGS[1:]
+
+
+def test_an_oversized_release_is_refused_before_the_operation_is_claimed(make_custodian, issue, monkeypatch):
+    from agent_bailiff.custodian import release as release_module
+
+    request, token = issue()
+    monkeypatch.setattr(release_module, "MAX_RELEASE_BYTES", 10)
+    custodian = make_custodian(bindings=EFFECTOR_BINDINGS, release_signer=signer())
+    assert custodian.release(token, request, NOW + 1) == Refused("release_too_large")
+    monkeypatch.undo()
+    assert isinstance(custodian.release(token, request, NOW + 2), Released)

@@ -17,7 +17,7 @@ from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBi
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
-from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner
+from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.decide.clearance import Clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
@@ -245,7 +245,6 @@ class Custodian:
         self._precheck(clearance, now)
         if self._suspension.suspended is not False:
             raise _Refusal("suspended")
-        self._admit(clearance, now)
         release_entry = replace(
             entry,
             entry_id=uuid.uuid4().hex,
@@ -254,9 +253,13 @@ class Custodian:
             performed=True,
             credential_tier=EFFECTOR_TIER,
         )
-        token = self._release_signer.sign(
-            clearance, verified.token, binding.credential_id, binding.catalog, release_entry.entry_id, now
-        )
+        try:
+            token = self._release_signer.sign(
+                clearance, verified.token, binding.credential_id, binding.catalog, release_entry.entry_id, now
+            )
+        except ReleaseTooLarge:
+            raise _Refusal("release_too_large") from None
+        self._admit(clearance, now)
         self._record(release_entry)
         return Released(RELEASE_HEADER, token, EFFECTOR_TIER, clearance.op_id, release_entry.entry_id)
 

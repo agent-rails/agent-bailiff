@@ -13,6 +13,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.strict_json import parse_strict_json
 
 CATALOG_VERSION = 1
+CATALOG_TOOL_PREFIX = "k8s."
 MAX_CATALOG_BYTES = 1 << 20
 MAX_RESPONSE_BYTES = 1 << 20
 LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
