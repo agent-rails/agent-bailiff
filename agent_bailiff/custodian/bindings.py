@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
 
 from agent_warrant.scope import covers, validate_entry
 
 from agent_bailiff.custodian.files import read_owned
+from agent_bailiff.strict_json import parse_strict_json
 
 BINDINGS_LABEL = "binding table"
 MAX_BINDINGS_BYTES = 1 << 20
@@ -64,8 +63,8 @@ class BindingTable:
     def load(cls, path: Path) -> BindingTable:
         content = read_owned(path, BINDINGS_LABEL, MAX_BINDINGS_BYTES)
         try:
-            document = json.loads(content, object_pairs_hook=_unique_keys)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            document = parse_strict_json(content)
+        except (UnicodeDecodeError, ValueError) as exc:
             raise BindingTableError(f"the {BINDINGS_LABEL} is not valid JSON: {exc}") from None
         if (
             not isinstance(document, dict)
@@ -88,12 +87,3 @@ def _binding(item: object) -> CredentialBinding:
     if not isinstance(item, dict) or set(item) != BINDING_FIELDS:
         raise BindingTableError(f"each binding must have exactly the fields {', '.join(sorted(BINDING_FIELDS))}")
     return CredentialBinding(**item)
-
-
-def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise BindingTableError(f"duplicate key {key!r} in the {BINDINGS_LABEL}")
-        result[key] = value
-    return result

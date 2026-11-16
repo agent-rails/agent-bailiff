@@ -6,10 +6,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_bailiff.adapters.agentgateway.calls import ToolRoutes, parse_strict_json
+from agent_bailiff.adapters.agentgateway.calls import ToolRoutes
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.custodian.bindings import BindingTable
 from agent_bailiff.custodian.files import OwnedFileError
+from agent_bailiff.strict_json import parse_strict_json
 
 MAX_CONFIG_BYTES = 1 << 20
 

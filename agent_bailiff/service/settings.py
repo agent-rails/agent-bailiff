@@ -10,13 +10,13 @@ from agent_warrant.resolver import PinnedResolver
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from agent_bailiff.adapters.agentgateway.calls import parse_strict_json
 from agent_bailiff.control.suspension import suspension_directory
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
 from agent_bailiff.docket.sink import Writers
 from agent_bailiff.keys import check_component, parse_pinned_keys
+from agent_bailiff.strict_json import parse_strict_json
 
 MAX_CONFIG_BYTES = 1 << 20
 MAX_OS_ID = 2**32 - 2

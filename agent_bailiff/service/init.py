@@ -9,7 +9,6 @@ from typing import Any
 
 from agent_warrant.identity import encode_public_key
 
-from agent_bailiff.adapters.agentgateway.calls import parse_strict_json
 from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
@@ -18,6 +17,7 @@ from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.keys import PublicKeyRecord, check_component, generate_signing_key
 from agent_bailiff.service.ledger import create_writer
 from agent_bailiff.service.settings import parse_control, parse_custodian, parse_decide, parse_docket
+from agent_bailiff.strict_json import parse_strict_json
 
 PRIVATE_MODE = 0o700
 FORBIDDEN_DIRECTORY_BITS = 0o077
