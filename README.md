@@ -39,6 +39,7 @@ Each component is meant to run as its own OS user. Each listens on a Unix socket
 - A completed effect is not undone.
 - Suspension stops decide from issuing clearances. The custodian does not read it, so a clearance issued before a suspension can still be released until it expires (`max_clearance_lifetime`).
 - Revocation works on a delegation link, a task, a tenant or a task root. There is no revocation of an agent key across every chain that uses it.
+- Control revokes the handles in a record signed by a pinned decide or custodian key. It checks that a tenant handle matches the record's tenant, but trusts that signer for the root and link bindings, so a compromised decide or custodian key can name any binding.
 - agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
 
 ## Packages
