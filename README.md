@@ -27,10 +27,10 @@ flowchart LR
 ```
 
 1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no secrets.
-2. **custodian** re-verifies the chain, proof and reservation on its own, checks suspension, claims the operation once, applies a per-task rate limit and canary checks, then decrypts the credential and sets it as a header on the upstream request. It removes the agent's own `authorization`, `cookie` and credential headers.
+2. **custodian** re-verifies the chain, proof and reservation on its own, applies canary checks, decrypts the credential, checks suspension, then claims the operation once under a per-task rate limit and sets the credential as a header on the upstream request. It removes the agent's own `authorization`, `cookie` and credential headers.
 3. **docket** is a separate process that appends a signed, hash-chained entry for each decision and release.
 
-Each component is meant to run as its own OS user. Each listens on a Unix socket that accepts only its configured peer uids. The ledger and the suspension directory (`<ledger>.suspension`, mode 0750) are owned by decide and shared read-only with the custodian through the ledger group.
+Each component is meant to run as its own OS user. Each listens on a Unix socket that accepts only its configured peer uids. The ledger and the suspension directory (`<ledger>.suspension`, mode 0750) are owned by decide and shared read-only with the custodian through the ledger group. Their parent directory must be in that group and not group or other writable.
 
 ## What it does not protect
 
@@ -38,6 +38,7 @@ Each component is meant to run as its own OS user. Each listens on a Unix socket
 - Root on the host can read every component's keys.
 - A completed effect is not undone.
 - Suspension is checked by decide before it issues a clearance and by the custodian just before it claims a release. A release that has already passed the custodian's check completes.
+- The ledger and suspension checks read mode bits, owner and group. They do not inspect ACLs, and they check only the immediate parent directory.
 - Revocation works on a delegation link, a task, a tenant or a task root. There is no revocation of an agent key across every chain that uses it.
 - Control revokes the handles in a record signed by a pinned decide or custodian key. It checks that a tenant handle matches the record's tenant, but trusts that signer for the root and link bindings, so a compromised decide or custodian key can name any binding.
 - agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
