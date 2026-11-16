@@ -15,7 +15,6 @@ from pathlib import Path
 import grpc
 import pytest
 from agent_warrant.identity import encode_public_key
-from agent_warrant.ledger import TaskLedger
 from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf import struct_pb2
@@ -31,7 +30,7 @@ from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.keys import generate_signing_key, key_id
 from agent_bailiff.service import run
-from agent_bailiff.service.ledger import LedgerUnsupported, create_writer, open_reader, open_writer
+from agent_bailiff.service.ledger import create_writer
 from agent_bailiff.service.settings import (
     ConfigError,
     load_control,
@@ -49,11 +48,6 @@ GID = os.getegid()
 ROOT = Path(__file__).resolve().parent.parent
 SECRET = b"Bearer deploy-secret"
 CHECK_REQUEST = "/agentgateway.dev.ext_mcp.ExtMcp/CheckRequest"
-SHARED_LEDGERS = hasattr(TaskLedger, "open_read_only")
-needs_shared_ledgers = pytest.mark.skipif(
-    not SHARED_LEDGERS,
-    reason="needs agent-warrant with TaskLedger.open_read_only (unreleased PR #15); move the pin after its release",
-)
 ROUTES = {
     "routes": [{"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/staging/api"}]
 }
@@ -421,17 +415,6 @@ def test_the_docket_service_accepts_pinned_writers_and_removes_its_socket(deploy
     assert len(deployment.records()) == 1
 
 
-@pytest.mark.skipif(SHARED_LEDGERS, reason="covers the agent-warrant 0.1.0 pin")
-def test_services_that_share_the_ledger_refuse_to_start_on_agent_warrant_0_1(deployment):
-    with pytest.raises(LedgerUnsupported):
-        open_writer(deployment.ledger, GID)
-    with pytest.raises(LedgerUnsupported):
-        create_writer(deployment.ledger, GID)
-    with pytest.raises(LedgerUnsupported):
-        open_reader(deployment.ledger, UID, GID)
-    assert cli.main(["decide", "run", "--config", str(deployment.paths["decide"])]) == cli.EXIT_REFUSED
-
-
 def check(socket_path, request):
     with grpc.insecure_channel(f"unix:{socket_path}") as channel:
         stub = channel.unary_unary(
@@ -531,7 +514,6 @@ def control(deployment, *arguments, stdin=None):
         sys.stdin = original
 
 
-@needs_shared_ledgers
 def test_the_services_release_a_credential_once_through_both_sockets(stack, live):
     request = live()
     decided, released = stack.call(request)
@@ -542,7 +524,6 @@ def test_the_services_release_a_credential_once_through_both_sockets(stack, live
     assert replay.error.reason == "already_issued"
 
 
-@needs_shared_ledgers
 @pytest.mark.parametrize("level", ["agent_key", "task", "tenant", "root"])
 def test_control_revoke_from_a_docket_line_stops_the_next_call(stack, live, deployment, level, capsys):
     stack.call(live())
@@ -558,7 +539,6 @@ def test_control_revoke_from_a_docket_line_stops_the_next_call(stack, live, depl
     assert entry.trace_id == "4bf92f3577b34da6a3ce929d0e0e4736" and entry.entry_id == outcome["entry_id"]
 
 
-@needs_shared_ledgers
 def test_control_suspend_and_resume_through_the_cli(stack, live, deployment, capsys):
     stack.call(live())
     line = deployment.record_line("decide", "allow")
@@ -570,7 +550,6 @@ def test_control_suspend_and_resume_through_the_cli(stack, live, deployment, cap
     assert released.WhichOneof("result") == "pass", (decided, released)
 
 
-@needs_shared_ledgers
 def test_control_refuses_a_tampered_record(stack, live, deployment, capsys):
     stack.call(live())
     line = deployment.record_line("decide", "allow")
@@ -582,7 +561,6 @@ def test_control_refuses_a_tampered_record(stack, live, deployment, capsys):
     assert released.WhichOneof("result") == "pass"
 
 
-@needs_shared_ledgers
 def test_control_reports_an_applied_but_unrecorded_revoke(stack, live, deployment, docket, capsys):
     stack.call(live())
     line = deployment.record_line("decide", "allow")
@@ -649,7 +627,6 @@ def test_the_docket_command_runs_until_sigterm(deployment):
     assert not deployment.sockets["docket"].exists()
 
 
-@needs_shared_ledgers
 def test_the_decide_and_custodian_commands_run_until_sigterm(deployment, docket):
     create_writer(deployment.ledger, GID).close()
     CredentialStore.create(
