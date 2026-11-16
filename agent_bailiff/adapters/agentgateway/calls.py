@@ -10,6 +10,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
@@ -28,6 +29,8 @@ META_TYPES: dict[str, tuple[type, ...]] = {
     "io.modelcontextprotocol/clientInfo": (dict,),
     "io.modelcontextprotocol/clientCapabilities": (dict,),
 }
+PLACEHOLDER = re.compile(r"\{([a-z][A-Za-z0-9]{0,31})\}")
+LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
@@ -43,16 +46,40 @@ class ToolRoute:
     name: str
     tool: str
     resource: str
+    arguments: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
-        for item in fields(self):
-            value = getattr(self, item.name)
+        for name in ("service", "name", "tool", "resource"):
+            value = getattr(self, name)
             if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
-                raise ValueError(f"{item.name} must be a non-empty ASCII printable str without whitespace")
-        for name in ("tool", "resource"):
-            problem = validate_entry(getattr(self, name))
-            if problem or "*" in getattr(self, name):
-                raise ValueError(f"{name} must be a concrete scope id: {problem or 'no wildcards'}")
+                raise ValueError(f"{name} must be a non-empty ASCII printable str without whitespace")
+        problem = validate_entry(self.tool)
+        if problem or "*" in self.tool:
+            raise ValueError(f"tool must be a concrete scope id: {problem or 'no wildcards'}")
+        placeholders = set(PLACEHOLDER.findall(self.resource))
+        if self.arguments is None and placeholders:
+            raise ValueError("a resource template needs an arguments list")
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", frozenset(self.arguments))
+            if not placeholders <= self.arguments:
+                raise ValueError("every resource placeholder must be a listed argument")
+        filled = PLACEHOLDER.sub("x", self.resource)
+        problem = validate_entry(filled)
+        if problem or any(character in filled for character in "*{}"):
+            raise ValueError(f"resource must be a concrete scope id or template: {problem or 'no wildcards'}")
+
+    def resource_for(self, arguments: dict[str, Any]) -> str | None:
+        if self.arguments is None:
+            return self.resource
+        if not arguments.keys() <= self.arguments:
+            return None
+        values = {}
+        for name in PLACEHOLDER.findall(self.resource):
+            value = arguments.get(name)
+            if not isinstance(value, str) or not LABEL.fullmatch(value):
+                return None
+            values[name] = value
+        return PLACEHOLDER.sub(lambda match: values[match.group(1)], self.resource)
 
 
 ROUTE_FIELDS = frozenset(item.name for item in fields(ToolRoute))
@@ -81,9 +108,14 @@ class ToolRoutes:
             raise ValueError('a route document must be an object with only a "routes" list')
         routes = []
         for item in document["routes"]:
-            if not isinstance(item, dict) or set(item) != ROUTE_FIELDS:
+            if not isinstance(item, dict) or set(item) not in (ROUTE_FIELDS - {"arguments"}, ROUTE_FIELDS):
                 raise ValueError(f"each route must have exactly the fields {', '.join(sorted(ROUTE_FIELDS))}")
-            routes.append(ToolRoute(**item))
+            arguments = item.get("arguments")
+            if arguments is not None and (
+                not isinstance(arguments, list) or not all(isinstance(name, str) for name in arguments)
+            ):
+                raise ValueError("route arguments must be a list of names")
+            routes.append(ToolRoute(**{**item, **({"arguments": frozenset(arguments)} if arguments else {})}))
         return cls(routes)
 
     @property
@@ -94,6 +126,13 @@ class ToolRoutes:
         return self._table.get((service, name))
 
 
+def routes_from_catalog(service: str, catalog: OperationCatalog) -> ToolRoutes:
+    return ToolRoutes(
+        ToolRoute(service, item.name, item.tool, item.resource, frozenset(argument.name for argument in item.arguments))
+        for item in catalog.operations
+    )
+
+
 def read_call(message: ext_mcp_pb2.McpRequest, routes: ToolRoutes) -> OperationRequest:
     if len(message.service_names) != 1:
         raise CallRefused("malformed_request")
@@ -101,6 +140,9 @@ def read_call(message: ext_mcp_pb2.McpRequest, routes: ToolRoutes) -> OperationR
     route = routes.route(message.service_names[0], name)
     if route is None:
         raise CallRefused("unknown_tool")
+    resource = route.resource_for(arguments)
+    if resource is None:
+        raise CallRefused("malformed_request")
     headers = _call_headers(message)
     links = headers.get(LINKS_HEADER)
     link_tokens = tuple(links.split(",")) if links is not None else ()
@@ -109,7 +151,7 @@ def read_call(message: ext_mcp_pb2.McpRequest, routes: ToolRoutes) -> OperationR
     trace = TRACEPARENT.fullmatch(headers.get(TRACEPARENT_HEADER, ""))
     return OperationRequest(
         tool=route.tool,
-        resource=route.resource,
+        resource=resource,
         args=arguments,
         nonce=headers[NONCE_HEADER],
         task_root=headers[TASK_ROOT_HEADER],

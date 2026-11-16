@@ -20,6 +20,7 @@ from agent_bailiff.adapters.agentgateway.calls import (
 )
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.custodian import Released, ReleaseResult
+from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import Decision
 from agent_bailiff.decide.request import OperationRequest
 
@@ -27,7 +28,7 @@ CLEARANCE_KEY = "clearance"
 RELEASE_REFUSED = "release_refused"
 METHOD_REFUSED = "method_refused"
 SESSION_METHODS = frozenset({"initialize", "ping", "tools/list"})
-AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", RELEASE_HEADER})
 CHAIN_HEADERS = frozenset({LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER})
 
 logger = logging.getLogger(__name__)

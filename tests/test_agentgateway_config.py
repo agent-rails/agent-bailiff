@@ -23,7 +23,7 @@ EXPECTED = GatewayExpectations(
 
 
 METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
-AGENT_CREDENTIALS = ["authorization", "proxy-authorization", "cookie"]
+AGENT_CREDENTIALS = ["authorization", "proxy-authorization", "cookie", "bailiff-release"]
 
 
 def gateway_config(
@@ -261,7 +261,14 @@ def test_the_header_modifier_must_only_strip_agent_credentials(change):
 
 def test_the_header_modifier_matches_names_case_insensitively():
     def change(config):
-        modifier(config)["remove"] = ["Authorization", "PROXY-AUTHORIZATION", "Cookie", "x-api-key", "x-extra"]
+        modifier(config)["remove"] = [
+            "Authorization",
+            "PROXY-AUTHORIZATION",
+            "Cookie",
+            "Bailiff-Release",
+            "x-api-key",
+            "x-extra",
+        ]
 
     assert problems_after(change) == ()
 

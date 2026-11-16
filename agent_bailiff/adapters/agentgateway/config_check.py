@@ -9,6 +9,7 @@ from typing import Any
 from agent_bailiff.adapters.agentgateway.calls import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
 from agent_bailiff.custodian.bindings import HEADER_NAME
+from agent_bailiff.custodian.release import RELEASE_HEADER
 
 TOP_LEVEL_KEYS = frozenset({"config", "mcp"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
@@ -27,7 +28,7 @@ BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "r
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
 BAILIFF_METHODS = {"*": "request"}
 METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
-AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", RELEASE_HEADER})
 CHAIN_HEADER_PREFIX = "x-bailiff-"
 REMOVE_PATH = "$.mcp.policies.requestHeaderModifier.remove"
 CLEARANCE_EXPRESSION = f"mcpGuardrails.{CLEARANCE_KEY}"
