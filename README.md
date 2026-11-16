@@ -2,7 +2,7 @@
 
 Lets an AI agent use a credential for one approved tool call without ever holding that credential.
 
-Status: pre-release. Interfaces and wire formats may change. Not ready for production use. Not built yet: commands to run the decide, custodian and docket services, a key and config `init` command, and revoke and suspend controls.
+Status: pre-release. Interfaces and wire formats may change. Not ready for production use.
 
 ## Why
 
@@ -37,6 +37,8 @@ Each component is meant to run as its own OS user. Each listens on a Unix socket
 - The upstream MCP server receives the credential and is trusted.
 - Root on the host can read every component's keys.
 - A completed effect is not undone.
+- Suspension stops decide from issuing clearances. The custodian does not read it, so a clearance issued before a suspension can still be released until it expires (`max_clearance_lifetime`).
+- Revocation works on a delegation link, a task, a tenant or a task root. There is no revocation of an agent key across every chain that uses it.
 - agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
 
 ## Packages
@@ -73,6 +75,12 @@ python -m agent_bailiff.adapters.agentgateway check-config \
 ```
 
 It refuses any config the processors cannot enforce, such as `failOpen`, a missing header allowlist, the wrong processor order or a TCP processor target.
+
+Each component has its own commands, run as that component's uid:
+
+- `agent-bailiff init {decide,custodian,control,docket}` creates the component's signing key and a config that denies everything until it is filled in.
+- `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
+- `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
 
 ## Documentation
 
