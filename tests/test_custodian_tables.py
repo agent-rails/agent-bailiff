@@ -230,6 +230,20 @@ def test_rate_limit_refuses_bad_configuration(limit, window):
         TaskRateLimiter(limit, window)
 
 
+def test_a_new_task_is_refused_while_the_tracked_tasks_are_all_live():
+    limiter = TaskRateLimiter(5, 10, max_tasks=2)
+    limiter.record("tenant-a", "task-1", NOW)
+    limiter.record("tenant-a", "task-2", NOW)
+    assert limiter.exhausted("tenant-a", "task-3", NOW + 1)
+    assert not limiter.exhausted("tenant-a", "task-1", NOW + 1)
+    with pytest.raises(OverflowError):
+        limiter.record("tenant-a", "task-3", NOW + 1)
+    assert not limiter.exhausted("tenant-a", "task-3", NOW + 10)
+    limiter.record("tenant-a", "task-3", NOW + 10)
+    limiter.record("tenant-a", "task-4", NOW + 10)
+    assert limiter.exhausted("tenant-a", "task-5", NOW + 10)
+
+
 def replace_with_another_database(path):
     ClaimsStore.create(path.parent / "other.db").close()
     os.replace(path.parent / "other.db", path)
