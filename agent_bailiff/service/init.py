@@ -10,6 +10,7 @@ from typing import Any
 from agent_warrant.identity import encode_public_key
 
 from agent_bailiff.adapters.agentgateway.calls import parse_strict_json
+from agent_bailiff.control.suspension import create_suspension_directory
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.files import create_owned
@@ -27,7 +28,6 @@ ROUTES = "routes.json"
 BINDINGS = "bindings.json"
 DOCKET_STATE = "docket-state"
 GRPC = "grpc"
-SUSPENSION = "suspension"
 DENY_ALL_POLICY = {"default": "deny", "rules": []}
 DEFAULT_MAX_PROOF_AGE = 60
 DEFAULT_RECONCILE_SECONDS = 10
@@ -38,6 +38,10 @@ DEFAULT_RATE_WINDOW = 60
 
 class InitError(Exception):
     pass
+
+
+def suspension_directory(ledger: Path) -> Path:
+    return ledger.with_name(f"{ledger.name}.suspension")
 
 
 def read_pin(path: Path) -> PublicKeyRecord:
@@ -62,9 +66,11 @@ def init_decide(
     gateway: Mapping[str, Any],
 ) -> PublicKeyRecord:
     check_component(name)
-    _check_new(directory, (CONFIG, KEY, ROUTES, DOCKET_STATE, GRPC, SUSPENSION))
-    if ledger.exists():
-        raise InitError(f"{ledger} already exists")
+    _check_new(directory, (CONFIG, KEY, ROUTES, DOCKET_STATE, GRPC))
+    suspension = suspension_directory(ledger)
+    for path in (ledger, suspension):
+        if os.path.lexists(path):
+            raise InitError(f"{path} already exists")
     document = {
         "name": name,
         "key": str(directory / KEY),
@@ -76,14 +82,15 @@ def init_decide(
         "costs": {"version": 1, "tools": {}},
         "issuers": {},
         "ledger": {"path": str(ledger), "group": ledger_group},
-        "suspension_dir": str(directory / SUSPENSION),
+        "suspension_dir": str(suspension),
         "routes": str(directory / ROUTES),
         "docket": _docket_client(directory, docket),
         "gateway": _gateway(directory, gateway),
     }
     parse_decide(document)
     create_writer(ledger, ledger_group).close()
-    _make_private_dirs(directory, (DOCKET_STATE, GRPC, SUSPENSION))
+    create_suspension_directory(suspension, ledger_group)
+    _make_private_dirs(directory, (DOCKET_STATE, GRPC))
     _write(directory / ROUTES, {"routes": []})
     record = generate_signing_key(directory / KEY, name)
     _write(directory / CONFIG, document)
@@ -120,6 +127,7 @@ def init_custodian(
         "credentials": str(directory / "credentials.db"),
         "claims": str(directory / "claims.db"),
         "ledger": {"path": str(ledger), "writer_uid": ledger_uid, "group": ledger_group},
+        "suspension_dir": str(suspension_directory(ledger)),
         "routes": str(directory / ROUTES),
         "docket": _docket_client(directory, docket),
         "gateway": _gateway(directory, gateway),

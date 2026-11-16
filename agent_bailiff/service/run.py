@@ -14,7 +14,7 @@ from agent_bailiff.adapters.agentgateway.calls import ToolRoutes
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ExtMcpProcessor, ProcessorServer
 from agent_bailiff.control.control import Control
-from agent_bailiff.control.suspension import Suspension
+from agent_bailiff.control.suspension import Suspension, SuspensionView
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.bindings import BindingTable
 from agent_bailiff.custodian.claims import ClaimsStore
@@ -117,7 +117,7 @@ def start_decide(settings: DecideSettings) -> RunningDecide:
             resolver=settings.issuers.resolver,
             trust_policy=settings.issuers.trust_policy,
             policy=settings.policy,
-            suspension=Suspension(settings.suspension_dir),
+            suspension=Suspension(settings.suspension_dir, settings.ledger.group),
             docket=docket_client(settings.docket, settings.name, key),
             signing_key=key,
             costs=settings.costs,
@@ -161,6 +161,7 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
             resolver=settings.issuers.resolver,
             trust_policy=settings.issuers.trust_policy,
             docket=docket_client(settings.docket, settings.name, key),
+            suspension=SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group),
         )
         headers = frozenset(binding.header_name for binding in bindings.bindings)
         server = processor_server(CustodianProcessor(custodian, routes, headers), settings.gateway)
@@ -211,7 +212,7 @@ def open_control(settings: ControlSettings, decide: DecideSettings) -> ControlSe
             component=settings.name,
             writers=settings.writers,
             ledger=ledger,
-            suspension=Suspension(decide.suspension_dir),
+            suspension=Suspension(decide.suspension_dir, decide.ledger.group),
             docket=docket_client(settings.docket, settings.name, key),
             docket_writer=settings.name,
         )

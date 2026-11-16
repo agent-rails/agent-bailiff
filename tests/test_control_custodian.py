@@ -1,10 +1,14 @@
+import os
+
 import pytest
 import test_custodian
 from test_control import MemoryDocket
+from test_control_suspension import shared_suspension
 from test_custodian import WRITERS, Refused, Released, custodian_entries
 from test_decide import NOW, make_request, make_root
 
 from agent_bailiff.control import Control, Suspension
+from agent_bailiff.control.suspension import SuspensionView
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
 
@@ -20,8 +24,20 @@ writer = test_custodian.writer
 
 
 @pytest.fixture
-def control(writer, private):
-    return Control("control.example", WRITERS, writer, Suspension(private("suspension")), MemoryDocket(), "control")
+def suspension_dir(private):
+    return shared_suspension(private("shared"))
+
+
+@pytest.fixture
+def control(writer, suspension_dir):
+    return Control(
+        "control.example",
+        WRITERS,
+        writer,
+        Suspension(suspension_dir, os.getegid()),
+        MemoryDocket(),
+        "control",
+    )
 
 
 def line_for(workdir, hop, decision):
@@ -59,3 +75,17 @@ def test_a_call_without_a_revoke_is_still_released(make_decider, make_custodian,
     request = make_request()
     decision = make_decider().check(request, NOW)
     assert isinstance(make_custodian().release(decision.clearance, request, NOW + 1), Released)
+
+
+def test_a_suspend_after_decide_allowed_stops_the_release_until_resume(
+    make_decider, make_custodian, control, workdir, suspension_dir
+):
+    request = make_request()
+    decision = make_decider().check(request, NOW)
+    assert decision.allowed
+    control.suspend(line_for(workdir, "decide", "allow"), "ops", NOW)
+    custodian = make_custodian(suspension=SuspensionView(suspension_dir, os.geteuid(), os.getegid()))
+    assert custodian.release(decision.clearance, request, NOW + 1) == Refused("suspended")
+    assert [entry.reason for entry in custodian_entries(workdir) if entry.decision == "refuse"] == ["suspended"]
+    control.resume("ops", NOW + 1)
+    assert isinstance(custodian.release(decision.clearance, request, NOW + 2), Released)

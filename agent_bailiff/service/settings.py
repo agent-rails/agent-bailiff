@@ -31,7 +31,8 @@ DECIDE_KEYS = frozenset(
 )
 CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
-    | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
+    | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "suspension_dir"}
+    | {"routes"}
     | {"docket", "gateway"}
 )
 DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "allowed_uids", "writers"})
@@ -161,6 +162,7 @@ class CustodianSettings:
     credentials: Path
     claims: Path
     ledger: ReadOnlyLedgerSettings
+    suspension_dir: Path
     routes: Path
     docket: DocketClientSettings
     gateway: GatewaySettings
@@ -254,6 +256,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         credentials=config.path("credentials"),
         claims=config.path("claims"),
         ledger=ReadOnlyLedgerSettings(ledger.path("path"), ledger.os_id("writer_uid"), ledger.os_id("group")),
+        suspension_dir=config.path("suspension_dir"),
         routes=config.path("routes"),
         docket=_docket_client(config),
         gateway=_gateway(config),

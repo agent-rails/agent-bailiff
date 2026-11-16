@@ -18,6 +18,7 @@ import pytest
 import test_custodian
 from test_agentgateway_config import gateway_config
 from test_control import MemoryDocket
+from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
@@ -492,7 +493,12 @@ def test_a_revoke_through_control_stops_the_next_call(stack, workdir, writer, pr
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
     assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
     control = Control(
-        "control", test_custodian.WRITERS, writer, Suspension(private("suspension")), MemoryDocket(), "control"
+        "control",
+        test_custodian.WRITERS,
+        writer,
+        Suspension(shared_suspension(private("shared")), os.getegid()),
+        MemoryDocket(),
+        "control",
     )
     control.revoke(allow_record_line(workdir), level, "ops", NOW)
     later = make_request(nonce="n-2")

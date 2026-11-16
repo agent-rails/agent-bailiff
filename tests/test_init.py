@@ -139,8 +139,10 @@ def test_init_writes_private_keys_and_configs_that_load(root, ledger_dir, capsys
         assert encode_public_key(record.public_key) == encode_public_key(key.public_key())
     for name in ("decide", "custodian", "control", "docket"):
         assert mode(root / name / "config.json") == (0o600, UID)
-    for directory in ("decide/suspension", "decide/grpc", "decide/docket-state", "custodian/grpc"):
+    for directory in ("decide/grpc", "decide/docket-state", "custodian/grpc"):
         assert mode(root / directory) == (0o700, UID)
+    assert mode(ledger_dir / "ledger.db.suspension") == (0o750, UID)
+    assert os.lstat(ledger_dir / "ledger.db.suspension").st_gid == GID
     for name in ("kek", "credentials.db", "claims.db", "bindings.json", "routes.json"):
         assert mode(root / "custodian" / name) == (0o600, UID)
     assert mode(ledger_dir / "ledger.db") == (0o640, UID)

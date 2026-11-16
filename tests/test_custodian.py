@@ -25,6 +25,7 @@ from test_decide import (
     PRINCIPAL,
     SIGNER_CUSTODIAN_ID,
     TENANT,
+    ExplodingSuspension,
     RunningSink,
     Suspension,
     make_request,
@@ -226,7 +227,7 @@ def make_decider(workdir, private, sink, writer):
 def make_custodian(workdir, private, sink, reader, state):
     opened = []
 
-    def make(docket=None, ledger=None, claims=None, **config):
+    def make(docket=None, ledger=None, claims=None, suspension=None, **config):
         options = {
             "custodian_id": CUSTODIAN_ID,
             "decider_id": DECIDER_ID,
@@ -251,6 +252,7 @@ def make_custodian(workdir, private, sink, reader, state):
             resolver=PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
             trust_policy=trust_policy(),
             docket=docket or docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY),
+            suspension=suspension or Suspension(),
         )
 
     yield make
@@ -760,3 +762,17 @@ def test_lost_release_acknowledgement_leaves_only_the_release_entry(make_custodi
     entries = [(entry.decision, entry.reason, entry.performed) for entry in custodian_entries(workdir)]
     assert entries == [("release", "ok", True)]
     assert make_custodian().release(token, request, NOW + 2) == Refused("already_issued")
+
+
+def test_a_suspended_custodian_refuses_without_spending_the_clearance(make_custodian, issue, workdir):
+    request, token = issue()
+    assert make_custodian(suspension=Suspension(True)).release(token, request, NOW + 1) == Refused("suspended")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "suspended")]
+    assert isinstance(make_custodian().release(token, request, NOW + 2), Released)
+
+
+def test_an_unreadable_suspension_state_refuses_the_release(make_custodian, issue, workdir):
+    request, token = issue()
+    result = make_custodian(suspension=ExplodingSuspension()).release(token, request, NOW + 1)
+    assert not result.ok
+    assert [entry for entry in custodian_entries(workdir) if entry.decision == "release"] == []

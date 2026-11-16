@@ -14,6 +14,7 @@ from agent_warrant.ledger import LedgerUnavailable, TaskLedger
 from agent_warrant.resolver import PinnedResolver
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_control_suspension import shared_suspension
 from test_decide import (
     AGENT_KEY,
     BINDINGS,
@@ -103,7 +104,7 @@ def ledger(workdir):
 
 @pytest.fixture
 def suspension(workdir):
-    return Suspension(private_dir(workdir, "suspension"))
+    return Suspension(shared_suspension(workdir), os.getegid())
 
 
 def client(workdir, writer, kid, key):

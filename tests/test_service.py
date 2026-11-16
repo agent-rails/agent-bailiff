@@ -19,6 +19,7 @@ from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf import struct_pb2
 from test_agentgateway_calls import message
+from test_control_suspension import shared_suspension
 from test_decide import AGENT_KEY, ISSUER_ID, ISSUER_KEY, NOW, POLICY, PRINCIPAL, SCOPE, TENANT, make_request
 
 from agent_bailiff import cli
@@ -95,7 +96,7 @@ class Deployment:
         for directory in (self.decide, self.custodian, self.control):
             private(directory / "docket-state")
             private(directory / "grpc")
-        private(self.decide / "suspension")
+        self.suspension = shared_suspension(self.ledger_dir)
         write_owned(self.decide / "routes.json", ROUTES)
         write_owned(self.custodian / "routes.json", ROUTES)
         write_owned(
@@ -165,7 +166,7 @@ class Deployment:
             "costs": {"version": 1, "tools": {"deploy.service": 1}},
             "issuers": ISSUERS,
             "ledger": {"path": str(self.ledger), "group": GID},
-            "suspension_dir": str(self.decide / "suspension"),
+            "suspension_dir": str(self.suspension),
             "routes": str(self.decide / "routes.json"),
             "docket": self.docket_client(self.decide),
             "gateway": self.gateway("decide", self.decide),
@@ -188,6 +189,7 @@ class Deployment:
             "credentials": str(self.custodian / "credentials.db"),
             "claims": str(self.custodian / "claims.db"),
             "ledger": {"path": str(self.ledger), "writer_uid": UID, "group": GID},
+            "suspension_dir": str(self.suspension),
             "routes": str(self.custodian / "routes.json"),
             "docket": self.docket_client(self.custodian),
             "gateway": self.gateway("custodian", self.custodian),
@@ -656,3 +658,18 @@ def test_a_service_with_a_bad_config_exits_refused(deployment, capsys):
     os.chmod(deployment.paths["docket"], 0o644)
     assert cli.main(["docket", "run", "--config", str(deployment.paths["docket"])]) == cli.EXIT_REFUSED
     assert "docket refused" in capsys.readouterr().err
+
+
+def test_a_suspend_after_decide_passed_stops_the_running_custodian(stack, live, deployment, capsys):
+    stack.call(live())
+    line = deployment.record_line("decide", "allow")
+    request = live("n-2")
+    decided = check(deployment.sockets["decide"], call_message(request))
+    assert decided.WhichOneof("result") == "pass"
+    assert control(deployment, "suspend", "--record", "-", stdin=line + "\n") == 0
+    metadata = struct_pb2.Struct()
+    metadata.CopyFrom(decided.metadata)
+    released = check(deployment.sockets["custodian"], call_message(request, metadata))
+    assert released.error.reason == "release_refused", released
+    refusals = [record.entry for _, record in deployment.records() if record.entry.hop == "custodian"]
+    assert [(entry.decision, entry.reason) for entry in refusals] == [("release", "ok"), ("refuse", "suspended")]
