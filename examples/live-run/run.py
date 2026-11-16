@@ -250,7 +250,13 @@ class Deployment:
                 "policies": {
                     "mcpAuthorization": {"rules": ['mcp.methodName == "tools/call" || mcp.methodName == "tools/list"']},
                     "requestHeaderModifier": {
-                        "remove": ["authorization", "proxy-authorization", "cookie", CREDENTIAL_HEADER]
+                        "remove": [
+                            "authorization",
+                            "proxy-authorization",
+                            "cookie",
+                            "bailiff-release",
+                            CREDENTIAL_HEADER,
+                        ]
                     },
                     "mcpGuardrails": {
                         "processors": [

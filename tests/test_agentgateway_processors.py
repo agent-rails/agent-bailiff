@@ -25,6 +25,7 @@ DENIED = ext_mcp_pb2.AuthorizationError.PERMISSION_DENIED
 CREDENTIAL_HEADERS = frozenset({"X-Api-Key", "X-Other-Key"})
 AGENT_HEADERS = [
     "authorization",
+    "bailiff-release",
     "cookie",
     "proxy-authorization",
     "x-bailiff-leaf-proof",
