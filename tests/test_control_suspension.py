@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
@@ -131,6 +132,46 @@ def test_a_parent_writable_by_the_group_or_others_counts_as_suspended(directory,
 def test_a_parent_in_another_group_counts_as_suspended(directory):
     assert Suspension(directory, GID + 1).suspended is True
     assert SuspensionView(directory, UID, GID + 1).suspended is True
+
+
+def test_a_parent_owned_by_another_uid_counts_as_suspended(directory, monkeypatch):
+    real_fstat = os.fstat
+    parent = os.stat(directory.parent)
+
+    def foreign_parent(fd):
+        info = real_fstat(fd)
+        if (info.st_dev, info.st_ino) != (parent.st_dev, parent.st_ino):
+            return info
+        fields = list(info)
+        fields[stat.ST_UID] = UID + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", foreign_parent)
+    assert view(directory).suspended is True
+    assert Suspension(directory, GID).suspended is True
+
+
+def test_a_parent_that_cannot_be_inspected_counts_as_suspended_without_leaking(directory, monkeypatch):
+    real_fstat = os.fstat
+    real_open = os.open
+    opened = []
+
+    def tracking_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def failing_fstat(fd):
+        if fd == opened[0]:
+            raise OSError(5, "EIO")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "fstat", failing_fstat)
+    assert view(directory).suspended is True
+    monkeypatch.undo()
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
 
 
 def test_create_refuses_a_parent_writable_by_the_group(directory):
