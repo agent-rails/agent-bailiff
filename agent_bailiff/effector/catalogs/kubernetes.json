@@ -4,8 +4,6 @@
   "operations": [
     {
       "name": "list_pods",
-      "tool": "k8s.pods.list",
-      "identity": "read",
       "call": {
         "group": "",
         "version": "v1",
@@ -37,8 +35,6 @@
     },
     {
       "name": "read_pod_log",
-      "tool": "k8s.pods.log",
-      "identity": "read",
       "call": {
         "group": "",
         "version": "v1",
@@ -69,8 +65,6 @@
     },
     {
       "name": "get_deployment",
-      "tool": "k8s.deployments.get",
-      "identity": "read",
       "call": {
         "group": "apps",
         "version": "v1",
@@ -100,8 +94,6 @@
     },
     {
       "name": "scale_deployment",
-      "tool": "k8s.deployments.scale",
-      "identity": "scale",
       "call": {
         "group": "apps",
         "version": "v1",
