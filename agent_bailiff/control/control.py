@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from agent_warrant.canonical import MAX_SAFE_INTEGER
 from agent_warrant.ledger import LedgerError
 
 from agent_bailiff.control.suspension import SuspensionError
@@ -211,5 +212,5 @@ def _actor(actor: object) -> str:
 
 
 def _check_now(now: object) -> None:
-    if isinstance(now, bool) or not isinstance(now, int) or now < 0:
-        raise ValueError("now must be a non-negative integer")
+    if isinstance(now, bool) or not isinstance(now, int) or not 0 <= now <= MAX_SAFE_INTEGER:
+        raise ValueError(f"now must be an integer between 0 and {MAX_SAFE_INTEGER}")

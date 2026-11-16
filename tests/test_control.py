@@ -453,10 +453,17 @@ def test_an_unavailable_ledger_is_refused_without_an_entry(decider, make_control
     assert docket.entries == []
 
 
-@pytest.mark.parametrize("now", [-1, True, 1.5, "1"])
+@pytest.mark.parametrize("now", [-1, True, 1.5, "1", 2**53])
 def test_an_invalid_clock_is_refused(make_control, now):
     with pytest.raises(ValueError):
         make_control(docket=MemoryDocket()).resume("ops", now)
+
+
+def test_a_revoke_with_an_unsafe_clock_is_not_reported_as_an_invalid_handle(decider, make_control, workdir):
+    allowed_delegated_call(decider, workdir)
+    with pytest.raises(ValueError, match="now must be"):
+        make_control().revoke(record_line(workdir), "root", "ops", 2**53)
+    assert control_entries(workdir) == []
 
 
 def test_control_must_not_verify_its_own_writer(make_control):
