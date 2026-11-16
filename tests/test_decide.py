@@ -502,7 +502,7 @@ def test_reconcile_after_a_restart_recovers_expired_issued_operations_from_the_l
         "reconcile",
         "outcome_unknown",
         decision.op_id,
-        "untracked_after_restart",
+        "untracked_issued_expired",
     )
     assert dict(entry.handles) == {"tenant": TENANT, "task": "task-1"}
     assert restarted.reconcile(NOW + MAX_PROOF_AGE + 1) == ()
@@ -704,3 +704,56 @@ def test_allow_entry_records_the_hash_of_the_clearance_it_released(make_decider,
     [entry] = docket_entries(docket_paths)
     assert entry.decision == "allow"
     assert entry.clearance_digest == token_hash(decision.clearance)
+
+
+def test_reconcile_skips_an_operation_still_being_issued(make_decider, ledger, docket_paths):
+    decider = make_decider()
+    original = ledger.mark_issued
+    seen = {}
+
+    def reconcile_during_issue(tenant, task, op_id, now):
+        result = original(tenant, task, op_id, now)
+        seen.setdefault("reconciled", decider.reconcile(result.expires_at))
+        return result
+
+    ledger.mark_issued = reconcile_during_issue
+    first = decider.check(make_request(nonce="n-1"), NOW)
+    ledger.mark_issued = original
+    second = decider.check(make_request(nonce="n-2"), NOW)
+    assert first.allowed and seen["reconciled"] == ()
+    expires_at = ledger.reservation(TENANT, "task-1", second.op_id, NOW).expires_at
+    assert sorted(decider.reconcile(expires_at)) == sorted((first.op_id, second.op_id))
+    assert decider.reconcile(expires_at + 1) == ()
+
+
+def test_reconcile_survives_another_decider_reconciling_the_same_ledger(make_decider, ledger, docket_paths):
+    one = make_decider()
+    two = make_decider()
+    first = one.check(make_request(nonce="n-1"), NOW)
+    second = one.check(make_request(nonce="n-2"), NOW)
+    expires_at = ledger.reservation(TENANT, "task-1", first.op_id, NOW).expires_at
+    assert sorted(two.reconcile(expires_at)) == sorted((first.op_id, second.op_id))
+    assert one.reconcile(expires_at) == ()
+    assert one.reconcile(expires_at + 1) == ()
+
+
+def test_a_docket_failure_leaves_the_operation_for_the_next_reconcile(make_decider, ledger, docket_paths):
+    first = make_decider().check(make_request(nonce="n-1"), NOW)
+    restarted = make_decider()
+    real = restarted._docket
+
+    class FailingReconcile:
+        def append(self, entry):
+            if entry.decision == "reconcile":
+                raise ConnectionError("docket down")
+            return real.append(entry)
+
+    restarted._docket = FailingReconcile()
+    expires_at = ledger.reservation(TENANT, "task-1", first.op_id, NOW).expires_at
+    with pytest.raises(ConnectionError):
+        restarted.reconcile(expires_at)
+    assert ledger.reservation(TENANT, "task-1", first.op_id, expires_at).state == "issued"
+    restarted._docket = real
+    assert restarted.reconcile(expires_at + 1) == (first.op_id,)
+    reasons = [entry.reason for entry in docket_entries(docket_paths) if entry.decision == "reconcile"]
+    assert reasons == ["untracked_issued_expired"]

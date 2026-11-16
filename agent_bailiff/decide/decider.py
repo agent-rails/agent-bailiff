@@ -27,6 +27,7 @@ from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.signing import token_hash
 
 HOP = "decide"
+MAX_RECONCILE_BATCH = 100
 MAX_TRACE_ID_CHARACTERS = 128
 OUTCOMES = frozenset({"done", "outcome_unknown"})
 
@@ -89,6 +90,7 @@ class Decider:
         self._signing_key = signing_key
         self._costs = costs
         self._issued: dict[str, _Issued] = {}
+        self._in_flight: set[str] = set()
         self._lock = threading.Lock()
 
     def check(self, request: OperationRequest, now: int) -> Decision:
@@ -138,7 +140,13 @@ class Decider:
             expired = [(op_id, issued) for op_id, issued in self._issued.items() if issued.exp <= now]
         reconciled = []
         for op_id, issued in expired:
-            self._ledger.mark_outcome_unknown(issued.tenant, issued.task, op_id, now)
+            try:
+                self._ledger.mark_outcome_unknown(issued.tenant, issued.task, op_id, now)
+            except LedgerRefused as refused:
+                logger.warning("reconcile skipped %s: %s", op_id, refused)
+                with self._lock:
+                    self._issued.pop(op_id, None)
+                continue
             with self._lock:
                 self._issued.pop(op_id, None)
             reconciled.append(op_id)
@@ -151,12 +159,10 @@ class Decider:
                     reason="clearance_expired",
                 )
             )
-        for reservation in self._ledger.issued_expired(now):
+        for reservation in self._ledger.issued_expired(now)[:MAX_RECONCILE_BATCH]:
             with self._lock:
-                if reservation.op_id in self._issued:
+                if reservation.op_id in self._issued or reservation.op_id in self._in_flight:
                     continue
-            self._ledger.mark_outcome_unknown(reservation.tenant_id, reservation.task_id, reservation.op_id, now)
-            reconciled.append(reservation.op_id)
             self._append(
                 Entry(
                     entry_id="",
@@ -169,10 +175,16 @@ class Decider:
                     tenant=reservation.tenant_id,
                     cost=reservation.cost,
                     outcome="outcome_unknown",
-                    reason="untracked_after_restart",
+                    reason="untracked_issued_expired",
                     handles={"tenant": reservation.tenant_id, "task": reservation.task_id},
                 )
             )
+            try:
+                self._ledger.mark_outcome_unknown(reservation.tenant_id, reservation.task_id, reservation.op_id, now)
+            except LedgerRefused as refused:
+                logger.warning("reconcile skipped %s after recording it: %s", reservation.op_id, refused)
+                continue
+            reconciled.append(reservation.op_id)
         return tuple(reconciled)
 
     def _check(self, request: OperationRequest, now: int, entry: Entry) -> Decision:
@@ -236,11 +248,17 @@ class Decider:
             raise _Refusal("suspended", entry)
         op_id = derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest)
         entry = replace(entry, op_id=op_id)
-        expires_at = self._reserve_and_issue(
-            root, links, leaf_binding, op_id, request, operation_args_digest, cost, now, entry
-        )
         with self._lock:
-            self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, entry)
+            self._in_flight.add(op_id)
+        try:
+            expires_at = self._reserve_and_issue(
+                root, links, leaf_binding, op_id, request, operation_args_digest, cost, now, entry
+            )
+            with self._lock:
+                self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, entry)
+        finally:
+            with self._lock:
+                self._in_flight.discard(op_id)
         entry_id = uuid.uuid4().hex
         clearance = Clearance(
             iss=self._config.decider_id,

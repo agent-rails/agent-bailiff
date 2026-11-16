@@ -54,7 +54,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D8. Exactly-once is not a core property
 
-**Decision:** decide reserves and marks an op_id issued, and the custodian claims it once. An issued operation that expires without an outcome is moved to `outcome_unknown` by reconciliation. After a decide restart, reconciliation finds such operations in the ledger (`issued_expired`) and records them with reason `untracked_after_restart` in a new trace.
+**Decision:** decide reserves and marks an op_id issued, and the custodian claims it once. An issued operation that expires without an outcome is moved to `outcome_unknown` by reconciliation. Reconciliation also reads expired issued operations from the ledger (`issued_expired`, at most 100 per pass), so operations left by a restart or another decide process are recorded with reason `untracked_issued_expired` in a new trace. For those, the docket entry is written before the ledger changes, so a failed append is retried on the next pass. Operations still being issued are skipped.
 
 **Why:** the ledger stops an op_id from being issued twice, which gives at-most-once issuance. `ExtMcp` gives no exactly-once execution at the target; that needs a target that honours an idempotency key, so it is a per-target capability.
 
