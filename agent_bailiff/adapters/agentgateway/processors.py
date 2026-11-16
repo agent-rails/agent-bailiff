@@ -89,8 +89,8 @@ class CustodianProcessor:
         clock: Clock = system_clock,
     ) -> None:
         names = frozenset(credential_headers)
-        if not names or not all(isinstance(name, str) and HEADER_NAME.fullmatch(name) for name in names):
-            raise ValueError("credential_headers must be a non-empty set of HTTP field names")
+        if not all(isinstance(name, str) and HEADER_NAME.fullmatch(name) for name in names):
+            raise ValueError("credential_headers must be HTTP field names")
         self._custodian = custodian
         self._routes = routes
         self._clock = clock

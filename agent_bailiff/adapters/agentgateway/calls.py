@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any
 
 from agent_warrant.scope import validate_entry
@@ -10,7 +10,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
-from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.catalog import Argument, OperationCatalog
 from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
@@ -30,7 +30,6 @@ META_TYPES: dict[str, tuple[type, ...]] = {
     "io.modelcontextprotocol/clientCapabilities": (dict,),
 }
 PLACEHOLDER = re.compile(r"\{([a-z][A-Za-z0-9]{0,31})\}")
-LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
@@ -46,7 +45,7 @@ class ToolRoute:
     name: str
     tool: str
     resource: str
-    arguments: frozenset[str] | None = None
+    schema: tuple[Argument, ...] | None = None
 
     def __post_init__(self) -> None:
         for name in ("service", "name", "tool", "resource"):
@@ -57,32 +56,29 @@ class ToolRoute:
         if problem or "*" in self.tool:
             raise ValueError(f"tool must be a concrete scope id: {problem or 'no wildcards'}")
         placeholders = set(PLACEHOLDER.findall(self.resource))
-        if self.arguments is None and placeholders:
-            raise ValueError("a resource template needs an arguments list")
-        if self.arguments is not None:
-            object.__setattr__(self, "arguments", frozenset(self.arguments))
-            if not placeholders <= self.arguments:
-                raise ValueError("every resource placeholder must be a listed argument")
+        if self.schema is None and placeholders:
+            raise ValueError("a resource template needs an argument schema")
+        if self.schema is not None:
+            object.__setattr__(self, "schema", tuple(self.schema))
+            labels = {item.name for item in self.schema if item.kind == "label"}
+            if not placeholders <= labels:
+                raise ValueError("every resource placeholder must be a label argument in the schema")
         filled = PLACEHOLDER.sub("x", self.resource)
         problem = validate_entry(filled)
         if problem or any(character in filled for character in "*{}"):
             raise ValueError(f"resource must be a concrete scope id or template: {problem or 'no wildcards'}")
 
     def resource_for(self, arguments: dict[str, Any]) -> str | None:
-        if self.arguments is None:
+        if self.schema is None:
             return self.resource
-        if not arguments.keys() <= self.arguments:
+        if set(arguments) != {item.name for item in self.schema}:
             return None
-        values = {}
-        for name in PLACEHOLDER.findall(self.resource):
-            value = arguments.get(name)
-            if not isinstance(value, str) or not LABEL.fullmatch(value):
-                return None
-            values[name] = value
-        return PLACEHOLDER.sub(lambda match: values[match.group(1)], self.resource)
+        if not all(item.accepts(arguments[item.name]) for item in self.schema):
+            return None
+        return PLACEHOLDER.sub(lambda match: str(arguments[match.group(1)]), self.resource)
 
 
-ROUTE_FIELDS = frozenset(item.name for item in fields(ToolRoute))
+DOCUMENT_ROUTE_FIELDS = frozenset({"service", "name", "tool", "resource"})
 
 
 class ToolRoutes:
@@ -108,14 +104,9 @@ class ToolRoutes:
             raise ValueError('a route document must be an object with only a "routes" list')
         routes = []
         for item in document["routes"]:
-            if not isinstance(item, dict) or set(item) not in (ROUTE_FIELDS - {"arguments"}, ROUTE_FIELDS):
-                raise ValueError(f"each route must have exactly the fields {', '.join(sorted(ROUTE_FIELDS))}")
-            arguments = item.get("arguments")
-            if arguments is not None and (
-                not isinstance(arguments, list) or not all(isinstance(name, str) for name in arguments)
-            ):
-                raise ValueError("route arguments must be a list of names")
-            routes.append(ToolRoute(**{**item, **({"arguments": frozenset(arguments)} if arguments else {})}))
+            if not isinstance(item, dict) or set(item) != DOCUMENT_ROUTE_FIELDS:
+                raise ValueError(f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}")
+            routes.append(ToolRoute(**item))
         return cls(routes)
 
     @property
@@ -128,8 +119,7 @@ class ToolRoutes:
 
 def routes_from_catalog(service: str, catalog: OperationCatalog) -> ToolRoutes:
     return ToolRoutes(
-        ToolRoute(service, item.name, item.tool, item.resource, frozenset(argument.name for argument in item.arguments))
-        for item in catalog.operations
+        ToolRoute(service, item.name, item.tool, item.resource, item.arguments) for item in catalog.operations
     )
 
 

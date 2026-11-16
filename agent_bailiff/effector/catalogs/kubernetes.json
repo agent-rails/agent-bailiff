@@ -5,38 +5,131 @@
     {
       "name": "list_pods",
       "tool": "k8s.pods.list",
-      "resource": "k8s/{namespace}/pods",
       "identity": "read",
-      "request": {"group": "", "version": "v1", "resource": "pods", "subresource": null, "verb": "list", "query": {"limit": "{limit}"}, "body": null},
-      "arguments": {"namespace": {"kind": "label"}, "limit": {"kind": "integer", "minimum": 1, "maximum": 200}},
-      "response": {"fields": ["metadata.name", "status.phase", "spec.nodeName"], "max_bytes": 65536}
+      "call": {
+        "group": "",
+        "version": "v1",
+        "resource": "pods",
+        "subresource": null,
+        "verb": "list",
+        "query": {
+          "limit": "limit"
+        }
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "limit": {
+          "kind": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "response": {
+        "fields": [
+          "metadata.name",
+          "status.phase",
+          "spec.nodeName"
+        ],
+        "max_bytes": 65536
+      }
     },
     {
       "name": "read_pod_log",
       "tool": "k8s.pods.log",
-      "resource": "k8s/{namespace}/pods/{name}",
       "identity": "read",
-      "request": {"group": "", "version": "v1", "resource": "pods", "subresource": "log", "verb": "get", "query": {"tailLines": "{tailLines}"}, "body": null},
-      "arguments": {"namespace": {"kind": "label"}, "name": {"kind": "label"}, "tailLines": {"kind": "integer", "minimum": 1, "maximum": 500}},
-      "response": {"fields": [], "max_bytes": 65536}
+      "call": {
+        "group": "",
+        "version": "v1",
+        "resource": "pods",
+        "subresource": "log",
+        "verb": "get",
+        "query": {
+          "tailLines": "tailLines"
+        }
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "name": {
+          "kind": "label"
+        },
+        "tailLines": {
+          "kind": "integer",
+          "minimum": 1,
+          "maximum": 500
+        }
+      },
+      "response": {
+        "fields": [],
+        "max_bytes": 65536
+      }
     },
     {
       "name": "get_deployment",
       "tool": "k8s.deployments.get",
-      "resource": "k8s/{namespace}/deployments/{name}",
       "identity": "read",
-      "request": {"group": "apps", "version": "v1", "resource": "deployments", "subresource": null, "verb": "get", "query": {}, "body": null},
-      "arguments": {"namespace": {"kind": "label"}, "name": {"kind": "label"}},
-      "response": {"fields": ["metadata.name", "spec.replicas", "status.replicas", "status.readyReplicas", "status.updatedReplicas"], "max_bytes": 16384}
+      "call": {
+        "group": "apps",
+        "version": "v1",
+        "resource": "deployments",
+        "subresource": null,
+        "verb": "get",
+        "query": {}
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "name": {
+          "kind": "label"
+        }
+      },
+      "response": {
+        "fields": [
+          "metadata.name",
+          "spec.replicas",
+          "status.replicas",
+          "status.readyReplicas",
+          "status.updatedReplicas"
+        ],
+        "max_bytes": 16384
+      }
     },
     {
       "name": "scale_deployment",
       "tool": "k8s.deployments.scale",
-      "resource": "k8s/{namespace}/deployments/{name}",
       "identity": "scale",
-      "request": {"group": "apps", "version": "v1", "resource": "deployments", "subresource": "scale", "verb": "patch", "query": {}, "body": {"spec": {"replicas": "{replicas}"}}},
-      "arguments": {"namespace": {"kind": "label"}, "name": {"kind": "label"}, "replicas": {"kind": "integer", "minimum": 1, "maximum": 10}},
-      "response": {"fields": ["spec.replicas", "status.replicas"], "max_bytes": 4096}
+      "call": {
+        "group": "apps",
+        "version": "v1",
+        "resource": "deployments",
+        "subresource": "scale",
+        "verb": "patch",
+        "query": {}
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "name": {
+          "kind": "label"
+        },
+        "replicas": {
+          "kind": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      },
+      "response": {
+        "fields": [
+          "spec.replicas",
+          "status.replicas"
+        ],
+        "max_bytes": 4096
+      }
     }
   ]
 }

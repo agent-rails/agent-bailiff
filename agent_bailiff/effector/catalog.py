@@ -18,22 +18,26 @@ MAX_RESPONSE_BYTES = 1 << 20
 LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 ARGUMENT_NAME = re.compile(r"[a-z][A-Za-z0-9]{0,31}")
-PLACEHOLDER = re.compile(r"\{([a-z][A-Za-z0-9]{0,31})\}")
-API_GROUP = re.compile(r"([a-z0-9]([-a-z0-9]*[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*")
-API_VERSION = re.compile(r"v[1-9][0-9]*((alpha|beta)[1-9][0-9]*)?")
-API_RESOURCE = re.compile(r"[a-z][a-z0-9]{0,62}")
 FIELD_PATH = re.compile(r"[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*")
-ALLOWED_CALLS = {
-    ("list", None): frozenset({"limit"}),
-    ("get", None): frozenset(),
-    ("get", "scale"): frozenset(),
-    ("get", "log"): frozenset({"tailLines"}),
-    ("patch", "scale"): frozenset(),
-}
-PATH_ARGUMENTS = ("namespace", "name")
-OPERATION_KEYS = frozenset({"name", "tool", "resource", "identity", "request", "arguments", "response"})
-REQUEST_KEYS = frozenset({"group", "version", "resource", "subresource", "verb", "query", "body"})
+OPERATION_KEYS = frozenset({"name", "tool", "identity", "call", "arguments", "response"})
+CALL_KEYS = frozenset({"group", "version", "resource", "subresource", "verb", "query"})
 RESPONSE_KEYS = frozenset({"fields", "max_bytes"})
+
+
+@dataclass(frozen=True)
+class CallShape:
+    named: bool
+    query: frozenset[str]
+    body_argument: str | None
+
+
+ALLOWED_CALLS: Mapping[tuple[str, str, str, str | None, str], CallShape] = {
+    ("", "v1", "pods", None, "list"): CallShape(False, frozenset({"limit"}), None),
+    ("", "v1", "pods", "log", "get"): CallShape(True, frozenset({"tailLines"}), None),
+    ("apps", "v1", "deployments", None, "get"): CallShape(True, frozenset(), None),
+    ("apps", "v1", "deployments", "scale", "get"): CallShape(True, frozenset(), None),
+    ("apps", "v1", "deployments", "scale", "patch"): CallShape(True, frozenset(), "replicas"),
+}
 
 
 class CatalogError(ValueError):
@@ -47,38 +51,64 @@ class Argument:
     minimum: int | None = None
     maximum: int | None = None
 
+    def accepts(self, value: object) -> bool:
+        if self.kind == "label":
+            return isinstance(value, str) and LABEL.fullmatch(value) is not None
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and self.minimum is not None
+            and self.maximum is not None
+            and self.minimum <= value <= self.maximum
+        )
+
 
 @dataclass(frozen=True)
-class KubernetesRequest:
+class KubernetesCall:
     group: str
     version: str
     resource: str
     subresource: str | None
     verb: str
     query: Mapping[str, str]
-    body: Any
+    body_argument: str | None
+    named: bool
+
+    def body(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+        if self.body_argument is None:
+            return None
+        return {"spec": {"replicas": arguments[self.body_argument]}}
 
 
 @dataclass(frozen=True)
 class CatalogOperation:
     name: str
     tool: str
-    resource: str
     identity: str
-    request: KubernetesRequest
+    call: KubernetesCall
     arguments: tuple[Argument, ...]
     response_fields: tuple[str, ...]
     max_response_bytes: int
 
+    @property
+    def resource(self) -> str:
+        template = f"k8s/{{namespace}}/{self.call.resource}"
+        return f"{template}/{{name}}" if self.call.named else template
+
     def argument(self, name: str) -> Argument | None:
         return next((item for item in self.arguments if item.name == name), None)
+
+    def accepts(self, arguments: object) -> bool:
+        if not isinstance(arguments, dict) or set(arguments) != {item.name for item in self.arguments}:
+            return False
+        return all(item.accepts(arguments[item.name]) for item in self.arguments)
 
 
 class OperationCatalog:
     def __init__(self, document: object) -> None:
         if not isinstance(document, dict) or set(document) != {"version", "target", "operations"}:
             raise CatalogError('a catalog must be an object with exactly "version", "target" and "operations"')
-        if document["version"] != CATALOG_VERSION or isinstance(document["version"], bool):
+        if isinstance(document["version"], bool) or document["version"] != CATALOG_VERSION:
             raise CatalogError(f"catalog version must be {CATALOG_VERSION}")
         if document["target"] != "kubernetes":
             raise CatalogError('catalog target must be "kubernetes"')
@@ -121,12 +151,13 @@ def _operation(item: object) -> CatalogOperation:
     if not isinstance(tool, str) or validate_entry(tool) or "*" in tool:
         raise CatalogError(f"{name}: tool must be an exact scope id")
     identity = _text(item, "identity", LABEL)
-    arguments = _arguments(name, item["arguments"])
-    request = _request(name, item["request"], arguments)
-    resource = _resource_template(name, item["resource"], arguments)
-    fields, max_bytes = _response(name, item["response"], request)
-    _check_every_argument_used(name, arguments, request, resource)
-    return CatalogOperation(name, tool, resource, identity, request, arguments, fields, max_bytes)
+    call = _call(name, item["call"])
+    arguments = _arguments(name, item["arguments"], call)
+    fields, max_bytes = _response(name, item["response"], call)
+    operation = CatalogOperation(name, tool, identity, call, arguments, fields, max_bytes)
+    if validate_entry(operation.resource.replace("{namespace}", "x").replace("{name}", "x")):
+        raise CatalogError(f"{name}: derived resource is not a valid scope id")
+    return operation
 
 
 def _text(item: Mapping[str, Any], key: str, pattern: re.Pattern[str]) -> str:
@@ -136,99 +167,52 @@ def _text(item: Mapping[str, Any], key: str, pattern: re.Pattern[str]) -> str:
     return value
 
 
-def _arguments(operation: str, document: object) -> tuple[Argument, ...]:
+def _call(operation: str, document: object) -> KubernetesCall:
+    if not isinstance(document, dict) or set(document) != CALL_KEYS:
+        raise CatalogError(f"{operation}: call must have exactly the fields {', '.join(sorted(CALL_KEYS))}")
+    key = (document["group"], document["version"], document["resource"], document["subresource"], document["verb"])
+    if not all(part is None or isinstance(part, str) for part in key):
+        raise CatalogError(f"{operation}: call fields must be strings or null")
+    shape = ALLOWED_CALLS.get(key)
+    if shape is None:
+        raise CatalogError(f"{operation}: call {key!r} is not in the allowed set")
+    query = document["query"]
+    if not isinstance(query, dict) or set(query) != shape.query:
+        raise CatalogError(f"{operation}: query must name exactly {', '.join(sorted(shape.query)) or 'nothing'}")
+    for parameter, argument in query.items():
+        if not isinstance(argument, str) or not ARGUMENT_NAME.fullmatch(argument):
+            raise CatalogError(f"{operation}: query {parameter} must name an integer argument")
+    group, version, resource, subresource, verb = key
+    return KubernetesCall(group, version, resource, subresource, verb, dict(query), shape.body_argument, shape.named)
+
+
+def _arguments(operation: str, document: object, call: KubernetesCall) -> tuple[Argument, ...]:
     if not isinstance(document, dict):
         raise CatalogError(f"{operation}: arguments must be an object")
+    labels = {"namespace", "name"} if call.named else {"namespace"}
+    integers = set(call.query.values()) | ({call.body_argument} if call.body_argument else set())
+    if set(document) != labels | integers or labels & integers:
+        raise CatalogError(f"{operation}: arguments must be exactly {', '.join(sorted(labels | integers))}")
     arguments = []
-    for name, spec in document.items():
-        if not ARGUMENT_NAME.fullmatch(name):
-            raise CatalogError(f"{operation}: argument name {name!r} is not valid")
-        if not isinstance(spec, dict) or spec.get("kind") not in ("label", "integer"):
-            raise CatalogError(f'{operation}: argument {name} must have kind "label" or "integer"')
-        if spec["kind"] == "label":
-            if set(spec) != {"kind"}:
-                raise CatalogError(f"{operation}: label argument {name} takes no other fields")
+    for name in sorted(document):
+        spec = document[name]
+        if name in labels:
+            if spec != {"kind": "label"}:
+                raise CatalogError(f'{operation}: argument {name} must be {{"kind": "label"}}')
             arguments.append(Argument(name, "label"))
             continue
-        if set(spec) != {"kind", "minimum", "maximum"}:
-            raise CatalogError(f"{operation}: integer argument {name} needs exactly minimum and maximum")
+        if not isinstance(spec, dict) or set(spec) != {"kind", "minimum", "maximum"} or spec["kind"] != "integer":
+            raise CatalogError(f"{operation}: argument {name} must be an integer with minimum and maximum")
         minimum, maximum = spec["minimum"], spec["maximum"]
         if not all(isinstance(value, int) and not isinstance(value, bool) for value in (minimum, maximum)):
             raise CatalogError(f"{operation}: bounds of {name} must be integers")
         if not 0 <= minimum <= maximum <= 100_000:
             raise CatalogError(f"{operation}: bounds of {name} must satisfy 0 <= minimum <= maximum <= 100000")
         arguments.append(Argument(name, "integer", minimum, maximum))
-    if "namespace" not in document or document["namespace"].get("kind") != "label":
-        raise CatalogError(f"{operation}: a namespace label argument is required")
     return tuple(arguments)
 
 
-def _request(operation: str, document: object, arguments: tuple[Argument, ...]) -> KubernetesRequest:
-    if not isinstance(document, dict) or set(document) != REQUEST_KEYS:
-        raise CatalogError(f"{operation}: request must have exactly the fields {', '.join(sorted(REQUEST_KEYS))}")
-    group, version, resource = document["group"], document["version"], document["resource"]
-    if not isinstance(group, str) or (group and not API_GROUP.fullmatch(group)):
-        raise CatalogError(f"{operation}: request group is not valid")
-    if not isinstance(version, str) or not API_VERSION.fullmatch(version):
-        raise CatalogError(f"{operation}: request version is not valid")
-    if not isinstance(resource, str) or not API_RESOURCE.fullmatch(resource):
-        raise CatalogError(f"{operation}: request resource is not valid")
-    subresource, verb = document["subresource"], document["verb"]
-    if (verb, subresource) not in ALLOWED_CALLS:
-        raise CatalogError(f"{operation}: verb {verb!r} with subresource {subresource!r} is not allowed")
-    has_name = any(item.name == "name" and item.kind == "label" for item in arguments)
-    if (verb == "list") == has_name:
-        raise CatalogError(f"{operation}: a name label argument is required for {verb} and refused for list")
-    query = document["query"]
-    if not isinstance(query, dict) or not set(query) <= ALLOWED_CALLS[(verb, subresource)]:
-        raise CatalogError(f"{operation}: query parameters are not allowed for this call")
-    for parameter, value in query.items():
-        _integer_slot(operation, f"query {parameter}", value, arguments)
-    body = document["body"]
-    if (verb == "patch") != (body is not None):
-        raise CatalogError(f"{operation}: a body is required for patch and refused otherwise")
-    if body is not None:
-        _check_body(operation, body, arguments)
-    return KubernetesRequest(group, version, resource, subresource, verb, dict(query), body)
-
-
-def _integer_slot(operation: str, where: str, value: object, arguments: tuple[Argument, ...]) -> str:
-    match = PLACEHOLDER.fullmatch(value) if isinstance(value, str) else None
-    argument = next((item for item in arguments if match and item.name == match.group(1)), None)
-    if argument is None or argument.kind != "integer":
-        raise CatalogError(f"{operation}: {where} must be one integer argument placeholder")
-    return argument.name
-
-
-def _check_body(operation: str, body: object, arguments: tuple[Argument, ...]) -> None:
-    if isinstance(body, dict):
-        if not body:
-            raise CatalogError(f"{operation}: body objects must not be empty")
-        for key, value in body.items():
-            if not FIELD_PATH.fullmatch(key) or "." in key:
-                raise CatalogError(f"{operation}: body key {key!r} is not a plain field name")
-            _check_body(operation, value, arguments)
-        return
-    _integer_slot(operation, "a body value", body, arguments)
-
-
-def _resource_template(operation: str, template: object, arguments: tuple[Argument, ...]) -> str:
-    if not isinstance(template, str):
-        raise CatalogError(f"{operation}: resource must be a string")
-    labels = {item.name for item in arguments if item.kind == "label"}
-    filled = template
-    for name in PLACEHOLDER.findall(template):
-        if name not in labels:
-            raise CatalogError(f"{operation}: resource placeholder {{{name}}} must be a label argument")
-        filled = filled.replace(f"{{{name}}}", "x")
-    if any(character in filled for character in "{}*") or validate_entry(filled):
-        raise CatalogError(f"{operation}: resource template is not a concrete scope id")
-    if "{namespace}" not in template:
-        raise CatalogError(f"{operation}: resource must contain the namespace")
-    return template
-
-
-def _response(operation: str, document: object, request: KubernetesRequest) -> tuple[tuple[str, ...], int]:
+def _response(operation: str, document: object, call: KubernetesCall) -> tuple[tuple[str, ...], int]:
     if not isinstance(document, dict) or set(document) != RESPONSE_KEYS:
         raise CatalogError(f"{operation}: response must have exactly fields and max_bytes")
     fields, max_bytes = document["fields"], document["max_bytes"]
@@ -236,30 +220,6 @@ def _response(operation: str, document: object, request: KubernetesRequest) -> t
         raise CatalogError(f"{operation}: max_bytes must be between 1 and {MAX_RESPONSE_BYTES}")
     if not isinstance(fields, list) or not all(isinstance(item, str) and FIELD_PATH.fullmatch(item) for item in fields):
         raise CatalogError(f"{operation}: fields must be a list of dotted field paths")
-    if (request.subresource == "log") != (not fields):
+    if (call.subresource == "log") != (not fields):
         raise CatalogError(f"{operation}: logs return text with no fields; every other call lists its fields")
     return tuple(fields), max_bytes
-
-
-def _check_every_argument_used(
-    operation: str, arguments: tuple[Argument, ...], request: KubernetesRequest, resource: str
-) -> None:
-    used = set(PLACEHOLDER.findall(resource)) | set(PATH_ARGUMENTS) & {item.name for item in arguments}
-    for value in request.query.values():
-        used |= _body_placeholders(value)
-    used |= _body_placeholders(request.body)
-    unused = {item.name for item in arguments} - used
-    if unused:
-        raise CatalogError(f"{operation}: arguments {', '.join(sorted(unused))} are not used")
-    for item in arguments:
-        if item.kind == "label" and item.name not in PATH_ARGUMENTS:
-            raise CatalogError(f"{operation}: label argument {item.name} must be namespace or name")
-
-
-def _body_placeholders(body: object) -> set[str]:
-    if isinstance(body, dict):
-        return set().union(*(_body_placeholders(value) for value in body.values()))
-    if isinstance(body, str):
-        match = PLACEHOLDER.fullmatch(body)
-        return {match.group(1)} if match else set()
-    return set()
