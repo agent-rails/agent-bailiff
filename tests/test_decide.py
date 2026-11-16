@@ -489,6 +489,25 @@ def test_reconcile_waits_for_clearance_expiry(make_decider, ledger, docket_paths
     assert decider.reconcile(NOW + MAX_PROOF_AGE + 1) == ()
 
 
+def test_reconcile_after_a_restart_recovers_expired_issued_operations_from_the_ledger(
+    make_decider, ledger, docket_paths
+):
+    decision = make_decider().check(make_request(), NOW)
+    restarted = make_decider()
+    assert restarted.reconcile(NOW + MAX_PROOF_AGE - 1) == ()
+    assert restarted.reconcile(NOW + MAX_PROOF_AGE) == (decision.op_id,)
+    assert ledger.reservation(TENANT, "task-1", decision.op_id, NOW + MAX_PROOF_AGE).state == "outcome_unknown"
+    entry = docket_entries(docket_paths)[-1]
+    assert (entry.decision, entry.outcome, entry.op_id, entry.reason) == (
+        "reconcile",
+        "outcome_unknown",
+        decision.op_id,
+        "untracked_after_restart",
+    )
+    assert dict(entry.handles) == {"tenant": TENANT, "task": "task-1"}
+    assert restarted.reconcile(NOW + MAX_PROOF_AGE + 1) == ()
+
+
 def test_record_outcome_marks_done_and_writes_an_entry(make_decider, ledger, docket_paths):
     decider = make_decider()
     decision = decider.check(make_request(), NOW)
