@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import tempfile
@@ -757,3 +758,5 @@ def test_a_docket_failure_leaves_the_operation_for_the_next_reconcile(make_decid
     assert restarted.reconcile(expires_at + 1) == (first.op_id,)
     reasons = [entry.reason for entry in docket_entries(docket_paths) if entry.decision == "reconcile"]
     assert reasons == ["untracked_issued_expired"]
+    traces = {entry.trace_id for entry in docket_entries(docket_paths) if entry.decision == "reconcile"}
+    assert traces == {hashlib.sha256(f"reconcile:{first.op_id}".encode()).hexdigest()[:32]}
