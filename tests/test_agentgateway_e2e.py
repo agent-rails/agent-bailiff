@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import test_custodian
 from test_agentgateway_config import gateway_config
+from test_control import MemoryDocket
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
@@ -24,6 +25,9 @@ from agent_bailiff.adapters.agentgateway.calls import ToolRoute, ToolRoutes
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.control import Control, Suspension
+from agent_bailiff.docket import decode_record
+from agent_bailiff.docket.sink import build_kid_index
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = "v1.7.0"
@@ -473,9 +477,28 @@ def test_check_config_refuses_unsafe_configs_the_gateway_itself_accepts(stack, b
     assert validate_gateway_config(config, stack["expected"])
 
 
-@pytest.mark.skip(reason="revoke and suspend through control land in Phase 6")
-def test_a_revoke_through_control_stops_the_next_call():
-    pass
+def allow_record_line(workdir):
+    index = build_kid_index(test_custodian.WRITERS)
+    for line in (workdir / "docket.log").read_text().splitlines():
+        entry = decode_record(line, index).entry
+        if (entry.hop, entry.decision) == ("decide", "allow"):
+            return line
+    raise AssertionError("no decide allow record")
+
+
+@pytest.mark.parametrize("level", ["agent_key", "task", "tenant", "root"])
+def test_a_revoke_through_control_stops_the_next_call(stack, workdir, writer, private, level):
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
+    control = Control(
+        "control", test_custodian.WRITERS, writer, Suspension(private("suspension")), MemoryDocket(), "control"
+    )
+    control.revoke(allow_record_line(workdir), level, "ops", NOW)
+    later = make_request(nonce="n-2")
+    status, body = stack["agent"].call("deploy_service", later.args, agent_headers(later))
+    assert refused(body, "chain_invalid"), body
+    assert len(stack["upstream"].calls()) == 1
 
 
 OTHER_USER = os.environ.get("AGENT_BAILIFF_TEST_OTHER_USER")
