@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import uuid
@@ -166,7 +167,7 @@ class Decider:
             self._append(
                 Entry(
                     entry_id="",
-                    trace_id=uuid.uuid4().hex,
+                    trace_id=_reconcile_trace_id(reservation.op_id),
                     hop=HOP,
                     component=self._config.decider_id,
                     decision="reconcile",
@@ -363,6 +364,10 @@ class Decider:
         entry_id = uuid.uuid4().hex
         self._docket.append(replace(entry, entry_id=entry_id))
         return entry_id
+
+
+def _reconcile_trace_id(op_id: str) -> str:
+    return hashlib.sha256(f"reconcile:{op_id}".encode()).hexdigest()[:32]
 
 
 def _with_who(entry: Entry, root: TaskRoot, links: tuple[ChainLink, ...], agent_key: str) -> Entry:
