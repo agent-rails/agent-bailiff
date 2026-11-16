@@ -47,6 +47,22 @@ def test_the_shipped_catalog_loads_with_derived_resources_and_bodies():
     assert catalog.operation("list_pods").call.body({}) is None
 
 
+def test_tool_ids_and_identities_are_derived_from_the_call():
+    catalog = OperationCatalog(shipped())
+    assert {item.name: (item.tool, item.identity) for item in catalog.operations} == {
+        "list_pods": ("k8s.pods.list", "read"),
+        "read_pod_log": ("k8s.pods.log", "read"),
+        "get_deployment": ("k8s.deployments.get", "read"),
+        "scale_deployment": ("k8s.deployments.scale", "scale"),
+    }
+    refused(lambda d: scale(d).update(tool="k8s.deployments.get"), "exactly the fields")
+    refused(lambda d: scale(d).update(identity="read"), "exactly the fields")
+
+
+def test_scale_cannot_reach_zero_replicas():
+    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer", "minimum": 0, "maximum": 3}), "1 <=")
+
+
 def test_only_the_listed_calls_are_allowed():
     assert set(ALLOWED_CALLS) == {
         ("", "v1", "pods", None, "list"),
@@ -129,12 +145,12 @@ def test_names_and_tools_must_be_unique():
 
     refused(duplicate, "unique")
 
-    def same_tool(document):
+    def same_call(document):
         other = copy.deepcopy(scale(document))
         other["name"] = "scale_again"
         document["operations"].append(other)
 
-    refused(same_tool, "tools must be unique")
+    refused(same_call, "tools must be unique")
 
 
 def test_top_level_rules():

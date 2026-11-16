@@ -19,24 +19,30 @@ LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 ARGUMENT_NAME = re.compile(r"[a-z][A-Za-z0-9]{0,31}")
 FIELD_PATH = re.compile(r"[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*")
-OPERATION_KEYS = frozenset({"name", "tool", "identity", "call", "arguments", "response"})
+OPERATION_KEYS = frozenset({"name", "call", "arguments", "response"})
 CALL_KEYS = frozenset({"group", "version", "resource", "subresource", "verb", "query"})
 RESPONSE_KEYS = frozenset({"fields", "max_bytes"})
 
 
 @dataclass(frozen=True)
 class CallShape:
+    tool: str
+    identity: str
     named: bool
     query: frozenset[str]
     body_argument: str | None
 
 
 ALLOWED_CALLS: Mapping[tuple[str, str, str, str | None, str], CallShape] = {
-    ("", "v1", "pods", None, "list"): CallShape(False, frozenset({"limit"}), None),
-    ("", "v1", "pods", "log", "get"): CallShape(True, frozenset({"tailLines"}), None),
-    ("apps", "v1", "deployments", None, "get"): CallShape(True, frozenset(), None),
-    ("apps", "v1", "deployments", "scale", "get"): CallShape(True, frozenset(), None),
-    ("apps", "v1", "deployments", "scale", "patch"): CallShape(True, frozenset(), "replicas"),
+    ("", "v1", "pods", None, "list"): CallShape("k8s.pods.list", "read", False, frozenset({"limit"}), None),
+    ("", "v1", "pods", "log", "get"): CallShape("k8s.pods.log", "read", True, frozenset({"tailLines"}), None),
+    ("apps", "v1", "deployments", None, "get"): CallShape("k8s.deployments.get", "read", True, frozenset(), None),
+    ("apps", "v1", "deployments", "scale", "get"): CallShape(
+        "k8s.deployments.scale.get", "read", True, frozenset(), None
+    ),
+    ("apps", "v1", "deployments", "scale", "patch"): CallShape(
+        "k8s.deployments.scale", "scale", True, frozenset(), "replicas"
+    ),
 }
 
 
@@ -73,6 +79,8 @@ class KubernetesCall:
     query: Mapping[str, str]
     body_argument: str | None
     named: bool
+    tool: str
+    identity: str
 
     def body(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.body_argument is None:
@@ -147,14 +155,10 @@ def _operation(item: object) -> CatalogOperation:
     if not isinstance(item, dict) or set(item) != OPERATION_KEYS:
         raise CatalogError(f"each operation must have exactly the fields {', '.join(sorted(OPERATION_KEYS))}")
     name = _text(item, "name", TOOL_NAME)
-    tool = item["tool"]
-    if not isinstance(tool, str) or validate_entry(tool) or "*" in tool:
-        raise CatalogError(f"{name}: tool must be an exact scope id")
-    identity = _text(item, "identity", LABEL)
     call = _call(name, item["call"])
     arguments = _arguments(name, item["arguments"], call)
     fields, max_bytes = _response(name, item["response"], call)
-    operation = CatalogOperation(name, tool, identity, call, arguments, fields, max_bytes)
+    operation = CatalogOperation(name, call.tool, call.identity, call, arguments, fields, max_bytes)
     if validate_entry(operation.resource.replace("{namespace}", "x").replace("{name}", "x")):
         raise CatalogError(f"{name}: derived resource is not a valid scope id")
     return operation
@@ -183,7 +187,18 @@ def _call(operation: str, document: object) -> KubernetesCall:
         if not isinstance(argument, str) or not ARGUMENT_NAME.fullmatch(argument):
             raise CatalogError(f"{operation}: query {parameter} must name an integer argument")
     group, version, resource, subresource, verb = key
-    return KubernetesCall(group, version, resource, subresource, verb, dict(query), shape.body_argument, shape.named)
+    return KubernetesCall(
+        group,
+        version,
+        resource,
+        subresource,
+        verb,
+        dict(query),
+        shape.body_argument,
+        shape.named,
+        shape.tool,
+        shape.identity,
+    )
 
 
 def _arguments(operation: str, document: object, call: KubernetesCall) -> tuple[Argument, ...]:
@@ -206,8 +221,9 @@ def _arguments(operation: str, document: object, call: KubernetesCall) -> tuple[
         minimum, maximum = spec["minimum"], spec["maximum"]
         if not all(isinstance(value, int) and not isinstance(value, bool) for value in (minimum, maximum)):
             raise CatalogError(f"{operation}: bounds of {name} must be integers")
-        if not 0 <= minimum <= maximum <= 100_000:
-            raise CatalogError(f"{operation}: bounds of {name} must satisfy 0 <= minimum <= maximum <= 100000")
+        floor = 1 if name == call.body_argument else 0
+        if not floor <= minimum <= maximum <= 100_000:
+            raise CatalogError(f"{operation}: bounds of {name} must satisfy {floor} <= minimum <= maximum <= 100000")
         arguments.append(Argument(name, "integer", minimum, maximum))
     return tuple(arguments)
 
