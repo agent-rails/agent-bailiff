@@ -50,10 +50,8 @@ class GatewayExpectations:
             raise ValueError("decide and custodian must listen on different sockets")
         if not self.services or not all(isinstance(item, str) and item for item in self.services):
             raise ValueError("services must be a non-empty set of non-empty str")
-        if not self.credential_headers or not all(
-            isinstance(item, str) and HEADER_NAME.fullmatch(item) for item in self.credential_headers
-        ):
-            raise ValueError("credential_headers must be a non-empty set of HTTP field names")
+        if not all(isinstance(item, str) and HEADER_NAME.fullmatch(item) for item in self.credential_headers):
+            raise ValueError("credential_headers must be HTTP field names")
 
 
 def validate_gateway_config(document: object, expected: GatewayExpectations) -> tuple[str, ...]:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_bailiff.effector.catalog import CatalogError, OperationCatalog
+from agent_bailiff.effector.catalog import ALLOWED_CALLS, CatalogError, OperationCatalog
 
 SHIPPED = Path(__file__).resolve().parent.parent / "agent_bailiff" / "effector" / "catalogs" / "kubernetes.json"
 
@@ -14,32 +14,16 @@ def shipped():
     return json.loads(SHIPPED.read_text())
 
 
+def named(document, name):
+    return next(item for item in document["operations"] if item["name"] == name)
+
+
 def scale(document):
-    return next(item for item in document["operations"] if item["name"] == "scale_deployment")
+    return named(document, "scale_deployment")
 
 
 def listing(document):
-    return next(item for item in document["operations"] if item["name"] == "list_pods")
-
-
-def test_the_shipped_catalog_loads():
-    catalog = OperationCatalog.load(SHIPPED)
-    assert {item.name for item in catalog.operations} == {
-        "list_pods",
-        "read_pod_log",
-        "get_deployment",
-        "scale_deployment",
-    }
-    operation = catalog.operation("scale_deployment")
-    assert operation.request.subresource == "scale" and operation.request.verb == "patch"
-    assert operation.argument("replicas").maximum == 10
-
-
-def test_the_digest_is_stable_and_changes_with_the_catalog():
-    assert OperationCatalog(shipped()).digest == OperationCatalog(shipped()).digest
-    changed = shipped()
-    scale(changed)["arguments"]["replicas"]["maximum"] = 11
-    assert OperationCatalog(changed).digest != OperationCatalog(shipped()).digest
+    return named(document, "list_pods")
 
 
 def refused(change, match):
@@ -49,107 +33,86 @@ def refused(change, match):
         OperationCatalog(document)
 
 
-def test_an_unknown_top_level_field_is_refused():
-    refused(lambda d: d.update(extra=1), "exactly")
+def test_the_shipped_catalog_loads_with_derived_resources_and_bodies():
+    catalog = OperationCatalog.load(SHIPPED)
+    resources = {item.name: item.resource for item in catalog.operations}
+    assert resources == {
+        "list_pods": "k8s/{namespace}/pods",
+        "read_pod_log": "k8s/{namespace}/pods/{name}",
+        "get_deployment": "k8s/{namespace}/deployments/{name}",
+        "scale_deployment": "k8s/{namespace}/deployments/{name}",
+    }
+    operation = catalog.operation("scale_deployment")
+    assert operation.call.body({"namespace": "staging", "name": "api", "replicas": 3}) == {"spec": {"replicas": 3}}
+    assert catalog.operation("list_pods").call.body({}) is None
 
 
-def test_another_version_or_target_is_refused():
-    refused(lambda d: d.update(version=2), "version")
-    refused(lambda d: d.update(target="aws"), "target")
-
-
-def test_an_unknown_operation_field_is_refused():
-    refused(lambda d: scale(d).update(extra=1), "exactly the fields")
+def test_only_the_listed_calls_are_allowed():
+    assert set(ALLOWED_CALLS) == {
+        ("", "v1", "pods", None, "list"),
+        ("", "v1", "pods", "log", "get"),
+        ("apps", "v1", "deployments", None, "get"),
+        ("apps", "v1", "deployments", "scale", "get"),
+        ("apps", "v1", "deployments", "scale", "patch"),
+    }
 
 
 @pytest.mark.parametrize(
-    ("verb", "subresource"),
-    [("delete", None), ("patch", None), ("update", "scale"), ("create", None), ("patch", "status"), ("get", "exec")],
+    "call",
+    [
+        {"resource": "secrets", "group": "", "subresource": None, "verb": "get"},
+        {"resource": "configmaps", "group": "", "subresource": None, "verb": "get"},
+        {"resource": "deployments", "group": "apps", "subresource": None, "verb": "patch"},
+        {"resource": "deployments", "group": "apps", "subresource": None, "verb": "delete"},
+        {"resource": "statefulsets", "group": "apps", "subresource": "scale", "verb": "patch"},
+        {"resource": "deployments", "group": "", "subresource": "scale", "verb": "patch"},
+        {"resource": "deployments", "group": "apps", "subresource": "status", "verb": "patch"},
+        {"resource": "serviceaccounts", "group": "", "subresource": "token", "verb": "create"},
+        {"version": "v1beta1"},
+        {"resource": ["deployments"]},
+    ],
 )
-def test_calls_outside_the_allowed_set_are_refused(verb, subresource):
-    def change(document):
-        scale(document)["request"].update(verb=verb, subresource=subresource)
-
-    refused(change, "not allowed")
+def test_calls_outside_the_allowed_set_are_refused(call):
+    refused(lambda d: scale(d)["call"].update(call), "allowed set|strings or null")
 
 
-def test_a_list_without_a_namespace_argument_is_refused():
-    def change(document):
-        del listing(document)["arguments"]["namespace"]
-        listing(document)["resource"] = "k8s/all/pods"
-
-    refused(change, "namespace label argument is required")
+def test_unknown_operation_or_call_fields_are_refused():
+    refused(lambda d: scale(d).update(resource="k8s/prod/pods/{namespace}"), "exactly the fields")
+    refused(lambda d: scale(d).update(body={"spec": {"paused": "{replicas}"}}), "exactly the fields")
+    refused(lambda d: scale(d)["call"].update(body={}), "exactly the fields")
 
 
-def test_a_list_with_a_name_argument_is_refused():
-    def change(document):
-        listing(document)["arguments"]["name"] = {"kind": "label"}
-
-    refused(change, "refused for list")
-
-
-def test_a_get_without_a_name_argument_is_refused():
-    def change(document):
-        operation = scale(document)
-        del operation["arguments"]["name"]
-        operation["resource"] = "k8s/{namespace}/deployments"
-
-    refused(change, "name label argument is required")
+def test_the_query_must_name_exactly_the_allowed_parameters():
+    refused(lambda d: listing(d)["call"]["query"].update(fieldSelector="limit"), "query must name exactly")
+    refused(lambda d: listing(d)["call"].update(query={}), "query must name exactly")
+    refused(lambda d: scale(d)["call"].update(query={"limit": "replicas"}), "query must name exactly")
 
 
-def test_a_free_string_argument_is_refused():
-    refused(lambda d: scale(d)["arguments"].update(reason={"kind": "string"}), "kind")
-
-
-def test_an_integer_argument_needs_bounds():
-    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer"}), "minimum and maximum")
+def test_the_arguments_must_match_the_call_exactly():
+    refused(lambda d: listing(d)["arguments"].update(name={"kind": "label"}), "arguments must be exactly")
+    refused(lambda d: scale(d)["arguments"].pop("name"), "arguments must be exactly")
+    refused(lambda d: scale(d)["arguments"].pop("replicas"), "arguments must be exactly")
     refused(
-        lambda d: scale(d)["arguments"].update(replicas={"kind": "integer", "minimum": 5, "maximum": 1}),
-        "bounds",
+        lambda d: scale(d)["arguments"].update(paused={"kind": "integer", "minimum": 0, "maximum": 1}),
+        "arguments must be exactly",
     )
+
+    def query_names_a_missing_argument(document):
+        listing(document)["call"]["query"]["limit"] = "count"
+
+    refused(query_names_a_missing_argument, "arguments must be exactly")
+
+
+def test_argument_kinds_and_bounds_are_strict():
+    refused(lambda d: scale(d)["arguments"].update(namespace={"kind": "label", "default": "x"}), "label")
+    refused(lambda d: scale(d)["arguments"].update(name={"kind": "string"}), "label")
+    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "label"}), "integer")
+    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer"}), "integer")
+    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer", "minimum": 5, "maximum": 1}), "bounds")
     refused(
         lambda d: scale(d)["arguments"].update(replicas={"kind": "integer", "minimum": True, "maximum": 5}),
         "integers",
     )
-
-
-def test_a_label_argument_other_than_namespace_or_name_is_refused():
-    def change(document):
-        operation = scale(document)
-        operation["arguments"]["container"] = {"kind": "label"}
-        operation["resource"] = "k8s/{namespace}/deployments/{name}/{container}"
-
-    refused(change, "must be namespace or name")
-
-
-def test_an_unused_argument_is_refused():
-    refused(
-        lambda d: scale(d)["arguments"].update(extra={"kind": "integer", "minimum": 0, "maximum": 1}),
-        "not used",
-    )
-
-
-def test_a_body_with_a_literal_or_a_dotted_key_is_refused():
-    refused(lambda d: scale(d)["request"].update(body={"spec": {"replicas": 3}}), "placeholder")
-    refused(lambda d: scale(d)["request"].update(body={"spec": {"template": "x"}}), "placeholder")
-    refused(lambda d: scale(d)["request"].update(body={"spec.replicas": "{replicas}"}), "plain field name")
-    refused(lambda d: scale(d)["request"].update(body={"spec": {}}), "empty")
-
-
-def test_a_body_is_required_for_patch_and_refused_otherwise():
-    refused(lambda d: scale(d)["request"].update(body=None), "body is required")
-    refused(lambda d: listing(d)["request"].update(body={"x": "{limit}"}), "body is required")
-
-
-def test_a_query_parameter_outside_the_call_is_refused():
-    refused(lambda d: listing(d)["request"]["query"].update(fieldSelector="{limit}"), "query parameters")
-    refused(lambda d: listing(d)["request"]["query"].update(limit="50"), "placeholder")
-
-
-def test_a_resource_template_must_be_concrete_and_contain_the_namespace():
-    refused(lambda d: scale(d).update(resource="k8s/*/deployments/{name}"), "concrete")
-    refused(lambda d: scale(d).update(resource="k8s/deployments/{name}"), "namespace")
-    refused(lambda d: scale(d).update(resource="k8s/{namespace}/deployments/{replicas}"), "label argument")
 
 
 def test_response_rules():
@@ -157,11 +120,7 @@ def test_response_rules():
     refused(lambda d: scale(d)["response"].update(max_bytes=0), "max_bytes")
     refused(lambda d: scale(d)["response"].update(max_bytes=(1 << 20) + 1), "max_bytes")
     refused(lambda d: scale(d)["response"].update(fields=["spec..replicas"]), "dotted")
-
-    def log_with_fields(document):
-        next(item for item in document["operations"] if item["name"] == "read_pod_log")["response"]["fields"] = ["x"]
-
-    refused(log_with_fields, "logs return text")
+    refused(lambda d: named(d, "read_pod_log")["response"].update(fields=["x"]), "logs return text")
 
 
 def test_names_and_tools_must_be_unique():
@@ -178,12 +137,34 @@ def test_names_and_tools_must_be_unique():
     refused(same_tool, "tools must be unique")
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("group", "Apps"), ("version", "1"), ("version", "v1beta"), ("resource", "Deployments"), ("resource", "")],
-)
-def test_invalid_api_coordinates_are_refused(field, value):
-    refused(lambda d: scale(d)["request"].update({field: value}), field)
+def test_top_level_rules():
+    refused(lambda d: d.update(extra=1), "exactly")
+    refused(lambda d: d.update(version=2), "version")
+    refused(lambda d: d.update(version=True), "version")
+    refused(lambda d: d.update(target="aws"), "target")
+    refused(lambda d: d.update(operations=[]), "non-empty")
+
+
+def test_operation_arguments_are_checked_against_the_schema():
+    operation = OperationCatalog(shipped()).operation("scale_deployment")
+    assert operation.accepts({"namespace": "staging", "name": "api", "replicas": 3})
+    for arguments in (
+        {"namespace": "staging", "name": "api"},
+        {"namespace": "staging", "name": "api", "replicas": 11},
+        {"namespace": "staging", "name": "api", "replicas": True},
+        {"namespace": "staging", "name": "api", "replicas": "3"},
+        {"namespace": "Staging", "name": "api", "replicas": 3},
+        {"namespace": "staging", "name": "api", "replicas": 3, "kind": "StatefulSet"},
+        ["staging"],
+    ):
+        assert not operation.accepts(arguments), arguments
+
+
+def test_the_digest_is_stable_and_changes_with_the_catalog():
+    assert OperationCatalog(shipped()).digest == OperationCatalog(shipped()).digest
+    changed = shipped()
+    scale(changed)["arguments"]["replicas"]["maximum"] = 9
+    assert OperationCatalog(changed).digest != OperationCatalog(shipped()).digest
 
 
 def test_load_refuses_invalid_json_and_oversized_files(tmp_path):

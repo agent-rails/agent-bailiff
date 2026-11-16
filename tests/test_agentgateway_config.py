@@ -324,7 +324,6 @@ def test_malformed_documents_are_refused(document):
         {"custodian_socket": Path("relative.sock")},
         {"custodian_socket": DECIDE_SOCKET},
         {"services": frozenset()},
-        {"credential_headers": frozenset()},
         {"credential_headers": frozenset({"bad header"})},
     ],
 )

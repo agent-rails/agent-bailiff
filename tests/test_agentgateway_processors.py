@@ -274,7 +274,7 @@ def test_custodian_never_removes_the_header_it_releases():
     assert "cookie" in result.header_mutation.remove
 
 
-@pytest.mark.parametrize("headers", [frozenset(), frozenset({"bad header"}), frozenset({""})])
+@pytest.mark.parametrize("headers", [frozenset({"bad header"}), frozenset({""})])
 def test_custodian_processor_needs_valid_credential_header_names(headers):
     with pytest.raises(ValueError):
         CustodianProcessor(FakeCustodian(), ROUTES, headers)
