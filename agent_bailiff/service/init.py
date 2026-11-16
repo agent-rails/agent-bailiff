@@ -10,7 +10,7 @@ from typing import Any
 from agent_warrant.identity import encode_public_key
 
 from agent_bailiff.adapters.agentgateway.calls import parse_strict_json
-from agent_bailiff.control.suspension import create_suspension_directory
+from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.files import create_owned
@@ -38,10 +38,6 @@ DEFAULT_RATE_WINDOW = 60
 
 class InitError(Exception):
     pass
-
-
-def suspension_directory(ledger: Path) -> Path:
-    return ledger.with_name(f"{ledger.name}.suspension")
 
 
 def read_pin(path: Path) -> PublicKeyRecord:
@@ -82,7 +78,6 @@ def init_decide(
         "costs": {"version": 1, "tools": {}},
         "issuers": {},
         "ledger": {"path": str(ledger), "group": ledger_group},
-        "suspension_dir": str(suspension),
         "routes": str(directory / ROUTES),
         "docket": _docket_client(directory, docket),
         "gateway": _gateway(directory, gateway),
@@ -127,7 +122,6 @@ def init_custodian(
         "credentials": str(directory / "credentials.db"),
         "claims": str(directory / "claims.db"),
         "ledger": {"path": str(ledger), "writer_uid": ledger_uid, "group": ledger_group},
-        "suspension_dir": str(suspension_directory(ledger)),
         "routes": str(directory / ROUTES),
         "docket": _docket_client(directory, docket),
         "gateway": _gateway(directory, gateway),

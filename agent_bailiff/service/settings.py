@@ -11,6 +11,7 @@ from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.calls import parse_strict_json
+from agent_bailiff.control.suspension import suspension_directory
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
@@ -27,12 +28,11 @@ TENANT_KEYS = frozenset({"principals", "principal_prefixes"})
 BINDING_KEYS = frozenset({"tenant", "tool", "resource", "credential_id", "target", "custodian"})
 DECIDE_KEYS = frozenset(
     {"name", "key", "max_proof_age", "reconcile_seconds", "custodians", "bindings", "policy", "costs", "issuers"}
-    | {"ledger", "suspension_dir", "routes", "docket", "gateway"}
+    | {"ledger", "routes", "docket", "gateway"}
 )
 CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
-    | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "suspension_dir"}
-    | {"routes"}
+    | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
     | {"docket", "gateway"}
 )
 DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "allowed_uids", "writers"})
@@ -225,7 +225,7 @@ def parse_decide(document: object) -> DecideSettings:
         costs=_costs(config),
         issuers=_issuers(config),
         ledger=SharedLedgerSettings(ledger.path("path"), ledger.os_id("group")),
-        suspension_dir=config.path("suspension_dir"),
+        suspension_dir=suspension_directory(ledger.path("path")),
         routes=config.path("routes"),
         docket=_docket_client(config),
         gateway=_gateway(config),
@@ -256,7 +256,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         credentials=config.path("credentials"),
         claims=config.path("claims"),
         ledger=ReadOnlyLedgerSettings(ledger.path("path"), ledger.os_id("writer_uid"), ledger.os_id("group")),
-        suspension_dir=config.path("suspension_dir"),
+        suspension_dir=suspension_directory(ledger.path("path")),
         routes=config.path("routes"),
         docket=_docket_client(config),
         gateway=_gateway(config),

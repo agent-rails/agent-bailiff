@@ -12,6 +12,7 @@ from agent_bailiff.control.suspension import (
     SuspensionError,
     SuspensionView,
     create_suspension_directory,
+    suspension_directory,
 )
 
 UID = os.geteuid()
@@ -19,7 +20,11 @@ GID = os.getegid()
 
 
 def shared_suspension(parent):
-    path = parent / "suspension"
+    ledger_dir = parent / "ledger"
+    ledger_dir.mkdir(mode=0o750)
+    os.chown(ledger_dir, -1, GID)
+    os.chmod(ledger_dir, 0o750)
+    path = suspension_directory(ledger_dir / "ledger.db")
     create_suspension_directory(path, GID)
     return path
 
@@ -108,6 +113,53 @@ def test_a_missing_directory_counts_as_suspended(directory):
     shutil.rmtree(directory)
     assert Suspension(directory, GID).suspended is True
     assert view(directory).suspended is True
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o757, 0o777])
+def test_a_parent_writable_by_the_group_or_others_counts_as_suspended(directory, mode):
+    Suspension(directory, GID).suspend({"actor": "ops"})
+    os.chmod(directory.parent, mode)
+    try:
+        assert Suspension(directory, GID).suspended is True
+        assert view(directory).suspended is True
+        with pytest.raises(SuspensionError):
+            Suspension(directory, GID).resume()
+    finally:
+        os.chmod(directory.parent, 0o750)
+
+
+def test_a_parent_in_another_group_counts_as_suspended(directory):
+    assert Suspension(directory, GID + 1).suspended is True
+    assert SuspensionView(directory, UID, GID + 1).suspended is True
+
+
+def test_create_refuses_a_parent_writable_by_the_group(directory):
+    os.chmod(directory.parent, 0o770)
+    try:
+        with pytest.raises(SuspensionError):
+            create_suspension_directory(directory.parent / "other.suspension", GID)
+    finally:
+        os.chmod(directory.parent, 0o750)
+    assert not (directory.parent / "other.suspension").exists()
+
+
+def test_create_refuses_an_existing_path(directory):
+    with pytest.raises(FileExistsError):
+        create_suspension_directory(directory, GID)
+
+
+def test_create_refuses_a_symlink_planted_at_the_path(directory):
+    target = directory.parent / "target"
+    target.mkdir(mode=0o700)
+    planted = directory.parent / "planted.suspension"
+    planted.symlink_to(target)
+    with pytest.raises(FileExistsError):
+        create_suspension_directory(planted, GID)
+    assert os.stat(target).st_mode & 0o777 == 0o700
+
+
+def test_the_path_is_derived_from_the_ledger():
+    assert suspension_directory(Path("/srv/bailiff/ledger.db")) == Path("/srv/bailiff/ledger.db.suspension")
 
 
 def test_a_symlinked_directory_counts_as_suspended(directory):

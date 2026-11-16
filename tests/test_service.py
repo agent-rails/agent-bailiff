@@ -19,11 +19,11 @@ from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from google.protobuf import struct_pb2
 from test_agentgateway_calls import message
-from test_control_suspension import shared_suspension
 from test_decide import AGENT_KEY, ISSUER_ID, ISSUER_KEY, NOW, POLICY, PRINCIPAL, SCOPE, TENANT, make_request
 
 from agent_bailiff import cli
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
+from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
 from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket import DocketClient, decode_record
@@ -96,7 +96,8 @@ class Deployment:
         for directory in (self.decide, self.custodian, self.control):
             private(directory / "docket-state")
             private(directory / "grpc")
-        self.suspension = shared_suspension(self.ledger_dir)
+        self.suspension = suspension_directory(self.ledger)
+        create_suspension_directory(self.suspension, GID)
         write_owned(self.decide / "routes.json", ROUTES)
         write_owned(self.custodian / "routes.json", ROUTES)
         write_owned(
@@ -166,7 +167,6 @@ class Deployment:
             "costs": {"version": 1, "tools": {"deploy.service": 1}},
             "issuers": ISSUERS,
             "ledger": {"path": str(self.ledger), "group": GID},
-            "suspension_dir": str(self.suspension),
             "routes": str(self.decide / "routes.json"),
             "docket": self.docket_client(self.decide),
             "gateway": self.gateway("decide", self.decide),
@@ -189,7 +189,6 @@ class Deployment:
             "credentials": str(self.custodian / "credentials.db"),
             "claims": str(self.custodian / "claims.db"),
             "ledger": {"path": str(self.ledger), "writer_uid": UID, "group": GID},
-            "suspension_dir": str(self.suspension),
             "routes": str(self.custodian / "routes.json"),
             "docket": self.docket_client(self.custodian),
             "gateway": self.gateway("custodian", self.custodian),
