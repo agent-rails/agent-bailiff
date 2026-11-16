@@ -12,16 +12,32 @@ SUSPENSION_FILE = "suspended"
 DIRECTORY_MODE = 0o750
 FILE_MODE = 0o640
 READER_FORBIDDEN_DIRECTORY_BITS = 0o027
+PARENT_FORBIDDEN_BITS = stat.S_IWGRP | stat.S_IWOTH
 
 
 class SuspensionError(Exception):
     pass
 
 
+def suspension_directory(ledger: Path) -> Path:
+    return ledger.with_name(f"{ledger.name}.suspension")
+
+
 def create_suspension_directory(directory: Path, group: int) -> None:
-    os.mkdir(directory, 0o700)
-    os.chown(directory, -1, group)
-    os.chmod(directory, DIRECTORY_MODE)
+    parent_fd = _open_parent(directory, group)
+    try:
+        os.mkdir(directory.name, 0o700, dir_fd=parent_fd)
+        fd = os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise SuspensionError(f"{directory} changed while it was being created")
+        os.fchown(fd, -1, group)
+        os.fchmod(fd, DIRECTORY_MODE)
+    finally:
+        os.close(fd)
 
 
 class Suspension:
@@ -70,7 +86,7 @@ class Suspension:
             os.close(directory_fd)
 
     def _open_directory(self) -> int:
-        fd = _open_directory(self._directory)
+        fd = _open_directory(self._directory, self._group)
         info = os.fstat(fd)
         if (
             not stat.S_ISDIR(info.st_mode)
@@ -94,7 +110,7 @@ class SuspensionView:
     @property
     def suspended(self) -> bool:
         try:
-            fd = _open_directory(self._directory)
+            fd = _open_directory(self._directory, self._group)
         except SuspensionError:
             return True
         info = os.fstat(fd)
@@ -109,11 +125,26 @@ class SuspensionView:
         return _holds_suspension(fd)
 
 
-def _open_directory(directory: Path) -> int:
+def _open_parent(directory: Path, group: int) -> int:
     try:
-        return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise SuspensionError(f"cannot open the suspension directory's parent: {exc.strerror}") from None
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & PARENT_FORBIDDEN_BITS or info.st_gid != group:
+        os.close(fd)
+        raise SuspensionError(f"{directory.parent} must be in group {group} and not group or other writable")
+    return fd
+
+
+def _open_directory(directory: Path, group: int) -> int:
+    parent_fd = _open_parent(directory, group)
+    try:
+        return os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     except OSError as exc:
         raise SuspensionError(f"cannot open the suspension directory: {exc.strerror}") from None
+    finally:
+        os.close(parent_fd)
 
 
 def _holds_suspension(directory_fd: int) -> bool:
