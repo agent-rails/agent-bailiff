@@ -10,7 +10,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
-from agent_bailiff.effector.catalog import Argument, OperationCatalog
+from agent_bailiff.effector.catalog import CATALOG_TOOL_PREFIX, Argument, OperationCatalog
 from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
@@ -58,6 +58,8 @@ class ToolRoute:
         placeholders = set(PLACEHOLDER.findall(self.resource))
         if self.schema is None and placeholders:
             raise ValueError("a resource template needs an argument schema")
+        if self.schema is None and self.tool.startswith(CATALOG_TOOL_PREFIX):
+            raise ValueError(f"{CATALOG_TOOL_PREFIX}* tools are routed only from their catalog")
         if self.schema is not None:
             object.__setattr__(self, "schema", tuple(self.schema))
             labels = {item.name for item in self.schema if item.kind == "label"}

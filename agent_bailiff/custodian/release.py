@@ -16,6 +16,10 @@ RELEASE_LIFETIME = 30
 MAX_RELEASE_BYTES = 16384
 
 
+class ReleaseTooLarge(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class Release:
     iss: str
@@ -67,7 +71,10 @@ class ReleaseSigner:
         problem = _field_problem(body)
         if problem:
             raise ValueError(problem)
-        return sign(self._key, self._kid, RELEASE_TYP, body)
+        token = sign(self._key, self._kid, RELEASE_TYP, body)
+        if len(token) > MAX_RELEASE_BYTES:
+            raise ReleaseTooLarge(f"release is longer than {MAX_RELEASE_BYTES} characters")
+        return token
 
 
 def verify_release(
