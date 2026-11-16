@@ -11,8 +11,8 @@ An agent that holds API keys can use them for anything, including after a prompt
 agent-bailiff splits that job:
 
 - Each effect is bounded to the agent's task: one call, one operation, one credential release.
-- The component that decides holds no secrets. The component that holds secrets re-checks the authority itself before every decrypt, so a compromised decider cannot bulk-decrypt the store.
-- Every decision and release is a signed docket entry, joined by trace id and operation id.
+- The component that decides holds no credentials. The component that holds secrets re-checks the authority itself before every decrypt, so a compromised decider cannot bulk-decrypt the store.
+- Each allowed decision and each credential release needs an acknowledged, signed docket entry, joined by trace id and operation id.
 
 ## How it works
 
@@ -26,11 +26,11 @@ flowchart LR
     C --> K
 ```
 
-1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no secrets.
+1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no credentials.
 2. **custodian** re-verifies the chain, proof and reservation on its own, applies canary checks, decrypts the credential, checks suspension, then claims the operation once under a per-task rate limit and sets the credential as a header on the upstream request. It removes the agent's own `authorization`, `cookie` and credential headers.
 3. **docket** is a separate process that appends a signed, hash-chained entry for each decision and release.
 
-Each component is meant to run as its own OS user. Each listens on a Unix socket that accepts only its configured peer uids. The ledger and the suspension directory (`<ledger>.suspension`, mode 0750) are owned by decide and shared read-only with the custodian through the ledger group. Their parent directory must be owned by root or decide, in that group, and not group or other writable.
+Each component is meant to run as its own OS user. Decide, custodian and docket listen on Unix sockets that accept only their configured peer uids; control runs on demand as decide's uid. The ledger and the suspension directory (`<ledger>.suspension`, mode 0750) are owned by decide and shared read-only with the custodian through the ledger group. Their parent directory must be owned by root or decide, in that group, and not group or other writable.
 
 ## What it does not protect
 
@@ -80,7 +80,7 @@ It refuses any config the processors cannot enforce, such as `failOpen`, a missi
 
 Each component has its own commands, run as that component's uid:
 
-- `agent-bailiff init {decide,custodian,control,docket}` creates the component's signing key and a config that denies everything until it is filled in.
+- `agent-bailiff init {decide,custodian,control,docket}` creates the component's config; for decide, custodian and control it also creates the signing key. Decide starts with a deny-all policy and the custodian with no credential bindings.
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
 - `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
 

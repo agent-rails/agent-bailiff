@@ -12,7 +12,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D1. A decision core and a separate credential custodian
 
-**Decision:** decide holds no secrets and issues a signed clearance. The custodian holds the credentials and re-verifies the authority itself before every decrypt.
+**Decision:** decide holds no credentials and no credential encryption key; it holds only its own signing key, and issues a signed clearance. The custodian holds the credentials and re-verifies the authority itself before every decrypt.
 
 **Why:** if the component that decides also holds the keys, one compromise exposes every credential. With the split, a compromised decide obtains only credentials covered by authority the caller can present, at a bounded rate.
 
@@ -36,7 +36,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D5. Per-component Ed25519 keys, pinned by key id
 
-**Decision:** `agent-bailiff init` generates each component's key under that component's uid. Verifiers pin peer public keys by key id in config they own. Records are Ed25519 over agent-warrant's canonical JSON, with `typ`, `v` and `kid` in the payload. Decoding is strict.
+**Decision:** `agent-bailiff init` generates the decide, custodian and control keys, each under that component's uid; the docket's init writes a sink config with the pinned writer public keys. Verifiers pin peer public keys by key id in config they own. Records are Ed25519 over agent-warrant's canonical JSON, with `typ`, `v` and `kid` in the payload. Decoding is strict.
 
 **Why:** no component can sign as another, and a verifier never takes keys from the party it verifies.
 
@@ -54,9 +54,9 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D8. Exactly-once is not a core property
 
-**Decision:** decide reserves and marks an op_id issued, and the custodian claims it once. An operation that is issued but never reported is moved to `outcome_unknown` by reconciliation.
+**Decision:** decide reserves and marks an op_id issued, and the custodian claims it once. While decide runs, an operation it issued that expires without an outcome is moved to `outcome_unknown` by reconciliation. That tracking is in memory and does not survive a restart.
 
-**Why:** `ExtMcp` gives at-most-once issuance. Exactly-once needs a target that honours an idempotency key, so it is a per-target capability.
+**Why:** the ledger stops an op_id from being issued twice, which gives at-most-once issuance. `ExtMcp` gives no exactly-once execution at the target; that needs a target that honours an idempotency key, so it is a per-target capability.
 
 ## D9. Credential tiers
 

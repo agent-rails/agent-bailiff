@@ -12,7 +12,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
 | agentgateway | its own uid | gateway config | the agent's MCP connection |
 
-No component holds another component's private key. Each verifier pins the peer public keys it accepts by key id in config it owns.
+Components keep separate private keys. Signed clearances and docket records are verified against public keys each verifier pins by key id in config it owns; Unix socket peers are checked by uid.
 
 ```mermaid
 flowchart LR
@@ -50,14 +50,14 @@ flowchart LR
    - writes a signed docket entry and waits for the acknowledgement;
    - sets the credential as a header on the upstream request.
 
-   It also removes the agent's own `authorization`, `proxy-authorization` and `cookie` headers and the `x-bailiff-*` headers.
+   It also removes the agent's own `authorization`, `proxy-authorization` and `cookie` headers and the four chain headers (`x-bailiff-task-root`, `x-bailiff-links`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`).
 4. The upstream MCP server receives the call with the credential header.
 
-Every hop records its entry under the same trace id and op_id, so the decide and custodian entries for one call can be joined.
+The entries for a verified call carry the clearance's trace id and op_id, so the decide and custodian entries for one call can be joined. Early refusals may have no op_id, and custodian refusals before verification are logged, not docketed.
 
 ## Data
 
-- **Ledger:** agent-warrant's `TaskLedger` (SQLite). Decide is the only writer; the custodian opens it read-only through the shared group. It holds reservations, issued and outcome state, and revocations (binding, task, tenant).
+- **Ledger:** agent-warrant's `TaskLedger` (SQLite). Decide, and control running as decide's uid, write it; the custodian opens it read-only through the shared group. It holds reservations, issued and outcome state, and revocations (binding, task, tenant).
 - **Suspension:** `<ledger>.suspension`, a directory owned by decide, group the ledger group, mode 0750. A `suspended` file in it means suspended. Decide and the custodian both treat anything they cannot verify as suspended.
 - **Credential store:** SQLite, custodian-only, mode 0600. Each credential is encrypted with AES-GCM under its own data key; the data key is wrapped by the key encryption key. Both use the associated data `{tenant, credential_id, target}`.
 - **Claims:** SQLite, custodian-only. The op_id is the primary key, so a second release of the same operation fails. Task denies from canary hits are stored here.
@@ -67,7 +67,7 @@ Every hop records its entry under the same trace id and op_id, so the decide and
 
 All records are Ed25519 signatures over agent-warrant's canonical JSON, encoded as `b64url(payload).b64url(signature)`. The payload carries `typ`, `v` and `kid`. Decoding is strict: unknown fields and a wrong `typ` are refused.
 
-- Clearance: `typ, v, kid, iss, aud, iat, exp, op_id, tenant, task, root_binding, leaf_binding, request_digest, tool, resource, args_digest, cost, credential_id, target, trace_id, entry_id`. Its lifetime is at most the custodian's `max_clearance_lifetime`, which is at most `max_proof_age`.
+- Clearance: `typ, v, kid, iss, aud, iat, exp, op_id, tenant, task, root_binding, leaf_binding, request_digest, tool, resource, args_digest, cost, credential_id, target, trace_id, entry_id`. Decide caps its lifetime at decide's `max_proof_age`; the custodian refuses one longer than its own `max_clearance_lifetime`.
 - Docket entry (`agent-bailiff/docket-entry/v1`): who (principal, tenant, task root, links, agent key), what (tool, resource, args digest, cost), policy (id, version, digest, rule, verdict), what was done (performed, outcome, credential tier), how (hop, component, decision, reason), and revocable handles.
 
 ## Control
@@ -81,10 +81,13 @@ Each action is applied first and then recorded as a control entry in the source 
 
 ## Failure behaviour
 
-Every component fails closed:
+Decide and the custodian fail closed:
 - An error refuses the call.
 - No clearance or credential is returned on an error path.
 - A docket write that is not acknowledged refuses the call.
+
+Control applies its action first and reports it as unrecorded if its entry is not acknowledged.
+
 - check-config refuses a gateway config with `failOpen`, a missing header allowlist, the wrong processor order or a non-Unix processor target.
 
 ## Credential tiers

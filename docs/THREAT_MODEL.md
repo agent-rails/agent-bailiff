@@ -8,7 +8,7 @@ Scope: agent-bailiff with the agentgateway v1.7.0 adapter, each component under 
 - Each component's signing key.
 - The ledger: reservations, revocations and issued state.
 - The suspension switch.
-- The docket: the record of every decision, release and control action.
+- The docket: the record of decisions, releases and control actions.
 
 ## Attackers
 
@@ -26,7 +26,7 @@ Root on the host is trusted. It can read every key and every file.
 - Gateway to processors: Unix sockets in a 0750 directory with the gateway's group. Each processor checks the peer uid on accept.
 - Decide to custodian: the clearance, signed by decide and verified with the custodian's pinned decide keys. It is necessary but not sufficient.
 - Components to docket: a Unix socket; the sink checks the peer uid and each writer's pinned key, sequence and previous hash.
-- Decide to custodian through the ledger and suspension directory: decide writes, the custodian reads, both through the ledger group.
+- Decide to custodian through the ledger and suspension directory: decide and control, both as decide's uid, write; the custodian reads through the ledger group.
 
 ## Threats and mitigations
 
@@ -34,7 +34,7 @@ Root on the host is trusted. It can read every key and every file.
 |---|---|
 | A hijacked agent calls a tool or resource outside its task | Decide verifies the chain and leaf proof, and refuses out-of-scope calls and unknown costs. The custodian re-verifies the same proof itself. |
 | A hijacked agent replays a call | The leaf proof binds tool, resource, arguments and nonce. The op_id is reserved in decide's ledger, and claimed once in the custodian's claims database. |
-| A hijacked agent sends its own credential headers, or tampers with `x-bailiff-*` headers | The custodian removes `authorization`, `proxy-authorization`, `cookie`, `x-bailiff-*` and every bound credential header from the upstream request. check-config requires a gateway header modifier that removes them too. |
+| A hijacked agent sends its own credential headers, or tampers with `x-bailiff-*` headers | The custodian removes `authorization`, `proxy-authorization`, `cookie`, the four chain headers (`x-bailiff-task-root`, `x-bailiff-links`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`) and every bound credential header from the upstream request. check-config requires a gateway header modifier that removes `authorization`, `proxy-authorization`, `cookie` and every bound credential header, and refuses one that removes any `x-bailiff-` header or `traceparent`. |
 | A compromised decide asks the custodian for any credential | The custodian takes the binding from its own table, re-verifies the chain, leaf proof and request digest from the call, checks the reservation, claims each op_id once, and rate-limits per task. It releases only credentials covered by authority the caller can present. |
 | A copied clearance is reused | It is bound to one op_id, audience, request digest and expiry, and the op_id can be claimed once. A clearance in the gateway access log releases nothing on its own. |
 | Bulk decryption of the credential store | Data keys are wrapped per credential, with tenant, credential id and target as associated data. Decryption happens only in the custodian, after verification. |
@@ -60,11 +60,17 @@ These are known and accepted for the current release:
 - **There is no agent-key revocation across chains.**
 - **An old record can be replayed to suspend again after a resume.** Control runs as decide's uid, and a replay only makes things more restrictive.
 - **`--actor` is recorded as given.** It is not tied to the caller's OS identity.
-- **The per-task rate limit is in memory.** A custodian restart resets it.
+- **The per-task rate limit is in memory.** A custodian restart resets it. It tracks at most 65536 live tasks; while that many are live, a release for a new task is refused as `rate_limited`, and checking it scans the tracked tasks.
 - **The revocation tables only grow.** There is no retention.
 - **Directory checks read mode bits, owner and group.** They do not inspect ACLs, and they check only the immediate parent directory. The ledger's parent check, in agent-warrant, does not check the parent's owner.
 - **check-config runs at startup only.** agentgateway reloads its config on change, so the config file must be writable only by a user that is neither the gateway's nor an agent's.
 - **agentgateway v1.7.0 runs no processor for client notifications.** They reach upstreams with the `x-bailiff-*` headers. See [AGENTGATEWAY.md](AGENTGATEWAY.md).
 - **`_meta` values in `tools/call` are not bound to the proof.**
+- **Other `x-bailiff-` headers reach the upstream.** The processors see only the allowlisted headers, so the custodian removes only the four chain headers. An agent can send other `x-bailiff-` headers; they carry no authority.
+- **Reconciliation is in memory.** While decide runs, an issued operation that expires without an outcome is recorded as `outcome_unknown`. After a decide restart, operations issued before it stay `issued` in the ledger with no docket entry. The custodian still refuses their expired clearances.
+- **Decide and custodian lifetimes are not checked against each other.** If decide's `max_proof_age` is above the custodian's `max_clearance_lifetime`, decide records an allow that the custodian then refuses as `clearance_invalid`. `init` writes equal values.
+- **Unrecorded refusals.** Custodian refusals before verification are logged, not docketed. Control applies its action before recording it and reports an unacknowledged entry as unrecorded.
+- **The docket sink writes and fsyncs on its event loop.** A slow disk delays every writer, and writers then refuse calls when their append times out.
+- **Processor relays have no idle timeout.** Idle connections can hold the 64-connection cap; see [AGENTGATEWAY.md](AGENTGATEWAY.md).
 - **Python cannot reliably zero secrets in memory.**
 - **On macOS, `fsync` does not flush the drive cache.**
