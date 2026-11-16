@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 include = ["agent_bailiff*"]
 
 [tool.setuptools.package-data]
-agent_bailiff = ["py.typed"]
+agent_bailiff = ["py.typed", "effector/catalogs/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
