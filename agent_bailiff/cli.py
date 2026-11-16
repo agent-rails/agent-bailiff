@@ -24,7 +24,6 @@ from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
 from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
 from agent_bailiff.service.init import InitError, init_control, init_custodian, init_decide, init_docket, read_pin
-from agent_bailiff.service.ledger import LedgerUnsupported
 from agent_bailiff.service.settings import DocketSettings, load_control, load_custodian, load_decide, load_docket
 from agent_bailiff.signing import MAX_TOKEN_CHARS
 
@@ -38,7 +37,6 @@ STARTUP_ERRORS = (
     ValueError,
     OwnedFileError,
     LedgerError,
-    LedgerUnsupported,
     BackendError,
     DocketError,
     DocketLocked,

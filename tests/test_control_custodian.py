@@ -1,6 +1,5 @@
 import pytest
 import test_custodian
-from agent_warrant.ledger import TaskLedger
 from test_control import MemoryDocket
 from test_custodian import WRITERS, Refused, Released, custodian_entries
 from test_decide import NOW, make_request, make_root
@@ -8,11 +7,6 @@ from test_decide import NOW, make_request, make_root
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
-
-pytestmark = pytest.mark.skipif(
-    not hasattr(TaskLedger, "open_read_only"),
-    reason="needs agent-warrant with TaskLedger.open_read_only (unreleased PR #15); move the pin after its release",
-)
 
 ledger_path = test_custodian.ledger_path
 make_custodian = test_custodian.make_custodian

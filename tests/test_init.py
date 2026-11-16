@@ -15,11 +15,9 @@ from test_service import (
     ISSUERS,
     ROUTES,
     SECRET,
-    SHARED_LEDGERS,
     DocketThread,
     call_message,
     check,
-    needs_shared_ledgers,
 )
 
 from agent_bailiff import cli
@@ -132,7 +130,6 @@ def mode(path):
     return stat.S_IMODE(info.st_mode), info.st_uid
 
 
-@needs_shared_ledgers
 def test_init_writes_private_keys_and_configs_that_load(root, ledger_dir, capsys):
     sockets, pins = init_all(root, ledger_dir, capsys)
     for name in ("decide", "custodian", "control"):
@@ -159,7 +156,6 @@ def test_init_writes_private_keys_and_configs_that_load(root, ledger_dir, capsys
     assert decide.bindings == () and decide.policy.policy.rules == []
 
 
-@needs_shared_ledgers
 def test_init_never_overwrites(root, ledger_dir, capsys):
     init_all(root, ledger_dir, capsys)
     before = (root / "decide" / "signing.key").read_bytes()
@@ -275,34 +271,12 @@ def test_docket_init_writes_a_config_that_loads(root, decide_pin, capsys):
     assert mode(directory / "config.json") == (0o600, UID)
 
 
-@pytest.mark.skipif(SHARED_LEDGERS, reason="covers the agent-warrant 0.1.0 pin")
-def test_decide_init_refuses_without_shared_ledgers_and_creates_nothing(root, ledger_dir, capsys):
-    directory = private(root / "decide")
-    code, out, err = init(
-        "decide",
-        "--dir", directory,
-        "--name", "decide.example",
-        "--custodian", "custodian.example",
-        "--ledger", ledger_dir / "ledger.db",
-        "--ledger-group", GID,
-        "--socket", root / "d.sock",
-        "--docket-socket", root / "s.sock",
-        "--docket-uid", UID,
-        "--gateway-uid", UID,
-        "--gateway-group", GID,
-        capsys=capsys,
-    )  # fmt: skip
-    assert code == cli.EXIT_REFUSED and "0.2.0" in err
-    assert os.listdir(directory) == [] and os.listdir(ledger_dir) == []
-
-
 def edit(path, change):
     document = json.loads(path.read_text())
     change(document)
     path.write_text(json.dumps(document))
 
 
-@needs_shared_ledgers
 def test_a_stack_built_by_init_releases_once_and_control_revokes(root, ledger_dir, capsys, live):
     sockets, _ = init_all(root, ledger_dir, capsys)
     binding = {"tenant": TENANT, "tool": "deploy.service", "resource": "env/staging/*"}
