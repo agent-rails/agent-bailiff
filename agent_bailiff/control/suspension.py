@@ -24,7 +24,7 @@ def suspension_directory(ledger: Path) -> Path:
 
 
 def create_suspension_directory(directory: Path, group: int) -> None:
-    parent_fd = _open_parent(directory, group)
+    parent_fd = _open_parent(directory, group, os.geteuid())
     try:
         os.mkdir(directory.name, 0o700, dir_fd=parent_fd)
         fd = os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
@@ -86,7 +86,7 @@ class Suspension:
             os.close(directory_fd)
 
     def _open_directory(self) -> int:
-        fd = _open_directory(self._directory, self._group)
+        fd = _open_directory(self._directory, self._group, os.geteuid())
         info = os.fstat(fd)
         if (
             not stat.S_ISDIR(info.st_mode)
@@ -110,7 +110,7 @@ class SuspensionView:
     @property
     def suspended(self) -> bool:
         try:
-            fd = _open_directory(self._directory, self._group)
+            fd = _open_directory(self._directory, self._group, self._owner_uid)
         except SuspensionError:
             return True
         info = os.fstat(fd)
@@ -125,20 +125,31 @@ class SuspensionView:
         return _holds_suspension(fd)
 
 
-def _open_parent(directory: Path, group: int) -> int:
+def _open_parent(directory: Path, group: int, owner: int) -> int:
     try:
         fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     except OSError as exc:
         raise SuspensionError(f"cannot open the suspension directory's parent: {exc.strerror}") from None
-    info = os.fstat(fd)
-    if not stat.S_ISDIR(info.st_mode) or info.st_mode & PARENT_FORBIDDEN_BITS or info.st_gid != group:
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
         os.close(fd)
-        raise SuspensionError(f"{directory.parent} must be in group {group} and not group or other writable")
+        raise SuspensionError(f"cannot inspect the suspension directory's parent: {exc.strerror}") from None
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid not in (0, owner)
+        or info.st_mode & PARENT_FORBIDDEN_BITS
+        or info.st_gid != group
+    ):
+        os.close(fd)
+        raise SuspensionError(
+            f"{directory.parent} must be owned by root or uid {owner}, in group {group}, not group or other writable"
+        )
     return fd
 
 
-def _open_directory(directory: Path, group: int) -> int:
-    parent_fd = _open_parent(directory, group)
+def _open_directory(directory: Path, group: int, owner: int) -> int:
+    parent_fd = _open_parent(directory, group, owner)
     try:
         return os.open(directory.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     except OSError as exc:
