@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, fields
@@ -11,6 +10,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
 TASK_ROOT_HEADER = "x-bailiff-task-root"
@@ -166,20 +166,3 @@ def _call_headers(message: ext_mcp_pb2.McpRequest) -> dict[str, str]:
     if not REQUIRED_HEADERS <= headers.keys():
         raise CallRefused("malformed_request")
     return headers
-
-
-def parse_strict_json(raw: bytes) -> Any:
-    return json.loads(raw, object_pairs_hook=_unique_keys, parse_constant=_no_constant)
-
-
-def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate key {key!r}")
-        result[key] = value
-    return result
-
-
-def _no_constant(name: str) -> Any:
-    raise ValueError(f"{name} is not valid JSON")
