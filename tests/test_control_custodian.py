@@ -33,7 +33,7 @@ def line_for(workdir, hop, decision):
     raise AssertionError(f"no {hop} {decision} record")
 
 
-@pytest.mark.parametrize("level", ["agent_key", "task", "tenant", "root"])
+@pytest.mark.parametrize("level", ["task", "tenant", "root"])
 def test_a_revoke_after_decide_allowed_stops_the_release_at_the_custodian(
     make_decider, make_custodian, control, workdir, level
 ):

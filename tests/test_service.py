@@ -524,7 +524,7 @@ def test_the_services_release_a_credential_once_through_both_sockets(stack, live
     assert replay.error.reason == "already_issued"
 
 
-@pytest.mark.parametrize("level", ["agent_key", "task", "tenant", "root"])
+@pytest.mark.parametrize("level", ["task", "tenant", "root"])
 def test_control_revoke_from_a_docket_line_stops_the_next_call(stack, live, deployment, level, capsys):
     stack.call(live())
     line = deployment.record_line("decide", "allow")

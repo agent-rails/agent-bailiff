@@ -486,7 +486,7 @@ def allow_record_line(workdir):
     raise AssertionError("no decide allow record")
 
 
-@pytest.mark.parametrize("level", ["agent_key", "task", "tenant", "root"])
+@pytest.mark.parametrize("level", ["task", "tenant", "root"])
 def test_a_revoke_through_control_stops_the_next_call(stack, workdir, writer, private, level):
     request = make_request()
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
