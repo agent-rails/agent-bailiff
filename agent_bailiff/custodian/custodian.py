@@ -13,10 +13,11 @@ from agent_warrant.scope import covers
 from agent_warrant.task_root import TaskRoot
 from agent_warrant.trust import IssuerTrustPolicy
 
-from agent_bailiff.custodian.bindings import BindingTable, CredentialBinding
+from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBinding, EffectorBinding
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
+from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.decide.clearance import Clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
@@ -28,6 +29,7 @@ from agent_bailiff.signing import token_hash
 
 HOP = "custodian"
 TIER = "gateway-bound"
+EFFECTOR_TIER = "effector"
 CLEARANCE_REFUSALS = {
     "wrong_issuer": "clearance_wrong_issuer",
     "wrong_audience": "clearance_wrong_audience",
@@ -105,6 +107,7 @@ class Custodian:
         trust_policy: IssuerTrustPolicy,
         docket: DocketWriter,
         suspension: SuspensionCheck,
+        release_signer: ReleaseSigner | None = None,
     ) -> None:
         self._config = config
         self._bindings = bindings
@@ -115,6 +118,7 @@ class Custodian:
         self._trust_policy = trust_policy
         self._docket = docket
         self._suspension = suspension
+        self._release_signer = release_signer
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
@@ -154,6 +158,8 @@ class Custodian:
         clearance = verified.clearance
         binding = self._binding(verified)
         self._check_reservation(verified, now)
+        if isinstance(binding, EffectorBinding):
+            return self._release_to_effector(verified, binding, entry, now)
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
@@ -232,7 +238,29 @@ class Custodian:
             raise _Refusal("clearance_mismatch")
         return _Verified(clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token)
 
-    def _binding(self, verified: _Verified) -> CredentialBinding:
+    def _release_to_effector(self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int) -> Released:
+        clearance = verified.clearance
+        if self._release_signer is None:
+            raise _Refusal("release_unavailable")
+        self._precheck(clearance, now)
+        if self._suspension.suspended is not False:
+            raise _Refusal("suspended")
+        self._admit(clearance, now)
+        release_entry = replace(
+            entry,
+            entry_id=uuid.uuid4().hex,
+            decision="release",
+            reason="ok",
+            performed=True,
+            credential_tier=EFFECTOR_TIER,
+        )
+        token = self._release_signer.sign(
+            clearance, verified.token, binding.credential_id, binding.catalog, release_entry.entry_id, now
+        )
+        self._record(release_entry)
+        return Released(RELEASE_HEADER, token, EFFECTOR_TIER, clearance.op_id, release_entry.entry_id)
+
+    def _binding(self, verified: _Verified) -> Binding:
         clearance = verified.clearance
         binding = self._bindings.resolve(clearance.tenant, clearance.tool, clearance.resource)
         if binding is None:
