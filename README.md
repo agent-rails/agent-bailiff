@@ -86,6 +86,9 @@ Each component has its own commands, run as that component's uid:
 
 ## Documentation
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, one call end to end, data and signed records
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): assets, attackers, mitigations and residual risks
+- [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 
