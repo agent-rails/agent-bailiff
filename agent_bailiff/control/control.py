@@ -15,7 +15,7 @@ from agent_bailiff.docket.sink import Writers, build_kid_index
 from agent_bailiff.signing import Refused
 
 HOP = "control"
-LEVELS = ("agent_key", "link", "task", "tenant", "root")
+LEVELS = ("link", "task", "tenant", "root")
 MAX_ACTOR_CHARACTERS = 128
 
 
@@ -84,11 +84,13 @@ class Control:
         actor_name = _actor(actor)
         if level not in LEVELS:
             raise ControlRefused("unknown_level", f"level must be one of {', '.join(LEVELS)}")
-        handles = _revocation_handles(source.handles, str(level))
+        handles = _revocation_handles(source, str(level))
         try:
             self._apply_revocation(handles, now)
         except LedgerError as exc:
             raise ControlRefused("ledger_unavailable", str(exc)) from None
+        except ValueError as exc:
+            raise ControlRefused("invalid_handle", str(exc)) from None
         entry = self._entry(source, "revoke", str(level), actor_name, now, handles)
         return self._record(entry)
 
@@ -181,13 +183,12 @@ class Control:
         return outcome
 
 
-def _revocation_handles(handles: Mapping[str, str], level: str) -> dict[str, str]:
-    if level == "agent_key":
-        leaf = "link" if "link" in handles else "root"
-        return _require(handles, ("agent_key", leaf))
-    if level == "task":
-        return _require(handles, ("tenant", "task"))
-    return _require(handles, (level,))
+def _revocation_handles(source: Entry, level: str) -> dict[str, str]:
+    names = ("tenant", "task") if level == "task" else (level,)
+    handles = _require(source.handles, names)
+    if "tenant" in handles and handles["tenant"] != source.tenant:
+        raise ControlRefused("handle_mismatch", "the record's tenant handle does not match its tenant")
+    return handles
 
 
 def _require(handles: Mapping[str, str], names: tuple[str, ...]) -> dict[str, str]:

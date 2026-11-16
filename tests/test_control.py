@@ -50,7 +50,7 @@ VERIFIED_WRITERS = {
 }
 SINK_WRITERS = {**VERIFIED_WRITERS, "control": {"control-1": CONTROL_KEY.public_key()}}
 LINK_SCOPE = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}
-LEVELS = ("agent_key", "link", "task", "tenant", "root")
+LEVELS = ("link", "task", "tenant", "root")
 
 
 class FailingDocket:
@@ -208,10 +208,6 @@ def test_revoke_at_each_level_stops_the_next_call(decider, make_control, workdir
 @pytest.mark.parametrize(
     ("level", "applied"),
     [
-        (
-            "agent_key",
-            lambda root, link: {"agent_key": encode_public_key(CHILD_KEY.public_key()), "link": link.binding()},
-        ),
         ("link", lambda root, link: {"link": link.binding()}),
         ("task", lambda root, link: {"tenant": TENANT, "task": root.task_id}),
         ("tenant", lambda root, link: {"tenant": TENANT}),
@@ -230,12 +226,26 @@ def test_the_control_entry_joins_the_trace_of_the_record(decider, make_control, 
     assert dict(entry.handles) == applied(root, link) == dict(outcome.handles)
 
 
-def test_agent_key_level_on_a_root_only_chain_revokes_the_root(decider, make_control, workdir, ledger):
-    root = make_root()
-    assert decider.check(make_request(root), NOW).allowed
-    outcome = make_control().revoke(record_line(workdir), "agent_key", "ops", NOW + 1)
-    assert dict(outcome.handles) == {"agent_key": encode_public_key(AGENT_KEY.public_key()), "root": root.binding()}
-    assert decider.check(make_request(root, nonce="n-2"), NOW + 1).reason == "chain_invalid"
+@pytest.mark.parametrize("level", ["task", "tenant"])
+def test_a_tenant_handle_that_does_not_match_the_record_is_refused(decider, make_control, workdir, level):
+    root, link = allowed_delegated_call(decider, workdir)
+    token = resign(record_line(workdir), DECIDE_KEY, "decide-1", lambda body: body["handles"].update(tenant="tenant-y"))
+    with pytest.raises(ControlRefused) as refused:
+        make_control().revoke(token, level, "ops", NOW + 1)
+    assert refused.value.reason == "handle_mismatch"
+    assert next_delegated_call(decider, root, link).allowed
+    assert control_entries(workdir) == []
+
+
+def test_an_invalid_binding_handle_is_refused_without_an_entry(decider, make_control, workdir):
+    allowed_delegated_call(decider, workdir)
+    token = resign(
+        record_line(workdir), DECIDE_KEY, "decide-1", lambda body: body["handles"].update(root="not-a-digest")
+    )
+    with pytest.raises(ControlRefused) as refused:
+        make_control().revoke(token, "root", "ops", NOW + 1)
+    assert refused.value.reason == "invalid_handle"
+    assert control_entries(workdir) == []
 
 
 def test_a_custodian_record_can_be_used(decider, make_control, workdir, ledger):
@@ -333,7 +343,7 @@ def test_link_level_on_a_root_only_chain_is_refused(decider, make_control, workd
     assert decider.check(make_request(root, nonce="n-2"), NOW + 1).allowed
 
 
-@pytest.mark.parametrize("level", ["", "Task", "principal", "op", None])
+@pytest.mark.parametrize("level", ["", "Task", "principal", "op", "agent_key", None])
 def test_an_unknown_level_is_refused(decider, make_control, workdir, level):
     allowed_delegated_call(decider, workdir)
     with pytest.raises(ControlRefused) as refused:
