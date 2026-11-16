@@ -151,6 +151,28 @@ class Decider:
                     reason="clearance_expired",
                 )
             )
+        for reservation in self._ledger.issued_expired(now):
+            with self._lock:
+                if reservation.op_id in self._issued:
+                    continue
+            self._ledger.mark_outcome_unknown(reservation.tenant_id, reservation.task_id, reservation.op_id, now)
+            reconciled.append(reservation.op_id)
+            self._append(
+                Entry(
+                    entry_id="",
+                    trace_id=uuid.uuid4().hex,
+                    hop=HOP,
+                    component=self._config.decider_id,
+                    decision="reconcile",
+                    at=now,
+                    op_id=reservation.op_id,
+                    tenant=reservation.tenant_id,
+                    cost=reservation.cost,
+                    outcome="outcome_unknown",
+                    reason="untracked_after_restart",
+                    handles={"tenant": reservation.tenant_id, "task": reservation.task_id},
+                )
+            )
         return tuple(reconciled)
 
     def _check(self, request: OperationRequest, now: int, entry: Entry) -> Decision:

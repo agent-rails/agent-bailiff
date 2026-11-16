@@ -67,7 +67,6 @@ These are known and accepted for the current release:
 - **agentgateway v1.7.0 runs no processor for client notifications.** They reach upstreams with the `x-bailiff-*` headers. See [AGENTGATEWAY.md](AGENTGATEWAY.md).
 - **`_meta` values in `tools/call` are not bound to the proof.**
 - **Other `x-bailiff-` headers reach the upstream.** The processors see only the allowlisted headers, so the custodian removes only the four chain headers. An agent can send other `x-bailiff-` headers; they carry no authority.
-- **Reconciliation is in memory.** While decide runs, an issued operation that expires without an outcome is recorded as `outcome_unknown`. After a decide restart, operations issued before it stay `issued` in the ledger with no docket entry. The custodian still refuses their expired clearances.
 - **Decide and custodian lifetimes are not checked against each other.** If decide's `max_proof_age` is above the custodian's `max_clearance_lifetime`, decide records an allow that the custodian then refuses as `clearance_invalid`. `init` writes equal values.
 - **Unrecorded refusals.** Custodian refusals before verification are logged, not docketed. Control applies its action before recording it and reports an unacknowledged entry as unrecorded.
 - **The docket sink writes and fsyncs on its event loop.** A slow disk delays every writer, and writers then refuse calls when their append times out.
