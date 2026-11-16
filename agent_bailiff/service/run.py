@@ -20,6 +20,7 @@ from agent_bailiff.custodian.bindings import BindingTable
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.config import CustodianConfig
 from agent_bailiff.custodian.custodian import Custodian
+from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.decide.config import DeciderConfig
 from agent_bailiff.decide.decider import Decider
@@ -162,8 +163,9 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
             trust_policy=settings.issuers.trust_policy,
             docket=docket_client(settings.docket, settings.name, key),
             suspension=SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group),
+            release_signer=ReleaseSigner(settings.name, key, key_id(settings.name, key.public_key())),
         )
-        headers = frozenset(binding.header_name for binding in bindings.bindings)
+        headers = frozenset(binding.header_name for binding in bindings.credential_bindings)
         server = processor_server(CustodianProcessor(custodian, routes, headers), settings.gateway)
         server.start()
     except BaseException:

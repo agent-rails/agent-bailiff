@@ -227,7 +227,7 @@ def make_decider(workdir, private, sink, writer):
 def make_custodian(workdir, private, sink, reader, state):
     opened = []
 
-    def make(docket=None, ledger=None, claims=None, suspension=None, **config):
+    def make(docket=None, ledger=None, claims=None, suspension=None, bindings=None, release_signer=None, **config):
         options = {
             "custodian_id": CUSTODIAN_ID,
             "decider_id": DECIDER_ID,
@@ -245,7 +245,7 @@ def make_custodian(workdir, private, sink, reader, state):
         opened.extend((store, claims))
         return Custodian(
             config=CustodianConfig(**options),
-            bindings=BindingTable(CUSTODIAN_BINDINGS),
+            bindings=BindingTable(bindings or CUSTODIAN_BINDINGS),
             store=store,
             claims=claims,
             ledger=ledger or reader,
@@ -253,6 +253,7 @@ def make_custodian(workdir, private, sink, reader, state):
             trust_policy=trust_policy(),
             docket=docket or docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY),
             suspension=suspension or Suspension(),
+            release_signer=release_signer,
         )
 
     yield make

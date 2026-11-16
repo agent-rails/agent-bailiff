@@ -10,7 +10,7 @@ from agent_bailiff.signing import Refused, sign, token_hash, verify
 
 ENTRY_TYP = "agent-bailiff/docket-entry/v1"
 HANDLE_LEVELS = frozenset({"agent_key", "link", "task", "tenant", "root"})
-CREDENTIAL_TIERS = frozenset({"target-bound", "gateway-bound", "exposed"})
+CREDENTIAL_TIERS = frozenset({"target-bound", "gateway-bound", "exposed", "effector"})
 
 
 @dataclass(frozen=True)

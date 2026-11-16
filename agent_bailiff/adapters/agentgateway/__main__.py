@@ -33,7 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             decide_socket=args.decide_socket,
             custodian_socket=args.custodian_socket,
             services=routes.services,
-            credential_headers=frozenset(binding.header_name for binding in bindings.bindings),
+            credential_headers=frozenset(binding.header_name for binding in bindings.credential_bindings),
         )
     except (OSError, ValueError, OwnedFileError) as exc:
         print(f"check-config refused: {exc}", file=sys.stderr)
