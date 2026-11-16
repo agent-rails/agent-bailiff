@@ -19,7 +19,7 @@ from agent_bailiff.custodian.config import CustodianConfig
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.decide.clearance import Clearance, verify_clearance
-from agent_bailiff.decide.decider import DocketWriter
+from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
@@ -104,6 +104,7 @@ class Custodian:
         resolver: IssuerResolver,
         trust_policy: IssuerTrustPolicy,
         docket: DocketWriter,
+        suspension: SuspensionCheck,
     ) -> None:
         self._config = config
         self._bindings = bindings
@@ -113,6 +114,7 @@ class Custodian:
         self._resolver = resolver
         self._trust_policy = trust_policy
         self._docket = docket
+        self._suspension = suspension
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
@@ -157,6 +159,8 @@ class Custodian:
             raise _Refusal("canary")
         self._precheck(clearance, now)
         header_value = self._decrypt(binding)
+        if self._suspension.suspended is not False:
+            raise _Refusal("suspended")
         self._admit(clearance, now)
         release_entry = replace(
             entry,
