@@ -50,7 +50,7 @@ flowchart LR
    - writes a signed docket entry and waits for the acknowledgement;
    - sets the credential as a header on the upstream request.
 
-   It also removes the agent's own `authorization`, `proxy-authorization` and `cookie` headers and the four chain headers (`x-bailiff-task-root`, `x-bailiff-links`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`).
+   It also removes the agent's own `authorization`, `proxy-authorization`, `cookie` and `bailiff-release` headers and the four chain headers (`x-bailiff-task-root`, `x-bailiff-links`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`).
 4. The upstream MCP server receives the call with the credential header.
 
 The entries for a verified call carry the clearance's trace id and op_id, so the decide and custodian entries for one call can be joined. Early refusals may have no op_id, and custodian refusals before verification are logged, not docketed.
