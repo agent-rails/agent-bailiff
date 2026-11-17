@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -15,10 +16,111 @@ def _contains(expected: object, actual: object) -> bool:
             key in actual and _contains(value, actual[key]) for key, value in expected.items()
         )
     if isinstance(expected, list):
-        return isinstance(actual, list) and len(expected) == len(actual) and all(
-            _contains(left, right) for left, right in zip(expected, actual, strict=True)
+        return (
+            isinstance(actual, list)
+            and len(expected) == len(actual)
+            and all(_contains(left, right) for left, right in zip(expected, actual, strict=True))
         )
     return expected == actual
+
+
+def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+    if kind == "ValidatingWebhookConfiguration":
+        # Extra selectors, rules or conditions can silently take bailiff writes
+        # out of the webhook's scope, so this list must match exactly.
+        expected_webhooks = copy.deepcopy(expected.get("webhooks"))
+        actual_webhooks = copy.deepcopy(actual.get("webhooks"))
+        if not isinstance(expected_webhooks, list) or not isinstance(actual_webhooks, list):
+            return True
+        # Kubernetes defaults omitted selectors to empty objects on create.
+        for expected_webhook, actual_webhook in zip(expected_webhooks, actual_webhooks, strict=False):
+            if not isinstance(expected_webhook, dict) or not isinstance(actual_webhook, dict):
+                return True
+            for selector in ("namespaceSelector", "objectSelector"):
+                if selector not in expected_webhook and actual_webhook.get(selector) == {}:
+                    actual_webhook.pop(selector)
+        return expected_webhooks != actual_webhooks
+    if kind == "ConfigMap":
+        return expected.get("data") != actual.get("data")
+    if kind == "Service":
+        spec = actual.get("spec")
+        if not isinstance(spec, dict):
+            return True
+        return (
+            spec.get("type", "ClusterIP") != "ClusterIP"
+            or bool(spec.get("externalIPs"))
+            or bool(spec.get("externalName"))
+            or bool(spec.get("loadBalancerClass"))
+        )
+    if kind != "Deployment":
+        return False
+    expected_spec = expected.get("spec")
+    actual_spec = actual.get("spec")
+    if not isinstance(expected_spec, dict) or not isinstance(actual_spec, dict):
+        return True
+    expected_template = expected_spec.get("template")
+    actual_template = actual_spec.get("template")
+    if not isinstance(expected_template, dict) or not isinstance(actual_template, dict):
+        return True
+    expected_pod = expected_template.get("spec")
+    actual_pod = actual_template.get("spec")
+    if not isinstance(expected_pod, dict) or not isinstance(actual_pod, dict):
+        return True
+    pod_defaults = {
+        "dnsPolicy": "ClusterFirst",
+        "enableServiceLinks": True,
+        "preemptionPolicy": "PreemptLowerPriority",
+        "restartPolicy": "Always",
+        "schedulerName": "default-scheduler",
+        "serviceAccountName": "default",
+        "terminationGracePeriodSeconds": 30,
+    }
+    if any(key not in expected_pod and value != pod_defaults.get(key) for key, value in actual_pod.items()):
+        return True
+    if actual_pod.get("securityContext") != expected_pod.get("securityContext"):
+        return True
+    for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"):
+        if actual_pod.get(field, False) is not False:
+            return True
+    expected_containers = expected_pod.get("containers")
+    actual_containers = actual_pod.get("containers")
+    if not isinstance(expected_containers, list) or not isinstance(actual_containers, list):
+        return True
+    if len(expected_containers) != len(actual_containers):
+        return True
+    for expected_container, actual_container in zip(expected_containers, actual_containers, strict=True):
+        if not isinstance(expected_container, dict) or not isinstance(actual_container, dict):
+            return True
+        if actual_container.get("securityContext") != expected_container.get("securityContext"):
+            return True
+        container_defaults = {
+            "terminationMessagePath": "/dev/termination-log",
+            "terminationMessagePolicy": "File",
+        }
+        if any(
+            key not in expected_container and value != container_defaults.get(key)
+            for key, value in actual_container.items()
+        ):
+            return True
+        if actual_container.get("volumeMounts") != expected_container.get("volumeMounts"):
+            return True
+    expected_volumes = expected_pod.get("volumes")
+    actual_volumes = actual_pod.get("volumes")
+    if not isinstance(expected_volumes, list) or not isinstance(actual_volumes, list):
+        return True
+    normalized_volumes = copy.deepcopy(actual_volumes)
+    for expected_volume, actual_volume in zip(expected_volumes, normalized_volumes, strict=True):
+        for source in ("configMap", "secret"):
+            expected_source = expected_volume.get(source)
+            actual_source = actual_volume.get(source)
+            if (
+                isinstance(expected_source, dict)
+                and isinstance(actual_source, dict)
+                and "defaultMode" not in expected_source
+                and actual_source.get("defaultMode") == 420
+            ):
+                actual_source.pop("defaultMode")
+    return normalized_volumes != expected_volumes
 
 
 def _path(item: Mapping[str, Any]) -> str:
@@ -39,8 +141,13 @@ def _path(item: Mapping[str, Any]) -> str:
 
 class WebhookAudit:
     def __init__(
-        self, transport: Transport, token: str, manifests: Mapping[str, Any],
-        effector_namespace: str, effector_account: str, synthetic_users: Sequence[str],
+        self,
+        transport: Transport,
+        token: str,
+        manifests: Mapping[str, Any],
+        effector_namespace: str,
+        effector_account: str,
+        synthetic_users: Sequence[str],
     ) -> None:
         self._transport = transport
         self._token = token
@@ -55,7 +162,7 @@ class WebhookAudit:
         if data is not None:
             headers["Content-Type"] = "application/json"
         status, response = self._transport.request(method, path, headers, data)
-        if status != 200:
+        if status not in (200, 201):
             raise RuntimeError(f"webhook audit API returned {status} for {path}")
         result = json.loads(response)
         if not isinstance(result, dict):
@@ -72,8 +179,12 @@ class WebhookAudit:
                 problems.append(str(exc))
                 continue
             fields = {key: item[key] for key in ("spec", "data", "webhooks") if key in item}
-            if not _contains(fields, live):
-                problems.append(f"{item['kind']} {item['metadata']['name']} drifted")
+            if not _contains(fields, live) or _security_drift(item["kind"], item, live):
+                problems.append(
+                    f"drift: {item['kind']} {item['metadata'].get('namespace', '<cluster>')}/"
+                    f"{item['metadata']['name']} differs from generated manifest; restore the generated object "
+                    "or move webhook to Audit mode, investigate, then rerun audit"
+                )
         problems.extend(self._access_reviews())
         return problems
 
@@ -92,7 +203,8 @@ class WebhookAudit:
         for user in [effector, *self._users]:
             groups = (
                 ["system:serviceaccounts", f"system:serviceaccounts:{self._namespace}", "system:authenticated"]
-                if user == effector else ["system:authenticated"]
+                if user == effector
+                else ["system:authenticated"]
             )
             for group, resource, namespace, name in targets:
                 for verb in ("create", "update", "patch", "delete", "deletecollection"):
@@ -101,10 +213,16 @@ class WebhookAudit:
                         attributes["namespace"] = namespace
                     if verb not in {"create", "deletecollection"}:
                         attributes["name"] = name
-                    review = {"apiVersion": "authorization.k8s.io/v1", "kind": "SubjectAccessReview",
-                              "spec": {"user": user, "groups": groups, "resourceAttributes": attributes}}
+                    review = {
+                        "apiVersion": "authorization.k8s.io/v1",
+                        "kind": "SubjectAccessReview",
+                        "spec": {"user": user, "groups": groups, "resourceAttributes": attributes},
+                    }
                     result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review)
                     status = result.get("status")
                     if not isinstance(status, dict) or status.get("allowed") is not False:
-                        problems.append(f"{user} may {verb} {resource}/{name}")
+                        problems.append(
+                            f"access: {user} may {verb} {resource}/{name}; remove the grant, keep webhook "
+                            "in Enforce only after a clean audit, then rerun audit"
+                        )
         return problems

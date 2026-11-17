@@ -28,8 +28,17 @@ def _pins(path: Path) -> dict[str, Any]:
 
 
 def _admission(config: dict[str, Any], catalog: OperationCatalog) -> Admission:
-    required = {"effector_id", "custodian_id", "decider_id", "custodian_keys", "decide_keys",
-                "catalog_digest", "skew_seconds", "max_clearance_lifetime", "enforce"}
+    required = {
+        "effector_id",
+        "custodian_id",
+        "decider_id",
+        "custodian_keys",
+        "decide_keys",
+        "catalog_digest",
+        "skew_seconds",
+        "max_clearance_lifetime",
+        "enforce",
+    }
     if set(config) != required or config["catalog_digest"] != catalog.digest:
         raise ValueError("webhook config fields or catalog digest do not match")
     for name in ("effector_id", "custodian_id", "decider_id"):
@@ -42,11 +51,13 @@ def _admission(config: dict[str, Any], catalog: OperationCatalog) -> Admission:
     if type(config["max_clearance_lifetime"]) is not int or config["max_clearance_lifetime"] < 1:
         raise ValueError("max_clearance_lifetime must be a positive integer")
     checks = ReleaseCheckConfig(
-        effector_id=config["effector_id"], custodian_id=config["custodian_id"],
+        effector_id=config["effector_id"],
+        custodian_id=config["custodian_id"],
         decider_id=config["decider_id"],
         custodian_keys=parse_pinned_keys(config["custodian_id"], config["custodian_keys"]),
         decide_keys=parse_pinned_keys(config["decider_id"], config["decide_keys"]),
-        skew_seconds=config["skew_seconds"], max_clearance_lifetime=config["max_clearance_lifetime"],
+        skew_seconds=config["skew_seconds"],
+        max_clearance_lifetime=config["max_clearance_lifetime"],
     )
     return Admission(checks, catalog, enforce=config["enforce"])
 
@@ -87,11 +98,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "audit":
         manifest = _pins(args.manifest)
-        users = [f"bailiff:{tenant}:{identity}" for tenant in parse_tenants(args.tenant)
-                 for identity in ("read", "scale", "restart")]
+        users = [
+            f"bailiff:{tenant}:{identity}"
+            for tenant in parse_tenants(args.tenant)
+            for identity in ("read", "scale", "restart")
+        ]
         audit_check = WebhookAudit(
-            HttpsTransport(args.kube_host, args.kube_port, args.kube_ca), read_token(args.token_file), manifest,
-            args.effector_namespace, args.effector_account, users,
+            HttpsTransport(args.kube_host, args.kube_port, args.kube_ca),
+            read_token(args.token_file),
+            manifest,
+            args.effector_namespace,
+            args.effector_account,
+            users,
         )
         problems = audit_check.check()
         for problem in problems:
@@ -101,8 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "manifests":
         pins = _pins(args.pins)
         _admission({**pins, "enforce": args.enforce}, catalog)
-        generated = generate_manifests(namespace=args.namespace, image=args.image, ca_pem=args.ca.read_bytes(),
-                                       pins=pins, catalog=catalog, enforce=args.enforce)
+        generated = generate_manifests(
+            namespace=args.namespace,
+            image=args.image,
+            ca_pem=args.ca.read_bytes(),
+            pins=pins,
+            catalog=catalog,
+            enforce=args.enforce,
+        )
         print(json.dumps(generated, indent=2, sort_keys=True))
         return 0
     admission = _admission(_pins(args.config), catalog)

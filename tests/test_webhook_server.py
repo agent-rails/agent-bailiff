@@ -19,8 +19,12 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
     ca = (directory / "ca.crt").read_bytes()
     pins = {"catalog_digest": CATALOG.digest}
     document = generate_manifests(
-        namespace="bailiff-system", image="registry.example/bailiff@sha256:" + "a" * 64,
-        ca_pem=ca, pins=pins, catalog=CATALOG, enforce=False,
+        namespace="bailiff-system",
+        image="registry.example/bailiff@sha256:" + "a" * 64,
+        ca_pem=ca,
+        pins=pins,
+        catalog=CATALOG,
+        enforce=False,
     )
     serialized = json.dumps(document)
     assert "PRIVATE KEY" not in serialized

@@ -57,6 +57,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 | `agent_bailiff.docket` | Signed, append-only security trace |
 | `agent_bailiff.adapters.agentgateway` | agentgateway `ExtMcp` processors and `check-config` |
 | `agent_bailiff.effector` | Operation catalog, effector MCP server, Kubernetes client, generated RBAC and admission, drift check |
+| `agent_bailiff.webhook` | Release-verifying admission webhook, drift/access audit, bounded structured security events |
 | `agent_bailiff.signing` | Ed25519 signed records over canonical JSON |
 
 Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roots, delegation chains, ledger) and [toolcall-authz](https://github.com/agent-rails/toolcall-authz) (policy).
@@ -99,6 +100,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 - [docs/EFFECTOR.md](docs/EFFECTOR.md): the Kubernetes effector, its catalog, generated RBAC and admission, drift check and limits
+- [docs/RELEASE_WEBHOOK.md](docs/RELEASE_WEBHOOK.md): release admission, operator signals, response steps and rollout gates
 - [examples/live-run](examples/live-run/README.md): end-to-end run with Claude as the agent, and its results
 
 ## Development

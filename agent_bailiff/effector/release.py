@@ -107,9 +107,7 @@ def verify_operation(
         raise ReleaseRefused("unknown_operation")
     if not isinstance(arguments, dict) or not operation.accepts(arguments):
         raise ReleaseRefused("malformed_arguments")
-    resource = operation.resource.format(
-        **{key: arguments[key] for key in ("namespace", "name") if key in arguments}
-    )
+    resource = operation.resource.format(**{key: arguments[key] for key in ("namespace", "name") if key in arguments})
     if resource != release.resource:
         raise ReleaseRefused("resource_mismatch")
     try:

@@ -159,8 +159,26 @@ def test_audit_reports_a_deny_but_allows_the_call(caplog):
     document = review()
     document["request"]["userInfo"]["extra"]["bailiff.dev/release"] = []
     assert decide(document, enforce=False)["allowed"] is True
-    assert "would_deny" in caplog.text
-    assert "bailiff.dev/release" in caplog.text
+    event = json.loads(caplog.records[-1].message)
+    assert event["event"] == "bailiff_admission_would_deny"
+    assert event["reason_code"] == "release_identity_mismatch"
+    assert event["request_uid"] == "uid-1"
+    assert event["username"] == "bailiff:tenant-a:scale"
+    assert "release" not in event
+
+
+def test_enforce_denial_is_machine_actionable_without_logging_release(caplog):
+    document = review()
+    secret = document["request"]["userInfo"]["extra"]["bailiff.dev/release"][0]
+    document["request"]["userInfo"]["extra"]["bailiff.dev/release"] = []
+    assert decide(document)["allowed"] is False
+    event = json.loads(caplog.records[-1].message)
+    assert event["event"] == "bailiff_admission_denied"
+    assert event["mode"] == "enforce"
+    assert event["resource"] == "apps/v1/deployments"
+    assert event["namespace"] == "staging" and event["name"] == "api"
+    assert "suspend" in event["action"] and "revoke" in event["action"]
+    assert secret not in caplog.text
 
 
 def test_duplicate_json_keys_are_rejected():

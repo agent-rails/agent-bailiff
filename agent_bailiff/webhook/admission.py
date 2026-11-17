@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -17,6 +18,24 @@ MAX_BODY_BYTES = 3 << 20
 
 class MalformedReview(ValueError):
     pass
+
+
+def _reason_code(reason: str) -> str:
+    if "bailiff.dev/release" in reason or "bailiff.dev/op-id" in reason:
+        return "release_identity_mismatch"
+    if reason.startswith("release_") or reason.startswith("clearance_"):
+        return "invalid_release"
+    if reason == "catalog_mismatch":
+        return "catalog_mismatch"
+    if reason in {"resource_mismatch", "arguments_mismatch", "malformed_arguments"}:
+        return "released_arguments_mismatch"
+    if "operation tuple" in reason:
+        return "operation_not_allowed"
+    if "object" in reason or "change" in reason or "identity" in reason:
+        return "object_change_mismatch"
+    if "extra" in reason or "op-id" in reason:
+        return "release_identity_mismatch"
+    return "malformed_or_unreleased_operation"
 
 
 def _map(value: object) -> dict[str, Any]:
@@ -87,12 +106,40 @@ class Admission:
             reason = None
         except (MalformedReview, ReleaseRefused) as exc:
             reason = str(exc) if isinstance(exc, MalformedReview) else exc.reason
-            logger.warning("admission %s: %s", "deny" if self._enforce else "would_deny", reason)
+            logger.warning("%s", json.dumps(self._denial_event(request, uid, reason), sort_keys=True))
         allowed = reason is None or not self._enforce
         response: dict[str, Any] = {"uid": uid, "allowed": allowed}
         if not allowed:
             response["status"] = {"code": 403, "message": "released operation required"}
         return {"apiVersion": "admission.k8s.io/v1", "kind": "AdmissionReview", "response": response}
+
+    def _denial_event(self, request: Mapping[str, Any], uid: str, reason: str) -> dict[str, Any]:
+        user_info = request.get("userInfo")
+        username = user_info.get("username") if isinstance(user_info, dict) else None
+        resource = request.get("resource")
+        resource_key = None
+        if isinstance(resource, dict):
+            resource_key = "/".join(str(resource.get(key, "")) for key in ("group", "version", "resource"))
+        operation = request.get("operation")
+        namespace = request.get("namespace")
+        name = request.get("name")
+        subresource = request.get("subResource", "")
+        return {
+            "event": "bailiff_admission_denied" if self._enforce else "bailiff_admission_would_deny",
+            "reason_code": _reason_code(reason),
+            "mode": "enforce" if self._enforce else "audit",
+            "request_uid": uid,
+            "username": username if isinstance(username, str) and len(username) <= 160 else None,
+            "operation": operation if isinstance(operation, str) and len(operation) <= 32 else None,
+            "resource": resource_key if resource_key is None or len(resource_key) <= 160 else None,
+            "subresource": subresource if isinstance(subresource, str) and len(subresource) <= 64 else None,
+            "namespace": namespace if isinstance(namespace, str) and len(namespace) <= 63 else None,
+            "name": name if isinstance(name, str) and len(name) <= 253 else None,
+            "action": (
+                "verify the approved operation and release; if unexpected, suspend the task, "
+                "revoke the effector token, and investigate Kubernetes audit events"
+            ),
+        }
 
     def _verify(self, request: dict[str, Any], now: int) -> None:
         user = _map(request.get("userInfo"))

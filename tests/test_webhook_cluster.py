@@ -14,6 +14,7 @@ from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import encode_clearance
 from agent_bailiff.decide.identity import snapshot_args
 from agent_bailiff.keys import key_id
+from agent_bailiff.webhook.audit import WebhookAudit
 from agent_bailiff.webhook.certs import issue_serving_certificate
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
@@ -143,6 +144,17 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
     try:
         apply(path.read_text())
         kubectl("-n", namespace, "rollout", "status", "deployment/" + NAME, "--timeout=90s")
+        users = [f"bailiff:{tenant}:{identity}" for tenant in ("ta", "tb") for identity in ("read", "scale", "restart")]
+        audit = WebhookAudit(
+            cluster["transport"],
+            (cluster["directory"] / "audit").read_text(),
+            manifests,
+            namespace,
+            "effector",
+            users,
+        )
+        audit_problems = audit.check()
+        assert audit_problems == [], audit_problems
         time.sleep(3)
         assert _patch(cluster)[0] == 200  # Audit mode: the VAP still checks op-id and range.
         manifests["items"][-1]["webhooks"][0]["failurePolicy"] = "Fail"

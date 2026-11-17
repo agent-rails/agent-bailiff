@@ -86,14 +86,14 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self) -> None:
-        logger.info("webhook HTTP GET %s", self.path)
+        logger.info('{"event":"bailiff_webhook_health_check"}')
         if self.path == "/readyz":
             self._reply(200, {"ready": True})
         else:
             self._reply(404, {})
 
     def do_POST(self) -> None:
-        logger.info("webhook HTTP POST %s", self.path)
+        logger.info('{"event":"bailiff_webhook_request"}')
         if urlsplit(self.path).path != "/validate":
             self._reply(404, {})
             return
@@ -108,10 +108,19 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             result = self.server.admission.review(self.rfile.read(length), int(time.time()))
         except (MalformedReview, TimeoutError):
+            logger.warning(
+                '{"event":"bailiff_admission_invalid_request",'
+                '"action":"check webhook request size and API server compatibility"}'
+            )
             self._reply(400, {})
             return
         except Exception:
-            logger.exception("admission evaluation failed")
+            # Exception text may contain untrusted request values. Keep the
+            # operator signal useful without echoing AdmissionReview contents.
+            logger.error(
+                '{"event":"bailiff_admission_internal_error",'
+                '"action":"check webhook health and configuration; keep failurePolicy Fail"}'
+            )
             self._reply(500, {})
             return
         self._reply(200, result)
