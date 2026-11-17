@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Protocol
 
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
@@ -32,6 +32,10 @@ class EffectorConfig:
     docket_writer: str
 
 
+class RbacCheck(Protocol):
+    def healthy(self, now: int) -> bool: ...
+
+
 class Effector:
     def __init__(
         self,
@@ -41,6 +45,7 @@ class Effector:
         client: KubernetesClient,
         suspension: SuspensionCheck,
         docket: DocketWriter,
+        rbac: RbacCheck,
     ) -> None:
         self._config = config
         self._catalog = catalog
@@ -48,6 +53,7 @@ class Effector:
         self._client = client
         self._suspension = suspension
         self._docket = docket
+        self._rbac = rbac
 
     def tools(self) -> list[dict[str, Any]]:
         return [_tool(item) for item in self._catalog.operations]
@@ -57,6 +63,8 @@ class Effector:
             return _error("malformed_request")
         if self._suspension.suspended is not False:
             return _error("suspended")
+        if not self._rbac.healthy(now):
+            return _error("rbac_unverified")
         try:
             checked = self._check.check(params.get("name"), params.get("arguments", {}), release_token, now)
         except ReleaseRefused as refusal:

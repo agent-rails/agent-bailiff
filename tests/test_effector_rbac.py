@@ -116,7 +116,7 @@ def test_the_admission_policies_fail_closed_and_bound_the_replica_range():
 def test_the_binding_policy_names_the_effector_and_the_applier():
     policy = named(manifests(), "ValidatingAdmissionPolicy", "bailiff-effector-rbac")
     expression = policy["spec"]["validations"][0]["expression"]
-    assert "s.name == 'effector' && s.namespace == 'bailiff-system'" in expression
+    assert "s.namespace == 'bailiff-system' && (s.name == 'effector' || s.name == 'effector-audit')" in expression
     assert "s.name.startsWith('bailiff:')" in expression
     assert expression.endswith(
         "request.userInfo.username == 'system:serviceaccount:argocd:argocd-application-controller'"
@@ -153,4 +153,12 @@ def test_the_cli_refuses_a_malformed_tenant(capsys):
 
 def test_the_example_is_valid_json_list():
     document = json.loads(EXAMPLE.read_text())
-    assert document["kind"] == "List" and len(document["items"]) == 16
+    assert document["kind"] == "List" and len(document["items"]) == 19
+
+
+def test_the_audit_identity_may_only_list_namespaces_rbac_and_admission_policies():
+    items = manifests()
+    role = named(items, "ClusterRole", "bailiff-effector-audit")
+    assert {verb for rule in role["rules"] for verb in rule["verbs"]} == {"list"}
+    binding = named(items, "ClusterRoleBinding", "bailiff-effector-audit")
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "effector-audit", "namespace": "bailiff-system"}]

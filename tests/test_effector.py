@@ -93,6 +93,14 @@ class RecordingDocket:
         return Record(writer="effector.homelab", seq=len(self.entries), prev=None, entry=entry, kid="k", token="t")
 
 
+class Verified:
+    def __init__(self, value=True):
+        self.value = value
+
+    def healthy(self, now):
+        return self.value
+
+
 class Suspended:
     def __init__(self, value=False):
         self.suspended = value
@@ -106,7 +114,7 @@ def token_file(tmp_path):
     return path
 
 
-def effector(token_file, transport=None, docket=None, suspended=False):
+def effector(token_file, transport=None, docket=None, suspended=False, rbac_healthy=True):
     transport = transport or FakeTransport()
     docket = docket or RecordingDocket()
     instance = Effector(
@@ -116,6 +124,7 @@ def effector(token_file, transport=None, docket=None, suspended=False):
         KubernetesClient(transport, token_file),
         Suspended(suspended),
         docket,
+        Verified(rbac_healthy),
     )
     return instance, transport, docket
 
@@ -365,3 +374,9 @@ def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
     )
     assert result["content"][0]["text"] == "response_too_large"
     assert docket.entries[-1].outcome == "done"
+
+
+def test_no_call_is_made_while_rbac_is_unverified(token_file):
+    instance, transport, docket = effector(token_file, rbac_healthy=False)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert transport.requests == [] and docket.entries == []

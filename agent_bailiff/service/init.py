@@ -179,6 +179,7 @@ def init_effector(
     ledger_group: int,
     port: int,
     kubernetes: Mapping[str, Any],
+    rbac: Mapping[str, Any],
     docket: Mapping[str, Any],
 ) -> PublicKeyRecord:
     check_component(name)
@@ -199,6 +200,13 @@ def init_effector(
             "port": kubernetes["port"],
             "ca": str(kubernetes["ca"]),
             "token_file": str(kubernetes["token_file"]),
+            "audit_token_file": str(kubernetes["audit_token_file"]),
+        },
+        "rbac": {
+            "namespace": rbac["namespace"],
+            "service_account": rbac["service_account"],
+            "applier": rbac["applier"],
+            "tenants": {tenant: list(namespaces) for tenant, namespaces in rbac["tenants"].items()},
         },
         "ledger": {"path": str(ledger), "writer_uid": ledger_uid, "group": ledger_group},
         "docket": _docket_client(directory, docket),

@@ -22,7 +22,8 @@ from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
 from agent_bailiff.effector.catalog import OperationCatalog
-from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
+from agent_bailiff.effector.drift import RbacDrift
+from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
 from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
@@ -60,6 +61,7 @@ STARTUP_ERRORS = (
     DocketLocked,
     DocketCorrupt,
     ProcessorLocked,
+    RbacDrift,
 )
 
 
@@ -152,6 +154,11 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     effector.add_argument("--kube-port", type=int, required=True)
     effector.add_argument("--kube-ca", type=Path, required=True)
     effector.add_argument("--kube-token-file", type=Path, required=True, help="the effector's own token, 0600")
+    effector.add_argument("--kube-audit-token-file", type=Path, required=True, help="the audit identity's token, 0600")
+    effector.add_argument("--effector-namespace", required=True)
+    effector.add_argument("--service-account", required=True)
+    effector.add_argument("--applier", required=True, help="the user that applies generated RBAC (GitOps)")
+    effector.add_argument("--tenant", action="append", required=True, help="tenant=namespace[,namespace...]")
     docket = components.add_parser("docket")
     docket.add_argument("--socket", type=Path, required=True)
     docket.add_argument("--socket-group", type=int, required=True)
@@ -199,6 +206,13 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             "port": args.kube_port,
             "ca": args.kube_ca,
             "token_file": args.kube_token_file,
+            "audit_token_file": args.kube_audit_token_file,
+        }
+        rbac = {
+            "namespace": args.effector_namespace,
+            "service_account": args.service_account,
+            "applier": args.applier,
+            "tenants": parse_tenants(args.tenant),
         }
         return init_effector(
             args.dir,
@@ -210,6 +224,7 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             ledger_group=args.ledger_group,
             port=args.port,
             kubernetes=kubernetes,
+            rbac=rbac,
             docket=docket,
         )
     gateway = {"uid": args.gateway_uid, "socket": args.socket, "socket_group": args.gateway_group}
@@ -276,12 +291,7 @@ def _run_effector(args: argparse.Namespace) -> int:
 
 def _effector_manifests(args: argparse.Namespace) -> int:
     try:
-        tenants: dict[str, list[str]] = {}
-        for item in args.tenant:
-            tenant, separator, namespaces = item.partition("=")
-            if not separator or tenant in tenants:
-                raise ValueError(f"--tenant {item!r} must be tenant=namespace[,namespace...], once per tenant")
-            tenants[tenant] = namespaces.split(",")
+        tenants = parse_tenants(args.tenant)
         identity = EffectorIdentity(args.namespace, args.service_account, args.applier)
         output = render(generate_manifests(OperationCatalog.load(args.catalog), identity, tenants))
     except STARTUP_ERRORS as exc:

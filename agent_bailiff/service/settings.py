@@ -15,6 +15,7 @@ from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
 from agent_bailiff.docket.sink import Writers
+from agent_bailiff.effector.rbac import EffectorIdentity, check_inputs
 from agent_bailiff.keys import check_component, parse_pinned_keys
 from agent_bailiff.strict_json import parse_strict_json
 
@@ -38,9 +39,10 @@ CUSTODIAN_KEYS = frozenset(
 DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "allowed_uids", "writers"})
 EFFECTOR_KEYS = frozenset(
     {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
-    | {"max_clearance_lifetime", "port", "kubernetes", "ledger", "docket"}
+    | {"max_clearance_lifetime", "port", "kubernetes", "rbac", "ledger", "docket"}
 )
-KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file"})
+KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file", "audit_token_file"})
+RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "tenants"})
 CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers"})
 
 
@@ -179,6 +181,7 @@ class KubernetesSettings:
     port: int
     ca: Path
     token_file: Path
+    audit_token_file: Path
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,8 @@ class EffectorSettings:
     max_clearance_lifetime: int
     port: int
     kubernetes: KubernetesSettings
+    rbac: EffectorIdentity
+    tenants: Mapping[str, tuple[str, ...]]
     ledger: ReadOnlyLedgerSettings
     suspension_dir: Path
     docket: DocketClientSettings
@@ -255,6 +260,18 @@ def parse_effector(document: object) -> EffectorSettings:
     if host not in ("127.0.0.1", "localhost") and not all(part.isalnum() or part in ".-" for part in host):
         raise ConfigError("effector.kubernetes.host must be a host name or address")
     ledger = config.section("ledger", frozenset({"path", "writer_uid", "group"}))
+    rbac = config.section("rbac", RBAC_KEYS)
+    tenants = rbac.raw("tenants")
+    if not isinstance(tenants, dict) or not all(
+        isinstance(namespaces, list) and all(isinstance(namespace, str) for namespace in namespaces)
+        for namespaces in tenants.values()
+    ):
+        raise ConfigError("effector.rbac.tenants must map tenants to lists of namespaces")
+    identity = EffectorIdentity(rbac.text("namespace"), rbac.text("service_account"), rbac.text("applier"))
+    try:
+        check_inputs(identity, tenants)
+    except ValueError as exc:
+        raise rbac.wrap("tenants", exc) from None
     return EffectorSettings(
         name=config.component("name"),
         key=config.path("key"),
@@ -267,8 +284,14 @@ def parse_effector(document: object) -> EffectorSettings:
         max_clearance_lifetime=config.integer("max_clearance_lifetime", 1),
         port=config.integer("port", 1, 65535),
         kubernetes=KubernetesSettings(
-            host, kubernetes.integer("port", 1, 65535), kubernetes.path("ca"), kubernetes.path("token_file")
+            host,
+            kubernetes.integer("port", 1, 65535),
+            kubernetes.path("ca"),
+            kubernetes.path("token_file"),
+            kubernetes.path("audit_token_file"),
         ),
+        rbac=identity,
+        tenants={tenant: tuple(namespaces) for tenant, namespaces in tenants.items()},
         ledger=ReadOnlyLedgerSettings(ledger.path("path"), ledger.os_id("writer_uid"), ledger.os_id("group")),
         suspension_dir=suspension_directory(ledger.path("path")),
         docket=_docket_client(config),

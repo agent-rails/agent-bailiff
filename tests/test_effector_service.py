@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from test_effector import post
 
+from agent_bailiff.effector.drift import RbacDrift, RbacGate
 from agent_bailiff.keys import generate_signing_key
 from agent_bailiff.service import run
 from agent_bailiff.service.init import init_effector
@@ -80,7 +81,13 @@ def effector_config(root, port):
         ledger_uid=UID,
         ledger_group=GID,
         port=port,
-        kubernetes={"host": "127.0.0.1", "port": 6443, "ca": ca, "token_file": token},
+        kubernetes={"host": "127.0.0.1", "port": 6443, "ca": ca, "token_file": token, "audit_token_file": token},
+        rbac={
+            "namespace": "bailiff-system",
+            "service_account": "effector",
+            "applier": "gitops",
+            "tenants": {"tenant-a": ["staging"]},
+        },
         docket={"socket": str(root / "run" / "d.sock"), "sink_uid": UID},
     )
     return root / "effector" / "config.json"
@@ -112,7 +119,13 @@ def test_the_effector_config_refuses_unknown_and_missing_keys(root):
         parse_effector({**document, "port": 0})
 
 
-def test_a_started_effector_serves_its_catalog_on_localhost(root):
+def test_the_effector_refuses_to_start_when_its_rbac_cannot_be_verified(root):
+    with pytest.raises(RbacDrift, match="the RBAC check failed"):
+        run.start_effector(load_effector(effector_config(root, free_port())))
+
+
+def test_a_started_effector_serves_its_catalog_on_localhost(root, monkeypatch):
+    monkeypatch.setattr(RbacGate, "verify", lambda self: None)
     port = free_port()
     service = run.start_effector(load_effector(effector_config(root, port)))
     try:
@@ -136,3 +149,10 @@ def test_a_started_effector_serves_its_catalog_on_localhost(root):
         assert body["result"]["isError"] is True
     finally:
         service.close()
+
+
+def test_the_effector_config_refuses_unsafe_rbac_inputs(root):
+    document = json.loads(effector_config(root, 18082).read_text())
+    for tenants in ({}, {"Tenant": ["staging"]}, {"tenant-a": ["bailiff-system"]}, {"tenant-a": "staging"}):
+        with pytest.raises(ConfigError):
+            parse_effector({**document, "rbac": {**document["rbac"], "tenants": tenants}})

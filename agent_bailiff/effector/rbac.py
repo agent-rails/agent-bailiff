@@ -15,6 +15,16 @@ ADMISSION = "admissionregistration.k8s.io/v1"
 OP_ID_PATTERN = "^[A-Za-z0-9_-]{43}$"
 IMPERSONATE = "impersonate:user-info"
 RBAC_WRITE_RESOURCES = ("rolebindings", "clusterrolebindings", "roles", "clusterroles")
+AUDIT_SUFFIX = "-audit"
+AUDIT_RULES = [
+    {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list"]},
+    {"apiGroups": ["rbac.authorization.k8s.io"], "resources": sorted(RBAC_WRITE_RESOURCES), "verbs": ["list"]},
+    {
+        "apiGroups": ["admissionregistration.k8s.io"],
+        "resources": ["validatingadmissionpolicies", "validatingadmissionpolicybindings"],
+        "verbs": ["list"],
+    },
+]
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,10 @@ class EffectorIdentity:
     namespace: str
     service_account: str
     applier: str
+
+    @property
+    def audit_account(self) -> str:
+        return self.service_account + AUDIT_SUFFIX
 
 
 def synthetic_user(tenant: str, identity: str) -> str:
@@ -31,7 +45,7 @@ def synthetic_user(tenant: str, identity: str) -> str:
 def generate_manifests(
     catalog: OperationCatalog, effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]]
 ) -> dict[str, Any]:
-    _check(effector, tenants)
+    check_inputs(effector, tenants)
     operations = catalog.operations
     identities = sorted({operation.identity for operation in operations})
     users = sorted(synthetic_user(tenant, identity) for tenant in tenants for identity in identities)
@@ -61,6 +75,19 @@ def generate_manifests(
             ],
         ),
         _binding("ClusterRoleBinding", "bailiff-effector-impersonate", None, "ClusterRole", [subject]),
+        {
+            "apiVersion": "v1",
+            "kind": "ServiceAccount",
+            "metadata": _metadata(effector.audit_account, effector.namespace),
+        },
+        _cluster_role("bailiff-effector-audit", AUDIT_RULES),
+        _binding(
+            "ClusterRoleBinding",
+            "bailiff-effector-audit",
+            None,
+            "ClusterRole",
+            [{"kind": "ServiceAccount", "name": effector.audit_account, "namespace": effector.namespace}],
+        ),
     ]
     for namespace in namespaces:
         items.append(_role("bailiff-effector-on", namespace, _rules(operations, "impersonate-on:user-info:")))
@@ -85,9 +112,9 @@ def render(manifests: Mapping[str, Any]) -> str:
     return json.dumps(manifests, indent=2, sort_keys=True) + "\n"
 
 
-def _check(effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]]) -> None:
+def check_inputs(effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]]) -> None:
     for value in (effector.namespace, effector.service_account):
-        if LABEL.fullmatch(value) is None:
+        if LABEL.fullmatch(value) is None or len(value) > 63 - len(AUDIT_SUFFIX):
             raise CatalogError(f"{value!r} is not a Kubernetes name")
     if not effector.applier or any(character in effector.applier for character in "'\\\n"):
         raise CatalogError("the applier must be a non-empty user name without quotes or backslashes")
@@ -140,9 +167,7 @@ def _guard_policy(operations: Sequence[CatalogOperation]) -> list[dict[str, Any]
         "spec": {
             "failurePolicy": "Fail",
             "matchConstraints": {
-                "resourceRules": [
-                    {"apiGroups": ["*"], "apiVersions": ["*"], "operations": ["*"], "resources": ["*/*"]}
-                ]
+                "resourceRules": [{"apiGroups": ["*"], "apiVersions": ["*"], "operations": ["*"], "resources": ["*/*"]}]
             },
             "matchConditions": [_synthetic_condition()],
             "validations": [
@@ -202,8 +227,8 @@ def _range_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
 
 def _binding_policy(effector: EffectorIdentity) -> list[dict[str, Any]]:
     reaches = (
-        f"(s.kind == 'ServiceAccount' && s.name == '{effector.service_account}'"
-        f" && s.namespace == '{effector.namespace}')"
+        f"(s.kind == 'ServiceAccount' && s.namespace == '{effector.namespace}'"
+        f" && (s.name == '{effector.service_account}' || s.name == '{effector.audit_account}'))"
         f" || (s.kind == 'User' && s.name.startsWith('{USER_PREFIX}:'))"
     )
     generated = f"(has({{0}}.metadata.labels) && '{GENERATED_LABEL}' in {{0}}.metadata.labels)"
@@ -278,3 +303,13 @@ def _binding(
         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": role_kind, "name": name},
         "subjects": subjects,
     }
+
+
+def parse_tenants(items: Sequence[str]) -> dict[str, list[str]]:
+    tenants: dict[str, list[str]] = {}
+    for item in items:
+        tenant, separator, namespaces = item.partition("=")
+        if not separator or tenant in tenants:
+            raise CatalogError(f"tenant {item!r} must be tenant=namespace[,namespace...], once per tenant")
+        tenants[tenant] = namespaces.split(",")
+    return tenants

@@ -27,7 +27,9 @@ from agent_bailiff.decide.decider import Decider
 from agent_bailiff.docket.client import DocketClient
 from agent_bailiff.docket.sink import DocketSink
 from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.drift import RbacAudit, RbacGate
 from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient
+from agent_bailiff.effector.rbac import generate_manifests
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
 from agent_bailiff.keys import key_id, load_signing_key
@@ -247,9 +249,11 @@ def _close_all(resources: tuple[Closeable, ...]) -> None:
 @dataclass
 class RunningEffector:
     server: EffectorServer
+    rbac: RbacGate
 
     def close(self) -> None:
         self.server.close()
+        self.rbac.close()
 
 
 def start_effector(settings: EffectorSettings) -> RunningEffector:
@@ -268,7 +272,12 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
         catalog,
     )
     kubernetes = settings.kubernetes
-    client = KubernetesClient(HttpsTransport(kubernetes.host, kubernetes.port, kubernetes.ca), kubernetes.token_file)
+    transport = HttpsTransport(kubernetes.host, kubernetes.port, kubernetes.ca)
+    client = KubernetesClient(transport, kubernetes.token_file)
+    manifests = generate_manifests(catalog, settings.rbac, settings.tenants)
+    audit = RbacAudit(transport, kubernetes.token_file, kubernetes.audit_token_file, settings.rbac, manifests)
+    rbac = RbacGate(audit, lambda: int(time.time()))
+    rbac.verify()
     suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)
     effector = Effector(
         EffectorConfig(settings.name, settings.name),
@@ -277,7 +286,9 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
         client,
         suspension,
         docket_client(settings.docket, settings.name, key),
+        rbac,
     )
     server = EffectorServer(effector, settings.port)
     server.start()
-    return RunningEffector(server)
+    rbac.start()
+    return RunningEffector(server, rbac)

@@ -88,6 +88,91 @@
       ]
     },
     {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "effector-audit",
+        "namespace": "bailiff-system"
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-audit"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "namespaces"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "rbac.authorization.k8s.io"
+          ],
+          "resources": [
+            "clusterrolebindings",
+            "clusterroles",
+            "rolebindings",
+            "roles"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            "admissionregistration.k8s.io"
+          ],
+          "resources": [
+            "validatingadmissionpolicies",
+            "validatingadmissionpolicybindings"
+          ],
+          "verbs": [
+            "list"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-audit"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "bailiff-effector-audit"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "effector-audit",
+          "namespace": "bailiff-system"
+        }
+      ]
+    },
+    {
       "apiVersion": "rbac.authorization.k8s.io/v1",
       "kind": "Role",
       "metadata": {
@@ -455,7 +540,7 @@
         },
         "validations": [
           {
-            "expression": "(!(has(object.subjects) && object.subjects.exists(s, (s.kind == 'ServiceAccount' && s.name == 'effector' && s.namespace == 'bailiff-system') || (s.kind == 'User' && s.name.startsWith('bailiff:')))) && !(has(object.metadata.labels) && 'bailiff.dev/generated' in object.metadata.labels) && !(oldObject != null && (has(oldObject.metadata.labels) && 'bailiff.dev/generated' in oldObject.metadata.labels))) || request.userInfo.username == 'system:serviceaccount:argocd:argocd-application-controller'",
+            "expression": "(!(has(object.subjects) && object.subjects.exists(s, (s.kind == 'ServiceAccount' && s.namespace == 'bailiff-system' && (s.name == 'effector' || s.name == 'effector-audit')) || (s.kind == 'User' && s.name.startsWith('bailiff:')))) && !(has(object.metadata.labels) && 'bailiff.dev/generated' in object.metadata.labels) && !(oldObject != null && (has(oldObject.metadata.labels) && 'bailiff.dev/generated' in oldObject.metadata.labels))) || request.userInfo.username == 'system:serviceaccount:argocd:argocd-application-controller'",
             "message": "only the applier may grant to the effector or synthetic users or change generated RBAC"
           }
         ]

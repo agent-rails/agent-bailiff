@@ -64,10 +64,7 @@ class KubernetesClient:
     def call(
         self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str
     ) -> KubernetesResult:
-        try:
-            token = read_owned(self._token_file, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
-        except (OSError, ValueError) as exc:
-            raise KubernetesUnavailable(f"cannot read the effector token: {exc}") from None
+        token = read_token(self._token_file)
         call = operation.call
         headers = {
             "Authorization": f"Bearer {token}",
@@ -92,6 +89,13 @@ class KubernetesClient:
         except ValueError:
             raise KubernetesUnavailable("response is not JSON") from None
         return KubernetesResult(status, project(operation, document))
+
+
+def read_token(path: Path) -> str:
+    try:
+        return read_owned(path, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
+    except (OSError, ValueError) as exc:
+        raise KubernetesUnavailable(f"cannot read the token file {path}: {exc}") from None
 
 
 def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> str:
