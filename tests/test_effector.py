@@ -1,0 +1,367 @@
+import json
+import os
+import urllib.error
+import urllib.request
+from dataclasses import asdict, replace
+from pathlib import Path
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from agent_bailiff.custodian.release import ReleaseSigner
+from agent_bailiff.decide.clearance import Clearance, encode_clearance
+from agent_bailiff.decide.identity import snapshot_args
+from agent_bailiff.docket.entry import Record
+from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.kubernetes import KubernetesClient, KubernetesUnavailable, project, request_path
+from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
+from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
+
+NOW = 1_800_000_000
+CATALOG = OperationCatalog.load(
+    Path(__file__).resolve().parent.parent / "agent_bailiff" / "effector" / "catalogs" / "kubernetes.json"
+)
+DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(20, 52)))
+CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(21, 53)))
+CONFIG = ReleaseCheckConfig(
+    effector_id="effector.homelab",
+    custodian_id="custodian.example",
+    decider_id="decide.example",
+    custodian_keys={"custodian-1": CUSTODIAN_KEY.public_key()},
+    decide_keys={"decide-1": DECIDE_KEY.public_key()},
+    skew_seconds=5,
+    max_clearance_lifetime=60,
+)
+SCALE_ARGS = {"namespace": "staging", "name": "api", "replicas": 3}
+
+
+def clearance_for(name="scale_deployment", arguments=None, **overrides):
+    arguments = SCALE_ARGS if arguments is None else arguments
+    operation = CATALOG.operation(name)
+    fields = {
+        "iss": "decide.example",
+        "aud": "custodian.example",
+        "iat": NOW,
+        "exp": NOW + 60,
+        "op_id": f"op-{name}-{arguments.get('replicas', 0)}",
+        "tenant": "tenant-a",
+        "task": "task-1",
+        "root_binding": "r" * 43,
+        "leaf_binding": "l" * 43,
+        "request_digest": "q" * 43,
+        "tool": operation.tool,
+        "resource": operation.resource.format(**{k: arguments[k] for k in ("namespace", "name") if k in arguments}),
+        "args_digest": snapshot_args(arguments).digest,
+        "cost": 1,
+        "credential_id": "effector.homelab",
+        "target": "cluster.homelab",
+        "trace_id": "t" * 32,
+        "entry_id": "e" * 32,
+    }
+    fields.update(overrides)
+    return Clearance(**fields)
+
+
+def release_for(clearance=None, catalog=CATALOG.digest, audience="effector.homelab", now=NOW + 1):
+    clearance = clearance or clearance_for()
+    token = encode_clearance(clearance, DECIDE_KEY, "decide-1")
+    signer = ReleaseSigner("custodian.example", CUSTODIAN_KEY, "custodian-1")
+    return signer.sign(clearance, token, audience, catalog, "f" * 32, now)
+
+
+class FakeTransport:
+    def __init__(self, status=200, body=b'{"spec": {"replicas": 3}, "status": {"replicas": 1}}', error=None):
+        self.status, self.body, self.error = status, body, error
+        self.requests = []
+
+    def request(self, method, path, headers, body):
+        self.requests.append((method, path, dict(headers), body))
+        if self.error:
+            raise self.error
+        return self.status, self.body
+
+
+class RecordingDocket:
+    def __init__(self, fail_on=()):
+        self.entries = []
+        self.fail_on = fail_on
+
+    def append(self, entry):
+        if entry.decision in self.fail_on:
+            raise ConnectionError("docket down")
+        self.entries.append(entry)
+        return Record(writer="effector.homelab", seq=len(self.entries), prev=None, entry=entry, kid="k", token="t")
+
+
+class Suspended:
+    def __init__(self, value=False):
+        self.suspended = value
+
+
+@pytest.fixture
+def token_file(tmp_path):
+    path = tmp_path / "token"
+    path.write_text("effector-token\n")
+    os.chmod(path, 0o600)
+    return path
+
+
+def effector(token_file, transport=None, docket=None, suspended=False):
+    transport = transport or FakeTransport()
+    docket = docket or RecordingDocket()
+    instance = Effector(
+        EffectorConfig("effector.homelab", "effector.homelab"),
+        CATALOG,
+        ReleaseCheck(CONFIG, CATALOG),
+        KubernetesClient(transport, token_file),
+        Suspended(suspended),
+        docket,
+    )
+    return instance, transport, docket
+
+
+def scale_params(arguments=None):
+    return {"name": "scale_deployment", "arguments": SCALE_ARGS if arguments is None else arguments}
+
+
+def test_a_released_scale_call_patches_the_scale_subresource_as_the_synthetic_user(token_file):
+    instance, transport, docket = effector(token_file)
+    result = instance.call(scale_params(), release_for(), NOW + 2)
+    assert result["isError"] is False
+    assert json.loads(result["content"][0]["text"]) == {"spec.replicas": 3, "status.replicas": 1}
+    [(method, path, headers, body)] = transport.requests
+    assert (method, path) == ("PATCH", "/apis/apps/v1/namespaces/staging/deployments/api/scale")
+    assert json.loads(body) == {"spec": {"replicas": 3}}
+    assert headers["Impersonate-User"] == "bailiff:tenant-a:scale"
+    assert headers["Impersonate-Extra-bailiff.dev%2Fop-id"] == "op-scale_deployment-3"
+    assert headers["Authorization"] == "Bearer effector-token"
+    assert headers["Content-Type"] == "application/merge-patch+json"
+    assert [(entry.decision, entry.outcome) for entry in docket.entries] == [("attempt", None), ("outcome", "done")]
+    assert docket.entries[1].parent_entry == docket.entries[0].entry_id
+    assert docket.entries[1].performed is True
+
+
+def test_reads_are_built_from_pinned_fields_and_projected(token_file):
+    pod = {
+        "metadata": {"name": "p1", "labels": {"a": "b"}},
+        "status": {"phase": "Running"},
+        "spec": {"nodeName": "n1", "containers": [{"env": [{"value": "secret"}]}]},
+    }
+    body = json.dumps({"items": [pod]}).encode()
+    instance, transport, _ = effector(token_file, FakeTransport(body=body))
+    arguments = {"namespace": "staging", "limit": 5}
+    clearance = clearance_for("list_pods", arguments)
+    result = instance.call({"name": "list_pods", "arguments": arguments}, release_for(clearance), NOW + 2)
+    assert json.loads(result["content"][0]["text"]) == [
+        {"metadata.name": "p1", "status.phase": "Running", "spec.nodeName": "n1"}
+    ]
+    assert transport.requests[0][:2] == ("GET", "/api/v1/namespaces/staging/pods?limit=5")
+    assert "secret" not in result["content"][0]["text"]
+
+
+def test_a_log_read_is_truncated_text(token_file):
+    instance, transport, _ = effector(token_file, FakeTransport(body=b"x" * 70000))
+    arguments = {"namespace": "staging", "name": "p1", "tailLines": 10}
+    clearance = clearance_for("read_pod_log", arguments)
+    result = instance.call({"name": "read_pod_log", "arguments": arguments}, release_for(clearance), NOW + 2)
+    assert len(result["content"][0]["text"]) == 65536
+    assert transport.requests[0][1] == "/api/v1/namespaces/staging/pods/p1/log?tailLines=10"
+
+
+@pytest.mark.parametrize(
+    ("params", "release", "reason"),
+    [
+        (scale_params(), None, "release_malformed"),
+        (scale_params(), "garbage", "release_malformed"),
+        (scale_params(), release_for(audience="other"), "release_wrong_audience"),
+        (scale_params(), release_for(catalog="z" * 43), "catalog_mismatch"),
+        (scale_params(), release_for(now=NOW - 100), "release_expired"),
+        (scale_params({**SCALE_ARGS, "replicas": 4}), release_for(), "arguments_mismatch"),
+        (scale_params({**SCALE_ARGS, "namespace": "prod"}), release_for(), "resource_mismatch"),
+        (scale_params({**SCALE_ARGS, "replicas": 11}), release_for(), "malformed_arguments"),
+        (scale_params({**SCALE_ARGS, "kind": "StatefulSet"}), release_for(), "malformed_arguments"),
+        (
+            {"name": "get_deployment", "arguments": {"namespace": "staging", "name": "api"}},
+            release_for(),
+            "unknown_operation",
+        ),
+        ({"name": "scale_deployment", "arguments": SCALE_ARGS, "extra": 1}, release_for(), "malformed_request"),
+    ],
+)
+def test_calls_that_do_not_match_their_release_are_refused_before_kubernetes(token_file, params, release, reason):
+    instance, transport, docket = effector(token_file)
+    result = instance.call(params, release, NOW + 2)
+    assert result == {"content": [{"type": "text", "text": reason}], "isError": True}
+    assert transport.requests == [] and docket.entries == []
+
+
+def test_a_clearance_that_disagrees_with_its_release_is_refused(token_file):
+    clearance = clearance_for()
+    token = encode_clearance(replace(clearance, resource="k8s/prod/deployments/api"), DECIDE_KEY, "decide-1")
+    release = ReleaseSigner("custodian.example", CUSTODIAN_KEY, "custodian-1").sign(
+        clearance, token, "effector.homelab", CATALOG.digest, "f" * 32, NOW + 1
+    )
+    instance, transport, _ = effector(token_file)
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "clearance_mismatch"
+    assert transport.requests == []
+
+
+def test_a_release_signed_by_an_unpinned_key_is_refused(token_file):
+    clearance = clearance_for()
+    token = encode_clearance(clearance, DECIDE_KEY, "decide-1")
+    forged = ReleaseSigner("custodian.example", Ed25519PrivateKey.generate(), "custodian-1").sign(
+        clearance, token, "effector.homelab", CATALOG.digest, "f" * 32, NOW + 1
+    )
+    instance, transport, _ = effector(token_file)
+    assert instance.call(scale_params(), forged, NOW + 2)["content"][0]["text"] == "release_bad_signature"
+
+
+def test_a_release_is_used_once(token_file):
+    instance, transport, _ = effector(token_file)
+    release = release_for()
+    assert instance.call(scale_params(), release, NOW + 2)["isError"] is False
+    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "release_replayed"
+    assert len(transport.requests) == 1
+
+
+def test_a_suspended_or_unreadable_suspension_refuses_before_any_check(token_file):
+    instance, transport, docket = effector(token_file, suspended=True)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    instance, transport, docket = effector(token_file, suspended=None)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert transport.requests == [] and docket.entries == []
+
+
+def test_no_call_is_made_without_an_acknowledged_attempt_entry(token_file):
+    instance, transport, _ = effector(token_file, docket=RecordingDocket(fail_on=("attempt",)))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "docket_unavailable"
+    assert transport.requests == []
+
+
+def test_a_timeout_or_missing_outcome_entry_is_outcome_unknown_never_success(token_file):
+    instance, _, docket = effector(token_file, FakeTransport(error=KubernetesUnavailable("timed out")))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert docket.entries[-1].outcome == "outcome_unknown"
+    instance, transport, _ = effector(token_file, docket=RecordingDocket(fail_on=("outcome",)))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert len(transport.requests) == 1
+
+
+def test_kubernetes_refusals_and_server_errors_are_recorded(token_file):
+    instance, _, docket = effector(token_file, FakeTransport(status=403, body=b"{}"))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "kubernetes_403"
+    assert (docket.entries[-1].outcome, docket.entries[-1].performed) == ("refused", False)
+    instance, _, docket = effector(token_file, FakeTransport(status=503, body=b"{}"))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+
+
+def test_tools_list_publishes_strict_schemas(token_file):
+    instance, _, _ = effector(token_file)
+    tools = {tool["name"]: tool for tool in instance.tools()}
+    schema = tools["scale_deployment"]["inputSchema"]
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["name", "namespace", "replicas"]
+    assert schema["properties"]["replicas"] == {"type": "integer", "minimum": 1, "maximum": 10}
+
+
+def test_request_paths_and_projection_use_only_catalog_fields():
+    operation = CATALOG.operation("get_deployment")
+    assert request_path(operation, {"namespace": "a", "name": "b"}) == "/apis/apps/v1/namespaces/a/deployments/b"
+    assert project(operation, {"metadata": {"name": "b", "annotations": {"x": "y"}}, "spec": {"replicas": 2}}) == {
+        "metadata.name": "b",
+        "spec.replicas": 2,
+        "status.replicas": None,
+        "status.readyReplicas": None,
+        "status.updatedReplicas": None,
+    }
+
+
+def post(port, message, headers=None):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/mcp",
+        json.dumps(message).encode(),
+        {"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = response.read()
+            return response.status, json.loads(data) if data else None
+    except urllib.error.HTTPError as error:
+        return error.code, None
+
+
+def test_the_mcp_server_serves_session_methods_and_calls_on_localhost(token_file):
+    instance, transport, _ = effector(token_file)
+    server = EffectorServer(instance, 0, clock=lambda: NOW + 2)
+    server.start()
+    port = server.server_address[1]
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+        status, body = post(port, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        assert status == 200 and body["result"]["serverInfo"]["name"] == "agent-bailiff-effector"
+        assert post(port, {"jsonrpc": "2.0", "method": "notifications/initialized"})[0] == 202
+        status, body = post(port, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        assert len(body["result"]["tools"]) == 4
+        status, body = post(
+            port,
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": scale_params()},
+            {"bailiff-release": release_for()},
+        )
+        assert body["result"]["isError"] is False and len(transport.requests) == 1
+        status, body = post(port, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": scale_params()})
+        assert body["result"]["content"][0]["text"] == "release_malformed"
+        assert post(port, {"jsonrpc": "2.0", "id": 5, "method": "initialize"}, {"Origin": "http://evil"})[0] == 403
+        assert post(port, [{"jsonrpc": "2.0", "id": 6, "method": "ping"}])[0] == 400
+    finally:
+        server.close()
+
+
+def test_the_checked_fields_cover_the_release(token_file):
+    assert {"op_id", "tenant", "task", "tool", "resource", "args_digest"} <= set(asdict(clearance_for()))
+
+
+class SuspendAfterChecks:
+    def __init__(self):
+        self.reads = 0
+
+    @property
+    def suspended(self):
+        self.reads += 1
+        return self.reads > 1
+
+
+def test_a_suspension_set_after_the_checks_stops_the_call(token_file):
+    instance, transport, docket = effector(token_file)
+    instance._suspension = SuspendAfterChecks()
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert transport.requests == []
+    assert [(entry.decision, entry.outcome, entry.reason) for entry in docket.entries] == [
+        ("attempt", None, None),
+        ("outcome", "refused", "suspended"),
+    ]
+
+
+def test_an_unreadable_token_file_is_recorded_as_outcome_unknown(token_file):
+    os.chmod(token_file, 0o644)
+    instance, transport, docket = effector(token_file)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert transport.requests == []
+    assert docket.entries[-1].outcome == "outcome_unknown"
+
+
+def test_an_unexpected_client_failure_is_recorded_as_outcome_unknown(token_file):
+    instance, _, docket = effector(token_file, FakeTransport(error=RuntimeError("bug")))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert docket.entries[-1].outcome == "outcome_unknown"
+
+
+def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
+    pods = [{"metadata": {"name": "p" * 60}, "status": {"phase": "Running"}} for _ in range(2000)]
+    instance, _, docket = effector(token_file, FakeTransport(body=json.dumps({"items": pods}).encode()))
+    arguments = {"namespace": "staging", "limit": 5}
+    result = instance.call(
+        {"name": "list_pods", "arguments": arguments}, release_for(clearance_for("list_pods", arguments)), NOW + 2
+    )
+    assert result["content"][0]["text"] == "response_too_large"
+    assert docket.entries[-1].outcome == "done"

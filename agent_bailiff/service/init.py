@@ -16,7 +16,13 @@ from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.keys import PublicKeyRecord, check_component, generate_signing_key
 from agent_bailiff.service.ledger import create_writer
-from agent_bailiff.service.settings import parse_control, parse_custodian, parse_decide, parse_docket
+from agent_bailiff.service.settings import (
+    parse_control,
+    parse_custodian,
+    parse_decide,
+    parse_docket,
+    parse_effector,
+)
 from agent_bailiff.strict_json import parse_strict_json
 
 PRIVATE_MODE = 0o700
@@ -34,6 +40,7 @@ DEFAULT_RECONCILE_SECONDS = 10
 DEFAULT_SKEW_SECONDS = 5
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW = 60
+DEFAULT_CATALOG = Path(__file__).resolve().parent.parent / "effector" / "catalogs" / "kubernetes.json"
 
 
 class InitError(Exception):
@@ -155,6 +162,48 @@ def init_control(
         "writers": _writers(pins),
     }
     parse_control(document)
+    _make_private_dirs(directory, (DOCKET_STATE,))
+    record = generate_signing_key(directory / KEY, name)
+    _write(directory / CONFIG, document)
+    return record
+
+
+def init_effector(
+    directory: Path,
+    *,
+    name: str,
+    custodian: PublicKeyRecord,
+    decide: PublicKeyRecord,
+    ledger: Path,
+    ledger_uid: int,
+    ledger_group: int,
+    port: int,
+    kubernetes: Mapping[str, Any],
+    docket: Mapping[str, Any],
+) -> PublicKeyRecord:
+    check_component(name)
+    _check_new(directory, (CONFIG, KEY, DOCKET_STATE))
+    document = {
+        "name": name,
+        "key": str(directory / KEY),
+        "catalog": str(DEFAULT_CATALOG),
+        "custodian": custodian.component,
+        "custodian_keys": {custodian.kid: encode_public_key(custodian.public_key)},
+        "decider": decide.component,
+        "decide_keys": {decide.kid: encode_public_key(decide.public_key)},
+        "skew_seconds": DEFAULT_SKEW_SECONDS,
+        "max_clearance_lifetime": DEFAULT_MAX_PROOF_AGE,
+        "port": port,
+        "kubernetes": {
+            "host": kubernetes["host"],
+            "port": kubernetes["port"],
+            "ca": str(kubernetes["ca"]),
+            "token_file": str(kubernetes["token_file"]),
+        },
+        "ledger": {"path": str(ledger), "writer_uid": ledger_uid, "group": ledger_group},
+        "docket": _docket_client(directory, docket),
+    }
+    parse_effector(document)
     _make_private_dirs(directory, (DOCKET_STATE,))
     record = generate_signing_key(directory / KEY, name)
     _write(directory / CONFIG, document)
