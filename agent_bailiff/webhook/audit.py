@@ -51,6 +51,7 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
             or bool(spec.get("externalIPs"))
             or bool(spec.get("externalName"))
             or bool(spec.get("loadBalancerClass"))
+            or spec.get("publishNotReadyAddresses", False) is not False
         )
     if kind != "Deployment":
         return False

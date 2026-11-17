@@ -21,7 +21,10 @@ def generate_manifests(
     pins: Mapping[str, Any],
     catalog: OperationCatalog,
     enforce: bool,
+    phase: str = "all",
 ) -> dict[str, Any]:
+    if phase not in {"all", "prepare", "register", "target"}:
+        raise ValueError("phase must be all, prepare, register, or target")
     if IMAGE_DIGEST.fullmatch(image) is None:
         raise ValueError("image must be pinned by sha256 digest")
     if not ca_pem.startswith(b"-----BEGIN CERTIFICATE-----"):
@@ -44,7 +47,10 @@ def generate_manifests(
             "apiVersion": "v1",
             "kind": "Service",
             "metadata": {"name": NAME, "namespace": namespace, "labels": labels},
-            "spec": {"selector": pod_labels, "ports": [{"port": 443, "targetPort": 9443, "protocol": "TCP"}]},
+            "spec": {
+                "selector": pod_labels,
+                "ports": [{"port": 443, "targetPort": 9443, "protocol": "TCP"}],
+            },
         },
         {
             "apiVersion": "apps/v1",
@@ -55,7 +61,13 @@ def generate_manifests(
                 "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0}},
                 "selector": {"matchLabels": pod_labels},
                 "template": {
-                    "metadata": {"labels": pod_labels, "annotations": {"bailiff.dev/catalog-digest": catalog.digest}},
+                    "metadata": {
+                        "labels": pod_labels,
+                        "annotations": {
+                            "bailiff.dev/catalog-digest": catalog.digest,
+                            "bailiff.dev/enforce-mode": str(enforce).lower(),
+                        },
+                    },
                     "spec": {
                         "automountServiceAccountToken": False,
                         "securityContext": {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532},
@@ -84,13 +96,21 @@ def generate_manifests(
                                     "serve",
                                     "--config",
                                     "/etc/bailiff/webhook.json",
+                                    "--mode",
+                                    "enforce" if enforce else "audit",
                                     "--cert",
                                     "/etc/bailiff/tls/tls.crt",
                                     "--key",
                                     "/etc/bailiff/tls/tls.key",
                                 ],
                                 "ports": [{"containerPort": 9443, "name": "https"}],
-                                "readinessProbe": {"httpGet": {"path": "/readyz", "port": "https", "scheme": "HTTPS"}},
+                                "readinessProbe": {
+                                    "httpGet": {
+                                        "path": "/readyz/" + ("enforce" if enforce else "audit"),
+                                        "port": "https",
+                                        "scheme": "HTTPS",
+                                    }
+                                },
                                 "resources": {
                                     "requests": {"cpu": "50m", "memory": "64Mi"},
                                     "limits": {"cpu": "500m", "memory": "256Mi"},
@@ -153,4 +173,8 @@ def generate_manifests(
             ],
         },
     ]
+    if phase == "prepare":
+        items = [item for item in items if item["kind"] != "ValidatingWebhookConfiguration"]
+    elif phase == "register":
+        items = [item for item in items if item["kind"] == "ValidatingWebhookConfiguration"]
     return {"apiVersion": "v1", "kind": "List", "items": items}

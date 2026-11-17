@@ -46,6 +46,9 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
     assert any("drift: Deployment bailiff-system/bailiff-release-webhook" in issue for issue in audit.check())
     api.objects[deployment]["spec"]["template"]["spec"]["hostAliases"] = [{"ip": "127.0.0.1", "hostnames": ["spoof"]}]
     assert any("drift: Deployment bailiff-system/bailiff-release-webhook" in issue for issue in audit.check())
+    service = next(path for path in api.objects if path.endswith("/services/bailiff-release-webhook"))
+    api.objects[service]["spec"]["publishNotReadyAddresses"] = True
+    assert any("drift: Service bailiff-system/bailiff-release-webhook" in issue for issue in audit.check())
     api.objects[webhook]["webhooks"][0]["namespaceSelector"] = {"matchLabels": {"exclude": "bailiff"}}
     assert any(
         "drift: ValidatingWebhookConfiguration <cluster>/bailiff-release-webhook" in issue for issue in audit.check()

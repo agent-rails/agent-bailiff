@@ -10,7 +10,7 @@ The webhook writes one-line JSON events to stdout for log collection:
 - `bailiff_admission_denied`: a request rejected in Enforce mode.
 - `bailiff_admission_invalid_request` and `bailiff_admission_internal_error`: the webhook could not evaluate a valid request. The registration uses `failurePolicy: Fail`, so API writes fail closed.
 
-Denial events include `reason_code`, `mode`, AdmissionReview `request_uid`, username, operation, resource, subresource, namespace and name. They never include the release, op-id, request object, or exception text. Route both denial event names to the Kubernetes security/on-call log alert path. In Audit mode, alert on `bailiff_admission_would_deny`; in Enforce mode, alert on `bailiff_admission_denied` and the two availability events. Retain Kubernetes API audit events long enough to investigate the request UID and impersonated identity. Do not treat webhook stdout as a durable audit ledger.
+Denial events include `reason_code`, `mode`, AdmissionReview `request_uid`, username, operation, resource, subresource, namespace and name. They never include the release, op-id, request object, or exception text. Route both denial event names to the Kubernetes security/on-call log alert path. In Audit mode, alert on `bailiff_admission_would_deny`; in Enforce mode, alert on `bailiff_admission_denied` and the two availability events. Retain Kubernetes API audit events long enough to investigate the request UID and impersonated identity. Kubernetes audit events can include the impersonated `UserInfo`, which has an `extra` map; verify whether the release extra is recorded by the target provider and restrict audit-log readers accordingly. Treat a recorded live release as a short-lived write capability. Do not treat webhook stdout as a durable audit ledger.
 
 For an unexpected denial or would-deny:
 
@@ -23,10 +23,39 @@ The `agent-bailiff-webhook audit` command checks generated webhook resources aga
 
 ## Rollout and operational gates
 
-1. Generate and apply the webhook in Audit mode. Route the `would_deny` event to the on-call path and observe legitimate writes through a representative workload window.
+1. Generate and apply the full webhook in Audit mode. Route the `would_deny` event to the on-call path and observe legitimate writes through a representative workload window.
 2. Require a clean `agent-bailiff-webhook audit`, a successful TLS load/abuse test, and a reviewed API audit-log sample proving release extras are not exposed to unauthorized readers.
 3. Verify admission transport limits and audit visibility on the target managed Kubernetes provider. OrbStack's successful 16 KB probe does not establish DOKS behavior.
-4. Verify by access review that Bailiff identities and the effector account cannot mutate the webhook registration/CA bundle, pins, TLS secret, Deployment, or namespace.
-5. Only then generate/apply Enforce mode. Keep the alert route and recurring audit active. Roll back to Audit mode, never by deleting registration.
+4. Use a dedicated, access-restricted namespace for the webhook. Verify by access review that Bailiff identities and the effector account cannot mutate the webhook registration/CA bundle, pins, TLS Secret, Deployment, or namespace. Also review every effective principal and group: untrusted principals must not be able to create Pods/workloads in the namespace, use `pods/exec`, `pods/attach` or ephemeral containers, or mutate Services, Endpoints, EndpointSlices, or the TLS Secret. A Pod creator in this namespace can mount its TLS Secret and match the Service selector. Confirm every live Service endpoint is owned by the expected Deployment ReplicaSet before Enforce and during scheduled audits.
+5. Switch to Enforce in two phases; never apply a full Enforce bundle in one `kubectl apply`:
 
-The webhook uses TLS 1.2 or later, a concurrency limit, request-size limit and socket timeouts. The serving private key is mounted from a Secret and is not embedded in generated manifests. Pin the webhook image by digest. Confirm timeouts under TLS load on the target cluster before production use.
+   ```sh
+   agent-bailiff-webhook manifests ... --enforce --phase prepare > enforce-prepare.json
+   kubectl apply -f enforce-prepare.json
+   kubectl rollout status deployment/bailiff-release-webhook -n bailiff-system
+   agent-bailiff-webhook manifests ... --enforce --phase target > enforce-target.json
+   agent-bailiff-webhook manifests ... --enforce --phase register > enforce-register.json
+   kubectl apply -f enforce-register.json
+   agent-bailiff-webhook audit --manifest enforce-target.json ...
+   ```
+
+   First require a clean Audit-mode audit and the external gates above. The prepare phase updates the pinned mode config and pod template, triggering a rollout. Readiness only succeeds for pods running the requested mode. Wait for rollout completion before registering `failurePolicy: Fail`; then audit the complete Enforce target. `--phase target` renders the full Enforce desired state for audit comparison only; do not apply it as one bundle.
+6. Keep the alert route and recurring audit active. To roll back, first render/apply the Audit registration (`manifests ... --phase register`), then render/apply the full Audit bundle and wait for the Audit-mode rollout. Never delete the registration as rollback.
+
+The webhook uses TLS 1.2 or later, a concurrency limit, request-size limit and socket timeouts. The serving private key is mounted from a Secret and is not embedded in generated manifests. The Service must keep `publishNotReadyAddresses` unset or false; the drift audit reports it if enabled because it bypasses mode-aware Pod readiness. Serving certificates expire after 90 days. Rotate before expiry with an overlapping CA bundle:
+
+1. Generate a fresh certificate set in a new protected directory; keep `ca.key` offline.
+2. Concatenate the old and new CA certificates into `ca-overlap.pem`. Render and apply only the registration, passing this bundle to `--ca` (and `--enforce` if Enforce is active). This keeps the current serving certificate trusted while adding trust for the replacement.
+3. Update the TLS Secret and roll the pods:
+
+   ```sh
+   kubectl -n bailiff-system create secret tls bailiff-release-webhook-tls \
+     --cert=/secure/next/tls.crt --key=/secure/next/tls.key --dry-run=client -o yaml \
+     | kubectl apply -f -
+   kubectl -n bailiff-system rollout restart deployment/bailiff-release-webhook
+   kubectl -n bailiff-system rollout status deployment/bailiff-release-webhook
+   ```
+
+4. Render and apply the registration again with only the new CA certificate, then run the webhook audit.
+
+Schedule this rotation well before 90 days and alert on the deadline; the binary does not renew certificates automatically. Pin the webhook image by digest. Confirm timeouts under TLS load on the target cluster before production use, and verify the two replicas occupy separate nodes before Enforce.

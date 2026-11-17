@@ -176,10 +176,19 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
         assert audit_problems == [], audit_problems
         time.sleep(3)
         assert _patch(cluster)[0] == 200  # Audit mode: the VAP still checks op-id and range.
-        manifests["items"][-1]["webhooks"][0]["failurePolicy"] = "Fail"
-        manifests["items"][0]["data"]["webhook.json"] = json.dumps({**_pins(), "enforce": True}, sort_keys=True)
-        apply(json.dumps(manifests))
-        kubectl("-n", namespace, "rollout", "restart", "deployment/" + NAME)
+        enforce_prepare = generate_manifests(
+            namespace=namespace,
+            image=IMAGE,
+            ca_pem=(directory / "ca.crt").read_bytes(),
+            pins=_pins(),
+            catalog=CATALOG,
+            enforce=True,
+            phase="prepare",
+        )
+        if LOCAL_IMAGE:
+            deployment = next(item for item in enforce_prepare["items"] if item["kind"] == "Deployment")
+            deployment["spec"]["template"]["spec"]["containers"][0]["image"] = LOCAL_IMAGE
+        apply(json.dumps(enforce_prepare))
         kubectl("-n", namespace, "rollout", "status", "deployment/" + NAME, "--timeout=90s")
         time.sleep(3)
         denied = _patch(cluster)
@@ -201,6 +210,18 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             kubectl("-n", namespace, "logs", "deployment/" + NAME, "--all-pods=true", "--tail=100", check=False).stdout,
             kubectl("get", "validatingwebhookconfiguration", NAME, "-o", "yaml", check=False).stdout,
         )
+        enforce_registration = generate_manifests(
+            namespace=namespace,
+            image=IMAGE,
+            ca_pem=(directory / "ca.crt").read_bytes(),
+            pins=_pins(),
+            catalog=CATALOG,
+            enforce=True,
+            phase="register",
+        )
+        apply(json.dumps(enforce_registration))
+        time.sleep(3)
+        assert _patch(cluster)[0] == 403
         namespace = cluster["names"]["stg"]
         scale_args = {"namespace": namespace, "name": "api", "replicas": 3}
         allowed = _patch(cluster, _release("scale_deployment", scale_args, "A" * 43))

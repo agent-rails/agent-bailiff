@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ def _pins(path: Path) -> dict[str, Any]:
     return value
 
 
-def _admission(config: dict[str, Any], catalog: OperationCatalog) -> Admission:
+def _admission(config: dict[str, Any], catalog: OperationCatalog, *, enforce: bool | None = None) -> Admission:
     required = {
         "effector_id",
         "custodian_id",
@@ -59,7 +60,7 @@ def _admission(config: dict[str, Any], catalog: OperationCatalog) -> Admission:
         skew_seconds=config["skew_seconds"],
         max_clearance_lifetime=config["max_clearance_lifetime"],
     )
-    return Admission(checks, catalog, enforce=config["enforce"])
+    return Admission(checks, catalog, enforce=config["enforce"] if enforce is None else enforce)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,11 +76,18 @@ def main(argv: list[str] | None = None) -> int:
     manifests.add_argument("--pins", type=Path, required=True)
     manifests.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     manifests.add_argument("--enforce", action="store_true")
+    manifests.add_argument(
+        "--phase",
+        choices=("all", "prepare", "register", "target"),
+        default="all",
+        help="stage an Enforce transition: prepare pods, register the policy, or render a full audit target",
+    )
     serve = commands.add_parser("serve")
     serve.add_argument("--config", type=Path, required=True)
     serve.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     serve.add_argument("--cert", type=Path, required=True)
     serve.add_argument("--key", type=Path, required=True)
+    serve.add_argument("--mode", choices=("audit", "enforce"), required=True)
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=9443)
     audit = commands.add_parser("audit")
@@ -117,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
     catalog = OperationCatalog.load(args.catalog)
     if args.command == "manifests":
+        if args.enforce and args.phase == "all":
+            parser.error("--enforce requires --phase prepare, register, or target; do not apply Enforce as one bundle")
         pins = _pins(args.pins)
         _admission({**pins, "enforce": args.enforce}, catalog)
         generated = generate_manifests(
@@ -126,10 +136,16 @@ def main(argv: list[str] | None = None) -> int:
             pins=pins,
             catalog=catalog,
             enforce=args.enforce,
+            phase=args.phase,
         )
+        if args.enforce and args.phase == "target":
+            print(
+                "Target bundle is for audit comparison only; apply prepare then register as separate phases.",
+                file=sys.stderr,
+            )
         print(json.dumps(generated, indent=2, sort_keys=True))
         return 0
-    admission = _admission(_pins(args.config), catalog)
+    admission = _admission(_pins(args.config), catalog, enforce=args.mode == "enforce")
     with WebhookServer(admission, args.host, args.port, args.cert, args.key) as server:
         server.serve_forever()
     return 0

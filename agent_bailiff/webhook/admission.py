@@ -90,6 +90,10 @@ class Admission:
         self._catalog = catalog
         self._enforce = enforce
 
+    @property
+    def enforce(self) -> bool:
+        return self._enforce
+
     def review(self, body: bytes, now: int) -> dict[str, Any]:
         if len(body) > MAX_BODY_BYTES:
             raise MalformedReview("review too large")

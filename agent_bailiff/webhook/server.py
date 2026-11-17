@@ -87,10 +87,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         logger.info('{"event":"bailiff_webhook_health_check"}')
-        if self.path == "/readyz":
-            self._reply(200, {"ready": True})
+        path = urlsplit(self.path).path
+        if path == "/readyz/audit":
+            ready = not self.server.admission.enforce
+        elif path == "/readyz/enforce":
+            ready = self.server.admission.enforce
         else:
             self._reply(404, {})
+            return
+        self._reply(200 if ready else 503, {"ready": ready})
 
     def do_POST(self) -> None:
         logger.info('{"event":"bailiff_webhook_request"}')
