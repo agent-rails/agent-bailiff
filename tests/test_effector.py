@@ -100,6 +100,11 @@ class Verified:
     def healthy(self, now):
         return self.value
 
+    def restart_healthy(self, now):
+        return self.value and self.restart
+
+    restart = True
+
 
 class Suspended:
     def __init__(self, value=False):
@@ -470,3 +475,14 @@ def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_releas
     assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"
     assert headers["Content-Type"] == "application/apply-patch+yaml"
     assert result.payload == {"metadata.name": "api", "metadata.generation": 4, "status.observedGeneration": 3}
+
+
+def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run(token_file):
+    instance, transport, docket = effector(token_file)
+    instance._rbac.restart = False
+    arguments = {"namespace": "staging", "name": "api"}
+    clearance = clearance_for("restart_deployment", arguments, op_id="op-restart-1")
+    result = instance.call({"name": "restart_deployment", "arguments": arguments}, release_for(clearance), NOW + 2)
+    assert result["content"][0]["text"] == "restart_unverified"
+    assert transport.requests == [] and docket.entries == []
+    assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False

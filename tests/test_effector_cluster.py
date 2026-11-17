@@ -166,6 +166,7 @@ def test_only_the_applier_may_grant_to_the_effector_or_synthetic_users(cluster, 
 
 def test_the_generated_set_is_clean(cluster):
     assert cluster["audit"].check() == []
+    assert cluster["audit"].check_restart_schema() == []
 
 
 def test_a_legacy_grant_bound_through_a_group_outside_the_catalog_is_drift(cluster, restore):

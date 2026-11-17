@@ -358,7 +358,7 @@ def schemas(api):
 
 
 def test_the_restart_schema_is_read_with_the_audit_token(api, audit):
-    assert audit.check() == []
+    assert audit.check_restart_schema() == []
     assert ("GET", APPS_SCHEMA_PATH, "Bearer audit-token") in api.requests
 
 
@@ -399,13 +399,38 @@ def test_the_restart_schema_is_read_with_the_audit_token(api, audit):
 )
 def test_a_deployment_schema_the_restart_policy_does_not_fully_compare_is_drift(api, audit, change, problem):
     change(schemas(api))
-    assert audit.check()[0] == problem
+    assert audit.check() == []
+    assert audit.check_restart_schema()[0] == problem
 
 
-def test_an_unreadable_schema_fails_the_check(api, audit):
+def test_an_unreadable_schema_fails_the_restart_check(api, audit):
     api.status["openapi"] = 403
     with pytest.raises(KubernetesUnavailable):
-        audit.check()
+        audit.check_restart_schema()
+
+
+@pytest.mark.parametrize("fault", ["changed", "unreadable"])
+def test_a_schema_problem_withdraws_only_restart(api, audit, fault):
+    if fault == "changed":
+        schemas(api)["io.k8s.api.apps.v1.DeploymentSpec"]["properties"]["rolloutHint"] = {}
+    else:
+        api.status["openapi"] = 403
+    gate = RbacGate(audit, Clock(), interval=60)
+    gate.verify()
+    assert gate.healthy(1000) is True
+    assert gate.restart_healthy(1000) is False
+
+
+def test_restart_is_healthy_only_while_both_checks_are_fresh(api, audit):
+    gate = RbacGate(audit, Clock(), interval=60)
+    assert gate.restart_healthy(1000) is False
+    gate.verify()
+    assert gate.restart_healthy(1000) and gate.restart_healthy(1120)
+    assert gate.restart_healthy(1121) is False
+    api.status["rolebindings"] = 403
+    with pytest.raises(RbacDrift):
+        gate.verify()
+    assert gate.restart_healthy(1000) is False
 
 
 def test_a_changed_restart_policy_variable_is_drift(api, audit):

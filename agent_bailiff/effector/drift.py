@@ -126,11 +126,11 @@ class RbacAudit:
         problems.extend(self._check_objects(BINDING_KINDS, self._compare_binding, self._reaches_effector))
         problems.extend(self._check_objects(ROLE_KINDS, self._compare_role, lambda item: False))
         problems.extend(self._check_policies())
-        if any(operation.call.restarts for operation in self._operations):
-            problems.extend(self._check_restart_schema())
         return problems
 
-    def _check_restart_schema(self) -> list[str]:
+    def check_restart_schema(self) -> list[str]:
+        if not any(operation.call.restarts for operation in self._operations):
+            return []
         document = self._request(self._audit_token, "GET", APPS_SCHEMA_PATH, None)
         schemas = (document.get("components") or {}).get("schemas")
         if not isinstance(schemas, dict):
@@ -314,6 +314,7 @@ class RbacGate:
         self._clock = clock
         self._interval = interval
         self._verified_at: int | None = None
+        self._restart_verified_at: int | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -324,8 +325,15 @@ class RbacGate:
             problems = self._audit.check()
         except Exception as exc:
             problems = [f"the RBAC check failed: {exc}"]
+        try:
+            restart_problems = [] if problems else self._audit.check_restart_schema()
+        except Exception as exc:
+            restart_problems = [f"the Deployment schema check failed: {exc}"]
         with self._lock:
             self._verified_at = None if problems else now
+            self._restart_verified_at = None if problems or restart_problems else now
+        for problem in restart_problems:
+            logger.error("restart withdrawn: %s", problem)
         if problems:
             for problem in problems:
                 logger.error("effector RBAC drift: %s", problem)
@@ -334,6 +342,14 @@ class RbacGate:
     def healthy(self, now: int) -> bool:
         with self._lock:
             verified = self._verified_at
+        return self._fresh(verified, now)
+
+    def restart_healthy(self, now: int) -> bool:
+        with self._lock:
+            verified, restart = self._verified_at, self._restart_verified_at
+        return self._fresh(verified, now) and self._fresh(restart, now)
+
+    def _fresh(self, verified: int | None, now: int) -> bool:
         return verified is not None and 0 <= now - verified <= 2 * self._interval
 
     def start(self) -> None:
