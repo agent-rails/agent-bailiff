@@ -114,13 +114,13 @@ def token_file(tmp_path):
     return path
 
 
-def effector(token_file, transport=None, docket=None, suspended=False, rbac_healthy=True):
+def effector(token_file, transport=None, docket=None, suspended=False, rbac_healthy=True, started_at=NOW):
     transport = transport or FakeTransport()
     docket = docket or RecordingDocket()
     instance = Effector(
         EffectorConfig("effector.homelab", "effector.homelab"),
         CATALOG,
-        ReleaseCheck(CONFIG, CATALOG),
+        ReleaseCheck(CONFIG, CATALOG, started_at),
         KubernetesClient(transport, token_file),
         Suspended(suspended),
         docket,
@@ -380,3 +380,12 @@ def test_no_call_is_made_while_rbac_is_unverified(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
     assert transport.requests == [] and docket.entries == []
+
+
+def test_a_release_issued_before_the_effector_started_is_refused(token_file):
+    instance, transport, _ = effector(token_file, started_at=NOW + 2)
+    assert (
+        instance.call(scale_params(), release_for(now=NOW + 1), NOW + 3)["content"][0]["text"]
+        == "release_predates_start"
+    )
+    assert transport.requests == []

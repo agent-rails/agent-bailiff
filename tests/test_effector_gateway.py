@@ -76,6 +76,7 @@ def effector_server(transport, docket):
             max_clearance_lifetime=test_custodian.MAX_PROOF_AGE,
         ),
         CATALOG,
+        NOW,
     )
     effector = Effector(
         EffectorConfig(EFFECTOR_ID, EFFECTOR_ID),

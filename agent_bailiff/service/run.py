@@ -270,6 +270,7 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
             max_clearance_lifetime=settings.max_clearance_lifetime,
         ),
         catalog,
+        int(time.time()),
     )
     kubernetes = settings.kubernetes
     transport = HttpsTransport(kubernetes.host, kubernetes.port, kubernetes.ca)

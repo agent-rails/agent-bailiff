@@ -42,9 +42,10 @@ class ReleaseRefused(Exception):
 
 
 class ReleaseCheck:
-    def __init__(self, config: ReleaseCheckConfig, catalog: OperationCatalog) -> None:
+    def __init__(self, config: ReleaseCheckConfig, catalog: OperationCatalog, started_at: int) -> None:
         self._config = config
         self._catalog = catalog
+        self._started_at = started_at
         self._seen: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -60,6 +61,8 @@ class ReleaseCheck:
         )
         if isinstance(release, Refused):
             raise ReleaseRefused(f"release_{release.reason}")
+        if release.iat < self._started_at:
+            raise ReleaseRefused("release_predates_start")
         if release.catalog != self._catalog.digest:
             raise ReleaseRefused("catalog_mismatch")
         clearance = verify_clearance(
