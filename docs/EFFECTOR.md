@@ -84,7 +84,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 
 - Decide's and the custodian's route tables name the catalog: `{"routes": [...], "catalogs": [{"service": "k8s", "name": "kubernetes"}]}`. Only shipped catalogs can be named.
 - The custodian needs an effector binding per tool, with the effector's name as credential id and the catalog digest from `agent-bailiff effector digest`. Decide needs a matching target binding.
-- Point the gateway's MCP target for the catalog service at `http://127.0.0.1:<port>/mcp`, and remove `bailiff-release` in its header modifier. check-config requires both: a catalog service must target http on 127.0.0.1, localhost or [::1].
+- Point the gateway's MCP target for the catalog service at `http://127.0.0.1:<port>/mcp`, and remove `bailiff-release` in its header modifier. check-config requires both: a catalog service must target http on 127.0.0.1, localhost or [::1]. It does not check the port or path against the effector's config; a release sent to another local server can at most run or drop the one approved operation it binds.
 - Run one effector instance. Its single-use set is in memory.
 
 ## Tests
@@ -94,7 +94,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 
 ## Limits
 
-- Grants that reach the effector or a synthetic user through a group cannot be refused at admission; the drift check finds them within 60 s.
+- Grants that reach the effector or a synthetic user through a group cannot be refused at admission; the next drift check finds them.
 - Admission does not see reads. Reads are bounded by the impersonate-on grants and the catalog.
 - The admission objects are protected by the drift check, not by admission.
 - A direct RBAC or admission change is in effect until the next check finds it, up to 60 s plus the duration of a check, unless the binding policy refuses it.
