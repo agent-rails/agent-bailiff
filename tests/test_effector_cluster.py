@@ -114,8 +114,12 @@ def restore(cluster):
 
 
 def call(cluster, name, arguments, tenant="ta", op_id=OP_ID):
-    release = "cluster-test-release" if name == "scale_deployment" else None
-    return cluster["client"].call(CATALOG.operation(name), arguments, tenant, op_id, "t" * 32, release).status
+    release = "cluster-test-release" if CATALOG.operation(name).call.verb == "patch" else None
+    return (
+        cluster["client"]
+        .call(CATALOG.operation(name), arguments, tenant, op_id, "t" * 32, int(time.time()), release)
+        .status
+    )
 
 
 def scale(cluster, namespace, replicas=2, **options):
@@ -167,6 +171,7 @@ def test_only_the_applier_may_grant_to_the_effector_or_synthetic_users(cluster, 
 
 def test_the_generated_set_is_clean(cluster):
     assert cluster["audit"].check() == []
+    assert cluster["audit"].check_restart_schema() == []
 
 
 def test_a_legacy_grant_bound_through_a_group_outside_the_catalog_is_drift(cluster, restore):
@@ -245,3 +250,210 @@ def test_a_deleted_admission_binding_is_drift(cluster, restore):
     assert cluster["audit"].check() == [
         "the generated ValidatingAdmissionPolicyBinding bailiff-effector-guard is missing"
     ]
+
+
+RESTARTED_AT = "kubectl.kubernetes.io/restartedAt"
+RESTART_OP = "bailiff.dev/restart-op"
+
+
+def deployment(namespace):
+    return json.loads(
+        kubectl("-n", namespace, "get", "deployment", "api", "--show-managed-fields", "-o", "json").stdout
+    )
+
+
+def snapshot(item):
+    metadata = item["metadata"]
+    managers = sorted(
+        (entry["manager"], entry["operation"], entry.get("subresource", ""), json.dumps(entry.get("fieldsV1")))
+        for entry in metadata.get("managedFields", [])
+        if entry.get("subresource") != "status"
+    )
+    kept = ("labels", "annotations", "generateName", "finalizers", "ownerReferences", "generation")
+    return item["spec"], {key: metadata.get(key) for key in kept}, managers
+
+
+def restart(cluster, namespace, issued_at, op_id=OP_ID):
+    operation = CATALOG.operation("restart_deployment")
+    arguments = {"namespace": namespace, "name": "api"}
+    return cluster["client"].call(operation, arguments, "ta", op_id, "t" * 32, issued_at).status
+
+
+def patch_as_restart_user(cluster, namespace, body, content_type="application/merge-patch+json"):
+    token = (cluster["directory"] / "effector").read_text()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Impersonate-User": "bailiff:ta:restart",
+        "Impersonate-Extra-bailiff.dev%2Fop-id": OP_ID,
+        "Content-Type": content_type,
+    }
+    path = f"/apis/apps/v1/namespaces/{namespace}/deployments/api?fieldManager=bailiff-effector"
+    status, _ = cluster["transport"].request("PATCH", path, headers, json.dumps(body).encode())
+    return status
+
+
+def test_a_restart_sets_only_the_annotation_and_a_retry_changes_nothing(cluster):
+    staging = cluster["names"]["stg"]
+    before = deployment(staging)
+    issued_at = int(time.time())
+    assert restart(cluster, staging, issued_at) == 200
+    after = deployment(staging)
+    stamp = after["spec"]["template"]["metadata"]["annotations"][RESTARTED_AT]
+    assert after["spec"]["template"]["metadata"]["annotations"][RESTART_OP] == OP_ID
+    assert stamp == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(issued_at))
+    assert after["spec"]["template"]["spec"] == before["spec"]["template"]["spec"]
+    assert after["spec"]["replicas"] == before["spec"]["replicas"]
+    assert restart(cluster, staging, issued_at) == 200
+    assert deployment(staging)["metadata"]["generation"] == after["metadata"]["generation"]
+
+
+def test_two_restarts_in_the_same_second_with_different_op_ids_both_roll(cluster):
+    staging = cluster["names"]["stg"]
+    issued_at = int(time.time())
+    first_op, second_op = "A" * 43, "B" * 43
+    assert restart(cluster, staging, issued_at, first_op) == 200
+    first = deployment(staging)
+    assert restart(cluster, staging, issued_at, second_op) == 200
+    second = deployment(staging)
+    annotations = second["spec"]["template"]["metadata"]["annotations"]
+    assert annotations[RESTARTED_AT] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(issued_at))
+    assert annotations[RESTART_OP] == second_op
+    assert second["metadata"]["generation"] > first["metadata"]["generation"]
+
+
+def test_a_restart_of_a_deployment_with_many_field_managers_leaves_their_entries(cluster, restore):
+    staging = cluster["names"]["stg"]
+    kubectl("-n", staging, "create", "deployment", "busy", "--image=registry.k8s.io/pause:3.10")
+    restore.append(("-n", staging, "deployment", "busy"))
+    for index in range(12):
+        kubectl("-n", staging, "label", "deployment", "busy", f"team{index}=x", f"--field-manager=tool-{index}")
+    operation = CATALOG.operation("restart_deployment")
+    arguments = {"namespace": staging, "name": "busy"}
+    assert cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time())).status == 200
+
+
+def test_a_restart_of_a_missing_deployment_creates_nothing(cluster):
+    staging = cluster["names"]["stg"]
+    operation = CATALOG.operation("restart_deployment")
+    arguments = {"namespace": staging, "name": "ghost"}
+    status = cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time())).status
+    assert status >= 400
+    assert kubectl("-n", staging, "get", "deployment", "ghost", "--ignore-not-found", "-o", "name").stdout == ""
+
+
+def test_a_restart_after_a_manual_rollout_restart_is_allowed(cluster):
+    staging = cluster["names"]["stg"]
+    kubectl("-n", staging, "rollout", "restart", "deployment", "api")
+    assert restart(cluster, staging, int(time.time()) + 1) == 200
+    assert restart(cluster, cluster["names"]["other"], int(time.time())) == 403
+
+
+RESTART_ONLY_ENTRY = {
+    "manager": "kubectl-rollout",
+    "operation": "Update",
+    "apiVersion": "apps/v1",
+    "fieldsType": "FieldsV1",
+    "fieldsV1": {
+        "f:spec": {"f:template": {"f:metadata": {"f:annotations": {"f:kubectl.kubernetes.io/restartedAt": {}}}}}
+    },
+}
+STAMP = {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: "2026-01-01T00:00:00Z", RESTART_OP: OP_ID}}}}}
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (
+            [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "busybox:1.36"}],
+            "application/json-patch+json",
+        ),
+        ({"spec": {"replicas": 4}}, None),
+        ({"spec": {"paused": True}}, None),
+        ({"spec": {"template": {"metadata": {"labels": {"evil": "1"}}}}}, None),
+        (
+            {"spec": {"template": {"metadata": {"annotations": {"evil": "1", RESTARTED_AT: "2026-01-01T00:00:00Z"}}}}},
+            None,
+        ),
+        ({"spec": {"template": {"spec": {"hostNetwork": True}}}, **{}}, None),
+        ({"metadata": {"labels": {"evil": "1"}}, **STAMP}, None),
+        ({"metadata": {"generateName": "evil-"}, **STAMP}, None),
+        ({"metadata": {"managedFields": [{}]}, **STAMP}, None),
+        (
+            [
+                {
+                    "op": "replace",
+                    "path": "/metadata/managedFields",
+                    "value": [
+                        {
+                            "manager": "gitops",
+                            "operation": "Apply",
+                            "apiVersion": "apps/v1",
+                            "fieldsType": "FieldsV1",
+                            "fieldsV1": {"f:spec": {}},
+                        }
+                    ],
+                }
+            ],
+            "application/json-patch+json",
+        ),
+        (
+            [
+                {"op": "copy", "from": "/metadata/managedFields/0", "path": "/metadata/managedFields/-"},
+                {"op": "remove", "path": "/metadata/managedFields/1"},
+            ],
+            "application/json-patch+json",
+        ),
+        (
+            [
+                {"op": "add", "path": "/metadata/managedFields/-", "value": RESTART_ONLY_ENTRY},
+                {"op": "remove", "path": "/metadata/managedFields/0"},
+            ],
+            "application/json-patch+json",
+        ),
+    ],
+)
+def test_the_restart_identity_cannot_change_anything_but_the_annotation(cluster, body, content_type):
+    staging = cluster["names"]["stg"]
+    before = snapshot(deployment(staging))
+    status = patch_as_restart_user(cluster, staging, body, content_type or "application/merge-patch+json")
+    assert status == 422
+    assert snapshot(deployment(staging)) == before
+
+
+def apply_as_restart_user(cluster, namespace, document):
+    token = (cluster["directory"] / "effector").read_text()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Impersonate-User": "bailiff:ta:restart",
+        "Impersonate-Extra-bailiff.dev%2Fop-id": OP_ID,
+        "Content-Type": "application/apply-patch+yaml",
+    }
+    path = f"/apis/apps/v1/namespaces/{namespace}/deployments/api?fieldManager=bailiff-effector&force=true"
+    applied = {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api"}, **document}
+    status, _ = cluster["transport"].request("PATCH", path, headers, json.dumps(applied).encode())
+    return status
+
+
+def stamped(template_metadata=None, **spec):
+    metadata = {"annotations": {RESTARTED_AT: "2026-02-02T00:00:00Z"}, **(template_metadata or {})}
+    return {"spec": {"template": {"metadata": metadata}, **spec}}
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"spec": {"template": {"spec": {"containers": [{"name": "pause", "image": "busybox:1.36"}]}}}},
+        stamped(replicas=4),
+        stamped(paused=True),
+        stamped({"labels": {"evil": "1"}}),
+        {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: "2026-02-02T00:00:00Z", "evil": "1"}}}}},
+        stamped({"annotations": {RESTARTED_AT: "2026-02-02T00:00:00Z", RESTART_OP: "B" * 43}}),
+        {"metadata": {"name": "api", "labels": {"evil": "1"}}, **stamped()},
+        {"metadata": {"name": "api", "annotations": {"evil": "1"}}, **stamped()},
+    ],
+)
+def test_an_apply_by_the_restart_identity_cannot_change_anything_but_the_annotation(cluster, document):
+    staging = cluster["names"]["stg"]
+    before = snapshot(deployment(staging))
+    assert apply_as_restart_user(cluster, staging, document) == 422
+    assert snapshot(deployment(staging)) == before

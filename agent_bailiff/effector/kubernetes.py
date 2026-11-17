@@ -19,6 +19,7 @@ USER_PREFIX = "bailiff"
 OP_ID_EXTRA = "bailiff.dev/op-id"
 TRACE_EXTRA = "bailiff.dev/trace-id"
 RELEASE_EXTRA = "bailiff.dev/release"
+FIELD_MANAGER = "bailiff-effector"
 
 
 class KubernetesUnavailable(Exception):
@@ -65,7 +66,13 @@ class KubernetesClient:
         self._token_file = token_file
 
     def call(
-        self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str,
+        self,
+        operation: CatalogOperation,
+        arguments: Mapping[str, Any],
+        tenant: str,
+        op_id: str,
+        trace_id: str,
+        issued_at: int,
         release_token: str | None = None,
     ) -> KubernetesResult:
         token = read_token(self._token_file)
@@ -81,11 +88,13 @@ class KubernetesClient:
             if not isinstance(release_token, str) or not release_token:
                 raise KubernetesUnavailable("a write requires a release")
             headers[f"Impersonate-Extra-{urllib.parse.quote(RELEASE_EXTRA, safe='')}"] = release_token
-        body = call.body(arguments)
+        body = call.body(arguments, issued_at, op_id)
         payload = None
         if body is not None:
             payload = json.dumps(body).encode()
-            headers["Content-Type"] = "application/merge-patch+json"
+            headers["Content-Type"] = (
+                "application/apply-patch+yaml" if call.restarts else "application/merge-patch+json"
+            )
         method = {"list": "GET", "get": "GET", "patch": "PATCH"}[call.verb]
         status, data = self._transport.request(method, request_path(operation, arguments), headers, payload)
         if not 200 <= status < 300:
@@ -115,6 +124,9 @@ def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> s
     if call.subresource:
         path += f"/{call.subresource}"
     query = {parameter: str(arguments[argument]) for parameter, argument in sorted(call.query.items())}
+    if call.restarts:
+        query["fieldManager"] = FIELD_MANAGER
+        query["force"] = "true"
     return f"{path}?{urllib.parse.urlencode(query)}" if query else path
 
 

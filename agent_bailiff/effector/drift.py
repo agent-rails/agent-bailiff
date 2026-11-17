@@ -10,13 +10,38 @@ from typing import Any
 
 from agent_bailiff.effector.catalog import CatalogOperation
 from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
-from agent_bailiff.effector.rbac import EffectorIdentity, synthetic_user
+from agent_bailiff.effector.rbac import (
+    DEPLOYMENT_FIELDS,
+    DEPLOYMENT_SPEC_FIELDS,
+    OBJECT_META_FIELDS,
+    POD_TEMPLATE_FIELDS,
+    EffectorIdentity,
+    synthetic_user,
+)
 
 CHECK_INTERVAL_SECONDS = 60
 PAGE_SIZE = 500
 MAX_PAGES = 200
 RBAC_PATH = "/apis/rbac.authorization.k8s.io/v1"
 ADMISSION_PATH = "/apis/admissionregistration.k8s.io/v1"
+APPS_SCHEMA_PATH = "/openapi/v3/apis/apps/v1"
+SCHEMA_REF = "#/components/schemas/"
+DEPLOYMENT = "io.k8s.api.apps.v1.Deployment"
+DEPLOYMENT_SPEC = "io.k8s.api.apps.v1.DeploymentSpec"
+POD_TEMPLATE_SPEC = "io.k8s.api.core.v1.PodTemplateSpec"
+OBJECT_META = "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"
+PINNED_SCHEMAS = {
+    DEPLOYMENT: DEPLOYMENT_FIELDS,
+    DEPLOYMENT_SPEC: DEPLOYMENT_SPEC_FIELDS,
+    POD_TEMPLATE_SPEC: POD_TEMPLATE_FIELDS,
+    OBJECT_META: OBJECT_META_FIELDS,
+}
+PINNED_REFERENCES = (
+    (DEPLOYMENT, "metadata", OBJECT_META),
+    (DEPLOYMENT, "spec", DEPLOYMENT_SPEC),
+    (DEPLOYMENT_SPEC, "template", POD_TEMPLATE_SPEC),
+    (POD_TEMPLATE_SPEC, "metadata", OBJECT_META),
+)
 BASELINE_RULES = (
     {"apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectaccessreviews"], "verbs": ["create"]},
     {"apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectrulesreviews"], "verbs": ["create"]},
@@ -39,7 +64,7 @@ NON_RESOURCE = "#non-resource"
 IMPLICIT_GROUPS = ["system:authenticated"]
 BINDING_KINDS = ("RoleBinding", "ClusterRoleBinding")
 ROLE_KINDS = ("Role", "ClusterRole")
-POLICY_FIELDS = ("failurePolicy", "matchConditions", "validations")
+POLICY_FIELDS = ("failurePolicy", "matchConditions", "validations", "variables")
 
 Atom = tuple[str, str, str, str | None]
 Key = tuple[str, str | None, str]
@@ -101,6 +126,30 @@ class RbacAudit:
         problems.extend(self._check_objects(BINDING_KINDS, self._compare_binding, self._reaches_effector))
         problems.extend(self._check_objects(ROLE_KINDS, self._compare_role, lambda item: False))
         problems.extend(self._check_policies())
+        return problems
+
+    def check_restart_schema(self) -> list[str]:
+        if not any(operation.call.restarts for operation in self._operations):
+            return []
+        document = self._request(self._audit_token, "GET", APPS_SCHEMA_PATH, None)
+        schemas = (document.get("components") or {}).get("schemas")
+        if not isinstance(schemas, dict):
+            raise KubernetesUnavailable(f"{APPS_SCHEMA_PATH} returned no schemas")
+        problems: list[str] = []
+        for name, pinned in PINNED_SCHEMAS.items():
+            properties = (schemas.get(name) or {}).get("properties")
+            if not isinstance(properties, dict):
+                problems.append(f"the cluster serves no {name} schema")
+                continue
+            added, removed = sorted(set(properties) - set(pinned)), sorted(set(pinned) - set(properties))
+            if added or removed:
+                problems.append(
+                    f"the cluster's {name} fields differ from those the restart policy compares:"
+                    f" added {added}, removed {removed}"
+                )
+        for owner, field, target in PINNED_REFERENCES:
+            if _reference(schemas, owner, field) != SCHEMA_REF + target:
+                problems.append(f"the cluster's {owner}.{field} is not a {target}")
         return problems
 
     def _check_synthetic_users(self) -> list[str]:
@@ -265,6 +314,7 @@ class RbacGate:
         self._clock = clock
         self._interval = interval
         self._verified_at: int | None = None
+        self._restart_verified_at: int | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -275,8 +325,15 @@ class RbacGate:
             problems = self._audit.check()
         except Exception as exc:
             problems = [f"the RBAC check failed: {exc}"]
+        try:
+            restart_problems = [] if problems else self._audit.check_restart_schema()
+        except Exception as exc:
+            restart_problems = [f"the Deployment schema check failed: {exc}"]
         with self._lock:
             self._verified_at = None if problems else now
+            self._restart_verified_at = None if problems or restart_problems else now
+        for problem in restart_problems:
+            logger.error("restart withdrawn: %s", problem)
         if problems:
             for problem in problems:
                 logger.error("effector RBAC drift: %s", problem)
@@ -285,6 +342,14 @@ class RbacGate:
     def healthy(self, now: int) -> bool:
         with self._lock:
             verified = self._verified_at
+        return self._fresh(verified, now)
+
+    def restart_healthy(self, now: int) -> bool:
+        with self._lock:
+            verified, restart = self._verified_at, self._restart_verified_at
+        return self._fresh(verified, now) and self._fresh(restart, now)
+
+    def _fresh(self, verified: int | None, now: int) -> bool:
         return verified is not None and 0 <= now - verified <= 2 * self._interval
 
     def start(self) -> None:
@@ -311,6 +376,14 @@ def _key(item: Mapping[str, Any], kind: str | None = None) -> Key:
 
 def _label(key: Key) -> str:
     return f"{key[1]}/{key[2]}" if key[1] else key[2]
+
+
+def _reference(schemas: Mapping[str, Any], owner: str, field: str) -> object:
+    schema = ((schemas.get(owner) or {}).get("properties") or {}).get(field) or {}
+    if "$ref" in schema:
+        return schema["$ref"]
+    parts = schema.get("allOf") or []
+    return parts[0].get("$ref") if len(parts) == 1 and isinstance(parts[0], dict) else None
 
 
 def _same_policy(expected: Mapping[str, Any], live: Mapping[str, Any]) -> bool:

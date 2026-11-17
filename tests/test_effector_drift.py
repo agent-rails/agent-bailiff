@@ -6,7 +6,16 @@ import urllib.parse
 import pytest
 
 from agent_bailiff.effector.catalog import OperationCatalog
-from agent_bailiff.effector.drift import BASELINE_NON_RESOURCE, BASELINE_RULES, RbacAudit, RbacDrift, RbacGate
+from agent_bailiff.effector.drift import (
+    APPS_SCHEMA_PATH,
+    BASELINE_NON_RESOURCE,
+    BASELINE_RULES,
+    PINNED_REFERENCES,
+    PINNED_SCHEMAS,
+    RbacAudit,
+    RbacDrift,
+    RbacGate,
+)
 from agent_bailiff.effector.kubernetes import KubernetesUnavailable
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
@@ -34,6 +43,15 @@ def served(item):
         for rule in constraints["resourceRules"]:
             rule["scope"] = "*"
     return item
+
+
+def apps_schema():
+    schemas = {
+        name: {"properties": {field: {"type": "string"} for field in fields}} for name, fields in PINNED_SCHEMAS.items()
+    }
+    for owner, field, target in PINNED_REFERENCES:
+        schemas[owner]["properties"][field] = {"default": {}, "allOf": [{"$ref": f"#/components/schemas/{target}"}]}
+    return {"components": {"schemas": schemas}}
 
 
 def rules_for(account, namespace):
@@ -75,18 +93,26 @@ class FakeApi:
         self.status = {}
         self.page_size = None
         self.requests = []
+        self.schema = apps_schema()
 
     def request(self, method, path, headers, body):
         self.requests.append((method, path, headers["Authorization"]))
         url = urllib.parse.urlsplit(path)
         query = dict(urllib.parse.parse_qsl(url.query))
+        if url.path == APPS_SCHEMA_PATH:
+            return self.status.get("openapi", 200), json.dumps(self.schema).encode()
         plural = url.path.rsplit("/", 1)[-1]
         if plural in self.status:
             return self.status[plural], b"{}"
         if method == "POST" and plural == "subjectaccessreviews":
             spec = json.loads(body)["spec"]
             attributes = spec["resourceAttributes"]
-            key = (spec["user"], attributes["namespace"], attributes["verb"], attributes["resource"])
+            key = (
+                spec["user"],
+                attributes["namespace"],
+                attributes["verb"],
+                attributes["resource"] + ("/" + attributes["subresource"] if "subresource" in attributes else ""),
+            )
             tenant, identity = spec["user"].split(":")[1:]
             allowed = attributes["namespace"] in TENANTS.get(tenant, []) and any(
                 operation.identity == identity
@@ -147,7 +173,7 @@ def test_the_generated_set_with_server_defaults_is_clean(api, audit):
     access = [auth for method, path, auth in api.requests if path.endswith("/subjectaccessreviews")]
     lists = [auth for method, _, auth in api.requests if method == "GET"]
     assert sorted(reviews) == ["Bearer audit-token"] * 4 + ["Bearer effector-token"] * 4
-    assert set(access) == {"Bearer audit-token"} and len(access) == 8
+    assert set(access) == {"Bearer audit-token"} and len(access) == 15
     assert set(lists) == {"Bearer audit-token"}
 
 
@@ -318,10 +344,96 @@ def test_a_policy_narrowed_to_cluster_scope_is_drift(api, audit):
 
 
 def test_a_synthetic_user_allowed_outside_its_tenant_or_identity_is_drift(api, audit):
-    api.sar_overrides[("bailiff:tenant-a:read", "staging", "patch", "deployments")] = True
+    api.sar_overrides[("bailiff:tenant-a:read", "staging", "patch", "deployments/scale")] = True
     assert audit.check() == ["bailiff:tenant-a:read may scale_deployment in staging"]
 
 
 def test_a_synthetic_user_missing_its_grant_is_drift(api, audit):
-    api.sar_overrides[("bailiff:tenant-a:scale", "staging", "patch", "deployments")] = False
+    api.sar_overrides[("bailiff:tenant-a:scale", "staging", "patch", "deployments/scale")] = False
     assert audit.check() == ["bailiff:tenant-a:scale may not scale_deployment in staging"]
+
+
+def schemas(api):
+    return api.schema["components"]["schemas"]
+
+
+def test_the_restart_schema_is_read_with_the_audit_token(api, audit):
+    assert audit.check_restart_schema() == []
+    assert ("GET", APPS_SCHEMA_PATH, "Bearer audit-token") in api.requests
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (
+            lambda s: s["io.k8s.api.apps.v1.DeploymentSpec"]["properties"].update(rolloutPolicy={}),
+            "the cluster's io.k8s.api.apps.v1.DeploymentSpec fields differ from those the restart policy compares:"
+            " added ['rolloutPolicy'], removed []",
+        ),
+        (
+            lambda s: s["io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta"]["properties"].pop("generateName"),
+            "the cluster's io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta fields differ from those the restart"
+            " policy compares: added [], removed ['generateName']",
+        ),
+        (
+            lambda s: s["io.k8s.api.apps.v1.Deployment"]["properties"].update(rolloutHint={}),
+            "the cluster's io.k8s.api.apps.v1.Deployment fields differ from those the restart policy compares:"
+            " added ['rolloutHint'], removed []",
+        ),
+        (
+            lambda s: s.pop("io.k8s.api.core.v1.PodTemplateSpec"),
+            "the cluster serves no io.k8s.api.core.v1.PodTemplateSpec schema",
+        ),
+        (
+            lambda s: s["io.k8s.api.apps.v1.DeploymentSpec"]["properties"].update(template={"type": "object"}),
+            "the cluster's io.k8s.api.apps.v1.DeploymentSpec.template is not a io.k8s.api.core.v1.PodTemplateSpec",
+        ),
+        (
+            lambda s: s["io.k8s.api.core.v1.PodTemplateSpec"]["properties"].update(
+                metadata={"$ref": "#/components/schemas/io.k8s.api.core.v1.TemplateMeta"}
+            ),
+            "the cluster's io.k8s.api.core.v1.PodTemplateSpec.metadata is not a"
+            " io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta",
+        ),
+    ],
+)
+def test_a_deployment_schema_the_restart_policy_does_not_fully_compare_is_drift(api, audit, change, problem):
+    change(schemas(api))
+    assert audit.check() == []
+    assert audit.check_restart_schema()[0] == problem
+
+
+def test_an_unreadable_schema_fails_the_restart_check(api, audit):
+    api.status["openapi"] = 403
+    with pytest.raises(KubernetesUnavailable):
+        audit.check_restart_schema()
+
+
+@pytest.mark.parametrize("fault", ["changed", "unreadable"])
+def test_a_schema_problem_withdraws_only_restart(api, audit, fault):
+    if fault == "changed":
+        schemas(api)["io.k8s.api.apps.v1.DeploymentSpec"]["properties"]["rolloutHint"] = {}
+    else:
+        api.status["openapi"] = 403
+    gate = RbacGate(audit, Clock(), interval=60)
+    gate.verify()
+    assert gate.healthy(1000) is True
+    assert gate.restart_healthy(1000) is False
+
+
+def test_restart_is_healthy_only_while_both_checks_are_fresh(api, audit):
+    gate = RbacGate(audit, Clock(), interval=60)
+    assert gate.restart_healthy(1000) is False
+    gate.verify()
+    assert gate.restart_healthy(1000) and gate.restart_healthy(1120)
+    assert gate.restart_healthy(1121) is False
+    api.status["rolebindings"] = 403
+    with pytest.raises(RbacDrift):
+        gate.verify()
+    assert gate.restart_healthy(1000) is False
+
+
+def test_a_changed_restart_policy_variable_is_drift(api, audit):
+    policy = api.find("ValidatingAdmissionPolicy", "bailiff-restart-deployment")
+    policy["spec"]["variables"][0]["expression"] = "{}"
+    assert audit.check() == ["the generated ValidatingAdmissionPolicy bailiff-restart-deployment was changed"]

@@ -41,6 +41,7 @@
           ],
           "resourceNames": [
             "bailiff:tenant-a:read",
+            "bailiff:tenant-a:restart",
             "bailiff:tenant-a:scale"
           ],
           "resources": [
@@ -284,7 +285,8 @@
             "deployments"
           ],
           "verbs": [
-            "impersonate-on:user-info:get"
+            "impersonate-on:user-info:get",
+            "impersonate-on:user-info:patch"
           ]
         },
         {
@@ -403,6 +405,55 @@
           "app.kubernetes.io/managed-by": "agent-bailiff",
           "bailiff.dev/generated": "true"
         },
+        "name": "bailiff-tenant-a-restart",
+        "namespace": "staging"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "patch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-tenant-a-restart",
+        "namespace": "staging"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "bailiff-tenant-a-restart"
+      },
+      "subjects": [
+        {
+          "apiGroup": "rbac.authorization.k8s.io",
+          "kind": "User",
+          "name": "bailiff:tenant-a:restart"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
         "name": "bailiff-tenant-a-scale",
         "namespace": "staging"
       },
@@ -486,7 +537,7 @@
             "message": "a synthetic user request must carry exactly one valid op-id"
           },
           {
-            "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.subResource == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
+            "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.?subResource.orValue('') == '' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':restart')) || (request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.?subResource.orValue('') == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
             "message": "synthetic users may write only through the catalog's write operations"
           },
           {
@@ -573,6 +624,229 @@
       },
       "spec": {
         "policyName": "bailiff-scale-deployment",
+        "validationActions": [
+          "Deny"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-restart-deployment"
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConditions": [
+          {
+            "expression": "request.userInfo.username.startsWith('bailiff:')",
+            "name": "synthetic-user"
+          },
+          {
+            "expression": "request.userInfo.username.endsWith(':restart')",
+            "name": "operation-identity"
+          }
+        ],
+        "matchConstraints": {
+          "resourceRules": [
+            {
+              "apiGroups": [
+                "apps"
+              ],
+              "apiVersions": [
+                "*"
+              ],
+              "operations": [
+                "UPDATE"
+              ],
+              "resources": [
+                "deployments"
+              ]
+            }
+          ]
+        },
+        "validations": [
+          {
+            "expression": "object.spec.?minReadySeconds == oldObject.spec.?minReadySeconds",
+            "message": "a restart may not change spec.minReadySeconds"
+          },
+          {
+            "expression": "object.spec.?paused == oldObject.spec.?paused",
+            "message": "a restart may not change spec.paused"
+          },
+          {
+            "expression": "object.spec.?progressDeadlineSeconds == oldObject.spec.?progressDeadlineSeconds",
+            "message": "a restart may not change spec.progressDeadlineSeconds"
+          },
+          {
+            "expression": "object.spec.?replicas == oldObject.spec.?replicas",
+            "message": "a restart may not change spec.replicas"
+          },
+          {
+            "expression": "object.spec.?revisionHistoryLimit == oldObject.spec.?revisionHistoryLimit",
+            "message": "a restart may not change spec.revisionHistoryLimit"
+          },
+          {
+            "expression": "object.spec.?selector == oldObject.spec.?selector",
+            "message": "a restart may not change spec.selector"
+          },
+          {
+            "expression": "object.spec.?strategy == oldObject.spec.?strategy",
+            "message": "a restart may not change spec.strategy"
+          },
+          {
+            "expression": "object.spec.template.spec == oldObject.spec.template.spec",
+            "message": "a restart may not change the pod spec"
+          },
+          {
+            "expression": "object.spec.template.metadata.?creationTimestamp == oldObject.spec.template.metadata.?creationTimestamp",
+            "message": "a restart may not change spec.template.metadata.creationTimestamp"
+          },
+          {
+            "expression": "object.spec.template.metadata.?deletionGracePeriodSeconds == oldObject.spec.template.metadata.?deletionGracePeriodSeconds",
+            "message": "a restart may not change spec.template.metadata.deletionGracePeriodSeconds"
+          },
+          {
+            "expression": "object.spec.template.metadata.?deletionTimestamp == oldObject.spec.template.metadata.?deletionTimestamp",
+            "message": "a restart may not change spec.template.metadata.deletionTimestamp"
+          },
+          {
+            "expression": "object.spec.template.metadata.?finalizers == oldObject.spec.template.metadata.?finalizers",
+            "message": "a restart may not change spec.template.metadata.finalizers"
+          },
+          {
+            "expression": "object.spec.template.metadata.?generateName == oldObject.spec.template.metadata.?generateName",
+            "message": "a restart may not change spec.template.metadata.generateName"
+          },
+          {
+            "expression": "object.spec.template.metadata.?generation == oldObject.spec.template.metadata.?generation",
+            "message": "a restart may not change spec.template.metadata.generation"
+          },
+          {
+            "expression": "object.spec.template.metadata.?labels == oldObject.spec.template.metadata.?labels",
+            "message": "a restart may not change spec.template.metadata.labels"
+          },
+          {
+            "expression": "object.spec.template.metadata.?managedFields == oldObject.spec.template.metadata.?managedFields",
+            "message": "a restart may not change spec.template.metadata.managedFields"
+          },
+          {
+            "expression": "object.spec.template.metadata.?name == oldObject.spec.template.metadata.?name",
+            "message": "a restart may not change spec.template.metadata.name"
+          },
+          {
+            "expression": "object.spec.template.metadata.?namespace == oldObject.spec.template.metadata.?namespace",
+            "message": "a restart may not change spec.template.metadata.namespace"
+          },
+          {
+            "expression": "object.spec.template.metadata.?ownerReferences == oldObject.spec.template.metadata.?ownerReferences",
+            "message": "a restart may not change spec.template.metadata.ownerReferences"
+          },
+          {
+            "expression": "object.spec.template.metadata.?resourceVersion == oldObject.spec.template.metadata.?resourceVersion",
+            "message": "a restart may not change spec.template.metadata.resourceVersion"
+          },
+          {
+            "expression": "object.spec.template.metadata.?selfLink == oldObject.spec.template.metadata.?selfLink",
+            "message": "a restart may not change spec.template.metadata.selfLink"
+          },
+          {
+            "expression": "object.spec.template.metadata.?uid == oldObject.spec.template.metadata.?uid",
+            "message": "a restart may not change spec.template.metadata.uid"
+          },
+          {
+            "expression": "object.metadata.?annotations == oldObject.metadata.?annotations",
+            "message": "a restart may not change metadata.annotations"
+          },
+          {
+            "expression": "object.metadata.?creationTimestamp == oldObject.metadata.?creationTimestamp",
+            "message": "a restart may not change metadata.creationTimestamp"
+          },
+          {
+            "expression": "object.metadata.?deletionGracePeriodSeconds == oldObject.metadata.?deletionGracePeriodSeconds",
+            "message": "a restart may not change metadata.deletionGracePeriodSeconds"
+          },
+          {
+            "expression": "object.metadata.?deletionTimestamp == oldObject.metadata.?deletionTimestamp",
+            "message": "a restart may not change metadata.deletionTimestamp"
+          },
+          {
+            "expression": "object.metadata.?finalizers == oldObject.metadata.?finalizers",
+            "message": "a restart may not change metadata.finalizers"
+          },
+          {
+            "expression": "object.metadata.?generateName == oldObject.metadata.?generateName",
+            "message": "a restart may not change metadata.generateName"
+          },
+          {
+            "expression": "object.metadata.?labels == oldObject.metadata.?labels",
+            "message": "a restart may not change metadata.labels"
+          },
+          {
+            "expression": "object.metadata.?name == oldObject.metadata.?name",
+            "message": "a restart may not change metadata.name"
+          },
+          {
+            "expression": "object.metadata.?namespace == oldObject.metadata.?namespace",
+            "message": "a restart may not change metadata.namespace"
+          },
+          {
+            "expression": "object.metadata.?ownerReferences == oldObject.metadata.?ownerReferences",
+            "message": "a restart may not change metadata.ownerReferences"
+          },
+          {
+            "expression": "object.metadata.?selfLink == oldObject.metadata.?selfLink",
+            "message": "a restart may not change metadata.selfLink"
+          },
+          {
+            "expression": "object.metadata.?uid == oldObject.metadata.?uid",
+            "message": "a restart may not change metadata.uid"
+          },
+          {
+            "expression": "variables.annotations.all(k, k in ['kubectl.kubernetes.io/restartedAt', 'bailiff.dev/restart-op'] || (k in variables.previous && variables.previous[k] == variables.annotations[k])) && variables.previous.all(k, k in ['kubectl.kubernetes.io/restartedAt', 'bailiff.dev/restart-op'] || k in variables.annotations)",
+            "message": "a restart may change only its two pod template annotations"
+          },
+          {
+            "expression": "'kubectl.kubernetes.io/restartedAt' in variables.annotations && 'bailiff.dev/restart-op' in variables.annotations && variables.annotations['bailiff.dev/restart-op'] == request.userInfo.extra['bailiff.dev/op-id'][0]",
+            "message": "a restart must bind both annotations to its op-id"
+          },
+          {
+            "expression": "object.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(n, !(n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).size() == oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(o, !(o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).size() && object.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(n, !(n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).all(n, object.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(n, !(n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).filter(x, x == n).size() == oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(o, !(o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).filter(x, x == n).size()) && object.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(n, (n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).all(n, oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').exists(o, (o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}}) && o.manager == n.manager && o.operation == n.operation && o.?subresource == n.?subresource && o.apiVersion == n.apiVersion && o.fieldsType == n.fieldsType)) && object.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(n, (n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || n.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).size() <= oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != 'bailiff-effector').filter(o, (o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{}}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{}}}}} || o.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{}}}}}})).size()",
+            "message": "a restart may not change other field managers' entries"
+          },
+          {
+            "expression": "object.metadata.?managedFields.orValue([]).all(m, m.manager != 'bailiff-effector' || (m.operation == 'Apply' && !has(m.subresource) && m.apiVersion == 'apps/v1' && m.fieldsType == 'FieldsV1' && (m.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}} || m.fieldsV1 == {\"f:spec\":{\"f:template\":{\"f:metadata\":{\"f:annotations\":{\".\":{},\"f:kubectl.kubernetes.io/restartedAt\":{},\"f:bailiff.dev/restart-op\":{}}}}}})))",
+            "message": "the bailiff-effector field manager may own only the two restart pod template annotations"
+          }
+        ],
+        "variables": [
+          {
+            "expression": "object.spec.template.metadata.?annotations.orValue({})",
+            "name": "annotations"
+          },
+          {
+            "expression": "oldObject.spec.template.metadata.?annotations.orValue({})",
+            "name": "previous"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-restart-deployment"
+      },
+      "spec": {
+        "policyName": "bailiff-restart-deployment",
         "validationActions": [
           "Deny"
         ]
