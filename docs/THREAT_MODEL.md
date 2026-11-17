@@ -84,6 +84,7 @@ These are known and accepted for the current release:
 - **Python cannot reliably zero secrets in memory.**
 - **Effector grants that reach the effector or a synthetic user through a group are detected, not prevented.** A direct RBAC or admission change is in effect until the next drift check finds it, up to 60 s plus the duration of a check, unless the binding policy refuses it. The admission objects themselves are protected only by the drift check.
 - **Admission does not see reads.** Effector reads are bounded by the impersonate-on grants and the catalog.
+- **Pod logs reach the agent unchanged.** They are untrusted input that can carry instructions, and a secret an application logs is exposed to the agent and anything it calls. Scope bounds what an instructed agent can do; nothing stops the secret leaving.
 - **A cluster credential for a `bailiff:` user name acts with that synthetic user's grants.** Issuing one needs control of the cluster CA or identity provider.
 - **One effector instance.** Its single-use set is in memory.
 - **A stolen effector token can restart and scale any Deployment in the tenant namespaces, repeatedly.** Admission bounds what each call changes, not how often or which Deployment.

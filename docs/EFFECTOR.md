@@ -99,6 +99,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 
 - Grants that reach the effector or a synthetic user through a group cannot be refused at admission; the next drift check finds them.
 - Admission does not see reads. Reads are bounded by the impersonate-on grants and the catalog.
+- `read_pod_log` returns the log text unchanged. A log line can carry instructions to the agent, and any secret an application logs reaches the agent, which may pass it to another tool. Decide still limits every action to the task's scope.
 - The admission objects are protected by the drift check, not by admission.
 - A direct RBAC or admission change is in effect until the next check finds it, up to 60 s plus the duration of a check, unless the binding policy refuses it.
 - The synthetic users' own permissions outside the catalog are not enumerated. They are reachable only through the effector's impersonation, which impersonate-on limits to catalog calls.
