@@ -275,7 +275,15 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
     transport = HttpsTransport(kubernetes.host, kubernetes.port, kubernetes.ca)
     client = KubernetesClient(transport, kubernetes.token_file)
     manifests = generate_manifests(catalog, settings.rbac, settings.tenants)
-    audit = RbacAudit(transport, kubernetes.token_file, kubernetes.audit_token_file, settings.rbac, manifests)
+    audit = RbacAudit(
+        transport,
+        kubernetes.token_file,
+        kubernetes.audit_token_file,
+        settings.rbac,
+        manifests,
+        settings.tenants,
+        catalog.operations,
+    )
     rbac = RbacGate(audit, lambda: int(time.time()))
     rbac.verify()
     suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)

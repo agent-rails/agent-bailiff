@@ -24,6 +24,7 @@ AUDIT_RULES = [
         "resources": ["validatingadmissionpolicies", "validatingadmissionpolicybindings"],
         "verbs": ["list"],
     },
+    {"apiGroups": ["authorization.k8s.io"], "resources": ["subjectaccessreviews"], "verbs": ["create"]},
 ]
 
 
@@ -100,7 +101,7 @@ def generate_manifests(
             for namespace in sorted(set(tenants[tenant])):
                 items.append(_role(name, namespace, _rules(owned, "")))
                 items.append(_binding("RoleBinding", name, namespace, "Role", [user]))
-    items.extend(_guard_policy(operations))
+    items.extend(_guard_policy(operations, tenants))
     for operation in operations:
         if operation.call.body_argument is not None:
             items.extend(_range_policy(operation))
@@ -141,7 +142,7 @@ def _rules(operations: Sequence[CatalogOperation], prefix: str) -> list[dict[str
     ]
 
 
-def _guard_policy(operations: Sequence[CatalogOperation]) -> list[dict[str, Any]]:
+def _guard_policy(operations: Sequence[CatalogOperation], tenants: Mapping[str, Sequence[str]]) -> list[dict[str, Any]]:
     writes = sorted(
         {
             (operation.call.group, operation.call.resource, operation.call.subresource or "", operation.identity)
@@ -160,6 +161,11 @@ def _guard_policy(operations: Sequence[CatalogOperation]) -> list[dict[str, Any]
         f" && size(request.userInfo.extra['{OP_ID_EXTRA}']) == 1"
         f" && request.userInfo.extra['{OP_ID_EXTRA}'][0].matches('{OP_ID_PATTERN}')"
     )
+    owned = " || ".join(
+        f"(request.userInfo.username.startsWith('{USER_PREFIX}:{tenant}:')"
+        f" && request.namespace in {json.dumps(sorted(set(tenants[tenant])))})"
+        for tenant in sorted(tenants)
+    )
     policy = {
         "apiVersion": ADMISSION,
         "kind": "ValidatingAdmissionPolicy",
@@ -176,6 +182,7 @@ def _guard_policy(operations: Sequence[CatalogOperation]) -> list[dict[str, Any]
                     "expression": allowed or "false",
                     "message": "synthetic users may write only through the catalog's write operations",
                 },
+                {"expression": owned, "message": "synthetic users may write only in their tenant's namespaces"},
             ],
         },
     }

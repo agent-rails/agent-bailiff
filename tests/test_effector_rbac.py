@@ -107,10 +107,14 @@ def test_the_admission_policies_fail_closed_and_bound_the_replica_range():
     assert "object.spec.replicas >= 1 && object.spec.replicas <= 10" in scale["spec"]["validations"][0]["expression"]
     guard = named(items, "ValidatingAdmissionPolicy", "bailiff-effector-guard")
     assert guard["spec"]["matchConstraints"]["resourceRules"][0]["resources"] == ["*/*"]
-    op_id, writes = guard["spec"]["validations"]
+    op_id, writes, owned = guard["spec"]["validations"]
     assert "has(request.userInfo.extra)" in op_id["expression"]
     assert "request.subResource == 'scale'" in writes["expression"]
     assert "endsWith(':scale')" in writes["expression"]
+    assert (
+        owned["expression"]
+        == "(request.userInfo.username.startsWith('bailiff:tenant-a:') && request.namespace in [\"staging\"])"
+    )
 
 
 def test_the_binding_policy_names_the_effector_and_the_applier():
@@ -156,9 +160,23 @@ def test_the_example_is_valid_json_list():
     assert document["kind"] == "List" and len(document["items"]) == 19
 
 
-def test_the_audit_identity_may_only_list_namespaces_rbac_and_admission_policies():
+def test_the_audit_identity_may_only_list_and_ask_access_reviews():
     items = manifests()
     role = named(items, "ClusterRole", "bailiff-effector-audit")
-    assert {verb for rule in role["rules"] for verb in rule["verbs"]} == {"list"}
+    writes = [rule for rule in role["rules"] if rule["verbs"] != ["list"]]
+    assert writes == [
+        {"apiGroups": ["authorization.k8s.io"], "resources": ["subjectaccessreviews"], "verbs": ["create"]}
+    ]
     binding = named(items, "ClusterRoleBinding", "bailiff-effector-audit")
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "effector-audit", "namespace": "bailiff-system"}]
+
+
+def test_the_guard_ties_each_tenant_to_its_own_namespaces():
+    guard = named(
+        manifests({"tenant-a": ["staging"], "tenant-b": ["dev", "qa"]}),
+        "ValidatingAdmissionPolicy",
+        "bailiff-effector-guard",
+    )
+    owned = guard["spec"]["validations"][2]["expression"]
+    assert "startsWith('bailiff:tenant-a:') && request.namespace in [\"staging\"]" in owned
+    assert 'startsWith(\'bailiff:tenant-b:\') && request.namespace in ["dev", "qa"]' in owned

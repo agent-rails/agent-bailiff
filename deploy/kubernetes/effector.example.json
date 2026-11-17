@@ -146,6 +146,17 @@
           "verbs": [
             "list"
           ]
+        },
+        {
+          "apiGroups": [
+            "authorization.k8s.io"
+          ],
+          "resources": [
+            "subjectaccessreviews"
+          ],
+          "verbs": [
+            "create"
+          ]
         }
       ]
     },
@@ -418,6 +429,10 @@
           {
             "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.subResource == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
             "message": "synthetic users may write only through the catalog's write operations"
+          },
+          {
+            "expression": "(request.userInfo.username.startsWith('bailiff:tenant-a:') && request.namespace in [\"staging\"])",
+            "message": "synthetic users may write only in their tenant's namespaces"
           }
         ]
       }

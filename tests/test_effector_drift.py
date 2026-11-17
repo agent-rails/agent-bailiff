@@ -6,14 +6,16 @@ import urllib.parse
 import pytest
 
 from agent_bailiff.effector.catalog import OperationCatalog
-from agent_bailiff.effector.drift import BASELINE_RULES, RbacAudit, RbacDrift, RbacGate
+from agent_bailiff.effector.drift import BASELINE_NON_RESOURCE, BASELINE_RULES, RbacAudit, RbacDrift, RbacGate
 from agent_bailiff.effector.kubernetes import KubernetesUnavailable
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
 IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops")
 TENANTS = {"tenant-a": ["staging"]}
-MANIFESTS = generate_manifests(OperationCatalog.load(DEFAULT_CATALOG), IDENTITY, TENANTS)
+CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
+MANIFESTS = generate_manifests(CATALOG, IDENTITY, TENANTS)
+TOKENS = {"Bearer effector-token": "effector", "Bearer audit-token": "effector-audit"}
 PLURALS = {
     "rolebindings": "RoleBinding",
     "clusterrolebindings": "ClusterRoleBinding",
@@ -34,7 +36,7 @@ def served(item):
     return item
 
 
-def rules_for(namespace):
+def rules_for(account, namespace):
     granted = [rule for rule in BASELINE_RULES]
     by_key = {
         (item["kind"], item["metadata"].get("namespace"), item["metadata"]["name"]): item for item in MANIFESTS["items"]
@@ -42,7 +44,7 @@ def rules_for(namespace):
     for item in MANIFESTS["items"]:
         if item["kind"] not in ("RoleBinding", "ClusterRoleBinding"):
             continue
-        if item["subjects"] != [{"kind": "ServiceAccount", "name": "effector", "namespace": "bailiff-system"}]:
+        if item["subjects"] != [{"kind": "ServiceAccount", "name": account, "namespace": "bailiff-system"}]:
             continue
         scope = item["metadata"].get("namespace")
         if scope not in (None, namespace):
@@ -66,6 +68,9 @@ class FakeApi:
             }
         )
         self.extra_rules = {}
+        self.audit_extra_rules = {}
+        self.extra_non_resource = []
+        self.sar_overrides = {}
         self.incomplete = set()
         self.status = {}
         self.page_size = None
@@ -78,11 +83,27 @@ class FakeApi:
         plural = url.path.rsplit("/", 1)[-1]
         if plural in self.status:
             return self.status[plural], b"{}"
+        if method == "POST" and plural == "subjectaccessreviews":
+            spec = json.loads(body)["spec"]
+            attributes = spec["resourceAttributes"]
+            key = (spec["user"], attributes["namespace"], attributes["verb"], attributes["resource"])
+            tenant, identity = spec["user"].split(":")[1:]
+            allowed = attributes["namespace"] in TENANTS.get(tenant, []) and any(
+                operation.identity == identity
+                and operation.call.verb == attributes["verb"]
+                and operation.call.resource == attributes["resource"]
+                and (operation.call.subresource or None) == attributes.get("subresource")
+                for operation in CATALOG.operations
+            )
+            assert spec["groups"] == ["system:authenticated"]
+            return 201, json.dumps({"status": {"allowed": self.sar_overrides.get(key, allowed)}}).encode()
         if method == "POST":
             namespace = json.loads(body)["spec"]["namespace"]
+            account = TOKENS[headers["Authorization"]]
+            extra = (self.extra_rules if account == "effector" else self.audit_extra_rules).get(namespace, [])
             status = {
-                "resourceRules": rules_for(namespace) + self.extra_rules.get(namespace, []),
-                "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": ["/healthz"]}],
+                "resourceRules": rules_for(account, namespace) + extra,
+                "nonResourceRules": list(BASELINE_NON_RESOURCE) + self.extra_non_resource,
                 "incomplete": namespace in self.incomplete,
             }
             return 201, json.dumps({"status": status}).encode()
@@ -117,14 +138,16 @@ def audit(api, tmp_path):
     for name, value in (("effector", "effector-token"), ("audit", "audit-token")):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
-    return RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, MANIFESTS)
+    return RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, MANIFESTS, TENANTS, CATALOG.operations)
 
 
 def test_the_generated_set_with_server_defaults_is_clean(api, audit):
     assert audit.check() == []
-    reviews = [auth for method, _, auth in api.requests if method == "POST"]
+    reviews = [auth for method, path, auth in api.requests if path.endswith("selfsubjectrulesreviews")]
+    access = [auth for method, path, auth in api.requests if path.endswith("/subjectaccessreviews")]
     lists = [auth for method, _, auth in api.requests if method == "GET"]
-    assert set(reviews) == {"Bearer effector-token"} and len(reviews) == 4
+    assert sorted(reviews) == ["Bearer audit-token"] * 4 + ["Bearer effector-token"] * 4
+    assert set(access) == {"Bearer audit-token"} and len(access) == 8
     assert set(lists) == {"Bearer audit-token"}
 
 
@@ -146,19 +169,22 @@ def test_the_generated_set_with_server_defaults_is_clean(api, audit):
 def test_a_grant_outside_the_generated_set_in_any_namespace_is_drift(api, audit, rule):
     api.extra_rules["kube-system"] = [rule]
     [problem] = audit.check()
-    assert "outside the generated set in kube-system" in problem
+    assert problem.startswith("effector holds a grant outside the generated set in kube-system")
 
 
 def test_an_incomplete_rules_review_is_drift(api, audit):
     api.incomplete.add("default")
-    assert audit.check() == ["the effector's rules in default could not be listed completely"]
+    assert audit.check() == [
+        "the rules of effector in default could not be listed completely",
+        "the rules of effector-audit in default could not be listed completely",
+    ]
 
 
 def test_every_namespace_page_is_reviewed(api, audit):
     api.page_size = 1
     api.extra_rules["bailiff-system"] = [{"apiGroups": [""], "resources": ["users"], "verbs": ["impersonate"]}]
     assert len(audit.check()) == 1
-    assert len([path for method, path, _ in api.requests if method == "POST"]) == 4
+    assert len([path for _, path, _ in api.requests if path.endswith("selfsubjectrulesreviews")]) == 8
 
 
 @pytest.mark.parametrize(
@@ -264,3 +290,38 @@ def test_drift_or_an_error_makes_the_gate_unhealthy(api, audit):
     with pytest.raises(RbacDrift, match="the RBAC check failed"):
         gate.verify()
     assert gate.healthy(1000) is False
+
+
+def test_a_non_resource_grant_outside_the_baseline_is_drift(api, audit):
+    api.extra_non_resource.append({"verbs": ["get"], "nonResourceURLs": ["/metrics"]})
+    problems = audit.check()
+    assert len(problems) == 8 and all("'/metrics'" in problem for problem in problems)
+
+
+def test_a_non_resource_rule_added_to_a_generated_role_is_drift(api, audit):
+    api.find("ClusterRole", "bailiff-effector-audit")["rules"].append({"verbs": ["get"], "nonResourceURLs": ["/logs"]})
+    assert audit.check() == ["the generated ClusterRole bailiff-effector-audit was changed"]
+
+
+def test_a_grant_to_the_audit_account_outside_the_generated_set_is_drift(api, audit):
+    api.audit_extra_rules["kube-system"] = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]
+    assert audit.check() == [
+        "effector-audit holds a grant outside the generated set in kube-system: ('get', '', 'secrets', None)"
+    ]
+
+
+def test_a_policy_narrowed_to_cluster_scope_is_drift(api, audit):
+    api.find("ValidatingAdmissionPolicy", "bailiff-scale-deployment")["spec"]["matchConstraints"]["resourceRules"][0][
+        "scope"
+    ] = "Cluster"
+    assert audit.check() == ["the generated ValidatingAdmissionPolicy bailiff-scale-deployment was changed"]
+
+
+def test_a_synthetic_user_allowed_outside_its_tenant_or_identity_is_drift(api, audit):
+    api.sar_overrides[("bailiff:tenant-a:read", "staging", "patch", "deployments")] = True
+    assert audit.check() == ["bailiff:tenant-a:read may scale_deployment in staging"]
+
+
+def test_a_synthetic_user_missing_its_grant_is_drift(api, audit):
+    api.sar_overrides[("bailiff:tenant-a:scale", "staging", "patch", "deployments")] = False
+    assert audit.check() == ["bailiff:tenant-a:scale may not scale_deployment in staging"]

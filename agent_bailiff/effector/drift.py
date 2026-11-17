@@ -8,8 +8,9 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from agent_bailiff.effector.catalog import CatalogOperation
 from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
-from agent_bailiff.effector.rbac import EffectorIdentity
+from agent_bailiff.effector.rbac import EffectorIdentity, synthetic_user
 
 CHECK_INTERVAL_SECONDS = 60
 PAGE_SIZE = 500
@@ -21,6 +22,21 @@ BASELINE_RULES = (
     {"apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectrulesreviews"], "verbs": ["create"]},
     {"apiGroups": ["authentication.k8s.io"], "resources": ["selfsubjectreviews"], "verbs": ["create"]},
 )
+BASELINE_NON_RESOURCE = (
+    {"verbs": ["get"], "nonResourceURLs": ["/healthz", "/livez", "/readyz", "/version", "/version/"]},
+    {
+        "verbs": ["get"],
+        "nonResourceURLs": [
+            "/.well-known/openid-configuration",
+            "/.well-known/openid-configuration/",
+            "/openid/v1/jwks",
+            "/openid/v1/jwks/",
+        ],
+    },
+    {"verbs": ["get"], "nonResourceURLs": ["/api", "/api/*", "/apis", "/apis/*", "/openapi", "/openapi/*"]},
+)
+NON_RESOURCE = "#non-resource"
+IMPLICIT_GROUPS = ["system:authenticated"]
 BINDING_KINDS = ("RoleBinding", "ClusterRoleBinding")
 ROLE_KINDS = ("Role", "ClusterRole")
 POLICY_FIELDS = ("failurePolicy", "matchConditions", "validations")
@@ -42,6 +58,8 @@ def atoms(rules: Iterable[Mapping[str, Any]]) -> set[Atom]:
     for rule in rules:
         names: list[str | None] = list(rule.get("resourceNames") or []) or [None]
         for verb in rule.get("verbs") or []:
+            for url in rule.get("nonResourceURLs") or []:
+                expanded.add((verb, NON_RESOURCE, url, None))
             for group in rule.get("apiGroups") or []:
                 for resource in rule.get("resources") or []:
                     for name in names:
@@ -57,13 +75,19 @@ class RbacAudit:
         audit_token: Path,
         identity: EffectorIdentity,
         manifests: Mapping[str, Any],
+        tenants: Mapping[str, Sequence[str]],
+        operations: Sequence[CatalogOperation],
     ) -> None:
         self._transport = transport
-        self._effector_token = effector_token
         self._audit_token = audit_token
         self._identity = identity
         self._items = {_key(item): item for item in manifests["items"]}
-        self._effector_rules = self._granted_to(identity.service_account)
+        self._tenants = tenants
+        self._operations = operations
+        self._granted = {
+            account: self._granted_to(account) for account in (identity.service_account, identity.audit_account)
+        }
+        self._tokens = {identity.service_account: effector_token, identity.audit_account: audit_token}
 
     def check(self) -> list[str]:
         problems: list[str] = []
@@ -71,29 +95,64 @@ class RbacAudit:
         if not namespaces:
             problems.append("the audit identity listed no namespaces")
         for namespace in namespaces:
-            problems.extend(self._check_rules(namespace))
+            for account in self._granted:
+                problems.extend(self._check_rules(account, namespace))
+        problems.extend(self._check_synthetic_users())
         problems.extend(self._check_objects(BINDING_KINDS, self._compare_binding, self._reaches_effector))
         problems.extend(self._check_objects(ROLE_KINDS, self._compare_role, lambda item: False))
         problems.extend(self._check_policies())
         return problems
 
-    def _check_rules(self, namespace: str) -> list[str]:
+    def _check_synthetic_users(self) -> list[str]:
+        problems: list[str] = []
+        identities = sorted({operation.identity for operation in self._operations})
+        namespaces = sorted({namespace for allowed in self._tenants.values() for namespace in allowed})
+        for tenant in sorted(self._tenants):
+            for identity in identities:
+                user = synthetic_user(tenant, identity)
+                for namespace in namespaces:
+                    for operation in self._operations:
+                        expected = namespace in self._tenants[tenant] and operation.identity == identity
+                        if self._allowed(user, namespace, operation) != expected:
+                            state = "may" if not expected else "may not"
+                            problems.append(f"{user} {state} {operation.name} in {namespace}")
+        return problems
+
+    def _allowed(self, user: str, namespace: str, operation: CatalogOperation) -> bool:
+        call = operation.call
+        attributes = {"namespace": namespace, "verb": call.verb, "group": call.group, "resource": call.resource}
+        if call.subresource:
+            attributes["subresource"] = call.subresource
+        review = {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SubjectAccessReview",
+            "spec": {"user": user, "groups": IMPLICIT_GROUPS, "resourceAttributes": attributes},
+        }
+        status = self._request(
+            self._audit_token, "POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review
+        ).get("status")
+        if not isinstance(status, dict) or not isinstance(status.get("allowed"), bool):
+            raise KubernetesUnavailable("a SubjectAccessReview returned no decision")
+        return status["allowed"] is True
+
+    def _check_rules(self, account: str, namespace: str) -> list[str]:
         review = {
             "apiVersion": "authorization.k8s.io/v1",
             "kind": "SelfSubjectRulesReview",
             "spec": {"namespace": namespace},
         }
         status = self._request(
-            self._effector_token, "POST", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews", review
+            self._tokens[account], "POST", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews", review
         ).get("status")
         if not isinstance(status, dict) or status.get("incomplete") is not False:
-            return [f"the effector's rules in {namespace} could not be listed completely"]
+            return [f"the rules of {account} in {namespace} could not be listed completely"]
+        rules = self._granted[account]
         allowed = (
-            atoms(BASELINE_RULES) | self._effector_rules.get(None, set()) | self._effector_rules.get(namespace, set())
+            atoms(BASELINE_RULES) | atoms(BASELINE_NON_RESOURCE) | rules.get(None, set()) | rules.get(namespace, set())
         )
-        granted = atoms(status.get("resourceRules") or [])
+        granted = atoms(status.get("resourceRules") or []) | atoms(status.get("nonResourceRules") or [])
         extra = sorted((atom for atom in granted if atom not in allowed and atom[:3] + (None,) not in allowed), key=str)
-        return [f"the effector holds a grant outside the generated set in {namespace}: {atom}" for atom in extra]
+        return [f"{account} holds a grant outside the generated set in {namespace}: {atom}" for atom in extra]
 
     def _check_objects(
         self,
@@ -264,6 +323,8 @@ def _same_policy(expected: Mapping[str, Any], live: Mapping[str, Any]) -> bool:
         or constraints.get("objectSelector")
         or constraints.get("excludeResourceRules")
     ):
+        return False
+    if any(rule.get("scope", "*") != "*" for rule in constraints.get("resourceRules") or []):
         return False
     rules = [
         {key: value for key, value in rule.items() if key != "scope"} for rule in constraints.get("resourceRules") or []
