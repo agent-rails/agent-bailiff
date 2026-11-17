@@ -9,12 +9,14 @@ Scope: agent-bailiff with the agentgateway v1.7.0 adapter, each component under 
 - The ledger: reservations, revocations and issued state.
 - The suspension switch.
 - The docket: the record of decisions, releases and control actions.
+- The effector's cluster token and audit token, and the custodian's release key.
 
 ## Attackers
 
 1. **A hijacked agent**, for example through prompt injection. It holds a valid task root, links and agent key, and can send any MCP traffic the gateway accepts.
 2. **A compromised decide.** It holds decide's key and the ledger writer, but no credentials.
-3. **A compromised upstream MCP server.** It receives every request routed to it, including the credential header.
+3. **A compromised upstream MCP server.** It receives every request routed to it, including the credential header. For catalog tools the upstream is the effector, which agent-bailiff owns.
+   - 3b. **A compromised effector.** It holds the effector's cluster token and audit token, but no credential store and no signing key the custodian or decide trusts.
 4. **A local user** who is not root and is not one of the component users, including a member of the ledger group who is not decide.
 5. **An operator error**, such as a misconfigured gateway, a permissive directory mode or a wrong config path.
 
@@ -27,6 +29,8 @@ Root on the host is trusted. It can read every key and every file.
 - Decide to custodian: the clearance, signed by decide and verified with the custodian's pinned decide keys. It is necessary but not sufficient.
 - Components to docket: a Unix socket; the sink checks the peer uid and each writer's pinned key, sequence and previous hash.
 - Decide to custodian through the ledger and suspension directory: decide and control, both as decide's uid, write; the custodian reads through the ledger group.
+- Custodian to effector: the release, signed by the custodian and verified with the effector's pinned keys, carried by the gateway over 127.0.0.1.
+- Effector to Kubernetes: HTTPS with a pinned CA; the cluster enforces the generated RBAC and admission policies. See [EFFECTOR.md](EFFECTOR.md).
 
 ## Threats and mitigations
 
@@ -45,6 +49,10 @@ Root on the host is trusted. It can read every key and every file.
 | A gateway config that fails open | check-config refuses `failOpen`, a missing header allowlist, the wrong processor order, a non-Unix processor target and an unsafe method surface. |
 | A local user connects to a processor or the sink | Peer uid checks on every socket; processor sockets sit in a 0750 directory with the gateway's group. |
 | Key or database file substitution | Key files and databases are opened with owner, mode, link and parent checks. The custodian re-checks its databases before each use. |
+| A hijacked agent reaches the cluster with a catalog tool outside its approval | The effector rebuilds the request from the catalog and refuses unless the release, decide's clearance, the catalog digest, the arguments and the derived resource all agree. A release is single-use within its 30 s lifetime and must be issued after the effector started. |
+| A third-party MCP server or the agent obtains a cluster credential | No cluster credential is released. The effector's token never leaves the effector. |
+| A compromised effector uses its token for other actions | Its service account can only impersonate the synthetic users and only for the catalog's calls in the tenant namespaces. Each synthetic user's own RBAC is limited to its identity's calls in its tenant's namespaces. Admission denies synthetic users every write outside the catalog's writes and their tenant's namespaces, replicas outside the range, and requests without one well-formed op-id. |
+| A grant widens the effector or a synthetic user, for example a legacy `impersonate` rule, a binding to `edit` or a grant to `system:authenticated` | Admission refuses bindings that name the effector, its audit account or a synthetic user unless the applier makes them. The drift check, at startup and every 60 s, compares the effector's and audit account's effective rules in every namespace, every synthetic user's catalog calls and every generated object with the generated set; any difference stops the effector. |
 | Canary credential use | A canary release is refused, denies the task in the claims database and writes an alert entry. Control can then revoke the task. |
 
 ## Residual risks
@@ -74,4 +82,9 @@ These are known and accepted for the current release:
 - **The docket sink writes and fsyncs on its event loop.** A slow disk delays every writer, and writers then refuse calls when their append times out.
 - **Processor relays have no idle timeout.** Idle connections can hold the 64-connection cap; see [AGENTGATEWAY.md](AGENTGATEWAY.md).
 - **Python cannot reliably zero secrets in memory.**
+- **Effector grants that reach the effector or a synthetic user through a group are detected, not prevented.** A direct RBAC or admission change is in effect for up to 60 s before the drift check finds it, unless the binding policy refuses it. The admission objects themselves are protected only by the drift check.
+- **Admission does not see reads.** Effector reads are bounded by the impersonate-on grants and the catalog.
+- **A cluster credential for a `bailiff:` user name acts with that synthetic user's grants.** Issuing one needs control of the cluster CA or identity provider.
+- **One effector instance.** Its single-use set is in memory.
+- **The effector's op-id in Kubernetes audit events is unverified.** It is sent as an impersonation extra.
 - **On macOS, `fsync` does not flush the drive cache.**

@@ -91,6 +91,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
+- [docs/EFFECTOR.md](docs/EFFECTOR.md): the Kubernetes effector, its catalog, generated RBAC and admission, drift check and limits
 - [examples/live-run](examples/live-run/README.md): end-to-end run with Claude as the agent, and its results
 
 ## Development

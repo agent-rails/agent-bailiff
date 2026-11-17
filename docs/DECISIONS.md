@@ -65,7 +65,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 - `gateway-bound`: long-lived, never given to the agent;
 - `exposed`: would reach the agent.
 
-Only `gateway-bound` is implemented. check-config refuses stdio, SSE and OpenAPI upstreams for services with a credential binding, because they cannot carry the released header.
+`gateway-bound` is implemented, and for catalog tools so is `effector` (D13): no credential is released. check-config refuses stdio, SSE and OpenAPI upstreams for services with a credential binding, because they cannot carry the released header.
 
 **Why:** most targets accept only long-lived keys, so a per-operation credential cannot be assumed. For `gateway-bound`, the upstream MCP server is trusted.
 
@@ -87,9 +87,28 @@ Only `gateway-bound` is implemented. check-config refuses stdio, SSE and OpenAPI
 
 **Why:** supply-chain integrity, and no copied gateway code.
 
+## D13. A Bailiff-owned effector for infrastructure operations
+
+**Decision:** for Kubernetes, agent-bailiff runs its own MCP server, the effector, as the gateway's upstream for catalog tools. The custodian signs a single-use release instead of releasing a credential; the effector verifies it, rebuilds the request from an operation catalog and makes the call itself. One catalog produces the routes, tool schemas, RBAC and admission policies. Third-party MCP servers are used only for tools that need no credential.
+
+**Why:** passing a reusable token to a separate MCP server lets that server, or anything that captures the token, act beyond the approved call. An `ExtMcp` hook cannot return a result, so the effector has to be the upstream.
+
+## D14. Constrained impersonation, with generated admission and a drift check
+
+**Decision:** the effector's service account uses Kubernetes constrained impersonation (beta in v1.36) of synthetic users `bailiff:<tenant>:<identity>`, with the op-id as a user extra. Admission policies are load-bearing: writes only through the catalog, only in the tenant's namespaces, replicas in range, one op-id. The effector refuses calls unless a check at most 120 s old found exactly the generated set, including no legacy `impersonate` grant anywhere.
+
+**Why:** minted service-account tokens outlive a single call, and Kubernetes falls back to a legacy `impersonate` grant even when constrained grants exist, so the grants must be checked across all namespaces. Impersonated users carry `system:authenticated`, so writes are tied to the tenant at admission as well as by RBAC.
+
+## D15. Restart deferred
+
+**Decision:** the catalog offers no restart.
+
+**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which also allows image and replica changes, and pod eviction cannot be scoped to one Deployment's pods.
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend.
+- Effector targets other than Kubernetes, more than one effector instance, and restart.
 - OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
 - A standards check of the chain format against RFC 8693 and the OAuth Transaction Tokens draft before 1.0.

@@ -11,6 +11,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 | docket | its own uid | the docket file, pinned writer keys | Unix socket for decide, custodian and control |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
 | agentgateway | its own uid | gateway config | the agent's MCP connection |
+| effector | its own uid | its signing key, the operation catalog, the cluster token and audit token, pinned custodian and decide keys | 127.0.0.1 HTTP, the gateway's MCP upstream for catalog tools |
 
 Components keep separate private keys. Signed clearances and docket records are verified against public keys each verifier pins by key id in config it owns; Unix socket peers are checked by uid.
 
@@ -92,4 +93,8 @@ Control applies its action first and reports it as unrecorded if its entry is no
 
 ## Credential tiers
 
-The docket records a credential tier for each release. Only `gateway-bound` is implemented: the credential is long-lived and never reaches the agent, and the operation binding holds only at this layer. `target-bound` credentials, narrowed or minted per operation at the target, and other key backends are not built yet.
+The docket records a credential tier for each release. Two are implemented:
+- `gateway-bound`: the credential is long-lived and never reaches the agent, and the operation binding holds only at this layer;
+- `effector`: no credential is released. The custodian signs a release, and the effector runs the operation itself under an identity the target limits; see [EFFECTOR.md](EFFECTOR.md).
+
+`target-bound` credentials, narrowed or minted per operation at the target, and other key backends are not built yet.
