@@ -111,6 +111,12 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** the record type is inside the signed payload and checked on verify, so a docket entry cannot pass as a release. Both keys would sit in the same process and directory, so a second key adds no isolation. A release-only key pays off once keys can live apart, with a KMS or OpenBao backend.
 
+## D17. Release-verifying admission for catalog writes
+
+**Decision:** Kubernetes admission requires a signed, 10-second custodian release for each catalog write. The webhook uses the same pure release-and-clearance verifier as the effector, pins both signing key sets, and compares the full admitted operation and old-to-new object change. The webhook is stateless: a captured, still-live release may be replayed and may undo a later write; suspension does not invalidate a release already issued. Clock skew is bounded by the configured verifier limit. A stolen effector token alone cannot create a valid release. Rollback changes the webhook to Audit mode; deleting its registration is not a safe rollback.
+
+**Why:** admission can verify signatures and the exact object change without requiring API-server flags or a state store in the write path. The remaining replay and suspension window is explicitly accepted to keep admission stateless; it lasts no longer than the release lifetime plus the configured skew bound.
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.

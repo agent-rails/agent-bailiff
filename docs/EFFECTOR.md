@@ -20,7 +20,7 @@ The same catalog produces the gateway routes and decide's resource for each call
 
 ## One call
 
-1. decide and the custodian check the call as they do any other. For an effector binding, the custodian does not read a credential. It signs a release (`agent-bailiff/release/v1`, header `bailiff-release`, at most 30 s) after claiming the op_id. The release carries the op_id, tenant, task, tool, resource, argument digest, catalog digest and decide's clearance.
+1. decide and the custodian check the call as they do any other. For an effector binding, the custodian does not read a credential. It signs a release (`agent-bailiff/release/v1`, header `bailiff-release`, at most 10 s) after claiming the op_id. The release carries the op_id, tenant, task, tool, resource, argument digest, catalog digest and decide's clearance.
 2. The gateway removes any `bailiff-release` the agent sent, and the custodian adds its own.
 3. The effector refuses the call if any of these fails:
    - the suspension state is readable and not suspended;
@@ -29,7 +29,7 @@ The same catalog produces the gateway routes and decide's resource for each call
    - the catalog digest matches;
    - decide's clearance verifies (pinned decide keys) and agrees with the release on op_id, tenant, task, tool, resource and argument digest;
    - the operation's tool equals the release's, the arguments match the catalog schema exactly, and the derived resource and argument digest equal the release's;
-   - the op_id has not been used within the release lifetime.
+   - the op_id has not been used within the release lifetime. This is effector-local; admission is stateless and accepts replay of the exact released change until expiry.
 4. It records an `attempt` docket entry and makes no call until the entry is acknowledged. It checks suspension again.
 5. It makes one Kubernetes request built only from the catalog's fields and the checked arguments. The request impersonates `bailiff:<tenant>:<identity>`, with the op_id and trace id as user extras. It uses the effector's own token, read from a 0600 file on each call, over HTTPS with a pinned CA, with no redirects or proxies, a 10 s timeout and a 1 MiB response cap.
 6. It records the outcome and returns only the catalog's response fields, within the catalog's byte limit. A timeout, a 5xx, a client failure or an unacknowledged outcome entry returns `outcome_unknown`, never success.
@@ -49,6 +49,8 @@ Admission is load-bearing. Every policy fails closed and is bound cluster-wide i
 - **the range policy** limits `replicas` on `deployments/scale` to the catalog's range;
 - **the restart policy** denies the restart identity any Deployment update except the two restart pod template annotations; `bailiff.dev/restart-op` must equal the request's single op-id extra. Every `DeploymentSpec` field, the pod spec, the pod template metadata and the Deployment's own metadata must be unchanged, except the server-owned `generation`, `resourceVersion` and `managedFields`. Other field managers' entries must be unchanged, except that an entry owning only `restartedAt` may lose it, and the `bailiff-effector` entry must be an Apply entry owning only the two restart annotations;
 - **the binding policy** refuses creating or updating any RoleBinding or ClusterRoleBinding that names the effector, its audit account or a synthetic user, and creating or updating generated RBAC, unless the applier makes the change. Deleting generated RBAC is allowed, because it only removes access: deleting the effector's RoleBinding stops its next call.
+
+Catalog writes also pass through the release-verifying webhook. See [RELEASE_WEBHOOK.md](RELEASE_WEBHOOK.md) for the Audit-to-Enforce rollout, structured denial events, operator response and deployment gates.
 
 ## Generated objects
 
@@ -102,7 +104,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 - Grants that reach the effector or a synthetic user through a group cannot be refused at admission; the next drift check finds them.
 - Admission does not see reads. Reads are bounded by the impersonate-on grants and the catalog.
 - `read_pod_log` returns the log text unchanged. A log line can carry instructions to the agent, and any secret an application logs reaches the agent, which may pass it to another tool. Decide still limits every action to the task's scope.
-- The admission objects are protected by the drift check, not by admission.
+- The effector's admission objects are protected by the drift check, not by admission. The release webhook's separate registration, serving assets and workload are checked by its audit command; see [RELEASE_WEBHOOK.md](RELEASE_WEBHOOK.md).
 - A direct RBAC or admission change is in effect until the next check finds it, up to 60 s plus the duration of a check, unless the binding policy refuses it.
 - The synthetic users' own permissions outside the catalog are not enumerated. They are reachable only through the effector's impersonation, which impersonate-on limits to catalog calls.
 - A credential issued by the cluster for a `bailiff:` user name would act with that user's grants. Issuing one needs control of the cluster CA or identity provider.

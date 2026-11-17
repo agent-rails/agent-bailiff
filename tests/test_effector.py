@@ -470,7 +470,7 @@ def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_releas
         body=b'{"metadata": {"name": "api", "generation": 4}, "status": {"observedGeneration": 3}}'
     )
     result = KubernetesClient(transport, token_file).call(
-        operation, {"namespace": "staging", "name": "api"}, "tenant-a", "op-1", "t" * 32, NOW
+        operation, {"namespace": "staging", "name": "api"}, "tenant-a", "op-1", "t" * 32, NOW, "release"
     )
     [(method, path, headers, body)] = transport.requests
     assert (method, path) == (
@@ -493,6 +493,7 @@ def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_releas
         },
     }
     assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"
+    assert headers["Impersonate-Extra-bailiff.dev%2Frelease"] == "release"
     assert headers["Content-Type"] == "application/apply-patch+yaml"
     assert result.payload == {"metadata.name": "api", "metadata.generation": 4, "status.observedGeneration": 3}
 

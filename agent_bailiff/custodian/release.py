@@ -12,7 +12,7 @@ from agent_bailiff.signing import Refused, sign, verify
 
 RELEASE_TYP = "agent-bailiff/release/v1"
 RELEASE_HEADER = "bailiff-release"
-RELEASE_LIFETIME = 30
+RELEASE_LIFETIME = 10
 MAX_RELEASE_BYTES = 16384
 
 

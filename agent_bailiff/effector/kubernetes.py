@@ -21,6 +21,7 @@ MAX_TOKEN_LIFETIME_SECONDS = 600
 USER_PREFIX = "bailiff"
 OP_ID_EXTRA = "bailiff.dev/op-id"
 TRACE_EXTRA = "bailiff.dev/trace-id"
+RELEASE_EXTRA = "bailiff.dev/release"
 FIELD_MANAGER = "bailiff-effector"
 
 
@@ -75,6 +76,7 @@ class KubernetesClient:
         op_id: str,
         trace_id: str,
         issued_at: int,
+        release_token: str | None = None,
     ) -> KubernetesResult:
         token = read_token(self._token_file)
         call = operation.call
@@ -85,6 +87,10 @@ class KubernetesClient:
             f"Impersonate-Extra-{urllib.parse.quote(OP_ID_EXTRA, safe='')}": op_id,
             f"Impersonate-Extra-{urllib.parse.quote(TRACE_EXTRA, safe='')}": trace_id or "none",
         }
+        if call.verb == "patch":
+            if not isinstance(release_token, str) or not release_token:
+                raise KubernetesUnavailable("a write requires a release")
+            headers[f"Impersonate-Extra-{urllib.parse.quote(RELEASE_EXTRA, safe='')}"] = release_token
         body = call.body(arguments, issued_at, op_id)
         payload = None
         if body is not None:

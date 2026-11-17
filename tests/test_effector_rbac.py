@@ -71,7 +71,11 @@ def test_the_effector_may_impersonate_only_the_synthetic_users_and_extras():
         "bailiff:tenant-b:scale",
     ]
     assert users["verbs"] == extras["verbs"] == ["impersonate:user-info"]
-    assert extras["resources"] == ["userextras/bailiff.dev/op-id", "userextras/bailiff.dev/trace-id"]
+    assert extras["resources"] == [
+        "userextras/bailiff.dev/op-id",
+        "userextras/bailiff.dev/trace-id",
+        "userextras/bailiff.dev/release",
+    ]
 
 
 def test_impersonate_on_grants_mirror_the_catalog_in_each_namespace():
@@ -166,13 +170,17 @@ def test_the_example_is_valid_json_list():
     assert document["kind"] == "List" and len(document["items"]) == 23
 
 
-def test_the_audit_identity_may_only_list_and_ask_access_reviews():
+def test_the_audit_identity_may_only_read_generated_webhook_objects_and_ask_access_reviews():
     items = manifests()
     role = named(items, "ClusterRole", "bailiff-effector-audit")
-    writes = [rule for rule in role["rules"] if rule["verbs"] != ["list"]]
+    writes = [rule for rule in role["rules"] if rule["verbs"] not in (["list"], ["get"])]
     assert writes == [
         {"apiGroups": ["authorization.k8s.io"], "resources": ["subjectaccessreviews"], "verbs": ["create"]}
     ]
+    gets = [rule for rule in role["rules"] if rule["verbs"] == ["get"]]
+    assert all(
+        set(rule["resourceNames"]) <= {"bailiff-release-webhook", "bailiff-release-webhook-pins"} for rule in gets
+    )
     binding = named(items, "ClusterRoleBinding", "bailiff-effector-audit")
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "effector-audit", "namespace": "bailiff-system"}]
 

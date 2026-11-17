@@ -1,0 +1,9 @@
+.git
+.venv
+.venv-dev
+_worktrees
+tests
+docs
+examples
+*.egg-info
+__pycache__
