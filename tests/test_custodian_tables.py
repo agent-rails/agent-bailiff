@@ -267,3 +267,20 @@ def test_claims_database_changed_after_open_is_refused(state, tamper):
             claims.is_denied("tenant-a", "task-1")
     finally:
         claims.close()
+
+
+def test_resolve_checks_only_bindings_for_the_same_tenant_and_tool(monkeypatch):
+    target = CredentialBinding(**DEPLOY)
+    others = [CredentialBinding(**{**DEPLOY, "tool": f"deploy.t{index}"}) for index in range(500)]
+    others += [CredentialBinding(**{**DEPLOY, "tenant": f"tenant-{index}"}) for index in range(500)]
+    table = BindingTable([*others, target])
+    checked = []
+    matches = CredentialBinding.matches
+    monkeypatch.setattr(CredentialBinding, "matches", lambda self, *args: checked.append(self) or matches(self, *args))
+    assert table.resolve("tenant-a", "deploy.service", "env/staging/api") == target
+    assert checked == [target]
+
+
+@pytest.mark.parametrize(("tenant", "tool"), [("tenant-a", []), ({}, "deploy.service"), (None, None)])
+def test_resolve_with_a_non_string_tenant_or_tool_resolves_to_none(tenant, tool):
+    assert BindingTable([CredentialBinding(**DEPLOY)]).resolve(tenant, tool, "env/staging/api") is None

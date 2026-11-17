@@ -18,7 +18,8 @@ from agent_bailiff.custodian.release import (
     ReleaseSigner,
     verify_release,
 )
-from agent_bailiff.decide.clearance import decode_clearance
+from agent_bailiff.decide.clearance import CLEARANCE_TYP, decode_clearance
+from agent_bailiff.docket.entry import ENTRY_TYP
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import sign
 
@@ -154,6 +155,12 @@ def test_a_valid_release_verifies():
 def test_invalid_releases_are_refused(token, now, aud, reason):
     result = verified(token, now=now, aud=aud)
     assert isinstance(result, SigningRefused) and result.reason == reason, result
+
+
+@pytest.mark.parametrize("typ", [ENTRY_TYP, CLEARANCE_TYP])
+def test_a_release_body_signed_by_the_release_key_as_another_record_type_is_refused(typ):
+    result = verified(sign(RELEASE_KEY, RELEASE_KID, typ, release_body()))
+    assert isinstance(result, SigningRefused) and result.reason == "wrong_typ", result
 
 
 def test_a_release_with_an_extra_or_missing_field_is_refused():
