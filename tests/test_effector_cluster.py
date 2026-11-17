@@ -10,7 +10,7 @@ import pytest
 
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacAudit
-from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient
+from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, KubernetesUnavailable
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
@@ -22,6 +22,7 @@ pytestmark = pytest.mark.skipif(
 CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
 OP_ID = "A" * 43
 SETTLE_SECONDS = 3
+REVOCATION_SECONDS = 30
 
 
 def kubectl(*args, check=True, stdin=None, user=None):
@@ -457,3 +458,27 @@ def test_an_apply_by_the_restart_identity_cannot_change_anything_but_the_annotat
     before = snapshot(deployment(staging))
     assert apply_as_restart_user(cluster, staging, document) == 422
     assert snapshot(deployment(staging)) == before
+
+
+def test_a_token_minted_for_longer_than_ten_minutes_is_refused(cluster, tmp_path):
+    long_lived = kubectl("-n", cluster["names"]["sys"], "create", "token", "effector", "--duration=1h").stdout.strip()
+    path = tmp_path / "long.token"
+    path.write_text(long_lived)
+    os.chmod(path, 0o600)
+    client = KubernetesClient(cluster["transport"], path)
+    with pytest.raises(KubernetesUnavailable, match="at most 600 seconds"):
+        client.call(
+            CATALOG.operation("list_pods"), {"namespace": cluster["names"]["stg"], "limit": 5}, "ta", OP_ID, "t"
+        )
+
+
+def test_deleting_the_impersonation_binding_stops_every_call(cluster, restore):
+    staging = cluster["names"]["stg"]
+    assert call(cluster, "list_pods", {"namespace": staging, "limit": 5}) == 200
+    kubectl("delete", "clusterrolebinding", "bailiff-effector-impersonate")
+    started = time.monotonic()
+    while call(cluster, "list_pods", {"namespace": staging, "limit": 5}) != 403:
+        assert time.monotonic() - started < REVOCATION_SECONDS, "revocation did not take effect"
+        time.sleep(1)
+    print(f"revoked after {time.monotonic() - started:.0f} s")
+    assert scale(cluster, staging) == 403

@@ -4,6 +4,7 @@ import os
 import urllib.parse
 
 import pytest
+from test_effector import AUDIT_TOKEN, EFFECTOR_TOKEN
 
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import (
@@ -24,7 +25,7 @@ IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops")
 TENANTS = {"tenant-a": ["staging"]}
 CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
 MANIFESTS = generate_manifests(CATALOG, IDENTITY, TENANTS)
-TOKENS = {"Bearer effector-token": "effector", "Bearer audit-token": "effector-audit"}
+TOKENS = {f"Bearer {EFFECTOR_TOKEN}": "effector", f"Bearer {AUDIT_TOKEN}": "effector-audit"}
 PLURALS = {
     "rolebindings": "RoleBinding",
     "clusterrolebindings": "ClusterRoleBinding",
@@ -161,7 +162,7 @@ def api(tmp_path):
 
 @pytest.fixture
 def audit(api, tmp_path):
-    for name, value in (("effector", "effector-token"), ("audit", "audit-token")):
+    for name, value in (("effector", EFFECTOR_TOKEN), ("audit", AUDIT_TOKEN)):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
     return RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, MANIFESTS, TENANTS, CATALOG.operations)
@@ -172,9 +173,9 @@ def test_the_generated_set_with_server_defaults_is_clean(api, audit):
     reviews = [auth for method, path, auth in api.requests if path.endswith("selfsubjectrulesreviews")]
     access = [auth for method, path, auth in api.requests if path.endswith("/subjectaccessreviews")]
     lists = [auth for method, _, auth in api.requests if method == "GET"]
-    assert sorted(reviews) == ["Bearer audit-token"] * 4 + ["Bearer effector-token"] * 4
-    assert set(access) == {"Bearer audit-token"} and len(access) == 15
-    assert set(lists) == {"Bearer audit-token"}
+    assert sorted(reviews) == sorted([f"Bearer {AUDIT_TOKEN}"] * 4 + [f"Bearer {EFFECTOR_TOKEN}"] * 4)
+    assert set(access) == {f"Bearer {AUDIT_TOKEN}"} and len(access) == 15
+    assert set(lists) == {f"Bearer {AUDIT_TOKEN}"}
 
 
 @pytest.mark.parametrize(
@@ -359,7 +360,7 @@ def schemas(api):
 
 def test_the_restart_schema_is_read_with_the_audit_token(api, audit):
     assert audit.check_restart_schema() == []
-    assert ("GET", APPS_SCHEMA_PATH, "Bearer audit-token") in api.requests
+    assert ("GET", APPS_SCHEMA_PATH, f"Bearer {AUDIT_TOKEN}") in api.requests
 
 
 @pytest.mark.parametrize(

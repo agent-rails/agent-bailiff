@@ -105,7 +105,13 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which RBAC cannot narrow, and pod eviction cannot be scoped to one Deployment's pods. A policy that checks only part of the object let other pod template annotations through. Comparing every field, including other field managers' entries, does not, and pinning the schema withdraws restart from the effector on a version with new fields. The op-id marker also prevents two separately released operations in the same second from collapsing into one identical template update. Deleting pods, scoped by their owner, was also tested: it can be confined to one Deployment's pods, but takes them all down at once and ignores PodDisruptionBudgets, so a stolen token could cause outages where a restart only rolls. Restart was deferred until this was tested on a cluster.
 
-## D16. Release-verifying admission for catalog writes
+## D16. One custodian key for docket entries and releases
+
+**Decision:** the custodian signs docket entries and effector releases with one key.
+
+**Why:** the record type is inside the signed payload and checked on verify, so a docket entry cannot pass as a release. Both keys would sit in the same process and directory, so a second key adds no isolation. A release-only key pays off once keys can live apart, with a KMS or OpenBao backend.
+
+## D17. Release-verifying admission for catalog writes
 
 **Decision:** Kubernetes admission requires a signed, 10-second custodian release for each catalog write. The webhook uses the same pure release-and-clearance verifier as the effector, pins both signing key sets, and compares the full admitted operation and old-to-new object change. The webhook is stateless: a captured, still-live release may be replayed and may undo a later write; suspension does not invalidate a release already issued. Clock skew is bounded by the configured verifier limit. A stolen effector token alone cannot create a valid release. Rollback changes the webhook to Audit mode; deleting its registration is not a safe rollback.
 
@@ -113,7 +119,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## Deferred
 
-- Target-bound minting and an OpenBao or KMS key backend.
+- Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
 - Effector targets other than Kubernetes, and more than one effector instance.
 - OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
