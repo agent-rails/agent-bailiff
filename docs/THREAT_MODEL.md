@@ -86,5 +86,7 @@ These are known and accepted for the current release:
 - **Admission does not see reads.** Effector reads are bounded by the impersonate-on grants and the catalog.
 - **A cluster credential for a `bailiff:` user name acts with that synthetic user's grants.** Issuing one needs control of the cluster CA or identity provider.
 - **One effector instance.** Its single-use set is in memory.
+- **A stolen effector token can make any write the catalog's policies allow until it expires or is revoked.** The cluster does not check that a write was released: admission sees only the op-id's format and cannot see the effector's pod identity. Tokens claim at most 600 s; the API server accepts a token for up to a minute after its expiry, so a stolen token works for about 11 minutes. Revocation took 5 to 15 s on OrbStack. The window is bounded by those and by how long an attacker holds the effector host. A webhook that verifies the custodian-signed release is required before the catalog adds writes or production use.
+- **A stolen audit token reveals the cluster's RBAC and admission layout.** It lists them cluster-wide.
 - **The effector's op-id in Kubernetes audit events is unverified.** It is sent as an impersonation extra.
 - **On macOS, `fsync` does not flush the drive cache.**

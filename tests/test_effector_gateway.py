@@ -13,7 +13,7 @@ from test_agentgateway_config import gateway_config
 from test_agentgateway_e2e import TRACE, Agent, Gateway, free_port, refused
 from test_custodian import docket_entries
 from test_decide import CUSTODIAN_ID, DECIDE_KEY, NOW, TENANT, make_request, make_root
-from test_effector import FakeTransport, RecordingDocket, Suspended, Verified
+from test_effector import EFFECTOR_TOKEN, FakeTransport, RecordingDocket, Suspended, Verified
 
 from agent_bailiff.adapters.agentgateway.calls import routes_from_catalog
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
@@ -171,7 +171,7 @@ def build_stack(binary, workdir, private, make_decider, make_custodian, upstream
 @pytest.fixture
 def token_file(tmp_path):
     path = tmp_path / "token"
-    path.write_text("effector-token\n")
+    path.write_text(EFFECTOR_TOKEN + "\n")
     os.chmod(path, 0o600)
     return path
 
@@ -319,4 +319,4 @@ def test_the_effector_token_reaches_neither_the_agent_nor_the_gateway_log(stack)
     request = request_for("list_pods", {"namespace": "staging", "limit": 5})
     status, body = stack["agent"].call("list_pods", {"namespace": "staging", "limit": 5}, headers_for(request))
     assert body["result"]["isError"] is False, body
-    assert "effector-token" not in json.dumps(body) and "effector-token" not in stack["gateway"].log()
+    assert EFFECTOR_TOKEN not in json.dumps(body) and EFFECTOR_TOKEN not in stack["gateway"].log()
