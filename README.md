@@ -1,6 +1,6 @@
 # agent-bailiff
 
-Lets an AI agent use a credential for one approved tool call without ever holding that credential.
+Lets an AI agent use a credential for one approved tool call without ever holding that credential. For Kubernetes, no credential leaves agent-bailiff at all: its own effector runs each approved operation.
 
 Status: pre-release. Interfaces and wire formats may change. Not ready for production use.
 
@@ -13,6 +13,7 @@ agent-bailiff splits that job:
 - Each effect is bounded to the agent's task: one call, one operation, one credential release.
 - The component that decides holds no credentials. The component that holds secrets re-checks the authority itself before every decrypt, so a compromised decider cannot bulk-decrypt the store.
 - Each allowed decision and each credential release needs an acknowledged, signed docket entry, joined by trace id and operation id.
+- For infrastructure, the effector holds the only credential and acts as an identity the cluster limits to the approved operation class, so no MCP server or agent ever holds a token it could reuse.
 
 ## How it works
 
@@ -22,19 +23,23 @@ flowchart LR
     G -->|1 check| D[decide]
     G -->|2 check + clearance| C[custodian]
     G -->|request + credential header| U[upstream MCP server]
+    G -->|catalog tool + signed release| E[effector]
+    E -->|impersonated call| KA[Kubernetes API]
     D --> K[docket]
     C --> K
+    E --> K
 ```
 
 1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no credentials.
 2. **custodian** re-verifies the chain, proof and reservation on its own, applies canary checks, decrypts the credential, checks suspension, then claims the operation once under a per-task rate limit and sets the credential as a header on the upstream request. It removes the agent's own `authorization`, `cookie` and credential headers.
 3. **docket** is a separate process that appends a signed, hash-chained entry for each decision and release.
+4. **effector** (catalog tools only, Kubernetes today) is the gateway's upstream instead of a third-party MCP server. The custodian signs a single-use release rather than releasing a credential. The effector verifies the release and decide's clearance, rebuilds the request from the operation catalog, records an attempt, and calls the API server under constrained impersonation as `bailiff:<tenant>:<identity>`. Generated RBAC and admission policies bound what that identity can do, and a drift check stops the effector if the cluster holds anything else. See [docs/EFFECTOR.md](docs/EFFECTOR.md).
 
 Each component is meant to run as its own OS user. Decide, custodian and docket listen on Unix sockets that accept only their configured peer uids; control runs on demand as decide's uid. The ledger and the suspension directory (`<ledger>.suspension`, mode 0750) are owned by decide and shared read-only with the custodian through the ledger group. Their parent directory must be owned by root or decide, in that group, and not group or other writable.
 
 ## What it does not protect
 
-- The upstream MCP server receives the credential and is trusted.
+- For credential bindings, the upstream MCP server receives the credential and is trusted. Catalog tools go to the effector instead; its limits are in [docs/EFFECTOR.md](docs/EFFECTOR.md).
 - Root on the host can read every component's keys.
 - A completed effect is not undone.
 - Suspension is checked by decide before it issues a clearance and by the custodian just before it claims a release. A release that has already passed the custodian's check completes.
@@ -51,6 +56,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 | `agent_bailiff.custodian` | Store credentials encrypted; release one per clearance |
 | `agent_bailiff.docket` | Signed, append-only security trace |
 | `agent_bailiff.adapters.agentgateway` | agentgateway `ExtMcp` processors and `check-config` |
+| `agent_bailiff.effector` | Operation catalog, effector MCP server, Kubernetes client, generated RBAC and admission, drift check |
 | `agent_bailiff.signing` | Ed25519 signed records over canonical JSON |
 
 Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roots, delegation chains, ledger) and [toolcall-authz](https://github.com/agent-rails/toolcall-authz) (policy).
@@ -60,6 +66,7 @@ Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roo
 - Python 3.13
 - Linux or macOS (peer credentials on Unix sockets)
 - [agentgateway](https://github.com/agentgateway/agentgateway) v1.7.0 for the gateway adapter
+- For the effector: Kubernetes v1.36 or later (constrained impersonation, beta in v1.36); tested on OrbStack v1.36.5
 
 ## Usage
 

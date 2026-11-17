@@ -21,11 +21,15 @@ flowchart LR
     G -->|1 ExtMcp check| D[decide]
     G -->|2 ExtMcp check + clearance| C[custodian]
     G -->|request + credential header| U[upstream MCP server]
+    G -->|catalog tool + signed release| E[effector]
+    E -->|impersonated call| KA[Kubernetes API]
     D -->|signed entries| K[docket]
     C -->|signed entries| K
+    E -->|signed entries| K
     O[control CLI] -->|signed entries| K
     D ---|writes| L[(ledger + suspension)]
     C -.->|reads| L
+    E -.->|reads suspension| L
     O ---|writes| L
 ```
 
