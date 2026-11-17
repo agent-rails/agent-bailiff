@@ -105,9 +105,15 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which also allows image and replica changes, and pod eviction cannot be scoped to one Deployment's pods.
 
+## D16. One custodian key for docket entries and releases
+
+**Decision:** the custodian signs docket entries and effector releases with one key.
+
+**Why:** the record type is inside the signed payload and checked on verify, so a docket entry cannot pass as a release. Both keys would sit in the same process and directory, so a second key adds no isolation. A release-only key pays off once keys can live apart, with a KMS or OpenBao backend.
+
 ## Deferred
 
-- Target-bound minting and an OpenBao or KMS key backend.
+- Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
 - Effector targets other than Kubernetes, more than one effector instance, and restart.
 - OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
