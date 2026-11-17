@@ -1,0 +1,483 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-system"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "effector",
+        "namespace": "bailiff-system"
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-impersonate"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "authentication.k8s.io"
+          ],
+          "resourceNames": [
+            "bailiff:tenant-a:read",
+            "bailiff:tenant-a:scale"
+          ],
+          "resources": [
+            "users"
+          ],
+          "verbs": [
+            "impersonate:user-info"
+          ]
+        },
+        {
+          "apiGroups": [
+            "authentication.k8s.io"
+          ],
+          "resources": [
+            "userextras/bailiff.dev/op-id",
+            "userextras/bailiff.dev/trace-id"
+          ],
+          "verbs": [
+            "impersonate:user-info"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-impersonate"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "bailiff-effector-impersonate"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "effector",
+          "namespace": "bailiff-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-on",
+        "namespace": "staging"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "impersonate-on:user-info:list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/log"
+          ],
+          "verbs": [
+            "impersonate-on:user-info:get"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "impersonate-on:user-info:get"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments/scale"
+          ],
+          "verbs": [
+            "impersonate-on:user-info:patch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-on",
+        "namespace": "staging"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "bailiff-effector-on"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "effector",
+          "namespace": "bailiff-system"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-tenant-a-read",
+        "namespace": "staging"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/log"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-tenant-a-read",
+        "namespace": "staging"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "bailiff-tenant-a-read"
+      },
+      "subjects": [
+        {
+          "apiGroup": "rbac.authorization.k8s.io",
+          "kind": "User",
+          "name": "bailiff:tenant-a:read"
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-tenant-a-scale",
+        "namespace": "staging"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments/scale"
+          ],
+          "verbs": [
+            "patch"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-tenant-a-scale",
+        "namespace": "staging"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "bailiff-tenant-a-scale"
+      },
+      "subjects": [
+        {
+          "apiGroup": "rbac.authorization.k8s.io",
+          "kind": "User",
+          "name": "bailiff:tenant-a:scale"
+        }
+      ]
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-guard"
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConditions": [
+          {
+            "expression": "request.userInfo.username.startsWith('bailiff:')",
+            "name": "synthetic-user"
+          }
+        ],
+        "matchConstraints": {
+          "resourceRules": [
+            {
+              "apiGroups": [
+                "*"
+              ],
+              "apiVersions": [
+                "*"
+              ],
+              "operations": [
+                "*"
+              ],
+              "resources": [
+                "*/*"
+              ]
+            }
+          ]
+        },
+        "validations": [
+          {
+            "expression": "has(request.userInfo.extra) && 'bailiff.dev/op-id' in request.userInfo.extra && size(request.userInfo.extra['bailiff.dev/op-id']) == 1 && request.userInfo.extra['bailiff.dev/op-id'][0].matches('^[A-Za-z0-9_-]{43}$')",
+            "message": "a synthetic user request must carry exactly one valid op-id"
+          },
+          {
+            "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.subResource == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
+            "message": "synthetic users may write only through the catalog's write operations"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-guard"
+      },
+      "spec": {
+        "policyName": "bailiff-effector-guard",
+        "validationActions": [
+          "Deny"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-scale-deployment"
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConditions": [
+          {
+            "expression": "request.userInfo.username.startsWith('bailiff:')",
+            "name": "synthetic-user"
+          },
+          {
+            "expression": "request.userInfo.username.endsWith(':scale')",
+            "name": "operation-identity"
+          }
+        ],
+        "matchConstraints": {
+          "resourceRules": [
+            {
+              "apiGroups": [
+                "apps"
+              ],
+              "apiVersions": [
+                "*"
+              ],
+              "operations": [
+                "UPDATE"
+              ],
+              "resources": [
+                "deployments/scale"
+              ]
+            }
+          ]
+        },
+        "validations": [
+          {
+            "expression": "has(object.spec.replicas) && object.spec.replicas >= 1 && object.spec.replicas <= 10",
+            "message": "replicas must be between 1 and 10"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-scale-deployment"
+      },
+      "spec": {
+        "policyName": "bailiff-scale-deployment",
+        "validationActions": [
+          "Deny"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-rbac"
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "resourceRules": [
+            {
+              "apiGroups": [
+                "rbac.authorization.k8s.io"
+              ],
+              "apiVersions": [
+                "*"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "rolebindings",
+                "clusterrolebindings",
+                "roles",
+                "clusterroles"
+              ]
+            }
+          ]
+        },
+        "validations": [
+          {
+            "expression": "(!(has(object.subjects) && object.subjects.exists(s, (s.kind == 'ServiceAccount' && s.name == 'effector' && s.namespace == 'bailiff-system') || (s.kind == 'User' && s.name.startsWith('bailiff:')))) && !(has(object.metadata.labels) && 'bailiff.dev/generated' in object.metadata.labels) && !(oldObject != null && (has(oldObject.metadata.labels) && 'bailiff.dev/generated' in oldObject.metadata.labels))) || request.userInfo.username == 'system:serviceaccount:argocd:argocd-application-controller'",
+            "message": "only the applier may grant to the effector or synthetic users or change generated RBAC"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "agent-bailiff",
+          "bailiff.dev/generated": "true"
+        },
+        "name": "bailiff-effector-rbac"
+      },
+      "spec": {
+        "policyName": "bailiff-effector-rbac",
+        "validationActions": [
+          "Deny"
+        ]
+      }
+    }
+  ],
+  "kind": "List"
+}

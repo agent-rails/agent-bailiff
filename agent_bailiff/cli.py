@@ -21,9 +21,12 @@ from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
+from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
 from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
+    DEFAULT_CATALOG,
     InitError,
     init_control,
     init_custodian,
@@ -89,6 +92,18 @@ def _parser() -> argparse.ArgumentParser:
         serve = component.add_parser("run", help=f"run the {name} service until SIGTERM or SIGINT")
         serve.add_argument("--config", type=Path, required=True)
         serve.set_defaults(handler=handler)
+        if name == "effector":
+            manifests = component.add_parser(
+                "manifests", help="print the RBAC and admission objects for the catalog as a kubectl List"
+            )
+            manifests.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+            manifests.add_argument("--namespace", required=True, help="the effector's own namespace")
+            manifests.add_argument("--service-account", required=True)
+            manifests.add_argument("--applier", required=True, help="the user that applies generated RBAC (GitOps)")
+            manifests.add_argument(
+                "--tenant", action="append", required=True, help="tenant=namespace[,namespace...]; repeat"
+            )
+            manifests.set_defaults(handler=_effector_manifests)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -256,6 +271,22 @@ def _run_effector(args: argparse.Namespace) -> int:
         stop.wait()
     finally:
         service.close()
+    return 0
+
+
+def _effector_manifests(args: argparse.Namespace) -> int:
+    try:
+        tenants: dict[str, list[str]] = {}
+        for item in args.tenant:
+            tenant, separator, namespaces = item.partition("=")
+            if not separator or tenant in tenants:
+                raise ValueError(f"--tenant {item!r} must be tenant=namespace[,namespace...], once per tenant")
+            tenants[tenant] = namespaces.split(",")
+        identity = EffectorIdentity(args.namespace, args.service_account, args.applier)
+        output = render(generate_manifests(OperationCatalog.load(args.catalog), identity, tenants))
+    except STARTUP_ERRORS as exc:
+        return _refused("effector manifests", exc)
+    sys.stdout.write(output)
     return 0
 
 
