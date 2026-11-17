@@ -99,16 +99,16 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** minted service-account tokens outlive a single call, and Kubernetes falls back to a legacy `impersonate` grant even when constrained grants exist, so the grants must be checked across all namespaces. Impersonated users carry `system:authenticated`, so writes are tied to the tenant at admission as well as by RBAC.
 
-## D15. Restart deferred
+## D15. Restart through a full-comparison admission policy
 
-**Decision:** the catalog offers no restart.
+**Decision:** the catalog offers `restart_deployment`: a patch that sets only the pod template's `restartedAt` annotation, sent as a restart identity that admission confines to that change. The drift check stops the effector when the cluster's Deployment schema has fields the policy does not compare.
 
-**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which also allows image and replica changes, and pod eviction cannot be scoped to one Deployment's pods.
+**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which RBAC cannot narrow, and pod eviction cannot be scoped to one Deployment's pods. A policy that checks only part of the object let other pod template annotations through. Comparing every field, including other field managers' entries, does not, and pinning the schema covers fields added in later versions. Restart was deferred until this was tested on a cluster.
 
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend.
-- Effector targets other than Kubernetes, more than one effector instance, and restart.
+- Effector targets other than Kubernetes, and more than one effector instance.
 - OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
 - A standards check of the chain format against RFC 8693 and the OAuth Transaction Tokens draft before 1.0.
