@@ -87,6 +87,7 @@ These are known and accepted for the current release:
 - **A cluster credential for a `bailiff:` user name acts with that synthetic user's grants.** Issuing one needs control of the cluster CA or identity provider.
 - **One effector instance.** Its single-use set is in memory.
 - **A stolen effector token can restart and scale any Deployment in the tenant namespaces, repeatedly.** Admission bounds what each call changes, not how often or which Deployment.
-- **The restart policy compares a fixed list of fields.** The drift check stops the effector when the cluster's Deployment schema differs from that list.
+- **The restart policy compares a fixed list of fields.** When the cluster's Deployment schema differs from that list, the drift check withdraws restart from the effector. A stolen effector token is not stopped by that: after an upgrade that adds a Deployment or ObjectMeta field, it can change the new field through the restart identity until the policy is regenerated.
+- **A restart follows the Deployment's strategy.** Under `Recreate`, or `maxUnavailable` at least the replica count, it is an outage. Rollouts do not consult PodDisruptionBudgets.
 - **The effector's op-id in Kubernetes audit events is unverified.** It is sent as an impersonation extra.
 - **On macOS, `fsync` does not flush the drive cache.**

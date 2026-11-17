@@ -101,9 +101,9 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D15. Restart through a full-comparison admission policy
 
-**Decision:** the catalog offers `restart_deployment`: a patch that sets only the pod template's `restartedAt` annotation, sent as a restart identity that admission confines to that change. The drift check stops the effector when the cluster's Deployment schema has fields the policy does not compare.
+**Decision:** the catalog offers `restart_deployment`: a forced server-side apply of only the pod template's `restartedAt` annotation, sent as a restart identity that admission confines to that change. The drift check withdraws restart when the cluster's Deployment schema has fields the policy does not compare.
 
-**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which RBAC cannot narrow, and pod eviction cannot be scoped to one Deployment's pods. A policy that checks only part of the object let other pod template annotations through. Comparing every field, including other field managers' entries, does not, and pinning the schema covers fields added in later versions. Restart was deferred until this was tested on a cluster.
+**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which RBAC cannot narrow, and pod eviction cannot be scoped to one Deployment's pods. A policy that checks only part of the object let other pod template annotations through. Comparing every field, including other field managers' entries, does not, and pinning the schema withdraws restart from the effector on a version with new fields. Deleting pods, scoped by their owner, was also tested: it can be confined to one Deployment's pods, but takes them all down at once and ignores PodDisruptionBudgets, so a stolen token could cause outages where a restart only rolls. Restart was deferred until this was tested on a cluster.
 
 ## Deferred
 

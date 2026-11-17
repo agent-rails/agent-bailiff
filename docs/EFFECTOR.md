@@ -12,9 +12,9 @@ The effector lets an agent change infrastructure without the agent, the gateway 
 | `read_pod_log` | `k8s.pods.log` | `read` | get `pods/log`, `tailLines` 1 to 500 |
 | `get_deployment` | `k8s.deployments.get` | `read` | get `apps/deployments` |
 | `scale_deployment` | `k8s.deployments.scale` | `scale` | patch `apps/deployments/scale`, `replicas` 1 to 10 |
-| `restart_deployment` | `k8s.deployments.restart` | `restart` | patch `apps/deployments`, setting only the pod template's `kubectl.kubernetes.io/restartedAt` |
+| `restart_deployment` | `k8s.deployments.restart` | `restart` | server-side apply to `apps/deployments`, setting only the pod template's `kubectl.kubernetes.io/restartedAt` |
 
-The tool id, identity, resource (`k8s/<namespace>/<resource>[/<name>]`) and request body are derived from the call, not configured. A restart sets `restartedAt` to the release's issue time with the `bailiff-effector` field manager, so a retry of the same release changes nothing.
+The tool id, identity, resource (`k8s/<namespace>/<resource>[/<name>]`) and request body are derived from the call, not configured. A restart is a forced server-side apply, field manager `bailiff-effector`, of only `restartedAt`, set to the release's issue time, so a retry of the same release changes nothing. Apply is used rather than a merge patch because the API server keeps at most 10 Update managers and merges older ones into `ancient-changes`, which the restart policy would read as a change to other managers' entries; Apply entries are not merged. A restart of a missing Deployment creates nothing (the guard admits only updates).
 
 The same catalog produces the gateway routes and decide's resource for each call (`routes_from_catalog`), the tool schemas the effector lists, and the RBAC and admission objects. Routes outside the catalog cannot use the `k8s.` tool prefix.
 
@@ -47,7 +47,7 @@ Each synthetic user is bound, in its tenant's namespaces only, to a Role with on
 Admission is load-bearing. Every policy fails closed and is bound cluster-wide in Deny mode:
 - **the guard** denies a synthetic user any write except the catalog's write calls, any write outside its tenant's namespaces, and any request without exactly one well-formed op-id;
 - **the range policy** limits `replicas` on `deployments/scale` to the catalog's range;
-- **the restart policy** denies the restart identity any Deployment update except the `restartedAt` pod template annotation. Every `DeploymentSpec` field, the pod spec, the pod template metadata and the Deployment's own metadata must be unchanged, except the server-owned `generation`, `resourceVersion` and `managedFields`. Other field managers' entries must be unchanged, except that an entry owning only `restartedAt` may lose it, and the `bailiff-effector` entry may own nothing else;
+- **the restart policy** denies the restart identity any Deployment update except the `restartedAt` pod template annotation. Every `DeploymentSpec` field, the pod spec, the pod template metadata and the Deployment's own metadata must be unchanged, except the server-owned `generation`, `resourceVersion` and `managedFields`. Other field managers' entries must be unchanged, except that an entry owning only `restartedAt` may lose it, and the `bailiff-effector` entry must be an Apply entry owning nothing else;
 - **the binding policy** refuses creating or updating any RoleBinding or ClusterRoleBinding that names the effector, its audit account or a synthetic user, and creating or updating generated RBAC, unless the applier makes the change. Deleting generated RBAC is allowed, because it only removes access: deleting the effector's RoleBinding stops its next call.
 
 ## Generated objects
@@ -67,7 +67,7 @@ At startup, and 60 s after each check ends, the effector checks the cluster's gr
 - A SelfSubjectRulesReview as the effector and as the audit account in every namespace must show only the generated grants, the default self-review rules and the default discovery and health URLs. An incomplete review counts as drift.
 - A SubjectAccessReview with the implicit `system:authenticated` group, for every synthetic user, tenant namespace and catalog call, must be allowed exactly when the namespace is the tenant's and the call is the identity's.
 - Every generated binding, role, policy and policy binding must be present and unchanged. No other binding may name the effector, the audit account or a synthetic user.
-- When the catalog offers restart, the audit account reads `/openapi/v3/apis/apps/v1`. `Deployment`, `DeploymentSpec`, `PodTemplateSpec` and `ObjectMeta` must have exactly the fields the restart policy accounts for, and `Deployment.metadata`, `Deployment.spec`, `DeploymentSpec.template` and `PodTemplateSpec.metadata` must reference them. A Kubernetes version that adds a field stops the effector until the policy covers it. The document is read under the 1 MiB response limit (711 KB on v1.36.5); a larger one fails the check.
+- When the catalog offers restart, the audit account reads `/openapi/v3/apis/apps/v1`. `Deployment`, `DeploymentSpec`, `PodTemplateSpec` and `ObjectMeta` must have exactly the fields the restart policy accounts for, and `Deployment.metadata`, `Deployment.spec`, `DeploymentSpec.template` and `PodTemplateSpec.metadata` must reference them. If the schema differs, or the document cannot be read within the 1 MiB response limit (711 KB on v1.36.5), the effector refuses restarts with `restart_unverified` and keeps serving the other operations. The restart policy stays in place either way.
 
 The audit account may only list namespaces, RBAC objects and admission policies, and create SubjectAccessReviews.
 
@@ -93,7 +93,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 ## Tests
 
 - `tests/test_effector_gateway.py` runs the pinned agentgateway binary in front of a real effector. The effector receives exactly the custodian's `bailiff-release`. A tools/call answered with 503 returns a failure to the agent and reaches the upstream once, counted again after 3 s.
-- `tests/test_effector_cluster.py` runs against a disposable cluster when `AGENT_BAILIFF_TEST_KUBE_CONTEXT` is set, and has been run on OrbStack v1.36.5. It covers a restart and its retry, a restart after `kubectl rollout restart`, and ten changes the restart identity must not make, sent with the effector's own token.
+- `tests/test_effector_cluster.py` runs against a disposable cluster when `AGENT_BAILIFF_TEST_KUBE_CONTEXT` is set, and has been run on OrbStack v1.36.5. It covers a restart and its retry, a restart after `kubectl rollout restart`, a restart of a Deployment with 12 field managers, a restart of a missing Deployment, and nineteen changes the restart identity must not make, sent with the effector's own token as merge patches, JSON patches and forced applies.
 
 ## Limits
 
@@ -105,6 +105,8 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 - A credential issued by the cluster for a `bailiff:` user name would act with that user's grants. Issuing one needs control of the cluster CA or identity provider.
 - The op-id is passed as an impersonation extra. Whether the API server's audit events record it has not been checked.
 - The restart identity may restart any Deployment in its tenant's namespaces, as often as it is called. A stolen effector token can therefore roll every such Deployment repeatedly, as it can already scale them within the range.
+- A restart is only as gentle as the Deployment's strategy. With `Recreate`, or `maxUnavailable` at least the replica count, it takes every pod down at once. Rollouts do not consult PodDisruptionBudgets.
+- The schema check guards the effector's own calls, not the cluster. After an upgrade that adds a Deployment or ObjectMeta field, the restart policy does not compare that field, so a stolen effector token can change it through the restart identity until the policy is regenerated for the new version. Admission cannot see the server version, so this is not closed in the policy.
 - A restart is refused if another field manager owns `restartedAt` together with other fields, because the policy cannot tell that handover from a change to those fields.
 - One instance only.
 - Effector bindings have no canary. Credential bindings can mark a credential as a canary, so a release of it is refused, denies the task and writes an alert; an effector binding has no equivalent.
