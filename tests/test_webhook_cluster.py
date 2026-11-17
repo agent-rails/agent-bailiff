@@ -143,7 +143,11 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
     path.write_text(json.dumps(manifests))
     try:
         apply(path.read_text())
-        kubectl("-n", namespace, "rollout", "status", "deployment/" + NAME, "--timeout=90s")
+        rollout = kubectl("-n", namespace, "rollout", "status", "deployment/" + NAME, "--timeout=45s", check=False)
+        if rollout.returncode:
+            pods = kubectl("-n", namespace, "get", "pods", "-o", "wide").stdout
+            events = kubectl("-n", namespace, "get", "events", "--sort-by=.lastTimestamp").stdout
+            pytest.fail(f"webhook rollout failed:\n{rollout.stdout}\nPods:\n{pods}\nEvents:\n{events}")
         users = [f"bailiff:{tenant}:{identity}" for tenant in ("ta", "tb") for identity in ("read", "scale", "restart")]
         audit = WebhookAudit(
             cluster["transport"],
