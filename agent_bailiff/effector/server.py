@@ -35,6 +35,8 @@ class EffectorConfig:
 class RbacCheck(Protocol):
     def healthy(self, now: int) -> bool: ...
 
+    def restart_healthy(self, now: int) -> bool: ...
+
 
 class Effector:
     def __init__(
@@ -70,6 +72,8 @@ class Effector:
         except ReleaseRefused as refusal:
             logger.warning("effector refused a call: %s", refusal.reason)
             return _error(refusal.reason)
+        if checked.operation.call.restarts and not self._rbac.restart_healthy(now):
+            return _error("restart_unverified")
         attempt = self._entry(checked, "attempt", now)
         if not self._record(attempt):
             return _error("docket_unavailable")
@@ -90,6 +94,7 @@ class Effector:
                 checked.release.tenant,
                 checked.release.op_id,
                 checked.clearance.trace_id,
+                checked.release.iat,
             )
         except Exception:
             logger.exception("kubernetes call failed; the outcome is unknown")

@@ -136,6 +136,7 @@ def test_a_started_effector_serves_its_catalog_on_localhost(root, monkeypatch):
             "read_pod_log",
             "get_deployment",
             "scale_deployment",
+            "restart_deployment",
         }
         status, body = post(
             port,

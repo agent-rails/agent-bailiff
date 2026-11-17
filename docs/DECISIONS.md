@@ -99,11 +99,11 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** minted service-account tokens outlive a single call, and Kubernetes falls back to a legacy `impersonate` grant even when constrained grants exist, so the grants must be checked across all namespaces. Impersonated users carry `system:authenticated`, so writes are tied to the tenant at admission as well as by RBAC.
 
-## D15. Restart deferred
+## D15. Restart through a full-comparison admission policy
 
-**Decision:** the catalog offers no restart.
+**Decision:** the catalog offers `restart_deployment`: a forced server-side apply of the pod template's `restartedAt` and `bailiff.dev/restart-op` annotations. The second annotation carries the release op-id, distinguishes separate restarts issued in one second, and makes a retry of the same release a no-op. Admission confines the restart identity to those annotations and requires the marker to equal the request's single op-id extra. The drift check withdraws restart when the cluster's Deployment schema has fields the policy does not compare.
 
-**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which also allows image and replica changes, and pod eviction cannot be scoped to one Deployment's pods.
+**Why:** Kubernetes has no narrow restart API. A rolling restart is a patch to the whole Deployment, which RBAC cannot narrow, and pod eviction cannot be scoped to one Deployment's pods. A policy that checks only part of the object let other pod template annotations through. Comparing every field, including other field managers' entries, does not, and pinning the schema withdraws restart from the effector on a version with new fields. The op-id marker also prevents two separately released operations in the same second from collapsing into one identical template update. Deleting pods, scoped by their owner, was also tested: it can be confined to one Deployment's pods, but takes them all down at once and ignores PodDisruptionBudgets, so a stolen token could cause outages where a restart only rolls. Restart was deferred until this was tested on a cluster.
 
 ## D16. One custodian key for docket entries and releases
 
@@ -114,7 +114,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
-- Effector targets other than Kubernetes, more than one effector instance, and restart.
+- Effector targets other than Kubernetes, and more than one effector instance.
 - OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
 - A standards check of the chain format against RFC 8693 and the OAuth Transaction Tokens draft before 1.0.

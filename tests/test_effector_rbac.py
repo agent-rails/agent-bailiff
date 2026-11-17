@@ -64,8 +64,10 @@ def test_the_effector_may_impersonate_only_the_synthetic_users_and_extras():
     users, extras = role["rules"]
     assert users["resourceNames"] == [
         "bailiff:tenant-a:read",
+        "bailiff:tenant-a:restart",
         "bailiff:tenant-a:scale",
         "bailiff:tenant-b:read",
+        "bailiff:tenant-b:restart",
         "bailiff:tenant-b:scale",
     ]
     assert users["verbs"] == extras["verbs"] == ["impersonate:user-info"]
@@ -78,7 +80,11 @@ def test_impersonate_on_grants_mirror_the_catalog_in_each_namespace():
         assert named(items, "Role", "bailiff-effector-on", namespace)["rules"] == [
             {"apiGroups": [""], "resources": ["pods"], "verbs": ["impersonate-on:user-info:list"]},
             {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["impersonate-on:user-info:get"]},
-            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["impersonate-on:user-info:get"]},
+            {
+                "apiGroups": ["apps"],
+                "resources": ["deployments"],
+                "verbs": ["impersonate-on:user-info:get", "impersonate-on:user-info:patch"],
+            },
             {"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["impersonate-on:user-info:patch"]},
         ]
 
@@ -109,7 +115,7 @@ def test_the_admission_policies_fail_closed_and_bound_the_replica_range():
     assert guard["spec"]["matchConstraints"]["resourceRules"][0]["resources"] == ["*/*"]
     op_id, writes, owned = guard["spec"]["validations"]
     assert "has(request.userInfo.extra)" in op_id["expression"]
-    assert "request.subResource == 'scale'" in writes["expression"]
+    assert "request.?subResource.orValue('') == 'scale'" in writes["expression"]
     assert "endsWith(':scale')" in writes["expression"]
     assert (
         owned["expression"]
@@ -157,7 +163,7 @@ def test_the_cli_refuses_a_malformed_tenant(capsys):
 
 def test_the_example_is_valid_json_list():
     document = json.loads(EXAMPLE.read_text())
-    assert document["kind"] == "List" and len(document["items"]) == 19
+    assert document["kind"] == "List" and len(document["items"]) == 23
 
 
 def test_the_audit_identity_may_only_list_and_ask_access_reviews():
@@ -180,3 +186,41 @@ def test_the_guard_ties_each_tenant_to_its_own_namespaces():
     owned = guard["spec"]["validations"][2]["expression"]
     assert "startsWith('bailiff:tenant-a:') && request.namespace in [\"staging\"]" in owned
     assert 'startsWith(\'bailiff:tenant-b:\') && request.namespace in ["dev", "qa"]' in owned
+
+
+def test_a_restart_operation_gets_a_full_comparison_policy_and_its_own_role():
+    from test_effector_catalog import with_restart
+
+    items = manifests(catalog=OperationCatalog(with_restart()))
+    policy = named(items, "ValidatingAdmissionPolicy", "bailiff-restart-deployment")
+    spec = policy["spec"]
+    assert spec["failurePolicy"] == "Fail"
+    assert spec["matchConstraints"]["resourceRules"] == [
+        {"apiGroups": ["apps"], "apiVersions": ["*"], "operations": ["UPDATE"], "resources": ["deployments"]}
+    ]
+    assert [item["expression"] for item in spec["matchConditions"]] == [
+        "request.userInfo.username.startsWith('bailiff:')",
+        "request.userInfo.username.endsWith(':restart')",
+    ]
+    expressions = [item["expression"] for item in spec["validations"]]
+    for field in ("minReadySeconds", "paused", "progressDeadlineSeconds", "replicas", "revisionHistoryLimit"):
+        assert f"object.spec.?{field} == oldObject.spec.?{field}" in expressions
+    assert "object.spec.template.spec == oldObject.spec.template.spec" in expressions
+    assert "object.spec.template.metadata.?labels == oldObject.spec.template.metadata.?labels" in expressions
+    assert "object.metadata.?generateName == oldObject.metadata.?generateName" in expressions
+    assert not any("object.metadata.?generation" in item for item in expressions)
+    assert any("m.manager != 'bailiff-effector'" in item for item in expressions)
+    assert any(
+        "variables.annotations['bailiff.dev/restart-op'] == request.userInfo.extra['bailiff.dev/op-id'][0]" in item
+        for item in expressions
+    )
+    binding = named(items, "ValidatingAdmissionPolicyBinding", "bailiff-restart-deployment")
+    assert binding["spec"]["validationActions"] == ["Deny"]
+    role = named(items, "Role", "bailiff-tenant-a-restart", "staging")
+    assert role["rules"] == [{"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"]}]
+    guard = named(items, "ValidatingAdmissionPolicy", "bailiff-effector-guard")
+    assert (
+        "request.?subResource.orValue('') == '' && request.operation == 'UPDATE'"
+        in guard["spec"]["validations"][1]["expression"]
+    )
+    assert "endsWith(':restart')" in guard["spec"]["validations"][1]["expression"]

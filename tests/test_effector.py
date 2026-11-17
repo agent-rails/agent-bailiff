@@ -113,6 +113,11 @@ class Verified:
     def healthy(self, now):
         return self.value
 
+    def restart_healthy(self, now):
+        return self.value and self.restart
+
+    restart = True
+
 
 class Suspended:
     def __init__(self, value=False):
@@ -324,7 +329,7 @@ def test_the_mcp_server_serves_session_methods_and_calls_on_localhost(token_file
         assert status == 200 and body["result"]["serverInfo"]["name"] == "agent-bailiff-effector"
         assert post(port, {"jsonrpc": "2.0", "method": "notifications/initialized"})[0] == 202
         status, body = post(port, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        assert len(body["result"]["tools"]) == 4
+        assert len(body["result"]["tools"]) == 5
         status, body = post(
             port,
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": scale_params()},
@@ -457,6 +462,52 @@ def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
         kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt").request("GET", "/api", {}, None)
 
 
+def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_release_time(token_file):
+    from test_effector_catalog import with_restart
+
+    operation = OperationCatalog(with_restart()).operation("restart_deployment")
+    transport = FakeTransport(
+        body=b'{"metadata": {"name": "api", "generation": 4}, "status": {"observedGeneration": 3}}'
+    )
+    result = KubernetesClient(transport, token_file).call(
+        operation, {"namespace": "staging", "name": "api"}, "tenant-a", "op-1", "t" * 32, NOW
+    )
+    [(method, path, headers, body)] = transport.requests
+    assert (method, path) == (
+        "PATCH",
+        "/apis/apps/v1/namespaces/staging/deployments/api?fieldManager=bailiff-effector&force=true",
+    )
+    assert json.loads(body) == {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "api"},
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:00Z",
+                        "bailiff.dev/restart-op": "op-1",
+                    }
+                }
+            }
+        },
+    }
+    assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"
+    assert headers["Content-Type"] == "application/apply-patch+yaml"
+    assert result.payload == {"metadata.name": "api", "metadata.generation": 4, "status.observedGeneration": 3}
+
+
+def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run(token_file):
+    instance, transport, docket = effector(token_file)
+    instance._rbac.restart = False
+    arguments = {"namespace": "staging", "name": "api"}
+    clearance = clearance_for("restart_deployment", arguments, op_id="op-restart-1")
+    result = instance.call({"name": "restart_deployment", "arguments": arguments}, release_for(clearance), NOW + 2)
+    assert result["content"][0]["text"] == "restart_unverified"
+    assert transport.requests == [] and docket.entries == []
+    assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
+
+
 @pytest.mark.parametrize(
     "token",
     [
@@ -475,6 +526,11 @@ def test_a_token_that_is_not_short_lived_is_refused_before_any_request(tmp_path,
     transport = FakeTransport()
     with pytest.raises(KubernetesUnavailable, match="at most 600 seconds"):
         KubernetesClient(transport, path).call(
-            CATALOG.operation("list_pods"), {"namespace": "staging", "limit": 5}, "tenant-a", "op-1", "t" * 32
+            CATALOG.operation("list_pods"),
+            {"namespace": "staging", "limit": 5},
+            "tenant-a",
+            "op-1",
+            "t" * 32,
+            NOW,
         )
     assert transport.requests == []
