@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import urllib.error
@@ -33,6 +34,18 @@ CONFIG = ReleaseCheckConfig(
     max_clearance_lifetime=60,
 )
 SCALE_ARGS = {"namespace": "staging", "name": "api", "replicas": 3}
+
+
+def service_account_token(name, lifetime=600, issued_at=NOW):
+    def part(document):
+        return base64.urlsafe_b64encode(json.dumps(document).encode()).rstrip(b"=").decode()
+
+    claims = {"sub": f"system:serviceaccount:bailiff-system:{name}", "iat": issued_at, "exp": issued_at + lifetime}
+    return f"{part({'alg': 'RS256'})}.{part(claims)}.c2ln"
+
+
+EFFECTOR_TOKEN = service_account_token("effector")
+AUDIT_TOKEN = service_account_token("effector-audit")
 
 
 def clearance_for(name="scale_deployment", arguments=None, **overrides):
@@ -109,7 +122,7 @@ class Suspended:
 @pytest.fixture
 def token_file(tmp_path):
     path = tmp_path / "token"
-    path.write_text("effector-token\n")
+    path.write_text(EFFECTOR_TOKEN + "\n")
     os.chmod(path, 0o600)
     return path
 
@@ -143,7 +156,7 @@ def test_a_released_scale_call_patches_the_scale_subresource_as_the_synthetic_us
     assert json.loads(body) == {"spec": {"replicas": 3}}
     assert headers["Impersonate-User"] == "bailiff:tenant-a:scale"
     assert headers["Impersonate-Extra-bailiff.dev%2Fop-id"] == "op-scale_deployment-3"
-    assert headers["Authorization"] == "Bearer effector-token"
+    assert headers["Authorization"] == f"Bearer {EFFECTOR_TOKEN}"
     assert headers["Content-Type"] == "application/merge-patch+json"
     assert [(entry.decision, entry.outcome) for entry in docket.entries] == [("attempt", None), ("outcome", "done")]
     assert docket.entries[1].parent_entry == docket.entries[0].entry_id
@@ -442,3 +455,26 @@ def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
     FakeConnection.response = FakeResponse(200, 4 << 20)
     with pytest.raises(KubernetesUnavailable, match="larger than the limit"):
         kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt").request("GET", "/api", {}, None)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        service_account_token("effector", lifetime=601),
+        service_account_token("effector", lifetime=31_536_000),
+        service_account_token("effector", lifetime=0),
+        "effector-token",
+        "a.b.c",
+        "e30.e30.c2ln",
+    ],
+)
+def test_a_token_that_is_not_short_lived_is_refused_before_any_request(tmp_path, token):
+    path = tmp_path / "token"
+    path.write_text(token)
+    os.chmod(path, 0o600)
+    transport = FakeTransport()
+    with pytest.raises(KubernetesUnavailable, match="at most 600 seconds"):
+        KubernetesClient(transport, path).call(
+            CATALOG.operation("list_pods"), {"namespace": "staging", "limit": 5}, "tenant-a", "op-1", "t" * 32
+        )
+    assert transport.requests == []
