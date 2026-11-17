@@ -102,3 +102,4 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 - A credential issued by the cluster for a `bailiff:` user name would act with that user's grants. Issuing one needs control of the cluster CA or identity provider.
 - The op-id is passed as an impersonation extra. Whether the API server's audit events record it has not been checked.
 - One instance only.
+- Effector bindings have no canary. Credential bindings can mark a credential as a canary, which denies the task when it is released; an effector binding has no equivalent.
