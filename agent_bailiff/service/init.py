@@ -14,6 +14,7 @@ from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import CredentialStore
+from agent_bailiff.effector.catalog import shipped_catalog
 from agent_bailiff.keys import PublicKeyRecord, check_component, generate_signing_key
 from agent_bailiff.service.ledger import create_writer
 from agent_bailiff.service.settings import (
@@ -40,7 +41,7 @@ DEFAULT_RECONCILE_SECONDS = 10
 DEFAULT_SKEW_SECONDS = 5
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW = 60
-DEFAULT_CATALOG = Path(__file__).resolve().parent.parent / "effector" / "catalogs" / "kubernetes.json"
+DEFAULT_CATALOG = shipped_catalog("kubernetes")
 
 
 class InitError(Exception):

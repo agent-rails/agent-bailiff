@@ -82,7 +82,8 @@ agent-bailiff init effector --dir /var/lib/bailiff-effector --name effector.home
 agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 ```
 
-- The custodian needs an effector binding per tool, with the effector's name as credential id and the catalog digest. Decide needs a matching target binding.
+- Decide's and the custodian's route tables name the catalog: `{"routes": [...], "catalogs": [{"service": "k8s", "name": "kubernetes"}]}`. Only shipped catalogs can be named.
+- The custodian needs an effector binding per tool, with the effector's name as credential id and the catalog digest from `agent-bailiff effector digest`. Decide needs a matching target binding.
 - Point the gateway's MCP target for the catalog service at `http://127.0.0.1:<port>/mcp`, and remove `bailiff-release` in its header modifier; check-config requires that.
 - Run one effector instance. Its single-use set is in memory.
 

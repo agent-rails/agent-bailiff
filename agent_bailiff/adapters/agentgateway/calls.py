@@ -10,7 +10,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
-from agent_bailiff.effector.catalog import CATALOG_TOOL_PREFIX, Argument, OperationCatalog
+from agent_bailiff.effector.catalog import CATALOG_TOOL_PREFIX, Argument, OperationCatalog, shipped_catalog
 from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
@@ -81,6 +81,7 @@ class ToolRoute:
 
 
 DOCUMENT_ROUTE_FIELDS = frozenset({"service", "name", "tool", "resource"})
+DOCUMENT_CATALOG_FIELDS = frozenset({"service", "name"})
 
 
 class ToolRoutes:
@@ -102,13 +103,28 @@ class ToolRoutes:
 
     @classmethod
     def from_document(cls, document: object) -> ToolRoutes:
-        if not isinstance(document, dict) or set(document) != {"routes"} or not isinstance(document["routes"], list):
-            raise ValueError('a route document must be an object with only a "routes" list')
+        if (
+            not isinstance(document, dict)
+            or not {"routes"} <= set(document) <= {"routes", "catalogs"}
+            or not isinstance(document["routes"], list)
+            or not isinstance(document.get("catalogs", []), list)
+        ):
+            raise ValueError('a route document must be an object with a "routes" list and optionally a "catalogs" list')
         routes = []
         for item in document["routes"]:
             if not isinstance(item, dict) or set(item) != DOCUMENT_ROUTE_FIELDS:
                 raise ValueError(f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}")
             routes.append(ToolRoute(**item))
+        for item in document.get("catalogs", []):
+            if not isinstance(item, dict) or set(item) != DOCUMENT_CATALOG_FIELDS:
+                raise ValueError("each catalog must have exactly the fields name, service")
+            if not isinstance(item["service"], str) or not isinstance(item["name"], str):
+                raise ValueError("a catalog's service and name must be strings")
+            catalog = OperationCatalog.load(shipped_catalog(item["name"]))
+            routes.extend(
+                ToolRoute(item["service"], operation.name, operation.tool, operation.resource, operation.arguments)
+                for operation in catalog.operations
+            )
         return cls(routes)
 
     @property

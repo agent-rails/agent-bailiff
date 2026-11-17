@@ -13,6 +13,7 @@ from agent_warrant.scope import validate_entry
 from agent_bailiff.strict_json import parse_strict_json
 
 CATALOG_VERSION = 1
+SHIPPED_CATALOGS = frozenset({"kubernetes"})
 CATALOG_TOOL_PREFIX = "k8s."
 MAX_CATALOG_BYTES = 1 << 20
 MAX_RESPONSE_BYTES = 1 << 20
@@ -240,3 +241,9 @@ def _response(operation: str, document: object, call: KubernetesCall) -> tuple[t
     if (call.subresource == "log") != (not fields):
         raise CatalogError(f"{operation}: logs return text with no fields; every other call lists its fields")
     return tuple(fields), max_bytes
+
+
+def shipped_catalog(name: str) -> Path:
+    if name not in SHIPPED_CATALOGS:
+        raise CatalogError(f"{name!r} is not a shipped catalog; choose from {', '.join(sorted(SHIPPED_CATALOGS))}")
+    return Path(__file__).resolve().parent / "catalogs" / f"{name}.json"

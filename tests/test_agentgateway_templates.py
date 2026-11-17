@@ -121,3 +121,38 @@ def test_a_route_document_cannot_route_a_catalog_tool_to_a_fixed_resource():
                 ]
             }
         )
+
+
+def test_a_route_document_can_name_a_shipped_catalog():
+    routes = ToolRoutes.from_document(
+        {
+            "routes": [{"service": "ops", "name": "deploy", "tool": "deploy.service", "resource": "env/staging/api"}],
+            "catalogs": [{"service": "k8s", "name": "kubernetes"}],
+        }
+    )
+    route = routes.route("k8s", "scale_deployment")
+    assert route.tool == "k8s.deployments.scale"
+    assert route.resource_for({"namespace": "staging", "name": "api", "replicas": 2}) == "k8s/staging/deployments/api"
+    assert routes.route("ops", "deploy").resource == "env/staging/api"
+
+
+@pytest.mark.parametrize(
+    "catalogs",
+    [
+        [{"service": "k8s", "name": "../../etc/passwd"}],
+        [{"service": "k8s", "name": "kubernetes", "path": "/tmp/x.json"}],
+        [{"service": "k8s"}],
+        {"service": "k8s", "name": "kubernetes"},
+    ],
+)
+def test_a_route_document_refuses_unknown_or_malformed_catalogs(catalogs):
+    with pytest.raises(ValueError):
+        ToolRoutes.from_document({"routes": [], "catalogs": catalogs})
+
+
+def test_the_cli_prints_the_shipped_catalog_digest(capsys):
+    from agent_bailiff.cli import main
+    from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
+
+    assert main(["effector", "digest"]) == 0
+    assert capsys.readouterr().out.strip() == OperationCatalog.load(shipped_catalog("kubernetes")).digest

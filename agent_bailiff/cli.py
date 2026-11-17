@@ -106,6 +106,9 @@ def _parser() -> argparse.ArgumentParser:
                 "--tenant", action="append", required=True, help="tenant=namespace[,namespace...]; repeat"
             )
             manifests.set_defaults(handler=_effector_manifests)
+            digest = component.add_parser("digest", help="print the catalog digest for custodian effector bindings")
+            digest.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+            digest.set_defaults(handler=_effector_digest)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -297,6 +300,15 @@ def _effector_manifests(args: argparse.Namespace) -> int:
     except STARTUP_ERRORS as exc:
         return _refused("effector manifests", exc)
     sys.stdout.write(output)
+    return 0
+
+
+def _effector_digest(args: argparse.Namespace) -> int:
+    try:
+        catalog = OperationCatalog.load(args.catalog)
+    except STARTUP_ERRORS as exc:
+        return _refused("effector digest", exc)
+    print(catalog.digest)
     return 0
 
 
