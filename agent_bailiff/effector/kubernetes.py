@@ -86,7 +86,9 @@ class KubernetesClient:
         payload = None
         if body is not None:
             payload = json.dumps(body).encode()
-            headers["Content-Type"] = "application/merge-patch+json"
+            headers["Content-Type"] = (
+                "application/apply-patch+yaml" if call.restarts else "application/merge-patch+json"
+            )
         method = {"list": "GET", "get": "GET", "patch": "PATCH"}[call.verb]
         status, data = self._transport.request(method, request_path(operation, arguments), headers, payload)
         if not 200 <= status < 300:
@@ -118,6 +120,7 @@ def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> s
     query = {parameter: str(arguments[argument]) for parameter, argument in sorted(call.query.items())}
     if call.restarts:
         query["fieldManager"] = FIELD_MANAGER
+        query["force"] = "true"
     return f"{path}?{urllib.parse.urlencode(query)}" if query else path
 
 

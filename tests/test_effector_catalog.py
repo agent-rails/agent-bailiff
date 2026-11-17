@@ -226,9 +226,12 @@ def test_restart_sets_only_the_restarted_at_annotation_to_the_release_time():
         "k8s/{namespace}/deployments/{name}",
     )
     assert operation.call.body({"namespace": "staging", "name": "api"}, 1_800_000_001) == {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "api"},
         "spec": {
             "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:01Z"}}}
-        }
+        },
     }
 
 

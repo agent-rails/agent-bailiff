@@ -279,6 +279,8 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
     restart_only = "({0}.fieldsV1 == {1} || {0}.fieldsV1 == {2} || {0}.fieldsV1 == {3} || {0}.fieldsV1 == {4})"
     shapes = (owns, owns_map, released, released_map)
     old_restart_only, new_restart_only = restart_only.format("o", *shapes), restart_only.format("n", *shapes)
+    kept_new = f"{others_new}.filter(n, !{new_restart_only})"
+    kept_old = f"{others_old}.filter(o, !{old_restart_only})"
     restart_new = f"{others_new}.filter(n, {new_restart_only})"
     restart_old = f"{others_old}.filter(o, {old_restart_only})"
     slot = (
@@ -318,14 +320,15 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
         ),
         (f"'{RESTARTED_AT}' in variables.annotations", "a restart must set the restartedAt pod template annotation"),
         (
-            f"{others_new}.filter(n, !{new_restart_only}) == {others_old}.filter(o, !{old_restart_only})"
+            f"{kept_new}.size() == {kept_old}.size() && {kept_new}.all(n, {kept_old}.exists(o, o == n))"
+            f" && {kept_old}.all(o, {kept_new}.exists(n, n == o))"
             f" && {restart_new}.all(n, {others_old}.exists(o, {old_restart_only} && {slot}))"
             f" && {restart_new}.size() <= {restart_old}.size()",
             "a restart may not change other field managers' entries",
         ),
         (
             f"object.metadata.?managedFields.orValue([]).all(m, m.manager != '{FIELD_MANAGER}'"
-            " || (m.operation == 'Update' && !has(m.subresource) && m.apiVersion == 'apps/v1'"
+            " || (m.operation == 'Apply' && !has(m.subresource) && m.apiVersion == 'apps/v1'"
             f" && m.fieldsType == 'FieldsV1' && (m.fieldsV1 == {owns} || m.fieldsV1 == {owns_map})))",
             f"the {FIELD_MANAGER} field manager may own only the restartedAt pod template annotation",
         ),

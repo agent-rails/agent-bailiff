@@ -94,7 +94,12 @@ class KubernetesCall:
     def body(self, arguments: Mapping[str, Any], issued_at: int) -> dict[str, Any] | None:
         if self.restarts:
             restarted = datetime.fromtimestamp(issued_at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            return {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: restarted}}}}}
+            return {
+                "apiVersion": f"{self.group}/{self.version}",
+                "kind": "Deployment",
+                "metadata": {"name": arguments["name"]},
+                "spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: restarted}}}},
+            }
         if self.body_argument is None:
             return None
         return {"spec": {"replicas": arguments[self.body_argument]}}

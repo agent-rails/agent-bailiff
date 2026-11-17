@@ -455,12 +455,18 @@ def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_releas
         operation, {"namespace": "staging", "name": "api"}, "tenant-a", "op-1", "t" * 32, NOW
     )
     [(method, path, headers, body)] = transport.requests
-    assert (method, path) == ("PATCH", "/apis/apps/v1/namespaces/staging/deployments/api?fieldManager=bailiff-effector")
+    assert (method, path) == (
+        "PATCH",
+        "/apis/apps/v1/namespaces/staging/deployments/api?fieldManager=bailiff-effector&force=true",
+    )
     assert json.loads(body) == {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "api"},
         "spec": {
             "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:00Z"}}}
-        }
+        },
     }
     assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"
-    assert headers["Content-Type"] == "application/merge-patch+json"
+    assert headers["Content-Type"] == "application/apply-patch+yaml"
     assert result.payload == {"metadata.name": "api", "metadata.generation": 4, "status.observedGeneration": 3}
