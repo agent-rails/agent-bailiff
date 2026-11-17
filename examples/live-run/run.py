@@ -170,9 +170,12 @@ class Deployment:
         cli(
             "init", "docket", "--dir", private(self.root / "docket"), "--socket", self.sockets["docket"],
             "--socket-group", GID, "--allowed-uid", UID, "--pin", decide_pin, "--pin", custodian_pin,
-            "--pin", control_pin,
+            "--pin", control_pin, *self.extra_pins(pins, decide_pin, custodian_pin, docket),
         )  # fmt: skip
         self.configure()
+
+    def extra_pins(self, pins: Path, decide_pin: Path, custodian_pin: Path, docket: list[object]) -> list[object]:
+        return []
 
     def configure(self) -> None:
         issuers = {
@@ -337,7 +340,7 @@ class Deployment:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    def task(self, task_id: str) -> dict[str, Any]:
+    def task(self, task_id: str, scope: dict[str, Any] = SCOPE) -> dict[str, Any]:
         now = int(time.time())
         root = issue_task_root(
             self.issuer_key,
@@ -350,7 +353,7 @@ class Deployment:
             max_depth=2,
             issued_at=now - 5,
             expires_at=now + 3600,
-            scope=SCOPE,
+            scope=scope,
             subject=encode_public_key(self.agent_key.public_key()),
         )
         state_dir = private(self.root / "agent" / task_id)
@@ -401,8 +404,13 @@ class Deployment:
         return cli(*args)
 
 
-def run_claude(prompt: str, task: dict[str, Any], model: str) -> dict[str, Any]:
-    allowed = ",".join(f"mcp__bailiff__{name}" for name in ("deploy_service", "withdraw_funds", "read_document"))
+def run_claude(
+    prompt: str,
+    task: dict[str, Any],
+    model: str,
+    tools: tuple[str, ...] = ("deploy_service", "withdraw_funds", "read_document"),
+) -> dict[str, Any]:
+    allowed = ",".join(f"mcp__bailiff__{name}" for name in tools)
     command = [
         "claude", "-p", prompt, "--mcp-config", str(task["mcp_config"]), "--strict-mcp-config", "--tools", "",
         "--allowedTools", allowed, "--output-format", "json", "--model", model, "--no-session-persistence",

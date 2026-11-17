@@ -60,7 +60,7 @@ class Shim:
                 "serverInfo": {"name": "bailiff-agent", "version": "1"},
             }
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": self.state.get("tools", TOOLS)}
         elif method == "tools/call":
             result = self.call(message["params"]["name"], message["params"].get("arguments") or {})
         else:
@@ -74,7 +74,8 @@ class Shim:
         if route is None:
             return text(f"unknown tool {name}", error=True)
         nonce = secrets.token_hex(8)
-        digest = request_digest(route["tool"], route["resource"], arguments, nonce)
+        resource = route["resource"].format_map({key: arguments.get(key) for key in ("namespace", "name")})
+        digest = request_digest(route["tool"], resource, arguments, nonce)
         proof = prove_leaf(
             self.root, self.key, int(time.time()), audience=self.state["decider_id"], request_digest=digest
         )
