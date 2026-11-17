@@ -427,7 +427,7 @@
             "message": "a synthetic user request must carry exactly one valid op-id"
           },
           {
-            "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.subResource == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
+            "expression": "(request.resource.group == 'apps' && request.resource.resource == 'deployments' && request.?subResource.orValue('') == 'scale' && request.operation == 'UPDATE' && request.userInfo.username.endsWith(':scale'))",
             "message": "synthetic users may write only through the catalog's write operations"
           },
           {

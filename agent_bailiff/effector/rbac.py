@@ -152,7 +152,7 @@ def _guard_policy(operations: Sequence[CatalogOperation], tenants: Mapping[str, 
     )
     allowed = " || ".join(
         f"(request.resource.group == '{group}' && request.resource.resource == '{resource}'"
-        f" && request.subResource == '{subresource}' && request.operation == 'UPDATE'"
+        f" && request.?subResource.orValue('') == '{subresource}' && request.operation == 'UPDATE'"
         f" && request.userInfo.username.endsWith(':{identity}'))"
         for group, resource, subresource, identity in writes
     )

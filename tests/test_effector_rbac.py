@@ -109,7 +109,7 @@ def test_the_admission_policies_fail_closed_and_bound_the_replica_range():
     assert guard["spec"]["matchConstraints"]["resourceRules"][0]["resources"] == ["*/*"]
     op_id, writes, owned = guard["spec"]["validations"]
     assert "has(request.userInfo.extra)" in op_id["expression"]
-    assert "request.subResource == 'scale'" in writes["expression"]
+    assert "request.?subResource.orValue('') == 'scale'" in writes["expression"]
     assert "endsWith(':scale')" in writes["expression"]
     assert (
         owned["expression"]
