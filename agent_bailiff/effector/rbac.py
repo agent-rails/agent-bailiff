@@ -5,8 +5,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from agent_bailiff.effector.catalog import LABEL, CatalogError, CatalogOperation, OperationCatalog
-from agent_bailiff.effector.kubernetes import OP_ID_EXTRA, TRACE_EXTRA, USER_PREFIX
+from agent_bailiff.effector.catalog import LABEL, RESTARTED_AT, CatalogError, CatalogOperation, OperationCatalog
+from agent_bailiff.effector.kubernetes import FIELD_MANAGER, OP_ID_EXTRA, TRACE_EXTRA, USER_PREFIX
 
 GENERATED_LABEL = "bailiff.dev/generated"
 LABELS = {"app.kubernetes.io/managed-by": "agent-bailiff", GENERATED_LABEL: "true"}
@@ -16,6 +16,36 @@ OP_ID_PATTERN = "^[A-Za-z0-9_-]{43}$"
 IMPERSONATE = "impersonate:user-info"
 RBAC_WRITE_RESOURCES = ("rolebindings", "clusterrolebindings", "roles", "clusterroles")
 AUDIT_SUFFIX = "-audit"
+DEPLOYMENT_SPEC_FIELDS = (
+    "minReadySeconds",
+    "paused",
+    "progressDeadlineSeconds",
+    "replicas",
+    "revisionHistoryLimit",
+    "selector",
+    "strategy",
+    "template",
+)
+DEPLOYMENT_FIELDS = ("apiVersion", "kind", "metadata", "spec", "status")
+POD_TEMPLATE_FIELDS = ("metadata", "spec")
+OBJECT_META_FIELDS = (
+    "annotations",
+    "creationTimestamp",
+    "deletionGracePeriodSeconds",
+    "deletionTimestamp",
+    "finalizers",
+    "generateName",
+    "generation",
+    "labels",
+    "managedFields",
+    "name",
+    "namespace",
+    "ownerReferences",
+    "resourceVersion",
+    "selfLink",
+    "uid",
+)
+SERVER_OWNED_META = ("generation", "managedFields", "resourceVersion")
 AUDIT_RULES = [
     {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list"]},
     {"apiGroups": ["rbac.authorization.k8s.io"], "resources": sorted(RBAC_WRITE_RESOURCES), "verbs": ["list"]},
@@ -105,6 +135,8 @@ def generate_manifests(
     for operation in operations:
         if operation.call.body_argument is not None:
             items.extend(_range_policy(operation))
+        if operation.call.restarts:
+            items.extend(_restart_policy(operation))
     items.extend(_binding_policy(effector))
     return {"apiVersion": "v1", "kind": "List", "items": items}
 
@@ -227,6 +259,106 @@ def _range_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
                     "message": f"replicas must be between {argument.minimum} and {argument.maximum}",
                 }
             ],
+        },
+    }
+    return [policy, _policy_binding(name)]
+
+
+def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
+    call = operation.call
+    owns = "{" + f'"f:spec":{{"f:template":{{"f:metadata":{{"f:annotations":{{"f:{RESTARTED_AT}":{{}}}}}}}}}}' + "}"
+    owns_map = (
+        "{"
+        + f'"f:spec":{{"f:template":{{"f:metadata":{{"f:annotations":{{".":{{}},"f:{RESTARTED_AT}":{{}}}}}}}}}}'
+        + "}"
+    )
+    released = '{"f:spec":{"f:template":{"f:metadata":{"f:annotations":{}}}}}'
+    released_map = '{"f:spec":{"f:template":{"f:metadata":{"f:annotations":{".":{}}}}}}'
+    others_new = f"object.metadata.?managedFields.orValue([]).filter(m, m.manager != '{FIELD_MANAGER}')"
+    others_old = f"oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != '{FIELD_MANAGER}')"
+    restart_only = "({0}.fieldsV1 == {1} || {0}.fieldsV1 == {2} || {0}.fieldsV1 == {3} || {0}.fieldsV1 == {4})"
+    shapes = (owns, owns_map, released, released_map)
+    old_restart_only, new_restart_only = restart_only.format("o", *shapes), restart_only.format("n", *shapes)
+    restart_new = f"{others_new}.filter(n, {new_restart_only})"
+    restart_old = f"{others_old}.filter(o, {old_restart_only})"
+    slot = (
+        "o.manager == n.manager && o.operation == n.operation && o.?subresource == n.?subresource"
+        " && o.apiVersion == n.apiVersion && o.fieldsType == n.fieldsType"
+    )
+    checks = [
+        (
+            f"object.spec.?{field} == oldObject.spec.?{field}",
+            f"a restart may not change spec.{field}",
+        )
+        for field in DEPLOYMENT_SPEC_FIELDS
+        if field != "template"
+    ]
+    checks.append(
+        ("object.spec.template.spec == oldObject.spec.template.spec", "a restart may not change the pod spec")
+    )
+    checks += [
+        (
+            f"object.spec.template.metadata.?{field} == oldObject.spec.template.metadata.?{field}",
+            f"a restart may not change spec.template.metadata.{field}",
+        )
+        for field in OBJECT_META_FIELDS
+        if field != "annotations"
+    ]
+    checks += [
+        (f"object.metadata.?{field} == oldObject.metadata.?{field}", f"a restart may not change metadata.{field}")
+        for field in OBJECT_META_FIELDS
+        if field not in SERVER_OWNED_META
+    ]
+    checks += [
+        (
+            f"variables.annotations.all(k, k == '{RESTARTED_AT}'"
+            " || (k in variables.previous && variables.previous[k] == variables.annotations[k]))"
+            f" && variables.previous.all(k, k == '{RESTARTED_AT}' || k in variables.annotations)",
+            "a restart may change only the restartedAt pod template annotation",
+        ),
+        (f"'{RESTARTED_AT}' in variables.annotations", "a restart must set the restartedAt pod template annotation"),
+        (
+            f"{others_new}.filter(n, !{new_restart_only}) == {others_old}.filter(o, !{old_restart_only})"
+            f" && {restart_new}.all(n, {others_old}.exists(o, {old_restart_only} && {slot}))"
+            f" && {restart_new}.size() <= {restart_old}.size()",
+            "a restart may not change other field managers' entries",
+        ),
+        (
+            f"object.metadata.?managedFields.orValue([]).all(m, m.manager != '{FIELD_MANAGER}'"
+            " || (m.operation == 'Update' && !has(m.subresource) && m.apiVersion == 'apps/v1'"
+            f" && m.fieldsType == 'FieldsV1' && (m.fieldsV1 == {owns} || m.fieldsV1 == {owns_map})))",
+            f"the {FIELD_MANAGER} field manager may own only the restartedAt pod template annotation",
+        ),
+    ]
+    name = f"bailiff-{operation.name.replace('_', '-')}"
+    policy = {
+        "apiVersion": ADMISSION,
+        "kind": "ValidatingAdmissionPolicy",
+        "metadata": _metadata(name),
+        "spec": {
+            "failurePolicy": "Fail",
+            "matchConstraints": {
+                "resourceRules": [
+                    {
+                        "apiGroups": [call.group],
+                        "apiVersions": ["*"],
+                        "operations": ["UPDATE"],
+                        "resources": [call.resource],
+                    }
+                ]
+            },
+            "matchConditions": [
+                _synthetic_condition(),
+                {
+                    "name": "operation-identity",
+                    "expression": f"request.userInfo.username.endsWith(':{operation.identity}')",
+                },
+            ],
+            "variables": [
+                {"name": "annotations", "expression": "object.spec.template.metadata.?annotations.orValue({})"},
+                {"name": "previous", "expression": "oldObject.spec.template.metadata.?annotations.orValue({})"},
+            ],
+            "validations": [{"expression": expression, "message": message} for expression, message in checks],
         },
     }
     return [policy, _policy_binding(name)]

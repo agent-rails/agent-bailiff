@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ FIELD_PATH = re.compile(r"[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*")
 OPERATION_KEYS = frozenset({"name", "call", "arguments", "response"})
 CALL_KEYS = frozenset({"group", "version", "resource", "subresource", "verb", "query"})
 RESPONSE_KEYS = frozenset({"fields", "max_bytes"})
+RESTARTED_AT = "kubectl.kubernetes.io/restartedAt"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,7 @@ class CallShape:
     named: bool
     query: frozenset[str]
     body_argument: str | None
+    restarts: bool = False
 
 
 ALLOWED_CALLS: Mapping[tuple[str, str, str, str | None, str], CallShape] = {
@@ -44,6 +47,9 @@ ALLOWED_CALLS: Mapping[tuple[str, str, str, str | None, str], CallShape] = {
     ),
     ("apps", "v1", "deployments", "scale", "patch"): CallShape(
         "k8s.deployments.scale", "scale", True, frozenset(), "replicas"
+    ),
+    ("apps", "v1", "deployments", None, "patch"): CallShape(
+        "k8s.deployments.restart", "restart", True, frozenset(), None, restarts=True
     ),
 }
 
@@ -83,8 +89,12 @@ class KubernetesCall:
     named: bool
     tool: str
     identity: str
+    restarts: bool
 
-    def body(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    def body(self, arguments: Mapping[str, Any], issued_at: int) -> dict[str, Any] | None:
+        if self.restarts:
+            restarted = datetime.fromtimestamp(issued_at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: restarted}}}}}
         if self.body_argument is None:
             return None
         return {"spec": {"replicas": arguments[self.body_argument]}}
@@ -200,6 +210,7 @@ def _call(operation: str, document: object) -> KubernetesCall:
         shape.named,
         shape.tool,
         shape.identity,
+        shape.restarts,
     )
 
 

@@ -18,6 +18,7 @@ TOKEN_LABEL = "effector token file"
 USER_PREFIX = "bailiff"
 OP_ID_EXTRA = "bailiff.dev/op-id"
 TRACE_EXTRA = "bailiff.dev/trace-id"
+FIELD_MANAGER = "bailiff-effector"
 
 
 class KubernetesUnavailable(Exception):
@@ -64,7 +65,13 @@ class KubernetesClient:
         self._token_file = token_file
 
     def call(
-        self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str
+        self,
+        operation: CatalogOperation,
+        arguments: Mapping[str, Any],
+        tenant: str,
+        op_id: str,
+        trace_id: str,
+        issued_at: int,
     ) -> KubernetesResult:
         token = read_token(self._token_file)
         call = operation.call
@@ -75,7 +82,7 @@ class KubernetesClient:
             f"Impersonate-Extra-{urllib.parse.quote(OP_ID_EXTRA, safe='')}": op_id,
             f"Impersonate-Extra-{urllib.parse.quote(TRACE_EXTRA, safe='')}": trace_id or "none",
         }
-        body = call.body(arguments)
+        body = call.body(arguments, issued_at)
         payload = None
         if body is not None:
             payload = json.dumps(body).encode()
@@ -109,6 +116,8 @@ def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> s
     if call.subresource:
         path += f"/{call.subresource}"
     query = {parameter: str(arguments[argument]) for parameter, argument in sorted(call.query.items())}
+    if call.restarts:
+        query["fieldManager"] = FIELD_MANAGER
     return f"{path}?{urllib.parse.urlencode(query)}" if query else path
 
 

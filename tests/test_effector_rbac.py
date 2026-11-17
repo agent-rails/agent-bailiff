@@ -180,3 +180,37 @@ def test_the_guard_ties_each_tenant_to_its_own_namespaces():
     owned = guard["spec"]["validations"][2]["expression"]
     assert "startsWith('bailiff:tenant-a:') && request.namespace in [\"staging\"]" in owned
     assert 'startsWith(\'bailiff:tenant-b:\') && request.namespace in ["dev", "qa"]' in owned
+
+
+def test_a_restart_operation_gets_a_full_comparison_policy_and_its_own_role():
+    from test_effector_catalog import with_restart
+
+    items = manifests(catalog=OperationCatalog(with_restart()))
+    policy = named(items, "ValidatingAdmissionPolicy", "bailiff-restart-deployment")
+    spec = policy["spec"]
+    assert spec["failurePolicy"] == "Fail"
+    assert spec["matchConstraints"]["resourceRules"] == [
+        {"apiGroups": ["apps"], "apiVersions": ["*"], "operations": ["UPDATE"], "resources": ["deployments"]}
+    ]
+    assert [item["expression"] for item in spec["matchConditions"]] == [
+        "request.userInfo.username.startsWith('bailiff:')",
+        "request.userInfo.username.endsWith(':restart')",
+    ]
+    expressions = [item["expression"] for item in spec["validations"]]
+    for field in ("minReadySeconds", "paused", "progressDeadlineSeconds", "replicas", "revisionHistoryLimit"):
+        assert f"object.spec.?{field} == oldObject.spec.?{field}" in expressions
+    assert "object.spec.template.spec == oldObject.spec.template.spec" in expressions
+    assert "object.spec.template.metadata.?labels == oldObject.spec.template.metadata.?labels" in expressions
+    assert "object.metadata.?generateName == oldObject.metadata.?generateName" in expressions
+    assert not any("object.metadata.?generation" in item for item in expressions)
+    assert any("m.manager != 'bailiff-effector'" in item for item in expressions)
+    binding = named(items, "ValidatingAdmissionPolicyBinding", "bailiff-restart-deployment")
+    assert binding["spec"]["validationActions"] == ["Deny"]
+    role = named(items, "Role", "bailiff-tenant-a-restart", "staging")
+    assert role["rules"] == [{"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"]}]
+    guard = named(items, "ValidatingAdmissionPolicy", "bailiff-effector-guard")
+    assert (
+        "request.?subResource.orValue('') == '' && request.operation == 'UPDATE'"
+        in guard["spec"]["validations"][1]["expression"]
+    )
+    assert "endsWith(':restart')" in guard["spec"]["validations"][1]["expression"]

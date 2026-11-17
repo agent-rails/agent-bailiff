@@ -442,3 +442,25 @@ def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
     FakeConnection.response = FakeResponse(200, 4 << 20)
     with pytest.raises(KubernetesUnavailable, match="larger than the limit"):
         kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt").request("GET", "/api", {}, None)
+
+
+def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_release_time(token_file):
+    from test_effector_catalog import with_restart
+
+    operation = OperationCatalog(with_restart()).operation("restart_deployment")
+    transport = FakeTransport(
+        body=b'{"metadata": {"name": "api", "generation": 4}, "status": {"observedGeneration": 3}}'
+    )
+    result = KubernetesClient(transport, token_file).call(
+        operation, {"namespace": "staging", "name": "api"}, "tenant-a", "op-1", "t" * 32, NOW
+    )
+    [(method, path, headers, body)] = transport.requests
+    assert (method, path) == ("PATCH", "/apis/apps/v1/namespaces/staging/deployments/api?fieldManager=bailiff-effector")
+    assert json.loads(body) == {
+        "spec": {
+            "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:00Z"}}}
+        }
+    }
+    assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"
+    assert headers["Content-Type"] == "application/merge-patch+json"
+    assert result.payload == {"metadata.name": "api", "metadata.generation": 4, "status.observedGeneration": 3}

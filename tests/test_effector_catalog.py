@@ -10,8 +10,30 @@ from agent_bailiff.effector.catalog import ALLOWED_CALLS, CatalogError, Operatio
 SHIPPED = Path(__file__).resolve().parent.parent / "agent_bailiff" / "effector" / "catalogs" / "kubernetes.json"
 
 
+RESTART = {
+    "name": "restart_deployment",
+    "call": {
+        "group": "apps",
+        "version": "v1",
+        "resource": "deployments",
+        "subresource": None,
+        "verb": "patch",
+        "query": {},
+    },
+    "arguments": {"namespace": {"kind": "label"}, "name": {"kind": "label"}},
+    "response": {"fields": ["metadata.name", "metadata.generation", "status.observedGeneration"], "max_bytes": 4096},
+}
+
+
 def shipped():
     return json.loads(SHIPPED.read_text())
+
+
+def with_restart():
+    document = shipped()
+    if not any(item["name"] == RESTART["name"] for item in document["operations"]):
+        document["operations"].append(copy.deepcopy(RESTART))
+    return document
 
 
 def named(document, name):
@@ -43,8 +65,8 @@ def test_the_shipped_catalog_loads_with_derived_resources_and_bodies():
         "scale_deployment": "k8s/{namespace}/deployments/{name}",
     }
     operation = catalog.operation("scale_deployment")
-    assert operation.call.body({"namespace": "staging", "name": "api", "replicas": 3}) == {"spec": {"replicas": 3}}
-    assert catalog.operation("list_pods").call.body({}) is None
+    assert operation.call.body({"namespace": "staging", "name": "api", "replicas": 3}, 0) == {"spec": {"replicas": 3}}
+    assert catalog.operation("list_pods").call.body({}, 0) is None
 
 
 def test_tool_ids_and_identities_are_derived_from_the_call():
@@ -70,6 +92,7 @@ def test_only_the_listed_calls_are_allowed():
         ("apps", "v1", "deployments", None, "get"),
         ("apps", "v1", "deployments", "scale", "get"),
         ("apps", "v1", "deployments", "scale", "patch"),
+        ("apps", "v1", "deployments", None, "patch"),
     }
 
 
@@ -78,7 +101,6 @@ def test_only_the_listed_calls_are_allowed():
     [
         {"resource": "secrets", "group": "", "subresource": None, "verb": "get"},
         {"resource": "configmaps", "group": "", "subresource": None, "verb": "get"},
-        {"resource": "deployments", "group": "apps", "subresource": None, "verb": "patch"},
         {"resource": "deployments", "group": "apps", "subresource": None, "verb": "delete"},
         {"resource": "statefulsets", "group": "apps", "subresource": "scale", "verb": "patch"},
         {"resource": "deployments", "group": "", "subresource": "scale", "verb": "patch"},
@@ -192,3 +214,25 @@ def test_load_refuses_invalid_json_and_oversized_files(tmp_path):
     path.write_text(" " * ((1 << 20) + 1))
     with pytest.raises(CatalogError, match="larger"):
         OperationCatalog.load(path)
+
+
+def test_restart_sets_only_the_restarted_at_annotation_to_the_release_time():
+    operation = OperationCatalog(with_restart()).operation("restart_deployment")
+    assert (operation.tool, operation.identity, operation.resource) == (
+        "k8s.deployments.restart",
+        "restart",
+        "k8s/{namespace}/deployments/{name}",
+    )
+    assert operation.call.body({"namespace": "staging", "name": "api"}, 1_800_000_001) == {
+        "spec": {
+            "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:01Z"}}}
+        }
+    }
+
+
+def test_restart_takes_no_other_arguments():
+    def with_replicas(document):
+        document["operations"].append(copy.deepcopy(RESTART))
+        document["operations"][-1]["arguments"]["replicas"] = {"kind": "integer", "minimum": 1, "maximum": 3}
+
+    refused(with_replicas, "arguments must be exactly")
