@@ -5,7 +5,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from agent_bailiff.effector.catalog import LABEL, RESTARTED_AT, CatalogError, CatalogOperation, OperationCatalog
+from agent_bailiff.effector.catalog import (
+    LABEL,
+    RESTART_OP,
+    RESTARTED_AT,
+    CatalogError,
+    CatalogOperation,
+    OperationCatalog,
+)
 from agent_bailiff.effector.kubernetes import FIELD_MANAGER, OP_ID_EXTRA, TRACE_EXTRA, USER_PREFIX
 
 GENERATED_LABEL = "bailiff.dev/generated"
@@ -266,18 +273,32 @@ def _range_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
 
 def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
     call = operation.call
-    owns = "{" + f'"f:spec":{{"f:template":{{"f:metadata":{{"f:annotations":{{"f:{RESTARTED_AT}":{{}}}}}}}}}}' + "}"
-    owns_map = (
-        "{"
-        + f'"f:spec":{{"f:template":{{"f:metadata":{{"f:annotations":{{".":{{}},"f:{RESTARTED_AT}":{{}}}}}}}}}}'
-        + "}"
-    )
+    old_annotation_fields: dict[str, Any] = {f"f:{RESTARTED_AT}": {}}
+    annotation_fields: dict[str, Any] = {**old_annotation_fields, f"f:{RESTART_OP}": {}}
+    old_field_set = {"f:spec": {"f:template": {"f:metadata": {"f:annotations": old_annotation_fields}}}}
+    old_field_set_with_map = {
+        "f:spec": {"f:template": {"f:metadata": {"f:annotations": {".": {}, **old_annotation_fields}}}}
+    }
+    field_set = {"f:spec": {"f:template": {"f:metadata": {"f:annotations": annotation_fields}}}}
+    owns = json.dumps(field_set, separators=(",", ":"))
+    field_set_with_map = {"f:spec": {"f:template": {"f:metadata": {"f:annotations": {".": {}, **annotation_fields}}}}}
+    owns_map = json.dumps(field_set_with_map, separators=(",", ":"))
     released = '{"f:spec":{"f:template":{"f:metadata":{"f:annotations":{}}}}}'
     released_map = '{"f:spec":{"f:template":{"f:metadata":{"f:annotations":{".":{}}}}}}'
     others_new = f"object.metadata.?managedFields.orValue([]).filter(m, m.manager != '{FIELD_MANAGER}')"
     others_old = f"oldObject.metadata.?managedFields.orValue([]).filter(m, m.manager != '{FIELD_MANAGER}')"
-    restart_only = "({0}.fieldsV1 == {1} || {0}.fieldsV1 == {2} || {0}.fieldsV1 == {3} || {0}.fieldsV1 == {4})"
-    shapes = (owns, owns_map, released, released_map)
+    restart_only = (
+        "({0}.fieldsV1 == {1} || {0}.fieldsV1 == {2} || {0}.fieldsV1 == {3}"
+        " || {0}.fieldsV1 == {4} || {0}.fieldsV1 == {5} || {0}.fieldsV1 == {6})"
+    )
+    shapes = (
+        owns,
+        owns_map,
+        json.dumps(old_field_set, separators=(",", ":")),
+        json.dumps(old_field_set_with_map, separators=(",", ":")),
+        released,
+        released_map,
+    )
     old_restart_only, new_restart_only = restart_only.format("o", *shapes), restart_only.format("n", *shapes)
     kept_new = f"{others_new}.filter(n, !{new_restart_only})"
     kept_old = f"{others_old}.filter(o, !{old_restart_only})"
@@ -313,12 +334,16 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
     ]
     checks += [
         (
-            f"variables.annotations.all(k, k == '{RESTARTED_AT}'"
+            f"variables.annotations.all(k, k in ['{RESTARTED_AT}', '{RESTART_OP}']"
             " || (k in variables.previous && variables.previous[k] == variables.annotations[k]))"
-            f" && variables.previous.all(k, k == '{RESTARTED_AT}' || k in variables.annotations)",
-            "a restart may change only the restartedAt pod template annotation",
+            f" && variables.previous.all(k, k in ['{RESTARTED_AT}', '{RESTART_OP}'] || k in variables.annotations)",
+            "a restart may change only its two pod template annotations",
         ),
-        (f"'{RESTARTED_AT}' in variables.annotations", "a restart must set the restartedAt pod template annotation"),
+        (
+            f"'{RESTARTED_AT}' in variables.annotations && '{RESTART_OP}' in variables.annotations"
+            f" && variables.annotations['{RESTART_OP}'] == request.userInfo.extra['{OP_ID_EXTRA}'][0]",
+            "a restart must bind both annotations to its op-id",
+        ),
         (
             f"{kept_new}.size() == {kept_old}.size()"
             f" && {kept_new}.all(n, {kept_new}.filter(x, x == n).size() == {kept_old}.filter(x, x == n).size())"
@@ -330,7 +355,7 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
             f"object.metadata.?managedFields.orValue([]).all(m, m.manager != '{FIELD_MANAGER}'"
             " || (m.operation == 'Apply' && !has(m.subresource) && m.apiVersion == 'apps/v1'"
             f" && m.fieldsType == 'FieldsV1' && (m.fieldsV1 == {owns} || m.fieldsV1 == {owns_map})))",
-            f"the {FIELD_MANAGER} field manager may own only the restartedAt pod template annotation",
+            f"the {FIELD_MANAGER} field manager may own only the two restart pod template annotations",
         ),
     ]
     name = f"bailiff-{operation.name.replace('_', '-')}"

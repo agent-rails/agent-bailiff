@@ -26,6 +26,7 @@ OPERATION_KEYS = frozenset({"name", "call", "arguments", "response"})
 CALL_KEYS = frozenset({"group", "version", "resource", "subresource", "verb", "query"})
 RESPONSE_KEYS = frozenset({"fields", "max_bytes"})
 RESTARTED_AT = "kubectl.kubernetes.io/restartedAt"
+RESTART_OP = "bailiff.dev/restart-op"
 
 
 @dataclass(frozen=True)
@@ -91,14 +92,16 @@ class KubernetesCall:
     identity: str
     restarts: bool
 
-    def body(self, arguments: Mapping[str, Any], issued_at: int) -> dict[str, Any] | None:
+    def body(self, arguments: Mapping[str, Any], issued_at: int, op_id: str | None = None) -> dict[str, Any] | None:
         if self.restarts:
+            if not isinstance(op_id, str) or not op_id:
+                raise ValueError("restart requires an op-id")
             restarted = datetime.fromtimestamp(issued_at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             return {
                 "apiVersion": f"{self.group}/{self.version}",
                 "kind": "Deployment",
                 "metadata": {"name": arguments["name"]},
-                "spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: restarted}}}},
+                "spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: restarted, RESTART_OP: op_id}}}},
             }
         if self.body_argument is None:
             return None

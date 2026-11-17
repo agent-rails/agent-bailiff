@@ -82,7 +82,7 @@ class KubernetesClient:
             f"Impersonate-Extra-{urllib.parse.quote(OP_ID_EXTRA, safe='')}": op_id,
             f"Impersonate-Extra-{urllib.parse.quote(TRACE_EXTRA, safe='')}": trace_id or "none",
         }
-        body = call.body(arguments, issued_at)
+        body = call.body(arguments, issued_at, op_id)
         payload = None
         if body is not None:
             payload = json.dumps(body).encode()

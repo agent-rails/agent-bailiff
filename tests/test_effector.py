@@ -469,7 +469,14 @@ def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_releas
         "kind": "Deployment",
         "metadata": {"name": "api"},
         "spec": {
-            "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:00Z"}}}
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:00Z",
+                        "bailiff.dev/restart-op": "op-1",
+                    }
+                }
+            }
         },
     }
     assert headers["Impersonate-User"] == "bailiff:tenant-a:restart"

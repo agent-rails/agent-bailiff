@@ -218,19 +218,26 @@ def test_load_refuses_invalid_json_and_oversized_files(tmp_path):
         OperationCatalog.load(path)
 
 
-def test_restart_sets_only_the_restarted_at_annotation_to_the_release_time():
+def test_restart_sets_time_and_operation_id_annotations():
     operation = OperationCatalog(with_restart()).operation("restart_deployment")
     assert (operation.tool, operation.identity, operation.resource) == (
         "k8s.deployments.restart",
         "restart",
         "k8s/{namespace}/deployments/{name}",
     )
-    assert operation.call.body({"namespace": "staging", "name": "api"}, 1_800_000_001) == {
+    assert operation.call.body({"namespace": "staging", "name": "api"}, 1_800_000_001, "op-1") == {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {"name": "api"},
         "spec": {
-            "template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:01Z"}}}
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": "2027-01-15T08:00:01Z",
+                        "bailiff.dev/restart-op": "op-1",
+                    }
+                }
+            }
         },
     }
 

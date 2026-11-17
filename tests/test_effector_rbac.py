@@ -210,6 +210,10 @@ def test_a_restart_operation_gets_a_full_comparison_policy_and_its_own_role():
     assert "object.metadata.?generateName == oldObject.metadata.?generateName" in expressions
     assert not any("object.metadata.?generation" in item for item in expressions)
     assert any("m.manager != 'bailiff-effector'" in item for item in expressions)
+    assert any(
+        "variables.annotations['bailiff.dev/restart-op'] == request.userInfo.extra['bailiff.dev/op-id'][0]" in item
+        for item in expressions
+    )
     binding = named(items, "ValidatingAdmissionPolicyBinding", "bailiff-restart-deployment")
     assert binding["spec"]["validationActions"] == ["Deny"]
     role = named(items, "Role", "bailiff-tenant-a-restart", "staging")
