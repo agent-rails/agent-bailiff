@@ -320,8 +320,8 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
         ),
         (f"'{RESTARTED_AT}' in variables.annotations", "a restart must set the restartedAt pod template annotation"),
         (
-            f"{kept_new}.size() == {kept_old}.size() && {kept_new}.all(n, {kept_old}.exists(o, o == n))"
-            f" && {kept_old}.all(o, {kept_new}.exists(n, n == o))"
+            f"{kept_new}.size() == {kept_old}.size()"
+            f" && {kept_new}.all(n, {kept_new}.filter(x, x == n).size() == {kept_old}.filter(x, x == n).size())"
             f" && {restart_new}.all(n, {others_old}.exists(o, {old_restart_only} && {slot}))"
             f" && {restart_new}.size() <= {restart_old}.size()",
             "a restart may not change other field managers' entries",
