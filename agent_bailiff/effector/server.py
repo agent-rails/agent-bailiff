@@ -14,7 +14,7 @@ from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.effector.catalog import LABEL, CatalogOperation, OperationCatalog
-from agent_bailiff.effector.kubernetes import KubernetesClient, KubernetesUnavailable
+from agent_bailiff.effector.kubernetes import KubernetesClient
 from agent_bailiff.effector.release import CheckedCall, ReleaseCheck, ReleaseRefused
 from agent_bailiff.strict_json import parse_strict_json
 
@@ -65,6 +65,16 @@ class Effector:
         attempt = self._entry(checked, "attempt", now)
         if not self._record(attempt):
             return _error("docket_unavailable")
+        if self._suspension.suspended is not False:
+            self._record(
+                replace(
+                    self._entry(checked, "outcome", now),
+                    parent_entry=attempt.entry_id,
+                    outcome="refused",
+                    reason="suspended",
+                )
+            )
+            return _error("suspended")
         try:
             result = self._client.call(
                 checked.operation,
@@ -73,7 +83,7 @@ class Effector:
                 checked.release.op_id,
                 checked.clearance.trace_id,
             )
-        except KubernetesUnavailable:
+        except Exception:
             logger.exception("kubernetes call failed; the outcome is unknown")
             self._record(
                 replace(self._entry(checked, "outcome", now), parent_entry=attempt.entry_id, outcome="outcome_unknown")
@@ -95,6 +105,8 @@ class Effector:
         if not recorded:
             return _error("outcome_unknown")
         text = result.payload if isinstance(result.payload, str) else json.dumps(result.payload, sort_keys=True)
+        if len(text.encode()) > checked.operation.max_response_bytes:
+            return _error("response_too_large")
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     def _entry(self, checked: CheckedCall, decision: str, now: int) -> Entry:

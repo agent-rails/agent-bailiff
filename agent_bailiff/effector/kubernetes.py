@@ -64,7 +64,10 @@ class KubernetesClient:
     def call(
         self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str
     ) -> KubernetesResult:
-        token = read_owned(self._token_file, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
+        try:
+            token = read_owned(self._token_file, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
+        except (OSError, ValueError) as exc:
+            raise KubernetesUnavailable(f"cannot read the effector token: {exc}") from None
         call = operation.call
         headers = {
             "Authorization": f"Bearer {token}",

@@ -319,3 +319,49 @@ def test_the_mcp_server_serves_session_methods_and_calls_on_localhost(token_file
 
 def test_the_checked_fields_cover_the_release(token_file):
     assert {"op_id", "tenant", "task", "tool", "resource", "args_digest"} <= set(asdict(clearance_for()))
+
+
+class SuspendAfterChecks:
+    def __init__(self):
+        self.reads = 0
+
+    @property
+    def suspended(self):
+        self.reads += 1
+        return self.reads > 1
+
+
+def test_a_suspension_set_after_the_checks_stops_the_call(token_file):
+    instance, transport, docket = effector(token_file)
+    instance._suspension = SuspendAfterChecks()
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert transport.requests == []
+    assert [(entry.decision, entry.outcome, entry.reason) for entry in docket.entries] == [
+        ("attempt", None, None),
+        ("outcome", "refused", "suspended"),
+    ]
+
+
+def test_an_unreadable_token_file_is_recorded_as_outcome_unknown(token_file):
+    os.chmod(token_file, 0o644)
+    instance, transport, docket = effector(token_file)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert transport.requests == []
+    assert docket.entries[-1].outcome == "outcome_unknown"
+
+
+def test_an_unexpected_client_failure_is_recorded_as_outcome_unknown(token_file):
+    instance, _, docket = effector(token_file, FakeTransport(error=RuntimeError("bug")))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert docket.entries[-1].outcome == "outcome_unknown"
+
+
+def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
+    pods = [{"metadata": {"name": "p" * 60}, "status": {"phase": "Running"}} for _ in range(2000)]
+    instance, _, docket = effector(token_file, FakeTransport(body=json.dumps({"items": pods}).encode()))
+    arguments = {"namespace": "staging", "limit": 5}
+    result = instance.call(
+        {"name": "list_pods", "arguments": arguments}, release_for(clearance_for("list_pods", arguments)), NOW + 2
+    )
+    assert result["content"][0]["text"] == "response_too_large"
+    assert docket.entries[-1].outcome == "done"
