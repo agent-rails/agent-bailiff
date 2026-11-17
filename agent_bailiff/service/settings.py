@@ -36,6 +36,11 @@ CUSTODIAN_KEYS = frozenset(
     | {"docket", "gateway"}
 )
 DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "allowed_uids", "writers"})
+EFFECTOR_KEYS = frozenset(
+    {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
+    | {"max_clearance_lifetime", "port", "kubernetes", "ledger", "docket"}
+)
+KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file"})
 CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers"})
 
 
@@ -169,6 +174,32 @@ class CustodianSettings:
 
 
 @dataclass(frozen=True)
+class KubernetesSettings:
+    host: str
+    port: int
+    ca: Path
+    token_file: Path
+
+
+@dataclass(frozen=True)
+class EffectorSettings:
+    name: str
+    key: Path
+    catalog: Path
+    custodian: str
+    custodian_keys: Mapping[str, Ed25519PublicKey]
+    decider: str
+    decide_keys: Mapping[str, Ed25519PublicKey]
+    skew_seconds: int
+    max_clearance_lifetime: int
+    port: int
+    kubernetes: KubernetesSettings
+    ledger: ReadOnlyLedgerSettings
+    suspension_dir: Path
+    docket: DocketClientSettings
+
+
+@dataclass(frozen=True)
 class DocketSettings:
     docket: Path
     socket: Path
@@ -203,6 +234,45 @@ def load_custodian(path: Path) -> CustodianSettings:
 
 def load_docket(path: Path) -> DocketSettings:
     return parse_docket(read_config(path, "docket config"))
+
+
+def load_effector(path: Path) -> EffectorSettings:
+    return parse_effector(read_config(path, "effector config"))
+
+
+def parse_effector(document: object) -> EffectorSettings:
+    config = Section(document, "effector", EFFECTOR_KEYS)
+    custodian = config.component("custodian")
+    decider = config.component("decider")
+    keys = {}
+    for field, owner in (("custodian_keys", custodian), ("decide_keys", decider)):
+        try:
+            keys[field] = parse_pinned_keys(owner, config.raw(field))
+        except ValueError as exc:
+            raise config.wrap(field, exc) from None
+    kubernetes = config.section("kubernetes", KUBERNETES_KEYS)
+    host = kubernetes.text("host")
+    if host not in ("127.0.0.1", "localhost") and not all(part.isalnum() or part in ".-" for part in host):
+        raise ConfigError("effector.kubernetes.host must be a host name or address")
+    ledger = config.section("ledger", frozenset({"path", "writer_uid", "group"}))
+    return EffectorSettings(
+        name=config.component("name"),
+        key=config.path("key"),
+        catalog=config.path("catalog"),
+        custodian=custodian,
+        custodian_keys=keys["custodian_keys"],
+        decider=decider,
+        decide_keys=keys["decide_keys"],
+        skew_seconds=config.integer("skew_seconds", 0, 300),
+        max_clearance_lifetime=config.integer("max_clearance_lifetime", 1),
+        port=config.integer("port", 1, 65535),
+        kubernetes=KubernetesSettings(
+            host, kubernetes.integer("port", 1, 65535), kubernetes.path("ca"), kubernetes.path("token_file")
+        ),
+        ledger=ReadOnlyLedgerSettings(ledger.path("path"), ledger.os_id("writer_uid"), ledger.os_id("group")),
+        suspension_dir=suspension_directory(ledger.path("path")),
+        docket=_docket_client(config),
+    )
 
 
 def load_control(path: Path) -> ControlSettings:

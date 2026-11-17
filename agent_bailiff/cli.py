@@ -23,8 +23,23 @@ from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
 from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
-from agent_bailiff.service.init import InitError, init_control, init_custodian, init_decide, init_docket, read_pin
-from agent_bailiff.service.settings import DocketSettings, load_control, load_custodian, load_decide, load_docket
+from agent_bailiff.service.init import (
+    InitError,
+    init_control,
+    init_custodian,
+    init_decide,
+    init_docket,
+    init_effector,
+    read_pin,
+)
+from agent_bailiff.service.settings import (
+    DocketSettings,
+    load_control,
+    load_custodian,
+    load_decide,
+    load_docket,
+    load_effector,
+)
 from agent_bailiff.signing import MAX_TOKEN_CHARS
 
 PROG = "agent-bailiff"
@@ -64,7 +79,12 @@ def _parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     _add_init(commands)
-    for name, handler in (("decide", _run_decide), ("custodian", _run_custodian), ("docket", _run_docket)):
+    for name, handler in (
+        ("decide", _run_decide),
+        ("custodian", _run_custodian),
+        ("docket", _run_docket),
+        ("effector", _run_effector),
+    ):
         component = commands.add_parser(name, help=f"the {name} service").add_subparsers(dest="action", required=True)
         serve = component.add_parser("run", help=f"run the {name} service until SIGTERM or SIGINT")
         serve.add_argument("--config", type=Path, required=True)
@@ -106,16 +126,27 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     custodian.add_argument("--ledger-group", type=int, required=True)
     control = components.add_parser("control")
     control.add_argument("--decide-config", type=Path, required=True)
+    effector = components.add_parser("effector")
+    effector.add_argument("--custodian-pin", type=Path, required=True, help="the custodian's public key record")
+    effector.add_argument("--decide-pin", type=Path, required=True, help="decide's public key record")
+    effector.add_argument("--ledger", type=Path, required=True, help="decide's ledger (its suspension is read)")
+    effector.add_argument("--ledger-uid", type=int, required=True)
+    effector.add_argument("--ledger-group", type=int, required=True)
+    effector.add_argument("--port", type=int, required=True, help="127.0.0.1 port the gateway reaches")
+    effector.add_argument("--kube-host", required=True)
+    effector.add_argument("--kube-port", type=int, required=True)
+    effector.add_argument("--kube-ca", type=Path, required=True)
+    effector.add_argument("--kube-token-file", type=Path, required=True, help="the effector's own token, 0600")
     docket = components.add_parser("docket")
     docket.add_argument("--socket", type=Path, required=True)
     docket.add_argument("--socket-group", type=int, required=True)
     docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
     for parser in (control, docket):
         parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
-    for parser in (decide, custodian, control, docket):
+    for parser in (decide, custodian, control, docket, effector):
         parser.add_argument("--dir", type=Path, required=True, help="the component's 0700 directory")
         parser.set_defaults(handler=_init)
-    for parser in (decide, custodian, control):
+    for parser in (decide, custodian, control, effector):
         parser.add_argument("--name", required=True, help="component name, also its docket writer and key id prefix")
         parser.add_argument("--docket-socket", required=True)
         parser.add_argument("--docket-uid", type=int, required=True, help="the docket sink's uid")
@@ -147,6 +178,25 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
     if args.component == "control":
         pins = [read_pin(path) for path in args.pin]
         return init_control(args.dir, name=args.name, decide_config=args.decide_config, pins=pins, docket=docket)
+    if args.component == "effector":
+        kubernetes = {
+            "host": args.kube_host,
+            "port": args.kube_port,
+            "ca": args.kube_ca,
+            "token_file": args.kube_token_file,
+        }
+        return init_effector(
+            args.dir,
+            name=args.name,
+            custodian=read_pin(args.custodian_pin),
+            decide=read_pin(args.decide_pin),
+            ledger=args.ledger,
+            ledger_uid=args.ledger_uid,
+            ledger_group=args.ledger_group,
+            port=args.port,
+            kubernetes=kubernetes,
+            docket=docket,
+        )
     gateway = {"uid": args.gateway_uid, "socket": args.socket, "socket_group": args.gateway_group}
     if args.component == "decide":
         return init_decide(
@@ -189,6 +239,19 @@ def _run_custodian(args: argparse.Namespace) -> int:
         service = run.start_custodian(load_custodian(args.config))
     except STARTUP_ERRORS as exc:
         return _refused("custodian", exc)
+    try:
+        stop.wait()
+    finally:
+        service.close()
+    return 0
+
+
+def _run_effector(args: argparse.Namespace) -> int:
+    stop = _stop_on_signals()
+    try:
+        service = run.start_effector(load_effector(args.config))
+    except STARTUP_ERRORS as exc:
+        return _refused("effector", exc)
     try:
         stop.wait()
     finally:

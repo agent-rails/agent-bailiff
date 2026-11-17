@@ -26,6 +26,10 @@ from agent_bailiff.decide.config import DeciderConfig
 from agent_bailiff.decide.decider import Decider
 from agent_bailiff.docket.client import DocketClient
 from agent_bailiff.docket.sink import DocketSink
+from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient
+from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
+from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
 from agent_bailiff.keys import key_id, load_signing_key
 from agent_bailiff.service.ledger import open_reader, open_writer
 from agent_bailiff.service.settings import (
@@ -34,6 +38,7 @@ from agent_bailiff.service.settings import (
     DecideSettings,
     DocketClientSettings,
     DocketSettings,
+    EffectorSettings,
     GatewaySettings,
     read_config,
 )
@@ -237,3 +242,42 @@ def reconcile(decider: Decider, now: int) -> None:
 def _close_all(resources: tuple[Closeable, ...]) -> None:
     for resource in reversed(resources):
         resource.close()
+
+
+@dataclass
+class RunningEffector:
+    server: EffectorServer
+
+    def close(self) -> None:
+        self.server.close()
+
+
+def start_effector(settings: EffectorSettings) -> RunningEffector:
+    key = load_signing_key(settings.key)
+    catalog = OperationCatalog.load(settings.catalog)
+    check = ReleaseCheck(
+        ReleaseCheckConfig(
+            effector_id=settings.name,
+            custodian_id=settings.custodian,
+            decider_id=settings.decider,
+            custodian_keys=settings.custodian_keys,
+            decide_keys=settings.decide_keys,
+            skew_seconds=settings.skew_seconds,
+            max_clearance_lifetime=settings.max_clearance_lifetime,
+        ),
+        catalog,
+    )
+    kubernetes = settings.kubernetes
+    client = KubernetesClient(HttpsTransport(kubernetes.host, kubernetes.port, kubernetes.ca), kubernetes.token_file)
+    suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)
+    effector = Effector(
+        EffectorConfig(settings.name, settings.name),
+        catalog,
+        check,
+        client,
+        suspension,
+        docket_client(settings.docket, settings.name, key),
+    )
+    server = EffectorServer(effector, settings.port)
+    server.start()
+    return RunningEffector(server)
