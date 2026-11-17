@@ -5,7 +5,7 @@ from test_agentgateway_calls import message
 from test_agentgateway_config import gateway_config, problems_after
 
 from agent_bailiff.adapters.agentgateway.calls import CallRefused, ToolRoute, ToolRoutes, read_call, routes_from_catalog
-from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations
+from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor
 from agent_bailiff.effector.catalog import Argument, OperationCatalog
 
@@ -156,3 +156,40 @@ def test_the_cli_prints_the_shipped_catalog_digest(capsys):
 
     assert main(["effector", "digest"]) == 0
     assert capsys.readouterr().out.strip() == OperationCatalog.load(shipped_catalog("kubernetes")).digest
+
+
+@pytest.mark.parametrize(
+    ("host", "accepted"),
+    [
+        ("http://127.0.0.1:18080/mcp", True),
+        ("http://localhost:18080/mcp", True),
+        ("http://[::1]:18080/mcp", True),
+        ("http://10.0.0.5:18080/mcp", False),
+        ("https://127.0.0.1:18080/mcp", False),
+        ("http://127.0.0.1.evil.example:18080/mcp", False),
+        ("127.0.0.1", True),
+        ("10.0.0.5", False),
+    ],
+)
+def test_check_config_requires_catalog_services_to_target_a_loopback_effector(host, accepted):
+    config = gateway_config(upstream=host, credential_headers=["bailiff-release"])
+    config["mcp"]["targets"][0]["name"] = "k8s"
+    expected = GatewayExpectations(
+        Path("/run/bailiff/d/decide.sock"),
+        Path("/run/bailiff/c/custodian.sock"),
+        frozenset({"k8s"}),
+        frozenset(),
+        frozenset({"k8s"}),
+    )
+    problems = [problem for problem in validate_gateway_config(config, expected) if "catalog service" in problem]
+    assert (problems == []) is accepted, problems
+
+
+def test_catalog_services_are_the_services_with_catalog_routes():
+    routes = ToolRoutes.from_document(
+        {
+            "routes": [{"service": "ops", "name": "deploy", "tool": "deploy.service", "resource": "env/staging/api"}],
+            "catalogs": [{"service": "k8s", "name": "kubernetes"}],
+        }
+    )
+    assert routes.catalog_services == frozenset({"k8s"})

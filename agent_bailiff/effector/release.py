@@ -61,7 +61,7 @@ class ReleaseCheck:
         )
         if isinstance(release, Refused):
             raise ReleaseRefused(f"release_{release.reason}")
-        if release.iat < self._started_at:
+        if release.iat <= self._started_at:
             raise ReleaseRefused("release_predates_start")
         if release.catalog != self._catalog.digest:
             raise ReleaseRefused("catalog_mismatch")

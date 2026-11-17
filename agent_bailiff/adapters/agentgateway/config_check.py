@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,8 @@ CHAIN_HEADER_PREFIX = "x-bailiff-"
 REMOVE_PATH = "$.mcp.policies.requestHeaderModifier.remove"
 CLEARANCE_EXPRESSION = f"mcpGuardrails.{CLEARANCE_KEY}"
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 
 @dataclass(frozen=True)
 class GatewayExpectations:
@@ -40,6 +43,7 @@ class GatewayExpectations:
     custodian_socket: Path
     services: frozenset[str]
     credential_headers: frozenset[str]
+    effector_services: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         for name in ("decide_socket", "custodian_socket"):
@@ -69,13 +73,15 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         problems.append("the gateway config must have an mcp object")
         return tuple(problems)
     _only_keys(problems, "mcp", mcp, MCP_KEYS)
-    _check_targets(problems, mcp.get("targets"), expected.services)
+    _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
     _check_policies(problems, mcp.get("policies"), expected)
     _check_credential_headers(problems, document, expected.credential_headers)
     return tuple(problems)
 
 
-def _check_targets(problems: list[str], targets: object, services: frozenset[str]) -> None:
+def _check_targets(
+    problems: list[str], targets: object, services: frozenset[str], effector_services: frozenset[str]
+) -> None:
     if not isinstance(targets, list):
         problems.append("mcp.targets must be a list")
         return
@@ -107,6 +113,24 @@ def _check_targets(problems: list[str], targets: object, services: frozenset[str
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
+        if service in effector_services and not _is_loopback_http(target["mcp"]):
+            problems.append(
+                f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or [::1]; "
+                "releases and clearances must not leave the host"
+            )
+
+
+def _is_loopback_http(target: Mapping[str, Any]) -> bool:
+    host = target.get("host")
+    if not isinstance(host, str):
+        return False
+    if "://" not in host:
+        return host.removeprefix("[").removesuffix("]") in LOOPBACK_HOSTS
+    try:
+        url = urllib.parse.urlsplit(host)
+        return url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
+    except ValueError:
+        return False
 
 
 def _check_policies(problems: list[str], policies: object, expected: GatewayExpectations) -> None:

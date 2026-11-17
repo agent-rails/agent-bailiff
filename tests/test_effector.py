@@ -114,7 +114,7 @@ def token_file(tmp_path):
     return path
 
 
-def effector(token_file, transport=None, docket=None, suspended=False, rbac_healthy=True, started_at=NOW):
+def effector(token_file, transport=None, docket=None, suspended=False, rbac_healthy=True, started_at=NOW - 1):
     transport = transport or FakeTransport()
     docket = docket or RecordingDocket()
     instance = Effector(
@@ -382,8 +382,9 @@ def test_no_call_is_made_while_rbac_is_unverified(token_file):
     assert transport.requests == [] and docket.entries == []
 
 
-def test_a_release_issued_before_the_effector_started_is_refused(token_file):
-    instance, transport, _ = effector(token_file, started_at=NOW + 2)
+@pytest.mark.parametrize("started_at", [NOW + 1, NOW + 2])
+def test_a_release_issued_before_or_in_the_second_the_effector_started_is_refused(token_file, started_at):
+    instance, transport, _ = effector(token_file, started_at=started_at)
     assert (
         instance.call(scale_params(), release_for(now=NOW + 1), NOW + 3)["content"][0]["text"]
         == "release_predates_start"

@@ -71,11 +71,9 @@ class Cluster:
         self.namespaces = {key: f"bl-{suffix}-{key}" for key in ("sys", "staging", "prod")}
         self.applier = json.loads(kubectl(context, "auth", "whoami", "-o", "json"))["status"]["userInfo"]["username"]
         self.manifests = self.directory / "manifests.json"
+        self.created = False
 
     def up(self) -> None:
-        existing = kubectl(self.context, "get", "clusterroles", "-l", "bailiff.dev/generated=true", "-o", "name")
-        if existing.strip():
-            raise RuntimeError("the cluster already holds generated bailiff objects; use a disposable cluster")
         self.manifests.write_text(
             cli(
                 "effector",
@@ -90,6 +88,16 @@ class Cluster:
                 f"{TENANT}={self.namespaces['staging']}",
             )  # fmt: skip
         )
+        items = json.loads(self.manifests.read_text())["items"]
+        names = [
+            f"{item['kind'].lower()}/{item['metadata']['name']}"
+            for item in items
+            if "namespace" not in item["metadata"]
+        ]
+        taken = kubectl(self.context, "get", *names, "--ignore-not-found", "-o", "name").split()
+        if taken:
+            raise RuntimeError(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
+        self.created = True
         for key in ("staging", "prod"):
             kubectl(self.context, "create", "namespace", self.namespaces[key])
             kubectl(
@@ -107,6 +115,8 @@ class Cluster:
         self.server = urllib.parse.urlsplit(cluster["server"])
 
     def down(self) -> None:
+        if not self.created:
+            return
         subprocess.run(
             ["kubectl", "--context", self.context, "delete", "-f", str(self.manifests), "--ignore-not-found"],
             capture_output=True,
@@ -371,12 +381,12 @@ def main() -> None:
         shutil.rmtree(args.root)
     root = private(args.root)
     cluster = Cluster(args.context, root / "cluster")
-    cluster.up()
     deployment = KubernetesDeployment(root)
     deployment.cluster = cluster
     outcomes: list[Outcome] = []
     staging, prod = cluster.namespaces["staging"], cluster.namespaces["prod"]
     try:
+        cluster.up()
         deployment.prepare()
         deployment.start()
         outcomes.append(

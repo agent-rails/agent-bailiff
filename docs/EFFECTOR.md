@@ -24,7 +24,7 @@ The same catalog produces the gateway routes and decide's resource for each call
 3. The effector refuses the call if any of these fails:
    - the suspension state is readable and not suspended;
    - the last clean RBAC check is at most 120 s old;
-   - the release signature (pinned custodian keys), audience (this effector), issuer and lifetime are valid, and the release was issued after the effector started;
+   - the release signature (pinned custodian keys), audience (this effector), issuer and lifetime are valid, and the release was issued after the second in which the effector started;
    - the catalog digest matches;
    - decide's clearance verifies (pinned decide keys) and agrees with the release on op_id, tenant, task, tool, resource and argument digest;
    - the operation's tool equals the release's, the arguments match the catalog schema exactly, and the derived resource and argument digest equal the release's;
@@ -61,7 +61,7 @@ This prints one kubectl `List`: the effector namespace, the effector and audit s
 
 ## Drift check
 
-At startup and every 60 s, the effector checks that the cluster holds exactly the generated set. Until a check is clean it refuses calls with `rbac_unverified`, and if the first check fails it does not start.
+At startup, and 60 s after each check ends, the effector checks the cluster's grants and admission objects against the generated set. It refuses calls with `rbac_unverified` unless the last clean check is at most 120 s old, and if the first check fails it does not start. The check covers the effector's and audit account's effective rules, the synthetic users' catalog calls, and the rules, role references, subjects and admission specs of the generated objects. It does not compare their metadata, or the generated Namespace and ServiceAccounts.
 - A SelfSubjectRulesReview as the effector and as the audit account in every namespace must show only the generated grants, the default self-review rules and the default discovery and health URLs. An incomplete review counts as drift.
 - A SubjectAccessReview with the implicit `system:authenticated` group, for every synthetic user, tenant namespace and catalog call, must be allowed exactly when the namespace is the tenant's and the call is the identity's.
 - Every generated binding, role, policy and policy binding must be present and unchanged. No other binding may name the effector, the audit account or a synthetic user.
@@ -84,12 +84,12 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 
 - Decide's and the custodian's route tables name the catalog: `{"routes": [...], "catalogs": [{"service": "k8s", "name": "kubernetes"}]}`. Only shipped catalogs can be named.
 - The custodian needs an effector binding per tool, with the effector's name as credential id and the catalog digest from `agent-bailiff effector digest`. Decide needs a matching target binding.
-- Point the gateway's MCP target for the catalog service at `http://127.0.0.1:<port>/mcp`, and remove `bailiff-release` in its header modifier; check-config requires that.
+- Point the gateway's MCP target for the catalog service at `http://127.0.0.1:<port>/mcp`, and remove `bailiff-release` in its header modifier. check-config requires both: a catalog service must target http on 127.0.0.1, localhost or [::1].
 - Run one effector instance. Its single-use set is in memory.
 
 ## Tests
 
-- `tests/test_effector_gateway.py` runs the pinned agentgateway binary in front of a real effector. The effector receives exactly the custodian's `bailiff-release`, and a tools/call answered with 503 is not retried.
+- `tests/test_effector_gateway.py` runs the pinned agentgateway binary in front of a real effector. The effector receives exactly the custodian's `bailiff-release`. A tools/call answered with 503 returns a failure to the agent and reaches the upstream once, counted again after 3 s.
 - `tests/test_effector_cluster.py` runs against a disposable cluster when `AGENT_BAILIFF_TEST_KUBE_CONTEXT` is set, and has been run on OrbStack v1.36.5.
 
 ## Limits
@@ -97,7 +97,7 @@ agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 - Grants that reach the effector or a synthetic user through a group cannot be refused at admission; the drift check finds them within 60 s.
 - Admission does not see reads. Reads are bounded by the impersonate-on grants and the catalog.
 - The admission objects are protected by the drift check, not by admission.
-- A direct RBAC or admission change is in effect for up to 60 s before the drift check finds it, unless the binding policy refuses it.
+- A direct RBAC or admission change is in effect until the next check finds it, up to 60 s plus the duration of a check, unless the binding policy refuses it.
 - The synthetic users' own permissions outside the catalog are not enumerated. They are reachable only through the effector's impersonation, which impersonate-on limits to catalog calls.
 - A credential issued by the cluster for a `bailiff:` user name would act with that user's grants. Issuing one needs control of the cluster CA or identity provider.
 - The op-id is passed as an impersonation extra. Whether the API server's audit events record it has not been checked.

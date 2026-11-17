@@ -40,11 +40,6 @@ def apply(document):
 
 @pytest.fixture(scope="module")
 def cluster(tmp_path_factory):
-    existing = kubectl(
-        "get", "clusterroles,validatingadmissionpolicies", "-l", "bailiff.dev/generated=true", "-o", "name"
-    )
-    if existing.stdout.strip():
-        pytest.fail("the cluster already holds generated bailiff objects; use a disposable cluster")
     suffix = secrets.token_hex(3)
     names = {key: f"bxt-{suffix}-{key}" for key in ("sys", "stg", "other")}
     tenants = {"ta": [names["stg"]], "tb": [names["other"]]}
@@ -52,10 +47,13 @@ def cluster(tmp_path_factory):
     manifests = generate_manifests(CATALOG, identity, tenants)
     directory = tmp_path_factory.mktemp("cluster")
     (directory / "manifests.json").write_text(render(manifests))
-    for key in ("stg", "other"):
-        kubectl("create", "namespace", names[key])
-        kubectl("-n", names[key], "create", "deployment", "api", "--image=registry.k8s.io/pause:3.10")
+    taken = cluster_scoped_collisions(manifests)
+    if taken:
+        pytest.fail(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
     try:
+        for key in ("stg", "other"):
+            kubectl("create", "namespace", names[key])
+            kubectl("-n", names[key], "create", "deployment", "api", "--image=registry.k8s.io/pause:3.10")
         apply(render(manifests))
         time.sleep(SETTLE_SECONDS)
         for account, file in (("effector", "effector"), ("effector-audit", "audit")):
@@ -88,6 +86,16 @@ def cluster(tmp_path_factory):
     finally:
         kubectl("delete", "-f", str(directory / "manifests.json"), "--ignore-not-found", "--wait=false", check=False)
         kubectl("delete", "namespace", names["stg"], names["other"], "--ignore-not-found", "--wait=false", check=False)
+
+
+def cluster_scoped_collisions(manifests):
+    names = [
+        f"{item['kind'].lower()}/{item['metadata']['name']}"
+        for item in manifests["items"]
+        if "namespace" not in item["metadata"]
+    ]
+    found = kubectl("get", *names, "--ignore-not-found", "-o", "name").stdout.split()
+    return sorted(found)
 
 
 def whoami():

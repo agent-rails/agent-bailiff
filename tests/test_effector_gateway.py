@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -56,6 +57,7 @@ EFFECTOR_BINDINGS = tuple(
 COSTS = CostTable(1, dict.fromkeys(TOOLS, 1))
 SCOPE = {"tools": ["k8s.*"], "resources": ["k8s/staging/*"], "max_cost_per_call": 5}
 SCALE = {"namespace": "staging", "name": "api", "replicas": 3}
+RETRY_WINDOW_SECONDS = 3
 
 
 class RecordingHandler(_Handler):
@@ -301,7 +303,9 @@ def test_the_gateway_does_not_retry_a_failed_effector_call(binary, workdir, priv
     try:
         agent = Agent(gateway.port)
         request = request_for("scale_deployment", SCALE)
-        agent.call("scale_deployment", SCALE, headers_for(request))
+        status, body = agent.call("scale_deployment", SCALE, headers_for(request))
+        assert "error" in body or body.get("result", {}).get("isError") is True or status >= 500, (status, body)
+        time.sleep(RETRY_WINDOW_SECONDS)
         assert upstream.calls == 1
     finally:
         gateway.stop()

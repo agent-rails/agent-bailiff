@@ -131,6 +131,12 @@ class ToolRoutes:
     def services(self) -> frozenset[str]:
         return frozenset(service for service, _ in self._table)
 
+    @property
+    def catalog_services(self) -> frozenset[str]:
+        return frozenset(
+            service for (service, _), route in self._table.items() if route.tool.startswith(CATALOG_TOOL_PREFIX)
+        )
+
     def route(self, service: str, name: str) -> ToolRoute | None:
         return self._table.get((service, name))
 
