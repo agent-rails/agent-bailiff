@@ -63,6 +63,7 @@ def test_the_shipped_catalog_loads_with_derived_resources_and_bodies():
         "read_pod_log": "k8s/{namespace}/pods/{name}",
         "get_deployment": "k8s/{namespace}/deployments/{name}",
         "scale_deployment": "k8s/{namespace}/deployments/{name}",
+        "restart_deployment": "k8s/{namespace}/deployments/{name}",
     }
     operation = catalog.operation("scale_deployment")
     assert operation.call.body({"namespace": "staging", "name": "api", "replicas": 3}, 0) == {"spec": {"replicas": 3}}
@@ -76,6 +77,7 @@ def test_tool_ids_and_identities_are_derived_from_the_call():
         "read_pod_log": ("k8s.pods.log", "read"),
         "get_deployment": ("k8s.deployments.get", "read"),
         "scale_deployment": ("k8s.deployments.scale", "scale"),
+        "restart_deployment": ("k8s.deployments.restart", "restart"),
     }
     refused(lambda d: scale(d).update(tool="k8s.deployments.get"), "exactly the fields")
     refused(lambda d: scale(d).update(identity="read"), "exactly the fields")

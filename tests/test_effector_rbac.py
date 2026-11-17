@@ -64,8 +64,10 @@ def test_the_effector_may_impersonate_only_the_synthetic_users_and_extras():
     users, extras = role["rules"]
     assert users["resourceNames"] == [
         "bailiff:tenant-a:read",
+        "bailiff:tenant-a:restart",
         "bailiff:tenant-a:scale",
         "bailiff:tenant-b:read",
+        "bailiff:tenant-b:restart",
         "bailiff:tenant-b:scale",
     ]
     assert users["verbs"] == extras["verbs"] == ["impersonate:user-info"]
@@ -78,7 +80,11 @@ def test_impersonate_on_grants_mirror_the_catalog_in_each_namespace():
         assert named(items, "Role", "bailiff-effector-on", namespace)["rules"] == [
             {"apiGroups": [""], "resources": ["pods"], "verbs": ["impersonate-on:user-info:list"]},
             {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["impersonate-on:user-info:get"]},
-            {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["impersonate-on:user-info:get"]},
+            {
+                "apiGroups": ["apps"],
+                "resources": ["deployments"],
+                "verbs": ["impersonate-on:user-info:get", "impersonate-on:user-info:patch"],
+            },
             {"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["impersonate-on:user-info:patch"]},
         ]
 
@@ -157,7 +163,7 @@ def test_the_cli_refuses_a_malformed_tenant(capsys):
 
 def test_the_example_is_valid_json_list():
     document = json.loads(EXAMPLE.read_text())
-    assert document["kind"] == "List" and len(document["items"]) == 19
+    assert document["kind"] == "List" and len(document["items"]) == 23
 
 
 def test_the_audit_identity_may_only_list_and_ask_access_reviews():

@@ -244,3 +244,135 @@ def test_a_deleted_admission_binding_is_drift(cluster, restore):
     assert cluster["audit"].check() == [
         "the generated ValidatingAdmissionPolicyBinding bailiff-effector-guard is missing"
     ]
+
+
+RESTARTED_AT = "kubectl.kubernetes.io/restartedAt"
+
+
+def deployment(namespace):
+    return json.loads(
+        kubectl("-n", namespace, "get", "deployment", "api", "--show-managed-fields", "-o", "json").stdout
+    )
+
+
+def snapshot(item):
+    metadata = item["metadata"]
+    managers = sorted(
+        (entry["manager"], entry["operation"], entry.get("subresource", ""), json.dumps(entry.get("fieldsV1")))
+        for entry in metadata.get("managedFields", [])
+        if entry.get("subresource") != "status"
+    )
+    kept = ("labels", "annotations", "generateName", "finalizers", "ownerReferences", "generation")
+    return item["spec"], {key: metadata.get(key) for key in kept}, managers
+
+
+def restart(cluster, namespace, issued_at):
+    operation = CATALOG.operation("restart_deployment")
+    arguments = {"namespace": namespace, "name": "api"}
+    return cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, issued_at).status
+
+
+def patch_as_restart_user(cluster, namespace, body, content_type="application/merge-patch+json"):
+    token = (cluster["directory"] / "effector").read_text()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Impersonate-User": "bailiff:ta:restart",
+        "Impersonate-Extra-bailiff.dev%2Fop-id": OP_ID,
+        "Content-Type": content_type,
+    }
+    path = f"/apis/apps/v1/namespaces/{namespace}/deployments/api?fieldManager=bailiff-effector"
+    status, _ = cluster["transport"].request("PATCH", path, headers, json.dumps(body).encode())
+    return status
+
+
+def test_a_restart_sets_only_the_annotation_and_a_retry_changes_nothing(cluster):
+    staging = cluster["names"]["stg"]
+    before = deployment(staging)
+    issued_at = int(time.time())
+    assert restart(cluster, staging, issued_at) == 200
+    after = deployment(staging)
+    stamp = after["spec"]["template"]["metadata"]["annotations"][RESTARTED_AT]
+    assert stamp == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(issued_at))
+    assert after["spec"]["template"]["spec"] == before["spec"]["template"]["spec"]
+    assert after["spec"]["replicas"] == before["spec"]["replicas"]
+    assert restart(cluster, staging, issued_at) == 200
+    assert deployment(staging)["metadata"]["generation"] == after["metadata"]["generation"]
+
+
+def test_a_restart_after_a_manual_rollout_restart_is_allowed(cluster):
+    staging = cluster["names"]["stg"]
+    kubectl("-n", staging, "rollout", "restart", "deployment", "api")
+    assert restart(cluster, staging, int(time.time()) + 1) == 200
+    assert restart(cluster, cluster["names"]["other"], int(time.time())) == 403
+
+
+RESTART_ONLY_ENTRY = {
+    "manager": "kubectl-rollout",
+    "operation": "Update",
+    "apiVersion": "apps/v1",
+    "fieldsType": "FieldsV1",
+    "fieldsV1": {
+        "f:spec": {"f:template": {"f:metadata": {"f:annotations": {"f:kubectl.kubernetes.io/restartedAt": {}}}}}
+    },
+}
+STAMP = {"spec": {"template": {"metadata": {"annotations": {RESTARTED_AT: "2026-01-01T00:00:00Z"}}}}}
+
+
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (
+            [{"op": "replace", "path": "/spec/template/spec/containers/0/image", "value": "busybox:1.36"}],
+            "application/json-patch+json",
+        ),
+        ({"spec": {"replicas": 4}}, None),
+        ({"spec": {"paused": True}}, None),
+        ({"spec": {"template": {"metadata": {"labels": {"evil": "1"}}}}}, None),
+        (
+            {"spec": {"template": {"metadata": {"annotations": {"evil": "1", RESTARTED_AT: "2026-01-01T00:00:00Z"}}}}},
+            None,
+        ),
+        ({"spec": {"template": {"spec": {"hostNetwork": True}}}, **{}}, None),
+        ({"metadata": {"labels": {"evil": "1"}}, **STAMP}, None),
+        ({"metadata": {"generateName": "evil-"}, **STAMP}, None),
+        ({"metadata": {"managedFields": [{}]}, **STAMP}, None),
+        (
+            [
+                {
+                    "op": "replace",
+                    "path": "/metadata/managedFields",
+                    "value": [
+                        {
+                            "manager": "gitops",
+                            "operation": "Apply",
+                            "apiVersion": "apps/v1",
+                            "fieldsType": "FieldsV1",
+                            "fieldsV1": {"f:spec": {}},
+                        }
+                    ],
+                }
+            ],
+            "application/json-patch+json",
+        ),
+        (
+            [
+                {"op": "copy", "from": "/metadata/managedFields/0", "path": "/metadata/managedFields/-"},
+                {"op": "remove", "path": "/metadata/managedFields/1"},
+            ],
+            "application/json-patch+json",
+        ),
+        (
+            [
+                {"op": "add", "path": "/metadata/managedFields/-", "value": RESTART_ONLY_ENTRY},
+                {"op": "remove", "path": "/metadata/managedFields/0"},
+            ],
+            "application/json-patch+json",
+        ),
+    ],
+)
+def test_the_restart_identity_cannot_change_anything_but_the_annotation(cluster, body, content_type):
+    staging = cluster["names"]["stg"]
+    before = snapshot(deployment(staging))
+    status = patch_as_restart_user(cluster, staging, body, content_type or "application/merge-patch+json")
+    assert status == 422
+    assert snapshot(deployment(staging)) == before

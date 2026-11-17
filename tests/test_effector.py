@@ -311,7 +311,7 @@ def test_the_mcp_server_serves_session_methods_and_calls_on_localhost(token_file
         assert status == 200 and body["result"]["serverInfo"]["name"] == "agent-bailiff-effector"
         assert post(port, {"jsonrpc": "2.0", "method": "notifications/initialized"})[0] == 202
         status, body = post(port, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        assert len(body["result"]["tools"]) == 4
+        assert len(body["result"]["tools"]) == 5
         status, body = post(
             port,
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": scale_params()},
