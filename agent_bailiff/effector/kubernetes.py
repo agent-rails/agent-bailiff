@@ -46,6 +46,8 @@ class HttpsTransport:
         try:
             connection.request(method, path, body=body, headers=dict(headers))
             response = connection.getresponse()
+            if not 200 <= response.status < 300:
+                return response.status, b""
             data = response.read(self._max + 1)
             if len(data) > self._max:
                 raise KubernetesUnavailable("response larger than the limit")

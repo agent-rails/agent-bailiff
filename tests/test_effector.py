@@ -397,3 +397,48 @@ def test_a_redirect_is_never_reported_as_success(token_file, status):
     instance, _, docket = effector(token_file, FakeTransport(status=status, body=b'{"spec": {"replicas": 3}}'))
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
     assert (docket.entries[-1].outcome, docket.entries[-1].performed) == ("outcome_unknown", False)
+
+
+class FakeResponse:
+    def __init__(self, status, size):
+        self.status, self.size = status, size
+
+    def read(self, limit):
+        return b"x" * min(self.size, limit)
+
+
+class FakeConnection:
+    response = None
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def request(self, *args, **kwargs):
+        pass
+
+    def getresponse(self):
+        return FakeConnection.response
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(("status", "expected"), [(403, (403, b"")), (500, (500, b""))])
+def test_the_transport_returns_a_non_2xx_status_without_reading_its_body(monkeypatch, tmp_path, status, expected):
+    from agent_bailiff.effector import kubernetes
+
+    monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda cafile: None)
+    monkeypatch.setattr(kubernetes.http.client, "HTTPSConnection", FakeConnection)
+    FakeConnection.response = FakeResponse(status, 4 << 20)
+    transport = kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt")
+    assert transport.request("GET", "/api", {}, None) == expected
+
+
+def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
+    from agent_bailiff.effector import kubernetes
+
+    monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda cafile: None)
+    monkeypatch.setattr(kubernetes.http.client, "HTTPSConnection", FakeConnection)
+    FakeConnection.response = FakeResponse(200, 4 << 20)
+    with pytest.raises(KubernetesUnavailable, match="larger than the limit"):
+        kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt").request("GET", "/api", {}, None)
