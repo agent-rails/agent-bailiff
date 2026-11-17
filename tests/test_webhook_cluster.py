@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import secrets
 import subprocess
 import time
 from dataclasses import replace
@@ -222,6 +223,53 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
         apply(json.dumps(enforce_registration))
         time.sleep(3)
         assert _patch(cluster)[0] == 403
+        probe_name = NAME + "-extra-probe-" + secrets.token_hex(3)
+        size_policy = {
+            "apiVersion": "admissionregistration.k8s.io/v1",
+            "kind": "ValidatingAdmissionPolicy",
+            "metadata": {"name": probe_name},
+            "spec": {
+                "failurePolicy": "Fail",
+                "matchConstraints": {
+                    "resourceRules": [
+                        {
+                            "apiGroups": ["apps"],
+                            "apiVersions": ["v1"],
+                            "operations": ["UPDATE"],
+                            "resources": ["deployments/scale"],
+                            "scope": "Namespaced",
+                        }
+                    ]
+                },
+                "validations": [
+                    {
+                        "expression": (
+                            "size(request.userInfo.extra['bailiff.dev/release']) == 1 && "
+                            "size(request.userInfo.extra['bailiff.dev/release'][0]) == 16384"
+                        ),
+                        "message": "release extra was not exactly 16 KiB",
+                    }
+                ],
+            },
+        }
+        size_binding_name = probe_name + "-binding"
+        size_binding = {
+            "apiVersion": "admissionregistration.k8s.io/v1",
+            "kind": "ValidatingAdmissionPolicyBinding",
+            "metadata": {"name": size_binding_name},
+            "spec": {"policyName": probe_name, "validationActions": ["Deny"]},
+        }
+        try:
+            apply(size_policy)
+            apply(size_binding)
+            max_extra = _patch(cluster, "x" * (16 << 10))
+            assert max_extra[0] == 403 and "released operation required" in max_extra[1], (
+                "16 KiB release extra did not reach the webhook unchanged",
+                max_extra,
+            )
+        finally:
+            kubectl("delete", "validatingadmissionpolicybinding", size_binding_name, "--ignore-not-found", check=False)
+            kubectl("delete", "validatingadmissionpolicy", probe_name, "--ignore-not-found", check=False)
         namespace = cluster["names"]["stg"]
         scale_args = {"namespace": namespace, "name": "api", "replicas": 3}
         allowed = _patch(cluster, _release("scale_deployment", scale_args, "A" * 43))
