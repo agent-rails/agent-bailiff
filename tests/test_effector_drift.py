@@ -360,7 +360,7 @@ def schemas(api):
 
 def test_the_restart_schema_is_read_with_the_audit_token(api, audit):
     assert audit.check_restart_schema() == []
-    assert ("GET", APPS_SCHEMA_PATH, "Bearer audit-token") in api.requests
+    assert ("GET", APPS_SCHEMA_PATH, f"Bearer {AUDIT_TOKEN}") in api.requests
 
 
 @pytest.mark.parametrize(

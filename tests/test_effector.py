@@ -526,6 +526,11 @@ def test_a_token_that_is_not_short_lived_is_refused_before_any_request(tmp_path,
     transport = FakeTransport()
     with pytest.raises(KubernetesUnavailable, match="at most 600 seconds"):
         KubernetesClient(transport, path).call(
-            CATALOG.operation("list_pods"), {"namespace": "staging", "limit": 5}, "tenant-a", "op-1", "t" * 32
+            CATALOG.operation("list_pods"),
+            {"namespace": "staging", "limit": 5},
+            "tenant-a",
+            "op-1",
+            "t" * 32,
+            NOW,
         )
     assert transport.requests == []
