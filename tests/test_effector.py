@@ -390,3 +390,10 @@ def test_a_release_issued_before_or_in_the_second_the_effector_started_is_refuse
         == "release_predates_start"
     )
     assert transport.requests == []
+
+
+@pytest.mark.parametrize("status", [302, 304])
+def test_a_redirect_is_never_reported_as_success(token_file, status):
+    instance, _, docket = effector(token_file, FakeTransport(status=status, body=b'{"spec": {"replicas": 3}}'))
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert (docket.entries[-1].outcome, docket.entries[-1].performed) == ("outcome_unknown", False)

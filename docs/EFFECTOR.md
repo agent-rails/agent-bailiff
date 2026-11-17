@@ -46,7 +46,7 @@ Each synthetic user is bound, in its tenant's namespaces only, to a Role with on
 Admission is load-bearing. Every policy fails closed and is bound cluster-wide in Deny mode:
 - **the guard** denies a synthetic user any write except the catalog's write calls, any write outside its tenant's namespaces, and any request without exactly one well-formed op-id;
 - **the range policy** limits `replicas` on `deployments/scale` to the catalog's range;
-- **the binding policy** refuses any RoleBinding or ClusterRoleBinding that names the effector, its audit account or a synthetic user, and any change to generated RBAC, unless the applier makes it.
+- **the binding policy** refuses creating or updating any RoleBinding or ClusterRoleBinding that names the effector, its audit account or a synthetic user, and creating or updating generated RBAC, unless the applier makes the change. Deleting generated RBAC is allowed, because it only removes access: deleting the effector's RoleBinding stops its next call.
 
 ## Generated objects
 

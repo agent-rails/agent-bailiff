@@ -97,8 +97,8 @@ class Effector:
                 replace(self._entry(checked, "outcome", now), parent_entry=attempt.entry_id, outcome="outcome_unknown")
             )
             return _error("outcome_unknown")
-        performed = result.status < 400
-        outcome = "done" if performed else ("outcome_unknown" if result.status >= 500 else "refused")
+        performed = 200 <= result.status < 300
+        outcome = "done" if performed else ("refused" if 400 <= result.status < 500 else "outcome_unknown")
         recorded = self._record(
             replace(
                 self._entry(checked, "outcome", now),

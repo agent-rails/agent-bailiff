@@ -80,7 +80,7 @@ class KubernetesClient:
             headers["Content-Type"] = "application/merge-patch+json"
         method = {"list": "GET", "get": "GET", "patch": "PATCH"}[call.verb]
         status, data = self._transport.request(method, request_path(operation, arguments), headers, payload)
-        if status >= 400:
+        if not 200 <= status < 300:
             return KubernetesResult(status, None)
         if call.subresource == "log":
             return KubernetesResult(status, data[: operation.max_response_bytes].decode("utf-8", "replace"))
