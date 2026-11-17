@@ -1,6 +1,7 @@
 import http.client
 import json
 import os
+import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from agent_bailiff.webhook.certs import issue_serving_certificate
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
 IMAGE = os.environ.get("AGENT_BAILIFF_TEST_WEBHOOK_IMAGE")
+LOCAL_IMAGE = os.environ.get("AGENT_BAILIFF_TEST_WEBHOOK_LOCAL_TAG")
 pytest_plugins = ["test_effector_cluster"]
 pytestmark = pytest.mark.skipif(
     not os.environ.get("AGENT_BAILIFF_TEST_KUBE_CONTEXT") or not IMAGE,
@@ -139,6 +141,19 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
         catalog=CATALOG,
         enforce=False,
     )
+    if LOCAL_IMAGE:
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", LOCAL_IMAGE, "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if inspected != IMAGE.rsplit("@", 1)[-1]:
+            pytest.fail("the local webhook tag does not identify the requested pinned image digest")
+        # OrbStack Kubernetes resolves local images by tag with IfNotPresent;
+        # the digest is checked above and remains required by the generator.
+        deployment = next(item for item in manifests["items"] if item["kind"] == "Deployment")
+        deployment["spec"]["template"]["spec"]["containers"][0]["image"] = LOCAL_IMAGE
     path = Path(cluster["directory"]) / "webhook.json"
     path.write_text(json.dumps(manifests))
     try:
