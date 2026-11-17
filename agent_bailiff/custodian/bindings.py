@@ -90,6 +90,9 @@ class BindingTable:
         self._bindings = tuple(bindings)
         if not all(isinstance(item, (CredentialBinding, EffectorBinding)) for item in self._bindings):
             raise TypeError("bindings must be CredentialBinding or EffectorBinding records")
+        self._by_tool: dict[tuple[str, str], list[Binding]] = {}
+        for item in self._bindings:
+            self._by_tool.setdefault((item.tenant, item.tool), []).append(item)
 
     @classmethod
     def load(cls, path: Path) -> BindingTable:
@@ -115,7 +118,10 @@ class BindingTable:
         return tuple(item for item in self._bindings if isinstance(item, CredentialBinding))
 
     def resolve(self, tenant: str, tool: str, resource: str) -> Binding | None:
-        matches = [item for item in self._bindings if item.matches(tenant, tool, resource)]
+        if not isinstance(tenant, str) or not isinstance(tool, str):
+            return None
+        candidates = self._by_tool.get((tenant, tool), ())
+        matches = [item for item in candidates if item.matches(tenant, tool, resource)]
         return matches[0] if len(matches) == 1 else None
 
 

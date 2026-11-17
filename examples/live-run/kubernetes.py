@@ -106,7 +106,7 @@ class Cluster:
             )  # fmt: skip
         kubectl(self.context, "apply", "-f", str(self.manifests))
         for account, name in (("effector", "effector.token"), ("effector-audit", "audit.token")):
-            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=1h")
+            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=10m")
             (self.directory / name).write_text(token.strip())
             os.chmod(self.directory / name, 0o600)
         view = json.loads(kubectl(self.context, "config", "view", "--minify", "--raw", "-o", "json"))

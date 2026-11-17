@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import http.client
 import json
 import ssl
@@ -15,6 +17,7 @@ from agent_bailiff.effector.catalog import CatalogOperation
 TIMEOUT_SECONDS = 10
 MAX_TOKEN_BYTES = 16384
 TOKEN_LABEL = "effector token file"
+MAX_TOKEN_LIFETIME_SECONDS = 600
 USER_PREFIX = "bailiff"
 OP_ID_EXTRA = "bailiff.dev/op-id"
 TRACE_EXTRA = "bailiff.dev/trace-id"
@@ -104,9 +107,37 @@ class KubernetesClient:
 
 def read_token(path: Path) -> str:
     try:
-        return read_owned(path, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
+        token = read_owned(path, TOKEN_LABEL, MAX_TOKEN_BYTES).decode("ascii").strip()
     except (OSError, ValueError) as exc:
         raise KubernetesUnavailable(f"cannot read the token file {path}: {exc}") from None
+    lifetime = token_lifetime(token)
+    if lifetime is None or not 0 < lifetime <= MAX_TOKEN_LIFETIME_SECONDS:
+        raise KubernetesUnavailable(
+            f"the token in {path} must be a service account token with a lifetime of at most"
+            f" {MAX_TOKEN_LIFETIME_SECONDS} seconds"
+        )
+    return token
+
+
+def token_lifetime(token: str) -> int | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    issued, expires = claims.get("iat"), claims.get("exp")
+    if (
+        not isinstance(issued, int)
+        or not isinstance(expires, int)
+        or isinstance(issued, bool)
+        or isinstance(expires, bool)
+    ):
+        return None
+    return expires - issued
 
 
 def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> str:
