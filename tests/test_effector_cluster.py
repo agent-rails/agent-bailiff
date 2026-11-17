@@ -114,7 +114,8 @@ def restore(cluster):
 
 
 def call(cluster, name, arguments, tenant="ta", op_id=OP_ID):
-    return cluster["client"].call(CATALOG.operation(name), arguments, tenant, op_id, "t" * 32).status
+    release = "cluster-test-release" if name == "scale_deployment" else None
+    return cluster["client"].call(CATALOG.operation(name), arguments, tenant, op_id, "t" * 32, release).status
 
 
 def scale(cluster, namespace, replicas=2, **options):

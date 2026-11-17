@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_bailiff.effector.catalog import LABEL, CatalogError, CatalogOperation, OperationCatalog
-from agent_bailiff.effector.kubernetes import OP_ID_EXTRA, TRACE_EXTRA, USER_PREFIX
+from agent_bailiff.effector.kubernetes import OP_ID_EXTRA, RELEASE_EXTRA, TRACE_EXTRA, USER_PREFIX
 
 GENERATED_LABEL = "bailiff.dev/generated"
 LABELS = {"app.kubernetes.io/managed-by": "agent-bailiff", GENERATED_LABEL: "true"}
@@ -25,6 +25,24 @@ AUDIT_RULES = [
         "verbs": ["list"],
     },
     {"apiGroups": ["authorization.k8s.io"], "resources": ["subjectaccessreviews"], "verbs": ["create"]},
+    {
+        "apiGroups": ["admissionregistration.k8s.io"],
+        "resources": ["validatingwebhookconfigurations"],
+        "resourceNames": ["bailiff-release-webhook"],
+        "verbs": ["get"],
+    },
+    {
+        "apiGroups": ["apps"], "resources": ["deployments"],
+        "resourceNames": ["bailiff-release-webhook"], "verbs": ["get"],
+    },
+    {
+        "apiGroups": ["policy"], "resources": ["poddisruptionbudgets"],
+        "resourceNames": ["bailiff-release-webhook"], "verbs": ["get"],
+    },
+    {
+        "apiGroups": [""], "resources": ["services", "configmaps"],
+        "resourceNames": ["bailiff-release-webhook", "bailiff-release-webhook-pins"], "verbs": ["get"],
+    },
 ]
 
 
@@ -70,7 +88,11 @@ def generate_manifests(
                 },
                 {
                     "apiGroups": ["authentication.k8s.io"],
-                    "resources": [f"userextras/{OP_ID_EXTRA}", f"userextras/{TRACE_EXTRA}"],
+                    "resources": [
+                        f"userextras/{OP_ID_EXTRA}",
+                        f"userextras/{TRACE_EXTRA}",
+                        f"userextras/{RELEASE_EXTRA}",
+                    ],
                     "verbs": [IMPERSONATE],
                 },
             ],

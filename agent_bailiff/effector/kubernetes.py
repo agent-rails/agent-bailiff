@@ -18,6 +18,7 @@ TOKEN_LABEL = "effector token file"
 USER_PREFIX = "bailiff"
 OP_ID_EXTRA = "bailiff.dev/op-id"
 TRACE_EXTRA = "bailiff.dev/trace-id"
+RELEASE_EXTRA = "bailiff.dev/release"
 
 
 class KubernetesUnavailable(Exception):
@@ -64,7 +65,8 @@ class KubernetesClient:
         self._token_file = token_file
 
     def call(
-        self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str
+        self, operation: CatalogOperation, arguments: Mapping[str, Any], tenant: str, op_id: str, trace_id: str,
+        release_token: str | None = None,
     ) -> KubernetesResult:
         token = read_token(self._token_file)
         call = operation.call
@@ -75,6 +77,10 @@ class KubernetesClient:
             f"Impersonate-Extra-{urllib.parse.quote(OP_ID_EXTRA, safe='')}": op_id,
             f"Impersonate-Extra-{urllib.parse.quote(TRACE_EXTRA, safe='')}": trace_id or "none",
         }
+        if call.verb == "patch":
+            if not isinstance(release_token, str) or not release_token:
+                raise KubernetesUnavailable("a write requires a release")
+            headers[f"Impersonate-Extra-{urllib.parse.quote(RELEASE_EXTRA, safe='')}"] = release_token
         body = call.body(arguments)
         payload = None
         if body is not None:

@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 agent-bailiff = "agent_bailiff.cli:main"
+agent-bailiff-webhook = "agent_bailiff.webhook.cli:main"
 
 [project.urls]
 Repository = "https://github.com/agent-rails/agent-bailiff"

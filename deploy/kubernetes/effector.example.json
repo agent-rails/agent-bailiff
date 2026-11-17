@@ -56,7 +56,8 @@
           ],
           "resources": [
             "userextras/bailiff.dev/op-id",
-            "userextras/bailiff.dev/trace-id"
+            "userextras/bailiff.dev/trace-id",
+            "userextras/bailiff.dev/release"
           ],
           "verbs": [
             "impersonate:user-info"
@@ -156,6 +157,64 @@
           ],
           "verbs": [
             "create"
+          ]
+        },
+        {
+          "apiGroups": [
+            "admissionregistration.k8s.io"
+          ],
+          "resourceNames": [
+            "bailiff-release-webhook"
+          ],
+          "resources": [
+            "validatingwebhookconfigurations"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resourceNames": [
+            "bailiff-release-webhook"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "apiGroups": [
+            "policy"
+          ],
+          "resourceNames": [
+            "bailiff-release-webhook"
+          ],
+          "resources": [
+            "poddisruptionbudgets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resourceNames": [
+            "bailiff-release-webhook",
+            "bailiff-release-webhook-pins"
+          ],
+          "resources": [
+            "services",
+            "configmaps"
+          ],
+          "verbs": [
+            "get"
           ]
         }
       ]

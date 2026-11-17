@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import json
+import logging
+import socket
+import ssl
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from socketserver import ThreadingMixIn
+from typing import Any, cast
+from urllib.parse import urlsplit
+
+from agent_bailiff.webhook.admission import MAX_BODY_BYTES, Admission, MalformedReview
+
+logger = logging.getLogger(__name__)
+
+
+class WebhookServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+    def __init__(
+        self, admission: Admission, host: str, port: int, cert: Path, key: Path, *, max_concurrency: int = 32
+    ) -> None:
+        if max_concurrency < 1 or max_concurrency > 256:
+            raise ValueError("max_concurrency must be 1..256")
+        self.admission = admission
+        self._slots = threading.BoundedSemaphore(max_concurrency)
+        # TLS handshakes are network-facing work, separate from AdmissionReview
+        # evaluation. A stalled handshake must not consume every review slot.
+        self._handshakes = threading.BoundedSemaphore(max(2, max_concurrency // 4))
+        self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self._context.load_cert_chain(str(cert), str(key))
+        super().__init__((host, port), _Handler)
+
+    def process_request(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if not self._handshakes.acquire(blocking=False):
+            cast(socket.socket, request).close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._handshakes.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        handshake_acquired = True
+        slot_acquired = False
+        try:
+            raw = cast(socket.socket, request)
+            raw.settimeout(3)
+            secure = self._context.wrap_socket(raw, server_side=True)
+            self._handshakes.release()
+            handshake_acquired = False
+            if not self._slots.acquire(blocking=False):
+                secure.close()
+                return
+            slot_acquired = True
+            with secure:
+                super().process_request_thread(secure, client_address)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            if slot_acquired:
+                self._slots.release()
+            if handshake_acquired:
+                self._handshakes.release()
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server: WebhookServer
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(3)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        logger.info("webhook HTTP GET %s", self.path)
+        if self.path == "/readyz":
+            self._reply(200, {"ready": True})
+        else:
+            self._reply(404, {})
+
+    def do_POST(self) -> None:
+        logger.info("webhook HTTP POST %s", self.path)
+        if urlsplit(self.path).path != "/validate":
+            self._reply(404, {})
+            return
+        lengths = self.headers.get_all("Content-Length") or []
+        if len(lengths) != 1 or not lengths[0].isdigit() or self.headers.get("Transfer-Encoding") is not None:
+            self._reply(400, {})
+            return
+        length = int(lengths[0])
+        if length > MAX_BODY_BYTES:
+            self._reply(413, {})
+            return
+        try:
+            result = self.server.admission.review(self.rfile.read(length), int(time.time()))
+        except (MalformedReview, TimeoutError):
+            self._reply(400, {})
+            return
+        except Exception:
+            logger.exception("admission evaluation failed")
+            self._reply(500, {})
+            return
+        self._reply(200, result)
+
+    def _reply(self, status: int, document: dict[str, Any]) -> None:
+        data = json.dumps(document, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.close_connection = True

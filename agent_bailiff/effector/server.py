@@ -90,6 +90,7 @@ class Effector:
                 checked.release.tenant,
                 checked.release.op_id,
                 checked.clearance.trace_id,
+                release_token if isinstance(release_token, str) else None,
             )
         except Exception:
             logger.exception("kubernetes call failed; the outcome is unknown")
