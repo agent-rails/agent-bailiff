@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
 OP_ID = "A" * 43
+RELEASE = "cluster-test-release"
 SETTLE_SECONDS = 3
 REVOCATION_SECONDS = 30
 
@@ -115,7 +116,7 @@ def restore(cluster):
 
 
 def call(cluster, name, arguments, tenant="ta", op_id=OP_ID):
-    release = "cluster-test-release" if CATALOG.operation(name).call.verb == "patch" else None
+    release = RELEASE if CATALOG.operation(name).call.verb == "patch" else None
     return (
         cluster["client"]
         .call(CATALOG.operation(name), arguments, tenant, op_id, "t" * 32, int(time.time()), release)
@@ -277,7 +278,7 @@ def snapshot(item):
 def restart(cluster, namespace, issued_at, op_id=OP_ID):
     operation = CATALOG.operation("restart_deployment")
     arguments = {"namespace": namespace, "name": "api"}
-    return cluster["client"].call(operation, arguments, "ta", op_id, "t" * 32, issued_at).status
+    return cluster["client"].call(operation, arguments, "ta", op_id, "t" * 32, issued_at, RELEASE).status
 
 
 def patch_as_restart_user(cluster, namespace, body, content_type="application/merge-patch+json"):
@@ -330,14 +331,14 @@ def test_a_restart_of_a_deployment_with_many_field_managers_leaves_their_entries
         kubectl("-n", staging, "label", "deployment", "busy", f"team{index}=x", f"--field-manager=tool-{index}")
     operation = CATALOG.operation("restart_deployment")
     arguments = {"namespace": staging, "name": "busy"}
-    assert cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time())).status == 200
+    assert cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time()), RELEASE).status == 200
 
 
 def test_a_restart_of_a_missing_deployment_creates_nothing(cluster):
     staging = cluster["names"]["stg"]
     operation = CATALOG.operation("restart_deployment")
     arguments = {"namespace": staging, "name": "ghost"}
-    status = cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time())).status
+    status = cluster["client"].call(operation, arguments, "ta", OP_ID, "t" * 32, int(time.time()), RELEASE).status
     assert status >= 400
     assert kubectl("-n", staging, "get", "deployment", "ghost", "--ignore-not-found", "-o", "name").stdout == ""
 
@@ -468,7 +469,12 @@ def test_a_token_minted_for_longer_than_ten_minutes_is_refused(cluster, tmp_path
     client = KubernetesClient(cluster["transport"], path)
     with pytest.raises(KubernetesUnavailable, match="at most 600 seconds"):
         client.call(
-            CATALOG.operation("list_pods"), {"namespace": cluster["names"]["stg"], "limit": 5}, "ta", OP_ID, "t"
+            CATALOG.operation("list_pods"),
+            {"namespace": cluster["names"]["stg"], "limit": 5},
+            "ta",
+            OP_ID,
+            "t",
+            int(time.time()),
         )
 
 
