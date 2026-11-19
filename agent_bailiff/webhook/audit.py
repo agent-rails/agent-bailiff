@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import math
+import random
+import threading
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -55,6 +58,9 @@ NODE_VERBS = ("impersonate:arbitrary-node", "impersonate:associated-node")
 SERVICE_ACCOUNT = "system:serviceaccount:"
 REVIEW_WORKERS = 8
 REVIEW_DEADLINE_SECONDS = 300.0
+THROTTLE_RETRIES = 5
+RETRY_BASE_SECONDS = 0.5
+RETRY_MAX_SECONDS = 8.0
 Review = tuple[str, str, str | None, str | None, str | None, tuple[str, ...]]
 
 
@@ -403,12 +409,27 @@ class WebhookAudit:
             [port for container in containers for port in container.get("ports", [])], "containerPort"
         )
 
-    def _request(self, method: str, path: str, body: object | None = None) -> dict[str, Any]:
+    def _request(
+        self, method: str, path: str, body: object | None = None, stop: threading.Event | None = None
+    ) -> dict[str, Any]:
+        stop = stop or threading.Event()
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         data = None if body is None else json.dumps(body).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"
-        status, response = self._transport.request(method, path, headers, data)
+        for attempt in range(THROTTLE_RETRIES + 1):
+            if stop.is_set():
+                raise RuntimeError(f"webhook audit stopped before {path}; the audit has already failed")
+            status, response = self._transport.request(method, path, headers, data)
+            if status != 429:
+                break
+            if attempt == THROTTLE_RETRIES:
+                raise RuntimeError(
+                    f"webhook audit API returned 429 for {path} after {THROTTLE_RETRIES} retries; "
+                    "lower --review-workers, then rerun audit"
+                )
+            if stop.wait(random.uniform(0, min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2**attempt))):
+                raise RuntimeError(f"webhook audit stopped retrying {path}; the audit has already failed")
         if status not in (200, 201):
             raise RuntimeError(f"webhook audit API returned {status} for {path}")
         result = json.loads(response)
@@ -549,20 +570,28 @@ class WebhookAudit:
 
     def _access_reviews(self) -> list[str]:
         requests = self._access_requests()
-        executor = ThreadPoolExecutor(max_workers=self._review_workers)
+        stop = threading.Event()
+        executor = ThreadPoolExecutor(max_workers=self._review_workers, thread_name_prefix="webhook-audit-review")
         try:
-            denied = list(executor.map(self._denied, [review for _, review in requests], timeout=self._review_deadline))
+            denied = list(
+                executor.map(
+                    functools.partial(self._denied, stop=stop),
+                    [review for _, review in requests],
+                    timeout=self._review_deadline,
+                )
+            )
         except TimeoutError:
             raise RuntimeError(
                 f"access reviews did not finish within {self._review_deadline} seconds; "
                 "check API server latency, then rerun audit"
             ) from None
         finally:
+            stop.set()
             executor.shutdown(wait=False, cancel_futures=True)
         return [problem for (problem, _), refused in zip(requests, denied, strict=True) if not refused]
 
-    def _denied(self, review: Mapping[str, Any]) -> bool:
-        result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review)
+    def _denied(self, review: Mapping[str, Any], stop: threading.Event) -> bool:
+        result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review, stop)
         status = result.get("status")
         return isinstance(status, dict) and status.get("allowed") is False
 

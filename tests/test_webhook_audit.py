@@ -6,6 +6,7 @@ import time
 import pytest
 from test_effector import CATALOG
 
+from agent_bailiff.webhook import audit as audit_module
 from agent_bailiff.webhook import cli as webhook_cli
 from agent_bailiff.webhook.audit import PROTECTED_REVIEWS, WebhookAudit, _path
 from agent_bailiff.webhook.guard import REGISTRATION_GUARD
@@ -648,6 +649,77 @@ def test_an_access_review_api_error_fails_the_audit():
     audit = WebhookAudit(FailingReviews(manifests), "token", manifests, "bailiff-system", "effector", [], ["staging"])
     with pytest.raises(RuntimeError, match="webhook audit API returned 500 for /apis/authorization.k8s.io"):
         audit.check()
+
+
+class ThrottledApi(FakeApi):
+    def __init__(self, manifests, throttled, methods=("POST",)):
+        super().__init__(manifests)
+        self.throttled = throttled
+        self.methods = methods
+        self.lock = threading.Lock()
+        self.throttles = 0
+
+    def request(self, method, path, headers, body):
+        if method in self.methods:
+            with self.lock:
+                if self.throttles < self.throttled:
+                    self.throttles += 1
+                    return 429, b""
+        return super().request(method, path, headers, body)
+
+
+@pytest.fixture
+def fast_retries(monkeypatch):
+    monkeypatch.setattr(audit_module, "RETRY_BASE_SECONDS", 0.001)
+    monkeypatch.setattr(audit_module, "RETRY_MAX_SECONDS", 0.002)
+
+
+@pytest.mark.parametrize("methods", [("POST",), ("GET",)])
+def test_throttled_requests_are_retried(fast_retries, methods):
+    manifests = manifests_in("webhook-ns")
+    api = ThrottledApi(manifests, throttled=audit_module.THROTTLE_RETRIES, methods=methods)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=1)
+    assert audit.check() == []
+    assert api.throttles == audit_module.THROTTLE_RETRIES
+
+
+def test_a_review_still_throttled_after_every_retry_fails_the_audit(fast_retries):
+    manifests = manifests_in("webhook-ns")
+    api = ThrottledApi(manifests, throttled=10**6)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=1)
+    with pytest.raises(RuntimeError, match="429 for /apis/authorization.k8s.io/v1/subjectaccessreviews after 5 "):
+        audit.check()
+    assert audit_module.THROTTLE_RETRIES + 1 <= api.throttles <= audit_module.THROTTLE_RETRIES + 2
+    assert api.reviews == []
+
+
+def test_the_review_deadline_stops_retries_that_are_waiting(monkeypatch):
+    monkeypatch.setattr(audit_module, "RETRY_BASE_SECONDS", 30.0)
+    monkeypatch.setattr(audit_module, "RETRY_MAX_SECONDS", 30.0)
+    monkeypatch.setattr(audit_module.random, "uniform", lambda low, high: high)
+    manifests = manifests_in("webhook-ns")
+    api = ThrottledApi(manifests, throttled=10**6)
+    audit = WebhookAudit(
+        api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=2, review_deadline=0.1
+    )
+    with pytest.raises(RuntimeError, match="access reviews did not finish within 0.1 seconds"):
+        audit.check()
+    finish = time.monotonic() + 2
+    while time.monotonic() < finish and any(
+        thread.name.startswith("webhook-audit-review") for thread in threading.enumerate()
+    ):
+        time.sleep(0.01)
+    assert not any(thread.name.startswith("webhook-audit-review") for thread in threading.enumerate())
+    assert api.throttles == 2
+
+
+def test_backoff_grows_with_full_jitter_up_to_the_cap(monkeypatch):
+    bounds = []
+    monkeypatch.setattr(audit_module.random, "uniform", lambda low, high: bounds.append((low, high)) or 0.0)
+    manifests = manifests_in("webhook-ns")
+    api = ThrottledApi(manifests, throttled=audit_module.THROTTLE_RETRIES)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=1).check()
+    assert bounds == [(0, 0.5), (0, 1.0), (0, 2.0), (0, 4.0), (0, 8.0)]
 
 
 @pytest.mark.parametrize(

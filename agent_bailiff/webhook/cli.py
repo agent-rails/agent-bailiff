@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         "--review-workers",
         type=int,
         default=REVIEW_WORKERS,
-        help="access reviews sent at once; lower it if the API server returns 429",
+        help="access reviews sent at once; lower it if the audit fails on repeated 429",
     )
     audit.add_argument(
         "--review-deadline",
