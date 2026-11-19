@@ -7,7 +7,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import sys
+import threading
+import time
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +28,7 @@ STATE = Path("/var/lib/bailiff")
 AGENT_KEY = STATE / "agent" / "agent.key"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
 TASK_FILE = STATE / "tasks" / "task.json"
+LOAD_FILE = STATE / "tasks" / "load.json"
 GATEWAY_URL = os.environ.get("BAILIFF_GATEWAY_URL", "http://gateway:8080/mcp")
 ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text())["routes"]
 SERVICE = "gitea"
@@ -85,11 +90,14 @@ def load_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(AGENT_KEY.read_text().strip()))
 
 
+def client_for(task: dict[str, str], key: Ed25519PrivateKey) -> BailiffClient:
+    holder = Holder(task["task_root"], (), key, task["decider_id"])
+    return BailiffClient(GATEWAY_URL, holder, ToolRoutes([ToolRoute(**route) for route in ROUTES]))
+
+
 def open_client() -> tuple[BailiffClient, str]:
     task = json.loads(TASK_FILE.read_text())
-    holder = Holder(task["task_root"], (), load_key(), task["decider_id"])
-    routes = ToolRoutes([ToolRoute(**route) for route in ROUTES])
-    return BailiffClient(GATEWAY_URL, holder, routes), task["task_id"]
+    return client_for(task, load_key()), task["task_id"]
 
 
 def copy_call(call: PreparedCall) -> PreparedCall:
@@ -139,6 +147,57 @@ def run_after_revoke(client: BailiffClient) -> list[Check]:
     ]
 
 
+def percentile(latencies: list[float], fraction: float) -> float:
+    return statistics.quantiles(latencies, n=100, method="inclusive")[round(fraction * 100) - 1]
+
+
+def run_load(clients: int, calls: int) -> dict[str, Any]:
+    document = json.loads(LOAD_FILE.read_text())
+    if clients > len(document["tasks"]) or calls > document["budget"]:
+        raise ScenarioFailed(f"{clients} clients of {calls} calls exceed the {len(document['tasks'])} load tasks")
+    key = load_key()
+    start = threading.Barrier(clients + 1)
+    samples: list[list[tuple[float, str]]] = [[] for _ in range(clients)]
+    errors: list[BaseException] = []
+
+    def drive(index: int) -> None:
+        try:
+            client = client_for(document["tasks"][index], key)
+            client.list_tools()
+            start.wait()
+            for _ in range(calls):
+                began = time.perf_counter()
+                outcome = client.call(SERVICE, "list_issues", {"owner": ORG, "repo": "demo"})
+                samples[index].append((time.perf_counter() - began, describe(outcome)))
+            client.close()
+        except BaseException as error:
+            errors.append(error)
+            start.abort()
+
+    threads = [threading.Thread(target=drive, args=(index,)) for index in range(clients)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    began = time.perf_counter()
+    for thread in threads:
+        thread.join()
+    elapsed = time.perf_counter() - began
+    if errors:
+        raise ScenarioFailed(f"a load client failed: {errors[0]!r}")
+    latencies = [latency for client in samples for latency, _ in client]
+    outcomes = Counter(outcome for client in samples for _, outcome in client)
+    return {
+        "clients": clients,
+        "calls": len(latencies),
+        "seconds": round(elapsed, 3),
+        "calls_per_second": round(len(latencies) / elapsed, 1),
+        "p50_ms": round(percentile(latencies, 0.50) * 1000, 1),
+        "p99_ms": round(percentile(latencies, 0.99) * 1000, 1),
+        "outcomes": dict(sorted(outcomes.items())),
+        "docket_unavailable_rate": round(outcomes["refused: docket_unavailable"] / len(latencies), 4),
+    }
+
+
 def report(task_id: str, checks: list[Check]) -> int:
     print(json.dumps({"task_id": task_id, "checks": [check.document() for check in checks]}, indent=2))
     return 0 if all(check.passed for check in checks) else 1
@@ -154,11 +213,16 @@ def run(scenarios: Callable[[BailiffClient], list[Check]]) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=["key", "run", "after-revoke"])
+    parser.add_argument("step", choices=["key", "run", "after-revoke", "load"])
+    parser.add_argument("--clients", type=int, default=1)
+    parser.add_argument("--calls", type=int, default=20)
     args = parser.parse_args(argv)
     try:
         if args.step == "key":
             print(f"key: {generate_key()}")
+            return 0
+        if args.step == "load":
+            print(json.dumps(run_load(args.clients, args.calls)))
             return 0
         return run(run_scenarios if args.step == "run" else run_after_revoke)
     except (ScenarioFailed, OSError, ValueError) as error:
