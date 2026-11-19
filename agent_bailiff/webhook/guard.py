@@ -35,6 +35,7 @@ NAMESPACE_RULES = (
             "pods",
             "pods/binding",
             "pods/resize",
+            "pods/proxy",
             "pods/status",
             "pods/ephemeralcontainers",
             "pods/exec",
@@ -42,6 +43,7 @@ NAMESPACE_RULES = (
             "pods/portforward",
             "services",
             "services/status",
+            "services/proxy",
             "endpoints",
             "secrets",
             "configmaps",
@@ -169,7 +171,7 @@ def _namespace_variables(deployer_list: str) -> list[dict[str, str]]:
 
 def _namespace_validations() -> list[dict[str, str]]:
     checks = (
-        ("request.operation != 'CONNECT'", "exec, attach and port-forward are denied in the webhook namespace"),
+        ("request.operation != 'CONNECT'", "exec, attach, port-forward and proxy are denied in the webhook namespace"),
         ("variables.subresource != 'ephemeralcontainers'", "ephemeral containers are denied in the webhook namespace"),
         (
             "variables.subresource != 'binding' || variables.user == 'system:kube-scheduler'",

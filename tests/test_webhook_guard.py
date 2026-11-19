@@ -52,6 +52,8 @@ def test_the_namespace_guard_never_matches_delete_and_covers_streaming_and_statu
         ("", "pods/ephemeralcontainers"),
         ("", "pods/binding"),
         ("", "pods/resize"),
+        ("", "pods/proxy"),
+        ("", "services/proxy"),
         ("", "serviceaccounts"),
         ("", "resourcequotas"),
         ("", "limitranges"),

@@ -123,7 +123,9 @@ def _denied(result, user=ATTACKER):
     return (
         result.returncode != 0
         and "ValidatingAdmissionPolicy 'bailiff-release-webhook-" in result.stderr
-        and (f"denied for {user}" in result.stderr or "exec, attach and port-forward are denied" in result.stderr)
+        and (
+            f"denied for {user}" in result.stderr or "exec, attach, port-forward and proxy are denied" in result.stderr
+        )
     )
 
 
@@ -230,6 +232,8 @@ def test_a_cluster_admin_cannot_get_into_the_guarded_namespace(guarded):
             '{"automountServiceAccountToken":true}',
         ),
         "create a quota": ("-n", namespace, "create", "quota", "rogue", "--hard=pods=0"),
+        "proxy to a pod": ("get", "--raw", f"/api/v1/namespaces/{namespace}/pods/{name}:8080/proxy/"),
+        "proxy to the service": ("get", "--raw", f"/api/v1/namespaces/{namespace}/services/{APP}:80/proxy/"),
         "delete the webhook": ("delete", "validatingwebhookconfiguration", webhook),
         "change the webhook": (
             "label",
