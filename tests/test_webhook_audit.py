@@ -87,6 +87,10 @@ def test_access_reviews_target_the_webhook_namespace_and_its_attack_surface():
     assert ("pods", None, "create") in reviewed
     assert ("pods", "exec", "create") in reviewed
     assert ("endpointslices", None, "create") in reviewed
+    assert ("pods", None, "patch") in reviewed
+    for workload in ("replicasets", "statefulsets", "daemonsets", "jobs", "cronjobs", "replicationcontrollers"):
+        assert (workload, None, "create") in reviewed
+    assert ("rolebindings", None, "create") in reviewed
     namespace_reviews = [review for review in api.reviews if review["resourceAttributes"]["resource"] == "namespaces"]
     assert {
         review["resourceAttributes"]["name"] for review in namespace_reviews if "name" in review["resourceAttributes"]

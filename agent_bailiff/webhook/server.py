@@ -75,24 +75,43 @@ class WebhookServer(ThreadingMixIn, HTTPServer):
         slot_acquired = False
         raw = cast(socket.socket, request)
         current: list[socket.socket] = [raw]
-        deadline = threading.Timer(self._deadline, lambda: _cut(current[0]))
+        guard = threading.Lock()
+        done = [False]
+
+        def expire() -> None:
+            with guard:
+                if not done[0]:
+                    _cut(current[0])
+
+        def finish() -> None:
+            with guard:
+                done[0] = True
+
+        deadline = threading.Timer(self._deadline, expire)
         deadline.daemon = True
         deadline.start()
         try:
             raw.settimeout(3)
-            secure = self._context.wrap_socket(raw, server_side=True)
-            current[0] = secure
+            secure = self._context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
+            with guard:
+                current[0] = secure
+            secure.do_handshake()
             self._handshakes.release()
             handshake_acquired = False
             if not self._slots.acquire(blocking=False):
+                finish()
                 secure.close()
                 return
             slot_acquired = True
             with secure:
-                super().process_request_thread(secure, client_address)
+                try:
+                    super().process_request_thread(secure, client_address)
+                finally:
+                    finish()
         except (OSError, ssl.SSLError):
             pass
         finally:
+            finish()
             deadline.cancel()
             if slot_acquired:
                 self._slots.release()

@@ -196,3 +196,41 @@ def test_register_switches_the_service_to_enforce_pods_and_target_is_not_applyab
     assert target["kind"] != "List"
     audit_service = next(item for item in audit["items"] if item["kind"] == "Service")
     assert "bailiff.dev/webhook-mode" not in audit_service["spec"]["selector"]
+
+
+def _client_hello():
+    client = ssl.create_default_context().wrap_bio(ssl.MemoryBIO(), outgoing := ssl.MemoryBIO(), server_hostname="x")
+    try:
+        client.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    return outgoing.read()
+
+
+def test_a_client_that_drips_its_handshake_is_cut_at_the_deadline(tmp_path):
+    directory = tmp_path / "certs"
+    issue_serving_certificate(directory, NAME, "bailiff-system")
+    admission = Admission(replace(CONFIG, skew_seconds=2), CATALOG, enforce=True)
+    server = WebhookServer(
+        admission, "127.0.0.1", 0, directory / "tls.crt", directory / "tls.key", connection_deadline=1
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        raw = socket.create_connection(("127.0.0.1", server.server_port), timeout=10)
+        started = time.monotonic()
+        try:
+            for byte in _client_hello():
+                raw.sendall(bytes([byte]))
+                time.sleep(0.5)
+                if time.monotonic() - started > 6:
+                    break
+        except OSError:
+            pass
+        held = time.monotonic() - started
+        raw.close()
+        assert held < 3
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
