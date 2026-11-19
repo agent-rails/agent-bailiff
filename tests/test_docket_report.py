@@ -14,9 +14,11 @@ from test_docket import make_entry
 
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketSink, decode_record, encode_record
+from agent_bailiff.docket.entry import ENTRY_TYP, _entry_body
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.keys import PublicKeyRecord, key_id
+from agent_bailiff.signing import sign
 
 DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
@@ -217,6 +219,20 @@ def test_table_cells_escape_control_characters(docket, pin_files, capsys):
     cells = out[1].split("\t")
     assert len(cells) == 9
     assert cells[5:8] == ["evil\\x1b[2J\\ttool", "r\\u202e", "line\\nbreak"]
+
+
+def test_a_literal_backslash_is_escaped_so_it_cannot_imitate_an_escape(docket, pin_files, capsys):
+    docket.append("decide", make_entry(1, tool="evil\\x1b"))
+    _, out, _ = verify(docket, pin_files, capsys=capsys)
+    assert out[1].split("\t")[5] == "evil\\\\x1b"
+
+
+def test_a_failure_detail_escapes_control_characters(docket, pin_files, capsys):
+    body = {**_entry_body(make_entry(1)), "handles": {"\x1b[2J": "x"}, "writer": "decide", "seq": 1, "prev": None}
+    docket.path.write_text(sign(DECIDE_KEY, PINS["decide"].kid, ENTRY_TYP, body) + "\n")
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "invalid_field" in err and "\\x1b[2J" in err and "\x1b" not in err
 
 
 def test_a_time_beyond_the_calendar_is_printed_as_a_number(docket, pin_files, capsys):

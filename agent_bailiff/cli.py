@@ -20,7 +20,15 @@ from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecor
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
-from agent_bailiff.docket.report import RecordFilter, json_row, pinned_writers, table_header, table_row, verify_records
+from agent_bailiff.docket.report import (
+    RecordFilter,
+    json_row,
+    pinned_writers,
+    printable,
+    table_header,
+    table_row,
+    verify_records,
+)
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
@@ -366,7 +374,7 @@ def _verify_docket(args: argparse.Namespace) -> int:
         return _refused("docket verify", exc)
     if not report.ok:
         print(
-            f"{PROG} docket verify: line {report.line} fails verification: {report.reason} {report.detail}; "
+            f"{PROG} docket verify: line {report.line} fails verification: {report.reason} {printable(report.detail)}; "
             f"{report.entries} records before it verified, {shown} printed",
             file=sys.stderr,
         )

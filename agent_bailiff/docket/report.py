@@ -94,7 +94,7 @@ def table_row(verified: VerifiedLine) -> str:
         entry.reason,
         note(entry),
     )
-    return "\t".join(_printable(value) for value in values)
+    return "\t".join(printable(value) for value in values)
 
 
 def _utc(at: int) -> str:
@@ -104,9 +104,9 @@ def _utc(at: int) -> str:
         return str(at)
 
 
-def _printable(value: str | None) -> str:
+def printable(value: str | None) -> str:
     if value is None:
         return "-"
-    if value.isascii() and value.isprintable():
+    if value.isascii() and value.isprintable() and "\\" not in value:
         return value
     return value.encode("unicode_escape").decode("ascii")

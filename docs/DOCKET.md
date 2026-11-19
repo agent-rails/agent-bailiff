@@ -25,6 +25,7 @@ A docket config with `reader_group` set lets members of that group read the dock
 - Readers see every record: tools, resources, principals, tenants and argument digests, never the arguments themselves.
 - Readers cannot append, truncate or replace the docket. Verification detects forged, altered, reordered or deleted records within each writer's chain; it cannot detect the sink uid truncating the newest records of a writer.
 - Without `reader_group` the docket stays 0600 and only the sink uid and root can read it.
+- To add `reader_group` to an existing docket: stop the sink, give the directory the group and mode 0750 and the docket the group and mode 0640, set `reader_group` in `config.json`, then start the sink. Removing it is the reverse, back to 0700 and 0600; the sink refuses to start on any mix.
 
 ## docket verify
 
@@ -56,5 +57,5 @@ A crash during a write can leave an incomplete final line. `verify_docket` repor
 
 1. Stop the sink.
 2. Run `verify_docket(docket_path, writers)` and confirm `reason == "torn_tail"`.
-3. Run `repair(docket_path, side_path, writers)`. Under the docket lock it writes the incomplete line to `side_path` (created new, mode 0600), fsyncs it and its directory, truncates the docket to the last complete line, fsyncs the docket and its directory, and returns the verification of the result. It raises `DocketCorrupt` if any earlier line is invalid, and `DocketLocked` while a sink holds the docket.
+3. Run `repair(docket_path, side_path, writers)`, adding `reader_gid=<gid>` when the docket config sets `reader_group`. Under the docket lock it writes the incomplete line to `side_path` (created new, mode 0600), fsyncs it and its directory, truncates the docket to the last complete line, fsyncs the docket and its directory, and returns the verification of the result. It raises `DocketCorrupt` if any earlier line is invalid, and `DocketLocked` while a sink holds the docket.
 4. Keep the side file for investigation and start the sink.
