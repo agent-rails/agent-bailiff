@@ -42,7 +42,7 @@ EFFECTOR_KEYS = frozenset(
     | {"max_clearance_lifetime", "port", "kubernetes", "rbac", "ledger", "docket"}
 )
 KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file", "audit_token_file"})
-RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "tenants"})
+RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "webhook_namespace", "tenants"})
 CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers"})
 
 
@@ -267,7 +267,9 @@ def parse_effector(document: object) -> EffectorSettings:
         for namespaces in tenants.values()
     ):
         raise ConfigError("effector.rbac.tenants must map tenants to lists of namespaces")
-    identity = EffectorIdentity(rbac.text("namespace"), rbac.text("service_account"), rbac.text("applier"))
+    identity = EffectorIdentity(
+        rbac.text("namespace"), rbac.text("service_account"), rbac.text("applier"), rbac.text("webhook_namespace")
+    )
     try:
         check_inputs(identity, tenants)
     except ValueError as exc:

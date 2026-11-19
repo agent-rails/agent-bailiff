@@ -43,9 +43,9 @@ def apply(document):
 @pytest.fixture(scope="module")
 def cluster(tmp_path_factory):
     suffix = secrets.token_hex(3)
-    names = {key: f"bxt-{suffix}-{key}" for key in ("sys", "stg", "other")}
+    names = {key: f"bxt-{suffix}-{key}" for key in ("sys", "stg", "other", "hook")}
     tenants = {"ta": [names["stg"]], "tb": [names["other"]]}
-    identity = EffectorIdentity(names["sys"], "effector", whoami())
+    identity = EffectorIdentity(names["sys"], "effector", whoami(), names["hook"])
     manifests = generate_manifests(CATALOG, identity, tenants)
     directory = tmp_path_factory.mktemp("cluster")
     (directory / "manifests.json").write_text(render(manifests))
@@ -53,6 +53,7 @@ def cluster(tmp_path_factory):
     if taken:
         pytest.fail(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
     try:
+        kubectl("create", "namespace", names["hook"])
         for key in ("stg", "other"):
             kubectl("create", "namespace", names[key])
             kubectl("-n", names[key], "create", "deployment", "api", "--image=registry.k8s.io/pause:3.10")
@@ -87,7 +88,16 @@ def cluster(tmp_path_factory):
         }
     finally:
         kubectl("delete", "-f", str(directory / "manifests.json"), "--ignore-not-found", "--wait=false", check=False)
-        kubectl("delete", "namespace", names["stg"], names["other"], "--ignore-not-found", "--wait=false", check=False)
+        kubectl(
+            "delete",
+            "namespace",
+            names["stg"],
+            names["other"],
+            names["hook"],
+            "--ignore-not-found",
+            "--wait=false",
+            check=False,
+        )
 
 
 def cluster_scoped_collisions(manifests):

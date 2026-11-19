@@ -58,10 +58,10 @@ Catalog writes also pass through the release-verifying webhook. See [RELEASE_WEB
 agent-bailiff effector manifests \
   --namespace bailiff-system --service-account effector \
   --applier system:serviceaccount:argocd:argocd-application-controller \
-  --tenant tenant-a=staging
+  --webhook-namespace bailiff-webhook --tenant tenant-a=staging
 ```
 
-This prints one kubectl `List`: the effector namespace, the effector and audit service accounts, the RBAC above, the four admission policies and their bindings. [deploy/kubernetes/effector.example.json](../deploy/kubernetes/effector.example.json) is this output. The effector's namespace must hold nothing but the effector. The applier is the user that applies the generated set, normally a GitOps controller. Tenant namespaces must already exist.
+This prints one kubectl `List`: the effector namespace, the effector and audit service accounts, the RBAC above, the release webhook audit grant, the four admission policies and their bindings. [deploy/kubernetes/effector.example.json](../deploy/kubernetes/effector.example.json) is this output. The effector's namespace must hold nothing but the effector. The generator refuses `default` and `kube-*` as the effector, webhook or a tenant namespace. The webhook namespace must differ from the effector's and from every tenant namespace, and must exist before the set is applied. The applier is the user that applies the generated set, normally a GitOps controller. Tenant namespaces must already exist.
 
 ## Drift check
 
@@ -71,7 +71,7 @@ At startup, and 60 s after each check ends, the effector checks the cluster's gr
 - Every generated binding, role, policy and policy binding must be present and unchanged. No other binding may name the effector, the audit account or a synthetic user.
 - When the catalog offers restart, the audit account reads `/openapi/v3/apis/apps/v1`. `Deployment`, `DeploymentSpec`, `PodTemplateSpec` and `ObjectMeta` must have exactly the fields the restart policy accounts for, and `Deployment.metadata`, `Deployment.spec`, `DeploymentSpec.template` and `PodTemplateSpec.metadata` must reference them. If the schema differs, or the document cannot be read within the 1 MiB response limit (711 KB on v1.36.5), the effector refuses restarts with `restart_unverified` and keeps serving the other operations. The restart policy stays in place either way.
 
-The audit account may only list namespaces, RBAC objects and admission policies, and create SubjectAccessReviews.
+The audit account may only list namespaces, RBAC objects and admission policies, create SubjectAccessReviews, get the generated release webhook objects by name, and, in the webhook namespace only, get Pods and list EndpointSlices for the webhook audit's serving-endpoint check. Pod and EndpointSlice names are generated, so this grant cannot be limited by name; it is a namespaced Role, never cluster-wide, and the drift check compares it like every other generated grant.
 
 ## Running it
 
@@ -82,7 +82,7 @@ agent-bailiff init effector --dir /var/lib/bailiff-effector --name effector.home
   --port 18080 --kube-host <api server host> --kube-port 6443 --kube-ca ca.crt \
   --kube-token-file effector.token --kube-audit-token-file audit.token \
   --effector-namespace bailiff-system --service-account effector \
-  --applier <applier user> --tenant tenant-a=staging \
+  --applier <applier user> --webhook-namespace bailiff-webhook --tenant tenant-a=staging \
   --docket-socket /run/bailiff-docket/docket.sock --docket-uid <docket uid>
 agent-bailiff effector run --config /var/lib/bailiff-effector/config.json
 ```

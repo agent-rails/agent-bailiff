@@ -11,7 +11,9 @@ from agent_bailiff.service.init import DEFAULT_CATALOG
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE = ROOT / "deploy" / "kubernetes" / "effector.example.json"
 CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
-IDENTITY = EffectorIdentity("bailiff-system", "effector", "system:serviceaccount:argocd:argocd-application-controller")
+IDENTITY = EffectorIdentity(
+    "bailiff-system", "effector", "system:serviceaccount:argocd:argocd-application-controller", "bailiff-webhook"
+)
 
 
 def manifests(tenants=None, catalog=CATALOG, identity=IDENTITY):
@@ -42,6 +44,8 @@ def test_the_cli_prints_the_same_manifests(capsys):
             "effector",
             "--applier",
             IDENTITY.applier,
+            "--webhook-namespace",
+            "bailiff-webhook",
             "--tenant",
             "tenant-a=staging",
         ]
@@ -149,9 +153,23 @@ def test_every_object_is_labelled_generated():
         ({"tenant-a": []}, IDENTITY),
         ({"tenant-a": ["Staging"]}, IDENTITY),
         ({"tenant-a": ["bailiff-system"]}, IDENTITY),
+        ({"tenant-a": ["default"]}, IDENTITY),
+        ({"tenant-a": ["kube-system"]}, IDENTITY),
+        ({"tenant-a": ["staging", "kube-public"]}, IDENTITY),
+        ({"tenant-a": ["kube-node-lease"]}, IDENTITY),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("kube-system", "effector", "gitops", "bailiff-webhook")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("default", "effector", "gitops", "bailiff-webhook")),
         ({"t" * 60: ["staging"]}, IDENTITY),
-        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "x' || true || '")),
-        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff_system", "effector", "gitops")),
+        (
+            {"tenant-a": ["staging"]},
+            EffectorIdentity("bailiff-system", "effector", "x' || true || '", "bailiff-webhook"),
+        ),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff_system", "effector", "gitops", "bailiff-webhook")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "gitops", "kube-system")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "gitops", "default")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "gitops", "bailiff-system")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "gitops", "staging")),
+        ({"tenant-a": ["staging"]}, EffectorIdentity("bailiff-system", "effector", "gitops", "Webhook")),
     ],
 )
 def test_unsafe_inputs_are_refused(tenants, identity):
@@ -161,13 +179,25 @@ def test_unsafe_inputs_are_refused(tenants, identity):
 
 def test_the_cli_refuses_a_malformed_tenant(capsys):
     args = ["effector", "manifests", "--namespace", "bailiff-system", "--service-account", "effector"]
-    assert main([*args, "--applier", "gitops", "--tenant", "tenant-a"]) != 0
+    assert main([*args, "--applier", "gitops", "--webhook-namespace", "bailiff-webhook", "--tenant", "tenant-a"]) != 0
     assert "refused" in capsys.readouterr().err
 
 
 def test_the_example_is_valid_json_list():
     document = json.loads(EXAMPLE.read_text())
-    assert document["kind"] == "List" and len(document["items"]) == 23
+    assert document["kind"] == "List" and len(document["items"]) == 25
+
+
+def test_the_audit_account_may_only_get_pods_and_list_endpoint_slices_in_the_webhook_namespace():
+    items = manifests()
+    role = named(items, "Role", "bailiff-release-webhook-audit", "bailiff-webhook")
+    binding = named(items, "RoleBinding", "bailiff-release-webhook-audit", "bailiff-webhook")
+    assert role["metadata"]["namespace"] == binding["metadata"]["namespace"] == "bailiff-webhook"
+    assert role["rules"] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]},
+        {"apiGroups": ["discovery.k8s.io"], "resources": ["endpointslices"], "verbs": ["list"]},
+    ]
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "effector-audit", "namespace": "bailiff-system"}]
 
 
 def test_the_audit_identity_may_only_read_generated_webhook_objects_and_ask_access_reviews():
@@ -179,7 +209,9 @@ def test_the_audit_identity_may_only_read_generated_webhook_objects_and_ask_acce
     ]
     gets = [rule for rule in role["rules"] if rule["verbs"] == ["get"]]
     assert all(
-        set(rule["resourceNames"]) <= {"bailiff-release-webhook", "bailiff-release-webhook-pins"} for rule in gets
+        set(rule["resourceNames"])
+        <= {"bailiff-release-webhook", "bailiff-release-webhook-pins", "bailiff-release-webhook-audit"}
+        for rule in gets
     )
     binding = named(items, "ClusterRoleBinding", "bailiff-effector-audit")
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "effector-audit", "namespace": "bailiff-system"}]

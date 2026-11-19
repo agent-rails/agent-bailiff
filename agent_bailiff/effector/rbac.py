@@ -87,6 +87,11 @@ AUDIT_RULES = [
         "verbs": ["get"],
     },
 ]
+WEBHOOK_AUDIT_ROLE = "bailiff-release-webhook-audit"
+WEBHOOK_AUDIT_RULES = [
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]},
+    {"apiGroups": ["discovery.k8s.io"], "resources": ["endpointslices"], "verbs": ["list"]},
+]
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,7 @@ class EffectorIdentity:
     namespace: str
     service_account: str
     applier: str
+    webhook_namespace: str
 
     @property
     def audit_account(self) -> str:
@@ -155,6 +161,16 @@ def generate_manifests(
             [{"kind": "ServiceAccount", "name": effector.audit_account, "namespace": effector.namespace}],
         ),
     ]
+    items.append(_role(WEBHOOK_AUDIT_ROLE, effector.webhook_namespace, WEBHOOK_AUDIT_RULES))
+    items.append(
+        _binding(
+            "RoleBinding",
+            WEBHOOK_AUDIT_ROLE,
+            effector.webhook_namespace,
+            "Role",
+            [{"kind": "ServiceAccount", "name": effector.audit_account, "namespace": effector.namespace}],
+        )
+    )
     for namespace in namespaces:
         items.append(_role("bailiff-effector-on", namespace, _rules(operations, "impersonate-on:user-info:")))
         items.append(_binding("RoleBinding", "bailiff-effector-on", namespace, "Role", [subject]))
@@ -180,10 +196,20 @@ def render(manifests: Mapping[str, Any]) -> str:
     return json.dumps(manifests, indent=2, sort_keys=True) + "\n"
 
 
+def reserved_namespace(namespace: str) -> bool:
+    return namespace == "default" or namespace.startswith("kube-")
+
+
 def check_inputs(effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]]) -> None:
     for value in (effector.namespace, effector.service_account):
         if LABEL.fullmatch(value) is None or len(value) > 63 - len(AUDIT_SUFFIX):
             raise CatalogError(f"{value!r} is not a Kubernetes name")
+    if reserved_namespace(effector.namespace):
+        raise CatalogError(f"the effector may not run in the reserved namespace {effector.namespace!r}")
+    if LABEL.fullmatch(effector.webhook_namespace) is None or reserved_namespace(effector.webhook_namespace):
+        raise CatalogError("the release webhook needs a dedicated namespace, not default or kube-*")
+    if effector.webhook_namespace == effector.namespace:
+        raise CatalogError("the release webhook may not share the effector's namespace")
     if not effector.applier or any(character in effector.applier for character in "'\\\n"):
         raise CatalogError("the applier must be a non-empty user name without quotes or backslashes")
     if not tenants:
@@ -193,8 +219,12 @@ def check_inputs(effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]
             raise CatalogError(f"tenant {tenant!r} must be a short Kubernetes name")
         if not namespaces or any(LABEL.fullmatch(namespace) is None for namespace in namespaces):
             raise CatalogError(f"tenant {tenant!r} needs one or more valid namespaces")
+        if any(reserved_namespace(namespace) for namespace in namespaces):
+            raise CatalogError(f"tenant {tenant!r} may not use default or kube-* namespaces")
         if effector.namespace in namespaces:
             raise CatalogError("the effector's namespace must hold nothing but the effector")
+        if effector.webhook_namespace in namespaces:
+            raise CatalogError("the release webhook's namespace may not be a tenant namespace")
 
 
 def _rules(operations: Sequence[CatalogOperation], prefix: str) -> list[dict[str, Any]]:

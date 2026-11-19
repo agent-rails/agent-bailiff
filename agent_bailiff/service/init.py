@@ -207,6 +207,7 @@ def init_effector(
             "namespace": rbac["namespace"],
             "service_account": rbac["service_account"],
             "applier": rbac["applier"],
+            "webhook_namespace": rbac["webhook_namespace"],
             "tenants": {tenant: list(namespaces) for tenant, namespaces in rbac["tenants"].items()},
         },
         "ledger": {"path": str(ledger), "writer_uid": ledger_uid, "group": ledger_group},

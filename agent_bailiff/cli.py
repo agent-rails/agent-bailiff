@@ -102,6 +102,7 @@ def _parser() -> argparse.ArgumentParser:
             manifests.add_argument("--namespace", required=True, help="the effector's own namespace")
             manifests.add_argument("--service-account", required=True)
             manifests.add_argument("--applier", required=True, help="the user that applies generated RBAC (GitOps)")
+            manifests.add_argument("--webhook-namespace", required=True, help="the release webhook's namespace")
             manifests.add_argument(
                 "--tenant", action="append", required=True, help="tenant=namespace[,namespace...]; repeat"
             )
@@ -161,6 +162,7 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     effector.add_argument("--effector-namespace", required=True)
     effector.add_argument("--service-account", required=True)
     effector.add_argument("--applier", required=True, help="the user that applies generated RBAC (GitOps)")
+    effector.add_argument("--webhook-namespace", required=True, help="the release webhook's namespace")
     effector.add_argument("--tenant", action="append", required=True, help="tenant=namespace[,namespace...]")
     docket = components.add_parser("docket")
     docket.add_argument("--socket", type=Path, required=True)
@@ -215,6 +217,7 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             "namespace": args.effector_namespace,
             "service_account": args.service_account,
             "applier": args.applier,
+            "webhook_namespace": args.webhook_namespace,
             "tenants": parse_tenants(args.tenant),
         }
         return init_effector(
@@ -295,7 +298,7 @@ def _run_effector(args: argparse.Namespace) -> int:
 def _effector_manifests(args: argparse.Namespace) -> int:
     try:
         tenants = parse_tenants(args.tenant)
-        identity = EffectorIdentity(args.namespace, args.service_account, args.applier)
+        identity = EffectorIdentity(args.namespace, args.service_account, args.applier, args.webhook_namespace)
         output = render(generate_manifests(OperationCatalog.load(args.catalog), identity, tenants))
     except STARTUP_ERRORS as exc:
         return _refused("effector manifests", exc)

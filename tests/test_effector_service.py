@@ -86,6 +86,7 @@ def effector_config(root, port):
             "namespace": "bailiff-system",
             "service_account": "effector",
             "applier": "gitops",
+            "webhook_namespace": "bailiff-webhook",
             "tenants": {"tenant-a": ["staging"]},
         },
         docket={"socket": str(root / "run" / "d.sock"), "sink_uid": UID},

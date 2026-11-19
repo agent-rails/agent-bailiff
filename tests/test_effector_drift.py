@@ -21,7 +21,7 @@ from agent_bailiff.effector.kubernetes import KubernetesUnavailable
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
-IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops")
+IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops", "bailiff-webhook")
 TENANTS = {"tenant-a": ["staging"]}
 CATALOG = OperationCatalog.load(DEFAULT_CATALOG)
 MANIFESTS = generate_manifests(CATALOG, IDENTITY, TENANTS)
@@ -197,6 +197,15 @@ def test_a_grant_outside_the_generated_set_in_any_namespace_is_drift(api, audit,
     api.extra_rules["kube-system"] = [rule]
     [problem] = audit.check()
     assert problem.startswith("effector holds a grant outside the generated set in kube-system")
+
+
+def test_the_webhook_audit_grant_is_part_of_the_generated_set(api, audit):
+    api.namespaces.append("bailiff-webhook")
+    assert audit.check() == []
+    api.find("Role", "bailiff-release-webhook-audit", "bailiff-webhook")["rules"].append(
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}
+    )
+    assert audit.check() == ["the generated Role bailiff-webhook/bailiff-release-webhook-audit was changed"]
 
 
 def test_an_incomplete_rules_review_is_drift(api, audit):
