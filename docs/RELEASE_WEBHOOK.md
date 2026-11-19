@@ -47,9 +47,11 @@ The cluster test `tests/test_webhook_guard_cluster.py` covers controllers runnin
    ```sh
    kubectl -n bailiff-webhook rollout restart deployment/bailiff-release-webhook
    kubectl -n bailiff-webhook rollout status deployment/bailiff-release-webhook
+   kubectl -n bailiff-webhook run probe --image=<pinned image> --overrides='{"spec":{"automountServiceAccountToken":false}}'
+   kubectl -n bailiff-webhook delete pod probe
    ```
 
-   Then read the API server audit log for the restart window. Every event in the webhook namespace whose `validation.policy.admission.k8s.io/validation_failure` annotation names the policy `bailiff-release-webhook-namespace` is a write Enforce would deny; its `user.username` is the identity. Require none. For a log of `audit.k8s.io/v1` events, one JSON object per line:
+   The probe is a control: Pods here are reserved to controllers, so its creation must be flagged. Then read the API server audit log for this window. Every event in the webhook namespace whose `validation.policy.admission.k8s.io/validation_failure` annotation names the policy `bailiff-release-webhook-namespace` is a write Enforce would deny; its `user.username` is the identity. Require exactly one: the deployer creating the probe. For a log of `audit.k8s.io/v1` events, one JSON object per line:
 
    ```sh
    jq -r 'select((.annotations["validation.policy.admission.k8s.io/validation_failure"] // "")
@@ -57,7 +59,7 @@ The cluster test `tests/test_webhook_guard_cluster.py` covers controllers runnin
      | .user.username + " " + .verb + " " + .objectRef.resource + "/" + (.objectRef.subresource // "")' audit.log
    ```
 
-   An event from a controller means the guard cannot be enforced on this cluster; an event from anyone else is a write to investigate under step 1. The annotation is recorded only for requests the audit policy logs at `Metadata` level or above; if the provider's audit log does not include them, there is no evidence and Enforce must not be enabled. An access review cannot replace this check: every API server binds each controller's service account in `kube-system` to its controller role at startup, so the listed names are authorized whether or not the controller manager signs in as them. On a one-node kind v1.36.4 cluster with a `Metadata` audit policy for the namespace, a restart of a Deployment with `automountServiceAccountToken: false` printed nothing; a Pod created by a deployer printed that deployer, and a Pod that mounts a service account token printed the kubelet's `system:node:<node>` creating `serviceaccounts/token`, a write the guard denies in Enforce.
+   An event from a controller means the guard cannot be enforced on this cluster; an event from anyone else is a write to investigate under step 1. If the probe is missing, the log does not hold the evidence and the check has failed, not passed: the annotation is recorded only in stages after admission, such as `ResponseComplete`, for requests the audit policy logs at `Metadata` level or above. If the provider's audit log cannot include them, Enforce must not be enabled. The restart exercises creating ReplicaSets and Pods, binding, Pod and ReplicaSet status, and Endpoints and EndpointSlices; it does not exercise node loss, where the node controller and Pod garbage collector write status of Pods on the lost node. The cluster test covers node loss on kind only. An access review cannot replace this check: every API server binds each controller's service account in `kube-system` to its controller role at startup, so the listed names are authorized whether or not the controller manager signs in as them. On a one-node kind v1.36.4 cluster with a `Metadata` audit policy for the namespace, these commands printed only the deployer creating the probe; a Pod that mounts a service account token also printed the kubelet's `system:node:<node>` creating `serviceaccounts/token`, a write the guard denies in Enforce, which is why the probe disables the token.
 6. Switch to Enforce in two phases; never apply a full Enforce bundle in one `kubectl apply`:
 
    ```sh
