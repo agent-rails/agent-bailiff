@@ -1,5 +1,7 @@
 import copy
 import json
+import threading
+import time
 
 import pytest
 from test_effector import CATALOG
@@ -574,3 +576,74 @@ def test_access_reviews_cover_grants_scoped_to_a_serving_pod():
         for name in (pod, f"{pod}:9443", f"{pod}:https", f"https:{pod}:9443", f"http:{pod}:", f":{pod}:9443"):
             assert ("", "webhook-ns", "pods", "proxy", name, verb) in reviewed
     assert ("", "webhook-ns", "pods", None, pod, "create") not in reviewed
+
+
+class SlowReviews(FakeApi):
+    def __init__(self, manifests, delay=0.0):
+        super().__init__(manifests)
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.active = 0
+        self.peak = 0
+
+    def request(self, method, path, headers, body):
+        if method == "GET":
+            return super().request(method, path, headers, body)
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            time.sleep(self.delay)
+            return super().request(method, path, headers, body)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+
+def test_access_reviews_run_concurrently_up_to_the_worker_cap():
+    manifests = manifests_in("webhook-ns")
+    api = SlowReviews(manifests, delay=0.002)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=4)
+    assert audit.check() == []
+    assert api.peak == 4
+
+
+def test_access_review_problems_keep_review_order_under_concurrency():
+    manifests = manifests_in("webhook-ns")
+    serial = FakeApi(manifests)
+    serial.allowed = True
+    expected = WebhookAudit(
+        serial, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"], review_workers=1
+    ).check()
+    concurrent = SlowReviews(manifests, delay=0.001)
+    concurrent.allowed = True
+    problems = WebhookAudit(
+        concurrent, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"]
+    ).check()
+    assert len(expected) == len(serial.reviews)
+    assert problems == expected
+
+
+def test_access_reviews_past_the_deadline_fail_the_audit():
+    manifests = manifests_in("webhook-ns")
+    api = SlowReviews(manifests, delay=0.05)
+    audit = WebhookAudit(
+        api, "token", manifests, "bailiff-system", "effector", [], ["staging"], review_workers=2, review_deadline=0.1
+    )
+    with pytest.raises(RuntimeError, match="access reviews did not finish within 0.1 seconds"):
+        audit.check()
+    assert len(api.reviews) < 20
+
+
+class FailingReviews(FakeApi):
+    def request(self, method, path, headers, body):
+        if method == "GET":
+            return super().request(method, path, headers, body)
+        return 500, b""
+
+
+def test_an_access_review_api_error_fails_the_audit():
+    manifests = manifests_in("webhook-ns")
+    audit = WebhookAudit(FailingReviews(manifests), "token", manifests, "bailiff-system", "effector", [], ["staging"])
+    with pytest.raises(RuntimeError, match="webhook audit API returned 500 for /apis/authorization.k8s.io"):
+        audit.check()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from agent_bailiff.effector.kubernetes import Transport
@@ -51,6 +52,8 @@ WEBHOOK_NAMESPACE = "<webhook>"
 CONSTRAINED = "authentication.k8s.io"
 NODE_VERBS = ("impersonate:arbitrary-node", "impersonate:associated-node")
 SERVICE_ACCOUNT = "system:serviceaccount:"
+REVIEW_WORKERS = 8
+REVIEW_DEADLINE_SECONDS = 300.0
 Review = tuple[str, str, str | None, str | None, str | None, tuple[str, ...]]
 
 
@@ -357,6 +360,8 @@ class WebhookAudit:
         effector_account: str,
         synthetic_users: Sequence[str],
         tenant_namespaces: Sequence[str],
+        review_workers: int = REVIEW_WORKERS,
+        review_deadline: float = REVIEW_DEADLINE_SECONDS,
     ) -> None:
         self._transport = transport
         self._token = token
@@ -365,6 +370,8 @@ class WebhookAudit:
         self._account = effector_account
         self._users = synthetic_users
         self._tenant_namespaces = tenant_namespaces
+        self._review_workers = review_workers
+        self._review_deadline = review_deadline
         if sorted(item["kind"] for item in manifests["items"]) != list(REQUIRED_KINDS):
             raise ValueError(
                 "audit needs the full webhook manifest set; render it without --phase in Audit mode "
@@ -531,7 +538,26 @@ class WebhookAudit:
         return reviews
 
     def _access_reviews(self) -> list[str]:
-        problems: list[str] = []
+        requests = self._access_requests()
+        executor = ThreadPoolExecutor(max_workers=self._review_workers)
+        try:
+            denied = list(executor.map(self._denied, [review for _, review in requests], timeout=self._review_deadline))
+        except TimeoutError:
+            raise RuntimeError(
+                f"access reviews did not finish within {self._review_deadline} seconds; "
+                "check API server latency, then rerun audit"
+            ) from None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return [problem for (problem, _), refused in zip(requests, denied, strict=True) if not refused]
+
+    def _denied(self, review: Mapping[str, Any]) -> bool:
+        result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review)
+        status = result.get("status")
+        return isinstance(status, dict) and status.get("allowed") is False
+
+    def _access_requests(self) -> list[tuple[str, dict[str, Any]]]:
+        requests: list[tuple[str, dict[str, Any]]] = []
         effector = f"system:serviceaccount:{self._namespace}:{self._account}"
         for user in [effector, *self._users]:
             groups = (
@@ -557,12 +583,10 @@ class WebhookAudit:
                         "kind": "SubjectAccessReview",
                         "spec": {"user": user, "groups": groups, "resourceAttributes": attributes},
                     }
-                    result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review)
-                    status = result.get("status")
-                    if not isinstance(status, dict) or status.get("allowed") is not False:
-                        shown = f"{resource}/{subresource}" if subresource else resource
-                        problems.append(
-                            f"access: {user} may {verb} {shown}/{target or '*'} in {scope or 'cluster scope'}; "
-                            "remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit"
-                        )
-        return problems
+                    shown = f"{resource}/{subresource}" if subresource else resource
+                    problem = (
+                        f"access: {user} may {verb} {shown}/{target or '*'} in {scope or 'cluster scope'}; "
+                        "remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit"
+                    )
+                    requests.append((problem, review))
+        return requests
