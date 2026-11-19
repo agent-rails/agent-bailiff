@@ -106,7 +106,11 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
         api, "audit-token", manifests, "bailiff-effector", "effector", ["bailiff:ta:scale"], ["staging"]
     )
     assert audit.check() == []
-    assert len(api.reviews) == 2 * (sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 3)
+    service_proxy = 7 * 2
+    per_pod = 6 * 2 + 10 * 2
+    assert len(api.reviews) == 2 * (
+        sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 3 + service_proxy + 2 * per_pod
+    )
     webhook_path = "/validatingwebhookconfigurations/bailiff-release-webhook"
     webhook = next(path for path in api.objects if path.endswith(webhook_path))
     api.objects[webhook]["webhooks"][0]["namespaceSelector"] = {}
@@ -531,5 +535,34 @@ def test_access_reviews_cover_proxying_to_the_webhook_and_watching_kube_system_s
     reviewed = reviewed_with_groups(api)
     for verb in ("create", "get"):
         assert ("", "webhook-ns", "pods", "proxy", None, verb) in reviewed
-        assert ("", "webhook-ns", "services", "proxy", NAME, verb) in reviewed
+        for name in (NAME, f"{NAME}:443", f"https:{NAME}:443", f"https:{NAME}:", f"http:{NAME}:443"):
+            assert ("", "webhook-ns", "services", "proxy", name, verb) in reviewed
     assert ("", "kube-system", "secrets", None, None, "watch") in reviewed
+
+
+def test_access_reviews_cover_impersonating_any_group_and_system_masters():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    reviewed = reviewed_with_groups(api)
+    for group in (None, "system:masters"):
+        assert ("", None, "groups", None, group, "impersonate") in reviewed
+        assert ("authentication.k8s.io", None, "groups", None, group, "impersonate:user-info") in reviewed
+
+
+def test_access_reviews_cover_grants_scoped_to_a_serving_pod():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    reviewed = reviewed_with_groups(api)
+    pod = f"{NAME}-abc-1"
+    for verb in ("update", "patch"):
+        assert ("", "webhook-ns", "pods", None, pod, verb) in reviewed
+        assert ("", "webhook-ns", "pods", "status", pod, verb) in reviewed
+        assert ("", "webhook-ns", "pods", "ephemeralcontainers", pod, verb) in reviewed
+    for verb in ("create", "get"):
+        for subresource in ("exec", "attach", "portforward"):
+            assert ("", "webhook-ns", "pods", subresource, pod, verb) in reviewed
+        for name in (pod, f"{pod}:9443", f"{pod}:https", f"https:{pod}:9443", f"http:{pod}:"):
+            assert ("", "webhook-ns", "pods", "proxy", name, verb) in reviewed
+    assert ("", "webhook-ns", "pods", None, pod, "create") not in reviewed

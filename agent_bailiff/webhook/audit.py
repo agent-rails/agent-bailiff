@@ -67,6 +67,19 @@ def _impersonation(identity: str) -> tuple[Review, Review]:
     )
 
 
+def _proxy_names(name: str, ports: Sequence[str]) -> list[str]:
+    forms = ("", *ports)
+    return [
+        name,
+        *(f"{name}:{port}" for port in forms),
+        *(f"{scheme}:{name}:{port}" for scheme in ("http", "https") for port in forms),
+    ]
+
+
+def _ports(ports: Sequence[Mapping[str, Any]], number: str) -> list[str]:
+    return sorted({str(port[key]) for port in ports for key in (number, "name") if key in port})
+
+
 PROTECTED_REVIEWS: tuple[Review, ...] = (
     ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, None, NAME, WRITE_VERBS),
     ("", "namespaces", None, None, "<namespace>", WRITE_VERBS),
@@ -80,7 +93,6 @@ PROTECTED_REVIEWS: tuple[Review, ...] = (
     ("", "pods", "status", WEBHOOK_NAMESPACE, None, ("update", "patch")),
     ("", "pods", "portforward", WEBHOOK_NAMESPACE, None, ("create", "get")),
     ("", "pods", "proxy", WEBHOOK_NAMESPACE, None, ("create", "get")),
-    ("", "services", "proxy", WEBHOOK_NAMESPACE, NAME, ("create", "get")),
     ("", "serviceaccounts", "token", WEBHOOK_NAMESPACE, None, ("create",)),
     ("apps", "replicasets", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
     ("apps", "statefulsets", None, WEBHOOK_NAMESPACE, None, ("create",)),
@@ -119,8 +131,14 @@ PROTECTED_REVIEWS: tuple[Review, ...] = (
     ("", "users", None, None, None, ("impersonate",)),
     (CONSTRAINED, "users", None, None, None, ("impersonate:user-info",)),
     (CONSTRAINED, "nodes", None, None, None, NODE_VERBS),
-    ("", "groups", None, None, "system:nodes", ("impersonate",)),
-    (CONSTRAINED, "groups", None, None, "system:nodes", ("impersonate:user-info",)),
+    *(
+        review
+        for group in (None, "system:nodes", "system:masters")
+        for review in (
+            ("", "groups", None, None, group, ("impersonate",)),
+            (CONSTRAINED, "groups", None, None, group, ("impersonate:user-info",)),
+        )
+    ),
     ("certificates.k8s.io", "certificatesigningrequests", "approval", None, None, ("update", "patch")),
     ("certificates.k8s.io", "signers", None, None, "kubernetes.io/kube-apiserver-client-kubelet", ("approve",)),
 )
@@ -358,6 +376,15 @@ class WebhookAudit:
         self._webhook_namespace = namespaces.pop()
         self._deployers = _deployers(manifests, self._webhook_namespace)
         self._serving_nodes: set[str] = set()
+        self._serving_pods: set[str] = set()
+        items = manifests["items"]
+        service = next(item for item in items if item["kind"] == "Service")
+        deployment = next(item for item in items if item["kind"] == "Deployment")
+        containers = deployment["spec"]["template"]["spec"]["containers"]
+        self._service_ports = _ports(service["spec"]["ports"], "port")
+        self._pod_ports = _ports(
+            [port for container in containers for port in container.get("ports", [])], "containerPort"
+        )
 
     def _request(self, method: str, path: str, body: object | None = None) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
@@ -375,6 +402,7 @@ class WebhookAudit:
     def check(self) -> list[str]:
         problems: list[str] = []
         self._serving_nodes = set()
+        self._serving_pods = set()
         if self._webhook_namespace == self._namespace:
             problems.append(
                 f"namespace: webhook namespace {self._webhook_namespace} is also the effector namespace; "
@@ -465,6 +493,7 @@ class WebhookAudit:
                         "match the generated pod template; delete the pod, find who created it, then rerun audit"
                     )
                     continue
+                self._serving_pods.add(pod_name)
                 node = pod["spec"].get("nodeName")
                 if isinstance(node, str) and node:
                     self._serving_nodes.add(node)
@@ -480,6 +509,22 @@ class WebhookAudit:
     def _reviews(self) -> list[Review]:
         reviews = list(PROTECTED_REVIEWS)
         reviews.extend(review for deployer in self._deployers for review in _impersonation(deployer))
+        reviews.extend(
+            ("", "services", "proxy", WEBHOOK_NAMESPACE, name, ("create", "get"))
+            for name in _proxy_names(NAME, self._service_ports)
+        )
+        for pod in sorted(self._serving_pods):
+            reviews.extend(
+                (group, resource, subresource, namespace, pod, tuple(verb for verb in verbs if verb != "create"))
+                if subresource is None
+                else (group, resource, subresource, namespace, pod, verbs)
+                for group, resource, subresource, namespace, name, verbs in PROTECTED_REVIEWS
+                if resource == "pods" and namespace == WEBHOOK_NAMESPACE and name is None and subresource != "proxy"
+            )
+            reviews.extend(
+                ("", "pods", "proxy", WEBHOOK_NAMESPACE, name, ("create", "get"))
+                for name in _proxy_names(pod, self._pod_ports)
+            )
         for node in sorted(self._serving_nodes):
             reviews.append(("", "users", None, None, f"system:node:{node}", ("impersonate",)))
             reviews.append((CONSTRAINED, "nodes", None, None, node, NODE_VERBS))
