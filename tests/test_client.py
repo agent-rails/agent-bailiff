@@ -110,6 +110,12 @@ class Stub:
                 headers = {"content-type": "application/json", **headers}
                 for key, value in headers.items():
                     self.send_header(key, value)
+                if callable(payload):
+                    self.send_header("connection", "close")
+                    self.end_headers()
+                    self.close_connection = True
+                    payload(self.wfile)
+                    return
                 self.send_header("content-length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -547,3 +553,52 @@ def test_a_replayed_client_call_is_refused_by_agentgateway(gateway_client, stack
 def test_a_call_outside_the_scope_is_refused_by_agentgateway(gateway_client, stack):
     assert gateway_client.call("deploy", "deploy_production", ARGS) == Refused("out_of_scope")
     assert stack["upstream"].calls() == []
+
+
+def test_an_empty_priming_event_is_skipped(client, stub):
+    respond = event_stream(DEPLOYED)
+
+    def primed(message):
+        status, headers, payload = respond(message)
+        return status, headers, b"id: 1\ndata:\n\n" + payload
+
+    stub.responders["tools/call"] = [primed]
+    assert client.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+
+
+def test_a_non_utf8_event_stream_is_outcome_unknown(client, stub):
+    stub.responders["tools/call"] = [lambda message: (200, {"content-type": "text/event-stream"}, b"data: \xff\n\n")]
+    assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("transport: _ResponseError")
+
+
+def test_a_json_response_for_another_request_id_is_outcome_unknown(client, stub):
+    stub.responders["tools/call"] = [reply(DEPLOYED, request_id=999)]
+    assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("transport: _ResponseError")
+
+
+def test_a_failed_initialized_notification_leaves_no_session(client, stub):
+    stub.responders["notifications/initialized"] = [lambda message: None] * 3 + [lambda message: (202, {}, b"")]
+    with pytest.raises(GatewayError):
+        client.call("deploy", "deploy_service", ARGS)
+    assert client.protocol_version is None and client.session_id is None
+    assert client.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+    assert stub.methods().count("initialize") == 2
+    assert len(stub.calls()) == 1
+
+
+def test_a_trickling_event_stream_stops_at_the_deadline(stub):
+    def trickle(wfile):
+        for _ in range(20):
+            wfile.write(b"x")
+            wfile.flush()
+            time.sleep(0.1)
+
+    stub.responders["tools/call"] = [lambda message: (200, {"content-type": "text/event-stream"}, trickle)]
+    instance = BailiffClient(stub.url, holder(), ROUTES, timeout=0.5, clock=lambda: NOW)
+    instance.list_tools()
+    started = time.monotonic()
+    outcome = instance.call("deploy", "deploy_service", ARGS)
+    elapsed = time.monotonic() - started
+    instance.close()
+    assert isinstance(outcome, OutcomeUnknown) and outcome.detail.startswith("transport:")
+    assert elapsed < 1.0

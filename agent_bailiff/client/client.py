@@ -24,6 +24,7 @@ PROTOCOL_HEADER = "mcp-protocol-version"
 CLIENT_NAME = "agent-bailiff-client"
 CLIENT_VERSION = "1"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+STREAM_CHUNK_BYTES = 64 * 1024
 SETUP_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 0.2
 BACKOFF_CAP_SECONDS = 2.0
@@ -216,9 +217,13 @@ class BailiffClient:
             raise GatewayError(f"the gateway negotiated an unsupported MCP protocol version: {str(version)[:32]!r}")
         self._protocol = version
         body = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode()
-        exchange = self._with_retries(lambda: self._exchange(body, {}, None))
+        try:
+            exchange = self._with_retries(lambda: self._exchange(body, {}, None))
+        except GatewayError:
+            self._reset_session()
+            raise
         if exchange.status not in {200, 202}:
-            self._protocol = None
+            self._reset_session()
             raise GatewayError(f"notifications/initialized returned HTTP {exchange.status}")
 
     def _setup_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -269,9 +274,11 @@ class BailiffClient:
         streaming = response_headers.get("content-type", "").startswith("text/event-stream")
         try:
             if streaming and request_id is not None:
-                message: dict[str, Any] | None = read_event_stream(response, request_id, deadline)
+                message: dict[str, Any] | None = read_event_stream(response, request_id, deadline, self._set_timeout)
             else:
                 message = read_json(response)
+                if message is not None and request_id is not None and message.get("id") != request_id:
+                    raise _ResponseError("the response id does not match the request id")
         finally:
             if streaming or response.will_close:
                 self._drop_connection()
@@ -293,10 +300,17 @@ class BailiffClient:
             self._connection.close()
             self._connection = None
 
-    def _expire_session(self) -> None:
+    def _set_timeout(self, seconds: float) -> None:
+        if self._connection is not None and self._connection.sock is not None:
+            self._connection.sock.settimeout(seconds)
+
+    def _reset_session(self) -> None:
         self._drop_connection()
         self._session = None
         self._protocol = None
+
+    def _expire_session(self) -> None:
+        self._reset_session()
         self._expired = True
 
     def _take_id(self) -> int:
@@ -350,32 +364,50 @@ def read_json(response: http.client.HTTPResponse) -> dict[str, Any] | None:
     return message if isinstance(message, dict) else None
 
 
-def read_event_stream(response: http.client.HTTPResponse, request_id: int, deadline: float) -> dict[str, Any]:
-    budget = MAX_RESPONSE_BYTES
+def read_event_stream(
+    response: http.client.HTTPResponse, request_id: int, deadline: float, set_timeout: Callable[[float], None]
+) -> dict[str, Any]:
+    received = 0
+    pending = b""
     data: list[str] = []
     while True:
-        if time.monotonic() > deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise _ResponseError("response deadline passed")
-        line = response.readline(budget + 1)
-        budget -= len(line)
-        if budget < 0:
+        set_timeout(remaining)
+        chunk = response.read1(STREAM_CHUNK_BYTES)
+        received += len(chunk)
+        if received > MAX_RESPONSE_BYTES:
             raise _ResponseError("response too large")
-        text = line.decode("utf-8").rstrip("\r\n")
-        if not line or text == "":
-            message = _event_message(data, request_id)
+        lines = (pending + chunk).split(b"\n")
+        pending = lines.pop() if chunk else b""
+        if not chunk:
+            lines.append(b"")
+        for line in lines:
+            message = _event_line(line, data, request_id)
             if message is not None:
                 return message
-            if not line:
-                raise _ResponseError("the stream ended without a response")
-            data = []
-            continue
+        if not chunk:
+            raise _ResponseError("the stream ended without a response")
+
+
+def _event_line(line: bytes, data: list[str], request_id: int) -> dict[str, Any] | None:
+    try:
+        text = line.decode("utf-8").rstrip("\r")
+    except UnicodeDecodeError:
+        raise _ResponseError("an event was not UTF-8") from None
+    if text:
         field, _, value = text.partition(":")
         if field == "data":
             data.append(value.removeprefix(" "))
+        return None
+    message = _event_message(data, request_id)
+    data.clear()
+    return message
 
 
 def _event_message(data: list[str], request_id: int) -> dict[str, Any] | None:
-    if not data:
+    if not "".join(data):
         return None
     try:
         message = json.loads("\n".join(data))

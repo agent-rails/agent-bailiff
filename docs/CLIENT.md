@@ -33,9 +33,9 @@ outcome = client.call("gitea", "get_me", {})
 | Outcome | Meaning |
 | --- | --- |
 | `Result(result)` | The upstream answered. `is_error` is the MCP tool-error flag. |
-| `Refused(reason)` | The gateway refused the call with a bailiff reason (`REFUSAL_REASONS`). The call was not forwarded upstream. |
-| `NeedsApproval()` | The policy requires a human (`needs_approval`). The call was not forwarded upstream. |
-| `OutcomeUnknown(detail)` | Timeout, dropped connection, oversized response, non-200 status, JSON-RPC error or expired session. The credential may have been released and the target may have acted. |
+| `Refused(reason)` | The answer is a bailiff refusal (`REFUSAL_REASONS`). A refusal from the gateway means the call was not forwarded upstream; see the limit below. |
+| `NeedsApproval()` | The answer is `needs_approval`: the policy requires a human. Same limit as `Refused`. |
+| `OutcomeUnknown(detail)` | Timeout, dropped connection, oversized or non-UTF-8 response, response id not matching the request, non-200 status, JSON-RPC error or expired session. The credential may have been released and the target may have acted. |
 
 - A gateway refusal is an HTTP 200 tool error whose only content is one text item equal to the reason. The client trusts that shape: an upstream that returns exactly a bailiff reason as its error text is classified as `Refused`.
 - A non-200 status after the gateway forwarded the call, such as an upstream rejecting the released credential, is `OutcomeUnknown`.
@@ -44,6 +44,7 @@ outcome = client.call("gitea", "get_me", {})
 
 ## Limits
 
-- Responses are capped at 4 MiB. `timeout` (default 30 s) applies to each socket operation; an event-stream response also stops at `timeout` after the response headers.
+- Responses are capped at 4 MiB. `timeout` (default 30 s) bounds each socket operation while connecting, sending, and reading headers or a JSON body. An event-stream response must deliver its result within `timeout` after its headers arrive.
+- Event streams: empty-data events (such as a priming event) and messages for other ids are skipped. A stream that ends before the result is `OutcomeUnknown`; the client does not resume with `GET` and `Last-Event-ID`.
 - A `PreparedCall` is sent at most once. Its `headers` and `body` stay readable, which is how the quickstart's replay scenario captures and resends a call.
-- Not in v1: tool-name prefixes from a multi-target gateway, approval resubmission, outcome reconciliation by op_id.
+- Not in v1: a refusal marker an upstream cannot produce, event-stream resumption, tool-name prefixes from a multi-target gateway, approval resubmission, outcome reconciliation by op_id.
