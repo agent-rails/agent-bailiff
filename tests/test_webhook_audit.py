@@ -5,6 +5,7 @@ import pytest
 from test_effector import CATALOG
 
 from agent_bailiff.webhook.audit import PROTECTED_REVIEWS, WebhookAudit, _path
+from agent_bailiff.webhook.guard import REGISTRATION_GUARD
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
 
@@ -105,7 +106,7 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
         api, "audit-token", manifests, "bailiff-effector", "effector", ["bailiff:ta:scale"], ["staging"]
     )
     assert audit.check() == []
-    assert len(api.reviews) == 2 * sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS)
+    assert len(api.reviews) == 2 * (sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 3)
     webhook_path = "/validatingwebhookconfigurations/bailiff-release-webhook"
     webhook = next(path for path in api.objects if path.endswith(webhook_path))
     api.objects[webhook]["webhooks"][0]["namespaceSelector"] = {}
@@ -437,3 +438,98 @@ def test_a_cluster_scoped_access_finding_names_cluster_scope():
     ).check()
     assert any("nodes/proxy/* in cluster scope" in problem for problem in problems)
     assert any("serviceaccounts/token/* in kube-system" in problem for problem in problems)
+
+
+def reviewed_with_groups(api):
+    return {
+        (
+            review["resourceAttributes"]["group"],
+            review["resourceAttributes"].get("namespace"),
+            review["resourceAttributes"]["resource"],
+            review["resourceAttributes"].get("subresource"),
+            review["resourceAttributes"].get("name"),
+            review["resourceAttributes"]["verb"],
+        )
+        for review in api.reviews
+    }
+
+
+def test_impersonation_reviews_use_the_api_group_each_mode_is_authorized_in():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
+    reviewed = reviewed_with_groups(api)
+    constrained = "authentication.k8s.io"
+    assert ("", None, "users", None, "system:kube-scheduler", "impersonate") in reviewed
+    assert (constrained, None, "users", None, "system:kube-scheduler", "impersonate:user-info") in reviewed
+    assert ("", "kube-system", "serviceaccounts", None, "replicaset-controller", "impersonate") in reviewed
+    assert (
+        constrained,
+        "kube-system",
+        "serviceaccounts",
+        None,
+        "replicaset-controller",
+        "impersonate:serviceaccount",
+    ) in reviewed
+    assert ("", None, "groups", None, "system:nodes", "impersonate") in reviewed
+    assert (constrained, None, "groups", None, "system:nodes", "impersonate:user-info") in reviewed
+    assert ("", None, "users", None, None, "impersonate") in reviewed
+    assert (constrained, None, "users", None, None, "impersonate:user-info") in reviewed
+    assert not any(group == "" and verb.startswith("impersonate:") for group, *_, verb in reviewed)
+
+
+def test_access_reviews_cover_impersonating_the_deployer_and_the_serving_nodes():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
+    reviewed = reviewed_with_groups(api)
+    constrained = "authentication.k8s.io"
+    assert ("", None, "users", None, "gitops", "impersonate") in reviewed
+    assert (constrained, None, "users", None, "gitops", "impersonate:user-info") in reviewed
+    assert ("", None, "users", None, "system:node:node-a", "impersonate") in reviewed
+    for verb in ("impersonate:arbitrary-node", "impersonate:associated-node"):
+        assert (constrained, None, "nodes", None, "node-a", verb) in reviewed
+        assert (constrained, None, "nodes", None, None, verb) in reviewed
+
+
+def test_a_service_account_deployer_is_reviewed_as_a_service_account():
+    manifests = generate_manifests(
+        namespace="webhook-ns",
+        image="example/release@sha256:" + "a" * 64,
+        ca_pem=b"-----BEGIN CERTIFICATE-----\nmock\n-----END CERTIFICATE-----\n",
+        pins={"catalog_digest": CATALOG.digest},
+        catalog=CATALOG,
+        deployers=["system:serviceaccount:argocd:applier"],
+        enforce=False,
+    )
+    api = FakeApi(manifests)
+    assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
+    reviewed = reviewed_with_groups(api)
+    assert ("", "argocd", "serviceaccounts", None, "applier", "impersonate") in reviewed
+    assert (
+        "authentication.k8s.io",
+        "argocd",
+        "serviceaccounts",
+        None,
+        "applier",
+        "impersonate:serviceaccount",
+    ) in reviewed
+
+
+def test_guards_that_differ_from_the_generated_guards_are_refused():
+    manifests = manifests_in("webhook-ns")
+    guard = next(item for item in manifests["items"] if item["metadata"]["name"] == REGISTRATION_GUARD)
+    guard["spec"]["validations"][0]["expression"] = 'variables.user in ["gitops", "intruder"]'
+    with pytest.raises(ValueError, match="guards"):
+        WebhookAudit(FakeApi(manifests), "token", manifests, "bailiff-system", "effector", [], ["staging"])
+
+
+def test_access_reviews_cover_proxying_to_the_webhook_and_watching_kube_system_secrets():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    reviewed = reviewed_with_groups(api)
+    for verb in ("create", "get"):
+        assert ("", "webhook-ns", "pods", "proxy", None, verb) in reviewed
+        assert ("", "webhook-ns", "services", "proxy", NAME, verb) in reviewed
+    assert ("", "kube-system", "secrets", None, None, "watch") in reviewed

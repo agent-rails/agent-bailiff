@@ -6,7 +6,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_bailiff.effector.kubernetes import Transport
-from agent_bailiff.webhook.guard import CONTROLLER_ACCOUNTS, CONTROLLERS, NAMESPACE_GUARD, REGISTRATION_GUARD
+from agent_bailiff.webhook.guard import (
+    CONTROLLERS,
+    NAMESPACE_GUARD,
+    REGISTRATION_GUARD,
+    guard_policies,
+)
 
 NAME = "bailiff-release-webhook"
 CONTAINER_DEFAULTS = {
@@ -43,8 +48,26 @@ REQUIRED_KINDS = (
 POLICY_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
 WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
 WEBHOOK_NAMESPACE = "<webhook>"
-IMPERSONATE_VERBS = ("impersonate", "impersonate:user-info", "impersonate:serviceaccount")
-PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, str | None, str | None, tuple[str, ...]], ...] = (
+CONSTRAINED = "authentication.k8s.io"
+NODE_VERBS = ("impersonate:arbitrary-node", "impersonate:associated-node")
+SERVICE_ACCOUNT = "system:serviceaccount:"
+Review = tuple[str, str, str | None, str | None, str | None, tuple[str, ...]]
+
+
+def _impersonation(identity: str) -> tuple[Review, Review]:
+    if identity.startswith(SERVICE_ACCOUNT):
+        namespace, account = identity.removeprefix(SERVICE_ACCOUNT).split(":", 1)
+        return (
+            ("", "serviceaccounts", None, namespace, account, ("impersonate",)),
+            (CONSTRAINED, "serviceaccounts", None, namespace, account, ("impersonate:serviceaccount",)),
+        )
+    return (
+        ("", "users", None, None, identity, ("impersonate",)),
+        (CONSTRAINED, "users", None, None, identity, ("impersonate:user-info",)),
+    )
+
+
+PROTECTED_REVIEWS: tuple[Review, ...] = (
     ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, None, NAME, WRITE_VERBS),
     ("", "namespaces", None, None, "<namespace>", WRITE_VERBS),
     ("apps", "deployments", None, WEBHOOK_NAMESPACE, NAME, WRITE_VERBS),
@@ -56,6 +79,8 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, str | None, str | None, tup
     ("", "pods", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
     ("", "pods", "status", WEBHOOK_NAMESPACE, None, ("update", "patch")),
     ("", "pods", "portforward", WEBHOOK_NAMESPACE, None, ("create", "get")),
+    ("", "pods", "proxy", WEBHOOK_NAMESPACE, None, ("create", "get")),
+    ("", "services", "proxy", WEBHOOK_NAMESPACE, NAME, ("create", "get")),
     ("", "serviceaccounts", "token", WEBHOOK_NAMESPACE, None, ("create",)),
     ("apps", "replicasets", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
     ("apps", "statefulsets", None, WEBHOOK_NAMESPACE, None, ("create",)),
@@ -89,14 +114,13 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, str | None, str | None, tup
     ("", "serviceaccounts", None, "kube-system", None, ("create",)),
     ("", "serviceaccounts", "token", "kube-system", None, ("create",)),
     ("", "pods", None, "kube-system", None, ("create",)),
-    ("", "secrets", None, "kube-system", None, ("get", "list")),
-    *(
-        ("", "users", None, None, user, IMPERSONATE_VERBS)
-        for user in CONTROLLERS
-        if not user.startswith("system:serviceaccount:")
-    ),
-    *(("", "serviceaccounts", None, "kube-system", account, IMPERSONATE_VERBS) for account in CONTROLLER_ACCOUNTS),
+    ("", "secrets", None, "kube-system", None, ("get", "list", "watch")),
+    *(review for user in CONTROLLERS for review in _impersonation(user)),
+    ("", "users", None, None, None, ("impersonate",)),
+    (CONSTRAINED, "users", None, None, None, ("impersonate:user-info",)),
+    (CONSTRAINED, "nodes", None, None, None, NODE_VERBS),
     ("", "groups", None, None, "system:nodes", ("impersonate",)),
+    (CONSTRAINED, "groups", None, None, "system:nodes", ("impersonate:user-info",)),
     ("certificates.k8s.io", "certificatesigningrequests", "approval", None, None, ("update", "patch")),
     ("certificates.k8s.io", "signers", None, None, "kubernetes.io/kube-apiserver-client-kubelet", ("approve",)),
 )
@@ -257,6 +281,31 @@ def _is_webhook_pod(pod: Mapping[str, Any], template: Mapping[str, Any], address
     return bool(addresses) and set(addresses) <= pod_ips
 
 
+def _guard_specs(items: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], Any]:
+    return {(item["kind"], item["metadata"]["name"]): item["spec"] for item in items if item["kind"] in POLICY_KINDS}
+
+
+def _deployers(manifests: Mapping[str, Any], namespace: str) -> list[str]:
+    guards = _guard_specs(manifests["items"])
+    prefix = "variables.user in "
+    validations = guards.get(("ValidatingAdmissionPolicy", REGISTRATION_GUARD), {}).get("validations") or [{}]
+    expression = validations[0].get("expression", "")
+    actions = guards.get(("ValidatingAdmissionPolicyBinding", REGISTRATION_GUARD), {}).get("validationActions")
+    deployers: list[str] = []
+    generated: list[dict[str, Any]] = []
+    if expression.startswith(prefix):
+        try:
+            deployers = json.loads(expression.removeprefix(prefix))
+            generated = guard_policies(namespace, NAME, deployers, actions == ["Deny"])
+        except (ValueError, TypeError):
+            generated = []
+    if not generated or guards != _guard_specs(generated):
+        raise ValueError(
+            "webhook guards differ from the generated guards; render the manifests again, then rerun audit"
+        )
+    return deployers
+
+
 def _path(item: Mapping[str, Any]) -> str:
     kind = item["kind"]
     name = item["metadata"]["name"]
@@ -307,6 +356,8 @@ class WebhookAudit:
         if len(namespaces) != 1:
             raise ValueError("webhook manifests must place every namespaced object in one namespace")
         self._webhook_namespace = namespaces.pop()
+        self._deployers = _deployers(manifests, self._webhook_namespace)
+        self._serving_nodes: set[str] = set()
 
     def _request(self, method: str, path: str, body: object | None = None) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
@@ -323,6 +374,7 @@ class WebhookAudit:
 
     def check(self) -> list[str]:
         problems: list[str] = []
+        self._serving_nodes = set()
         if self._webhook_namespace == self._namespace:
             problems.append(
                 f"namespace: webhook namespace {self._webhook_namespace} is also the effector namespace; "
@@ -413,6 +465,9 @@ class WebhookAudit:
                         "match the generated pod template; delete the pod, find who created it, then rerun audit"
                     )
                     continue
+                node = pod["spec"].get("nodeName")
+                if isinstance(node, str) and node:
+                    self._serving_nodes.add(node)
                 if (endpoint.get("conditions") or {}).get("ready") is not False:
                     ready += 1
         if ready == 0:
@@ -421,6 +476,14 @@ class WebhookAudit:
                 "write is denied and in Audit none is checked; fix the rollout, then rerun audit"
             )
         return problems
+
+    def _reviews(self) -> list[Review]:
+        reviews = list(PROTECTED_REVIEWS)
+        reviews.extend(review for deployer in self._deployers for review in _impersonation(deployer))
+        for node in sorted(self._serving_nodes):
+            reviews.append(("", "users", None, None, f"system:node:{node}", ("impersonate",)))
+            reviews.append((CONSTRAINED, "nodes", None, None, node, NODE_VERBS))
+        return reviews
 
     def _access_reviews(self) -> list[str]:
         problems: list[str] = []
@@ -431,7 +494,7 @@ class WebhookAudit:
                 if user == effector
                 else ["system:authenticated"]
             )
-            for group, resource, subresource, namespace, name, verbs in PROTECTED_REVIEWS:
+            for group, resource, subresource, namespace, name, verbs in self._reviews():
                 target = self._webhook_namespace if name == "<namespace>" else name
                 scope = self._webhook_namespace if namespace == WEBHOOK_NAMESPACE else namespace
                 for verb in verbs:
@@ -440,7 +503,9 @@ class WebhookAudit:
                         attributes["subresource"] = subresource
                     if scope:
                         attributes["namespace"] = scope
-                    if target is not None and verb not in {"create", "deletecollection", "list", "watch"}:
+                    if target is not None and (
+                        subresource or verb not in {"create", "deletecollection", "list", "watch"}
+                    ):
                         attributes["name"] = target
                     review = {
                         "apiVersion": "authorization.k8s.io/v1",
