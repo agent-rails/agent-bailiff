@@ -67,7 +67,7 @@ Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roo
 - Python 3.13
 - Linux or macOS (peer credentials on Unix sockets)
 - [agentgateway](https://github.com/agentgateway/agentgateway) v1.7.0 for the gateway adapter
-- For the effector: Kubernetes v1.36 or later (constrained impersonation, beta in v1.36); tested on OrbStack v1.36.5
+- For the effector: Kubernetes v1.36 or later (constrained impersonation, beta in v1.36); tested on OrbStack v1.36.5 and kind v1.36.4. On v1.34 the effector's calls are refused (28 of 36 cluster tests fail with 403 on kind v1.34.3).
 
 ## Usage
 
