@@ -209,12 +209,12 @@ class Stack:
     def container(self, service):
         return self.compose("ps", "--all", "--quiet", service).strip()
 
-    def probe(self, script, user="0:0"):
+    def probe(self, script, user="0:0", arguments=()):
         mounts = [arg for name in VOLUMES for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
         capabilities = ["--cap-add", "DAC_READ_SEARCH"] if user == "0:0" else []
         command = [
             "docker", "run", "--rm", "--network", "none", "--user", user, "--read-only",
-            "--cap-drop", "ALL", *capabilities, *mounts, IMAGE, "-c", script,
+            "--cap-drop", "ALL", *capabilities, *mounts, IMAGE, "-c", script, *arguments,
         ]  # fmt: skip
         result = subprocess.run(command, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=False)
         assert result.returncode == 0, result.stderr
