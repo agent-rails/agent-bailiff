@@ -7,3 +7,4 @@ docs
 examples
 *.egg-info
 __pycache__
+!examples/quickstart/bootstrap.py

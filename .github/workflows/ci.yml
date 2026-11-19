@@ -34,7 +34,7 @@ jobs:
 
   quickstart-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -64,6 +64,9 @@ jobs:
           AGENT_BAILIFF_TEST_GITEA_MCP_URL: http://127.0.0.1:18080/mcp
           AGENT_BAILIFF_TEST_GITEA_TOKEN_FILE: ${{ runner.temp }}/gitea-token
           AGENT_BAILIFF_TEST_GITEA_USER: agentops
+      - run: pytest -q -rs tests/test_quickstart_stack.py | tee --append "$RUNNER_TEMP/pytest.out"
+        env:
+          AGENT_BAILIFF_TEST_QUICKSTART: "1"
       - run: "! grep -q skipped \"$RUNNER_TEMP/pytest.out\""
       - if: always()
         run: docker compose down --volumes
