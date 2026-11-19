@@ -161,6 +161,8 @@ def test_access_reviews_target_the_webhook_namespace_and_its_attack_surface():
     for subresource in ("exec", "attach", "portforward"):
         assert ("pods", subresource, "create") in reviewed
         assert ("pods", subresource, "get") in reviewed
+    assert ("nodes", "proxy", "get") in reviewed
+    assert ("nodes", "proxy", "create") in reviewed
     assert ("endpointslices", None, "create") in reviewed
     assert ("pods", None, "patch") in reviewed
     for workload in ("replicasets", "statefulsets", "daemonsets", "jobs", "cronjobs", "replicationcontrollers"):

@@ -58,6 +58,7 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
     ("rbac.authorization.k8s.io", "roles", None, True, None, ("create", "update", "patch")),
     ("rbac.authorization.k8s.io", "rolebindings", None, True, None, ("create", "update", "patch")),
     ("", "pods", "exec", True, None, ("create", "get")),
+    ("", "nodes", "proxy", False, None, ("create", "get")),
     ("", "pods", "attach", True, None, ("create", "get")),
     ("", "pods", "ephemeralcontainers", True, None, ("update", "patch")),
     ("discovery.k8s.io", "endpointslices", None, True, None, ("create", "update", "patch")),
