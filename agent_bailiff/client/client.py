@@ -180,7 +180,10 @@ class BailiffClient:
             message = self._setup_request("tools/list", {})
         except _SessionExpired:
             self._ensure_session()
-            message = self._setup_request("tools/list", {})
+            try:
+                message = self._setup_request("tools/list", {})
+            except _SessionExpired:
+                raise GatewayError("tools/list returned HTTP 404 after the session was initialized again") from None
         tools = message.get("result", {}).get("tools")
         if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
             raise GatewayError("tools/list returned no tool list")

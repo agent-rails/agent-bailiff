@@ -378,6 +378,14 @@ def test_tools_list_reinitializes_once_on_an_expired_session(client, stub):
     assert stub.methods().count("initialize") == 2
 
 
+def test_tools_list_expiring_twice_raises_gateway_error(client, stub):
+    client.list_tools()
+    stub.responders["tools/list"] = [reply(status=404)]
+    with pytest.raises(GatewayError, match="tools/list returned HTTP 404"):
+        client.list_tools()
+    assert stub.methods().count("initialize") == 2
+
+
 def test_initialize_retries_with_full_jitter_then_gives_up(client, stub, sleeps):
     stub.responders["initialize"] = [reply(status=503)]
     with pytest.raises(GatewayError, match="initialize returned HTTP 503"):
