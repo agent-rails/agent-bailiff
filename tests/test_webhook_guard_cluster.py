@@ -51,7 +51,7 @@ def _workload(namespace):
                                 ]
                             }
                         },
-                        "containers": [{"name": "pause", "image": IMAGE}],
+                        "containers": [{"name": "pause", "image": IMAGE, "resources": {"requests": {"cpu": "1m"}}}],
                     },
                 },
             },
@@ -208,6 +208,28 @@ def test_a_cluster_admin_cannot_get_into_the_guarded_namespace(guarded):
             '{"spec":{"selector":{"app":"rogue"}}}',
         ),
         "scale": ("-n", namespace, "scale", f"deployment/{APP}", "--replicas=5"),
+        "resize a pod": (
+            "-n",
+            namespace,
+            "patch",
+            "pod",
+            name,
+            "--subresource=resize",
+            "--type=merge",
+            "-p",
+            '{"spec":{"containers":[{"name":"pause","resources":{"requests":{"cpu":"2m"}}}]}}',
+        ),
+        "change a service account": (
+            "-n",
+            namespace,
+            "patch",
+            "serviceaccount",
+            "default",
+            "--type=merge",
+            "-p",
+            '{"automountServiceAccountToken":true}',
+        ),
+        "create a quota": ("-n", namespace, "create", "quota", "rogue", "--hard=pods=0"),
         "delete the webhook": ("delete", "validatingwebhookconfiguration", webhook),
         "change the webhook": (
             "label",
@@ -225,6 +247,38 @@ def test_a_cluster_admin_cannot_get_into_the_guarded_namespace(guarded):
         "ports": [{"port": 8080}],
     }
     results = {label: kubectl(*arguments, check=False, user=ATTACKER) for label, arguments in attempts.items()}
+    results["bind a pod"] = kubectl(
+        "create",
+        "--raw",
+        f"/api/v1/namespaces/{namespace}/pods/{name}/binding",
+        "-f",
+        "-",
+        check=False,
+        user=ATTACKER,
+        stdin=json.dumps(
+            {
+                "apiVersion": "v1",
+                "kind": "Binding",
+                "metadata": {"name": name, "namespace": namespace},
+                "target": {"apiVersion": "v1", "kind": "Node", "name": pod["spec"]["nodeName"]},
+            }
+        ),
+    )
+    results["create a network policy"] = kubectl(
+        "create",
+        "-f",
+        "-",
+        check=False,
+        user=ATTACKER,
+        stdin=json.dumps(
+            {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {"name": "rogue", "namespace": namespace},
+                "spec": {"podSelector": {}, "policyTypes": ["Ingress"]},
+            }
+        ),
+    )
     results["create an endpoint slice"] = kubectl(
         "create", "-f", "-", check=False, user=ATTACKER, stdin=json.dumps(endpoint_slice)
     )

@@ -50,6 +50,12 @@ def test_the_namespace_guard_never_matches_delete_and_covers_streaming_and_statu
         ("", "pods/portforward"),
         ("", "pods/status"),
         ("", "pods/ephemeralcontainers"),
+        ("", "pods/binding"),
+        ("", "pods/resize"),
+        ("", "serviceaccounts"),
+        ("", "resourcequotas"),
+        ("", "limitranges"),
+        ("networking.k8s.io", "networkpolicies"),
         ("", "secrets"),
         ("discovery.k8s.io", "endpointslices"),
         ("apps", "replicasets"),
@@ -66,8 +72,30 @@ def test_controller_identities_are_exact_names():
 
 @pytest.mark.parametrize(
     "deployers",
-    [[], [""], ["it's"], ["a\\b"], ["system:kube-controller-manager"], ["system:node:worker"]],
+    [
+        [],
+        [""],
+        ["it's"],
+        ["a\\b"],
+        ["system:kube-controller-manager"],
+        ["system:node:worker"],
+        ["system:anonymous"],
+        ["system:unauthenticated"],
+        ["system:kube-proxy"],
+        ["system:serviceaccount:kube-system:argocd"],
+        ["system:serviceaccount:ns:default"],
+    ],
 )
 def test_bad_deployers_are_refused(deployers):
     with pytest.raises(ValueError, match="deployer"):
         guard_policies("ns", "hook", deployers, False)
+
+
+def test_a_gitops_service_account_outside_the_webhook_namespace_may_deploy():
+    assert guard_policies("ns", "hook", ["system:serviceaccount:argocd:argocd-application-controller"], True)
+
+
+def test_only_the_scheduler_may_bind_pods():
+    policies = _by_name(guard_policies("ns", "hook", ["gitops"], True), "ValidatingAdmissionPolicy")
+    expressions = [check["expression"] for check in policies[NAMESPACE_GUARD]["spec"]["validations"]]
+    assert "variables.subresource != 'binding' || variables.user == 'system:kube-scheduler'" in expressions

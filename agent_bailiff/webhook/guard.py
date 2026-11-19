@@ -19,6 +19,7 @@ CONTROLLER_ACCOUNTS = (
     "replicaset-controller",
     "resource-claim-controller",
     "root-ca-cert-publisher",
+    "service-account-controller",
 )
 CONTROLLERS = (
     "system:kube-controller-manager",
@@ -32,6 +33,8 @@ NAMESPACE_RULES = (
         "",
         (
             "pods",
+            "pods/binding",
+            "pods/resize",
             "pods/status",
             "pods/ephemeralcontainers",
             "pods/exec",
@@ -42,7 +45,10 @@ NAMESPACE_RULES = (
             "endpoints",
             "secrets",
             "configmaps",
+            "serviceaccounts",
             "serviceaccounts/token",
+            "resourcequotas",
+            "limitranges",
             "replicationcontrollers",
         ),
     ),
@@ -61,6 +67,7 @@ NAMESPACE_RULES = (
     ),
     ("batch", ("jobs", "cronjobs")),
     ("discovery.k8s.io", ("endpointslices",)),
+    ("networking.k8s.io", ("networkpolicies",)),
     ("policy", ("poddisruptionbudgets", "poddisruptionbudgets/status")),
     ("rbac.authorization.k8s.io", ("roles", "rolebindings")),
 )
@@ -71,8 +78,11 @@ def guard_policies(namespace: str, webhook: str, deployers: Sequence[str], enfor
         not deployer or any(character in deployer for character in "'\\\n") for deployer in deployers
     ):
         raise ValueError("deployers must be non-empty user names without quotes or backslashes")
-    if any(deployer in CONTROLLERS or deployer.startswith("system:node:") for deployer in deployers):
-        raise ValueError("a deployer may not be a controller or node identity")
+    if any(_reserved(deployer, namespace) for deployer in deployers):
+        raise ValueError(
+            "a deployer may not be anonymous, a control-plane, node or kube-system identity,"
+            " or a service account in the webhook namespace"
+        )
     actions = ["Deny"] if enforce else ["Audit", "Warn"]
     deployer_list = json.dumps(sorted(set(deployers)))
     return [
@@ -123,6 +133,22 @@ def guard_policies(namespace: str, webhook: str, deployers: Sequence[str], enfor
     ]
 
 
+def _reserved(deployer: str, namespace: str) -> bool:
+    return (
+        deployer in CONTROLLERS
+        or deployer == "system:anonymous"
+        or deployer.startswith(
+            (
+                "system:unauthenticated",
+                "system:node:",
+                "system:kube-",
+                "system:serviceaccount:kube-system:",
+                f"system:serviceaccount:{namespace}:",
+            )
+        )
+    )
+
+
 def _namespace_variables(deployer_list: str) -> list[dict[str, str]]:
     return [
         {"name": "user", "expression": "request.userInfo.username"},
@@ -145,6 +171,10 @@ def _namespace_validations() -> list[dict[str, str]]:
     checks = (
         ("request.operation != 'CONNECT'", "exec, attach and port-forward are denied in the webhook namespace"),
         ("variables.subresource != 'ephemeralcontainers'", "ephemeral containers are denied in the webhook namespace"),
+        (
+            "variables.subresource != 'binding' || variables.user == 'system:kube-scheduler'",
+            "only the scheduler may bind Pods in the webhook namespace",
+        ),
         (
             f"!(request.operation == 'CREATE' && variables.resource in {json.dumps(list(UNUSED_WORKLOADS))})",
             "only the generated Deployment may run Pods in the webhook namespace",
