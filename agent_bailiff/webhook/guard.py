@@ -80,6 +80,8 @@ def guard_policies(namespace: str, webhook: str, deployers: Sequence[str], enfor
         not deployer or any(character in deployer for character in "'\\\n") for deployer in deployers
     ):
         raise ValueError("deployers must be non-empty user names without quotes or backslashes")
+    if any(_malformed_service_account(deployer) for deployer in deployers):
+        raise ValueError("a service account deployer must be system:serviceaccount:<namespace>:<name>")
     if any(_reserved(deployer, namespace) for deployer in deployers):
         raise ValueError(
             "a deployer may not be anonymous, a control-plane, node or kube-system identity,"
@@ -133,6 +135,13 @@ def guard_policies(namespace: str, webhook: str, deployers: Sequence[str], enfor
         ),
         _binding(REGISTRATION_GUARD, actions, {}),
     ]
+
+
+def _malformed_service_account(deployer: str) -> bool:
+    if not deployer.startswith("system:serviceaccount:"):
+        return False
+    parts = deployer.removeprefix("system:serviceaccount:").split(":")
+    return len(parts) != 2 or not all(parts)
 
 
 def _reserved(deployer: str, namespace: str) -> bool:

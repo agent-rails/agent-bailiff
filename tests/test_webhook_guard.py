@@ -86,6 +86,10 @@ def test_controller_identities_are_exact_names():
         ["system:kube-proxy"],
         ["system:serviceaccount:kube-system:argocd"],
         ["system:serviceaccount:ns:default"],
+        ["system:serviceaccount:foo"],
+        ["system:serviceaccount:a:b:c"],
+        ["system:serviceaccount::x"],
+        ["system:serviceaccount:x:"],
     ],
 )
 def test_bad_deployers_are_refused(deployers):
