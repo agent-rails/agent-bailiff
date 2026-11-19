@@ -22,6 +22,8 @@ POD_DEFAULTS = {
     "terminationGracePeriodSeconds": 30,
 }
 DEPLOYMENT_DEFAULTS = {"progressDeadlineSeconds": 600, "revisionHistoryLimit": 10}
+PROBE_DEFAULTS = {"failureThreshold": 3, "periodSeconds": 10, "successThreshold": 1, "timeoutSeconds": 1}
+PORT_DEFAULTS = {"protocol": "TCP"}
 SCHEDULED_TOLERATIONS = [
     {"effect": "NoExecute", "key": "node.kubernetes.io/not-ready", "operator": "Exists", "tolerationSeconds": 300},
     {"effect": "NoExecute", "key": "node.kubernetes.io/unreachable", "operator": "Exists", "tolerationSeconds": 300},
@@ -45,7 +47,7 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
     ("", "secrets", None, True, NAME + "-tls", WRITE_VERBS + ("get", "list", "watch")),
     ("", "pods", None, True, None, ("create", "update", "patch")),
     ("", "pods", "status", True, None, ("update", "patch")),
-    ("", "pods", "portforward", True, None, ("create",)),
+    ("", "pods", "portforward", True, None, ("create", "get")),
     ("", "serviceaccounts", "token", True, None, ("create",)),
     ("apps", "replicasets", None, True, None, ("create", "update", "patch")),
     ("apps", "statefulsets", None, True, None, ("create",)),
@@ -55,8 +57,8 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
     ("", "replicationcontrollers", None, True, None, ("create",)),
     ("rbac.authorization.k8s.io", "roles", None, True, None, ("create", "update", "patch")),
     ("rbac.authorization.k8s.io", "rolebindings", None, True, None, ("create", "update", "patch")),
-    ("", "pods", "exec", True, None, ("create",)),
-    ("", "pods", "attach", True, None, ("create",)),
+    ("", "pods", "exec", True, None, ("create", "get")),
+    ("", "pods", "attach", True, None, ("create", "get")),
     ("", "pods", "ephemeralcontainers", True, None, ("update", "patch")),
     ("discovery.k8s.io", "endpointslices", None, True, None, ("create", "update", "patch")),
     ("", "endpoints", None, True, None, ("create", "update", "patch")),
@@ -136,37 +138,51 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
     return _pod_spec_drift(expected_pod, actual_pod)
 
 
+def _without_defaults(
+    actual: Mapping[str, Any], expected: Mapping[str, Any], defaults: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {key: value for key, value in actual.items() if key in expected or value != defaults.get(key)}
+
+
+def _normalized_container(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> dict[str, Any]:
+    container = _without_defaults(copy.deepcopy(dict(actual)), expected, CONTAINER_DEFAULTS)
+    for probe in ("readinessProbe", "livenessProbe", "startupProbe"):
+        if isinstance(container.get(probe), dict) and isinstance(expected.get(probe), dict):
+            container[probe] = _without_defaults(container[probe], expected[probe], PROBE_DEFAULTS)
+    ports = container.get("ports")
+    expected_ports = expected.get("ports")
+    if isinstance(ports, list) and isinstance(expected_ports, list) and len(ports) == len(expected_ports):
+        container["ports"] = [
+            _without_defaults(port, expected_port, PORT_DEFAULTS) if isinstance(port, dict) else port
+            for port, expected_port in zip(ports, expected_ports, strict=True)
+        ]
+    return container
+
+
 def _pod_spec_drift(expected_pod: Mapping[str, Any], actual_pod: Mapping[str, Any]) -> bool:
-    if any(key not in expected_pod and value != POD_DEFAULTS.get(key) for key, value in actual_pod.items()):
-        return True
-    if actual_pod.get("securityContext") != expected_pod.get("securityContext"):
-        return True
+    pod = _without_defaults(copy.deepcopy(dict(actual_pod)), expected_pod, POD_DEFAULTS)
     expected_containers = expected_pod.get("containers")
-    actual_containers = actual_pod.get("containers")
-    if not isinstance(expected_containers, list) or not isinstance(actual_containers, list):
+    containers = pod.get("containers")
+    if not isinstance(expected_containers, list) or not isinstance(containers, list):
         return True
-    if len(expected_containers) != len(actual_containers):
+    if len(expected_containers) != len(containers):
         return True
-    for expected_container, actual_container in zip(expected_containers, actual_containers, strict=True):
-        if not isinstance(expected_container, dict) or not isinstance(actual_container, dict):
-            return True
-        if actual_container.get("securityContext") != expected_container.get("securityContext"):
-            return True
-        if _extra_container_fields(expected_container, actual_container):
-            return True
-        if actual_container.get("volumeMounts") != expected_container.get("volumeMounts"):
-            return True
+    if not all(isinstance(container, dict) for container in containers):
+        return True
+    pod["containers"] = [
+        _normalized_container(container, expected_container)
+        for container, expected_container in zip(containers, expected_containers, strict=True)
+    ]
     expected_volumes = expected_pod.get("volumes")
-    actual_volumes = actual_pod.get("volumes")
-    if not isinstance(expected_volumes, list) or not isinstance(actual_volumes, list):
+    volumes = pod.get("volumes")
+    if not isinstance(expected_volumes, list) or not isinstance(volumes, list):
         return True
-    if len(expected_volumes) != len(actual_volumes) or not all(isinstance(volume, dict) for volume in actual_volumes):
+    if len(expected_volumes) != len(volumes) or not all(isinstance(volume, dict) for volume in volumes):
         return True
-    normalized_volumes = copy.deepcopy(actual_volumes)
-    for expected_volume, actual_volume in zip(expected_volumes, normalized_volumes, strict=True):
+    for expected_volume, volume in zip(expected_volumes, volumes, strict=True):
         for source in ("configMap", "secret"):
             expected_source = expected_volume.get(source)
-            actual_source = actual_volume.get(source)
+            actual_source = volume.get(source)
             if (
                 isinstance(expected_source, dict)
                 and isinstance(actual_source, dict)
@@ -174,7 +190,7 @@ def _pod_spec_drift(expected_pod: Mapping[str, Any], actual_pod: Mapping[str, An
                 and actual_source.get("defaultMode") == 420
             ):
                 actual_source.pop("defaultMode")
-    return normalized_volumes != expected_volumes
+    return pod != expected_pod
 
 
 def _unscheduled_pod_spec(spec: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -187,11 +203,13 @@ def _unscheduled_pod_spec(spec: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if unscheduled.pop("tolerations", SCHEDULED_TOLERATIONS) != SCHEDULED_TOLERATIONS:
         return None
+    pull_secrets = unscheduled.pop("imagePullSecrets", [])
+    if not isinstance(pull_secrets, list) or not all(
+        isinstance(secret, dict) and set(secret) == {"name"} and isinstance(secret["name"], str)
+        for secret in pull_secrets
+    ):
+        return None
     return unscheduled
-
-
-def _extra_container_fields(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
-    return any(key not in expected and value != CONTAINER_DEFAULTS.get(key) for key, value in actual.items())
 
 
 def _is_webhook_pod(pod: Mapping[str, Any], template: Mapping[str, Any], addresses: Sequence[str]) -> bool:
@@ -204,7 +222,7 @@ def _is_webhook_pod(pod: Mapping[str, Any], template: Mapping[str, Any], address
         return False
     unscheduled = _unscheduled_pod_spec(spec)
     expected = template["spec"]
-    if unscheduled is None or not _contains(expected, unscheduled) or _pod_spec_drift(expected, unscheduled):
+    if unscheduled is None or _pod_spec_drift(expected, unscheduled):
         return False
     pod_ips = {entry.get("ip") for entry in status.get("podIPs") or [] if isinstance(entry, dict)}
     return bool(addresses) and set(addresses) <= pod_ips

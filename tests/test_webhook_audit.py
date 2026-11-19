@@ -158,7 +158,9 @@ def test_access_reviews_target_the_webhook_namespace_and_its_attack_surface():
     }
     assert ("deployments", "scale", "patch") in reviewed
     assert ("pods", None, "create") in reviewed
-    assert ("pods", "exec", "create") in reviewed
+    for subresource in ("exec", "attach", "portforward"):
+        assert ("pods", subresource, "create") in reviewed
+        assert ("pods", subresource, "get") in reviewed
     assert ("endpointslices", None, "create") in reviewed
     assert ("pods", None, "patch") in reviewed
     for workload in ("replicasets", "statefulsets", "daemonsets", "jobs", "cronjobs", "replicationcontrollers"):
@@ -247,6 +249,18 @@ def test_a_clean_cluster_has_no_endpoint_or_rollout_problems():
         lambda api: api.pod()["spec"]["volumes"].append({"name": "x", "emptyDir": {}}),
         lambda api: api.pod()["spec"]["containers"][0]["volumeMounts"][0].update(subPath="x"),
         lambda api: api.pod()["spec"]["containers"][0]["volumeMounts"][1].update(mountPropagation="Bidirectional"),
+        lambda api: api.pod()["spec"]["containers"][0]["ports"][0].update(hostPort=9443, hostIP="0.0.0.0"),
+        lambda api: api.pod()["spec"]["containers"][0]["resources"]["limits"].update({"nvidia.com/gpu": "1"}),
+        lambda api: api.pod()["spec"]["containers"][0]["readinessProbe"]["httpGet"].update(host="203.0.113.5"),
+        lambda api: api.pod()["spec"]["containers"][0]["readinessProbe"]["httpGet"].update(
+            httpHeaders=[{"name": "Host", "value": "x"}]
+        ),
+        lambda api: api.pod()["spec"]["containers"][0]["readinessProbe"].update(timeoutSeconds=30),
+        lambda api: api.pod()["spec"]["containers"][0]["ports"][0].update(protocol="UDP"),
+        lambda api: api.pod()["spec"]["affinity"].update(
+            nodeAffinity={"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": []}}
+        ),
+        lambda api: api.pod()["spec"].update(imagePullSecrets=[{"name": "x", "extra": "y"}]),
     ],
 )
 def test_an_endpoint_that_is_not_a_generated_webhook_pod_is_reported(mutate):
@@ -260,6 +274,7 @@ def test_an_endpoint_that_is_not_a_generated_webhook_pod_is_reported(mutate):
         lambda spec: spec.update(minReadySeconds=3600),
         lambda spec: spec["template"]["spec"]["volumes"].append({"name": "x", "emptyDir": {}}),
         lambda spec: spec["template"]["spec"].update(runtimeClassName="attacker"),
+        lambda spec: spec["template"]["spec"]["containers"][0]["ports"][0].update(hostPort=9443),
     ],
 )
 def test_a_deployment_that_differs_from_the_generated_one_is_drift(mutate):
@@ -267,6 +282,10 @@ def test_a_deployment_that_differs_from_the_generated_one_is_drift(mutate):
         mutate(_live(api, "/deployments/" + NAME)["spec"])
 
     assert any(problem.startswith("drift: Deployment ") for problem in audit_problems(change))
+
+
+def test_image_pull_secrets_from_the_service_account_are_accepted():
+    assert audit_problems(lambda api: api.pod()["spec"].update(imagePullSecrets=[{"name": "registry"}])) == []
 
 
 def test_the_webhook_namespace_as_the_effector_namespace_is_reported():
