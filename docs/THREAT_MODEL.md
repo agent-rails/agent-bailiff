@@ -93,6 +93,8 @@ These are known and accepted for the current release:
 - **The restart policy compares a fixed list of fields.** When the cluster's Deployment schema differs from that list, the drift check withdraws restart from the effector. After an upgrade that adds a Deployment or ObjectMeta field, a stolen effector token can change that field through the restart identity in Audit mode or when the release webhook is absent, until the policy is regenerated.
 - **A restart follows the Deployment's strategy.** Under `Recreate`, or `maxUnavailable` at least the replica count, it is an outage. Rollouts do not consult PodDisruptionBudgets.
 - **A stolen audit token reveals the cluster's RBAC and admission layout.** It lists them cluster-wide.
+- **A network peer that can reach the release webhook can exhaust its connection slots.** Each connection is cut after 5 s, but repeated connections still deny bailiff writes in Enforce and hide them from `would_deny` in Audit. Ingress must be restricted to the API server on the target cluster; this is not generated.
+- **Other admission webhooks and API audit-log readers see the release extra** and can replay a released write within its lifetime.
 - **The release webhook namespace is a trusted boundary.** A principal who can create a Pod there may mount the serving TLS Secret and spoof the Service selector; the webhook's current audit does not enumerate all principals or serving endpoint provenance. Enforce requires a dedicated restricted namespace, an effective access review across principals/groups, and endpoint-owner verification.
 - **The effector's op-id in Kubernetes audit events is unverified.** It is sent as an impersonation extra.
 - **On macOS, `fsync` does not flush the drive cache.**
