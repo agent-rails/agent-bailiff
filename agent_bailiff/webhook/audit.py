@@ -12,6 +12,20 @@ CONTAINER_DEFAULTS = {
     "terminationMessagePath": "/dev/termination-log",
     "terminationMessagePolicy": "File",
 }
+POD_DEFAULTS = {
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": True,
+    "preemptionPolicy": "PreemptLowerPriority",
+    "restartPolicy": "Always",
+    "schedulerName": "default-scheduler",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 30,
+}
+DEPLOYMENT_DEFAULTS = {"progressDeadlineSeconds": 600, "revisionHistoryLimit": 10}
+SCHEDULED_TOLERATIONS = [
+    {"effect": "NoExecute", "key": "node.kubernetes.io/not-ready", "operator": "Exists", "tolerationSeconds": 300},
+    {"effect": "NoExecute", "key": "node.kubernetes.io/unreachable", "operator": "Exists", "tolerationSeconds": 300},
+]
 REQUIRED_KINDS = (
     "ConfigMap",
     "Deployment",
@@ -30,6 +44,9 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
     ("", "configmaps", None, True, NAME + "-pins", WRITE_VERBS),
     ("", "secrets", None, True, NAME + "-tls", WRITE_VERBS + ("get", "list", "watch")),
     ("", "pods", None, True, None, ("create", "update", "patch")),
+    ("", "pods", "status", True, None, ("update", "patch")),
+    ("", "pods", "portforward", True, None, ("create",)),
+    ("", "serviceaccounts", "token", True, None, ("create",)),
     ("apps", "replicasets", None, True, None, ("create", "update", "patch")),
     ("apps", "statefulsets", None, True, None, ("create",)),
     ("apps", "daemonsets", None, True, None, ("create",)),
@@ -43,6 +60,16 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
     ("", "pods", "ephemeralcontainers", True, None, ("update", "patch")),
     ("discovery.k8s.io", "endpointslices", None, True, None, ("create", "update", "patch")),
     ("", "endpoints", None, True, None, ("create", "update", "patch")),
+    ("admissionregistration.k8s.io", "mutatingwebhookconfigurations", None, False, None, ("create", "update", "patch")),
+    ("admissionregistration.k8s.io", "mutatingadmissionpolicies", None, False, None, ("create", "update", "patch")),
+    (
+        "admissionregistration.k8s.io",
+        "mutatingadmissionpolicybindings",
+        None,
+        False,
+        None,
+        ("create", "update", "patch"),
+    ),
 )
 
 
@@ -96,6 +123,8 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
     actual_spec = actual.get("spec")
     if not isinstance(expected_spec, dict) or not isinstance(actual_spec, dict):
         return True
+    if any(key not in expected_spec and value != DEPLOYMENT_DEFAULTS.get(key) for key, value in actual_spec.items()):
+        return True
     expected_template = expected_spec.get("template")
     actual_template = actual_spec.get("template")
     if not isinstance(expected_template, dict) or not isinstance(actual_template, dict):
@@ -104,22 +133,14 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
     actual_pod = actual_template.get("spec")
     if not isinstance(expected_pod, dict) or not isinstance(actual_pod, dict):
         return True
-    pod_defaults = {
-        "dnsPolicy": "ClusterFirst",
-        "enableServiceLinks": True,
-        "preemptionPolicy": "PreemptLowerPriority",
-        "restartPolicy": "Always",
-        "schedulerName": "default-scheduler",
-        "serviceAccountName": "default",
-        "terminationGracePeriodSeconds": 30,
-    }
-    if any(key not in expected_pod and value != pod_defaults.get(key) for key, value in actual_pod.items()):
+    return _pod_spec_drift(expected_pod, actual_pod)
+
+
+def _pod_spec_drift(expected_pod: Mapping[str, Any], actual_pod: Mapping[str, Any]) -> bool:
+    if any(key not in expected_pod and value != POD_DEFAULTS.get(key) for key, value in actual_pod.items()):
         return True
     if actual_pod.get("securityContext") != expected_pod.get("securityContext"):
         return True
-    for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"):
-        if actual_pod.get(field, False) is not False:
-            return True
     expected_containers = expected_pod.get("containers")
     actual_containers = actual_pod.get("containers")
     if not isinstance(expected_containers, list) or not isinstance(actual_containers, list):
@@ -139,6 +160,8 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
     actual_volumes = actual_pod.get("volumes")
     if not isinstance(expected_volumes, list) or not isinstance(actual_volumes, list):
         return True
+    if len(expected_volumes) != len(actual_volumes) or not all(isinstance(volume, dict) for volume in actual_volumes):
+        return True
     normalized_volumes = copy.deepcopy(actual_volumes)
     for expected_volume, actual_volume in zip(expected_volumes, normalized_volumes, strict=True):
         for source in ("configMap", "secret"):
@@ -154,6 +177,19 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
     return normalized_volumes != expected_volumes
 
 
+def _unscheduled_pod_spec(spec: Mapping[str, Any]) -> dict[str, Any] | None:
+    unscheduled = dict(spec)
+    if not isinstance(unscheduled.pop("nodeName", ""), str):
+        return None
+    if unscheduled.pop("priority", 0) != 0:
+        return None
+    if unscheduled.pop("serviceAccount", spec.get("serviceAccountName")) != spec.get("serviceAccountName"):
+        return None
+    if unscheduled.pop("tolerations", SCHEDULED_TOLERATIONS) != SCHEDULED_TOLERATIONS:
+        return None
+    return unscheduled
+
+
 def _extra_container_fields(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
     return any(key not in expected and value != CONTAINER_DEFAULTS.get(key) for key, value in actual.items())
 
@@ -166,20 +202,10 @@ def _is_webhook_pod(pod: Mapping[str, Any], template: Mapping[str, Any], address
         return False
     if not _contains(template["metadata"]["labels"], metadata.get("labels")):
         return False
+    unscheduled = _unscheduled_pod_spec(spec)
     expected = template["spec"]
-    if not _contains(expected, spec) or spec.get("securityContext") != expected.get("securityContext"):
+    if unscheduled is None or not _contains(expected, unscheduled) or _pod_spec_drift(expected, unscheduled):
         return False
-    if spec.get("initContainers") or spec.get("ephemeralContainers"):
-        return False
-    if any(
-        spec.get(field, False) is not False for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace")
-    ):
-        return False
-    for expected_container, container in zip(expected["containers"], spec["containers"], strict=True):
-        if container.get("securityContext") != expected_container.get("securityContext"):
-            return False
-        if _extra_container_fields(expected_container, container):
-            return False
     pod_ips = {entry.get("ip") for entry in status.get("podIPs") or [] if isinstance(entry, dict)}
     return bool(addresses) and set(addresses) <= pod_ips
 
@@ -243,6 +269,11 @@ class WebhookAudit:
 
     def check(self) -> list[str]:
         problems: list[str] = []
+        if self._webhook_namespace == self._namespace:
+            problems.append(
+                f"namespace: webhook namespace {self._webhook_namespace} is also the effector namespace; "
+                "move the webhook to a dedicated namespace, then rerun audit"
+            )
         if self._webhook_namespace in self._tenant_namespaces:
             problems.append(
                 f"namespace: webhook namespace {self._webhook_namespace} is also a tenant namespace; "
@@ -286,13 +317,19 @@ class WebhookAudit:
         return []
 
     def _serving_endpoints(self, template: Mapping[str, Any]) -> list[str]:
-        slices = self._request(
-            "GET",
-            f"/apis/discovery.k8s.io/v1/namespaces/{self._webhook_namespace}/endpointslices"
-            f"?labelSelector=kubernetes.io%2Fservice-name%3D{NAME}",
-        ).get("items")
+        try:
+            slices = self._request(
+                "GET",
+                f"/apis/discovery.k8s.io/v1/namespaces/{self._webhook_namespace}/endpointslices"
+                f"?labelSelector=kubernetes.io%2Fservice-name%3D{NAME}",
+            ).get("items")
+        except RuntimeError as exc:
+            return [
+                f"endpoint: {exc}; grant the audit account list on EndpointSlices with "
+                "agent-bailiff effector manifests --webhook-namespace, then rerun audit"
+            ]
         if not isinstance(slices, list):
-            raise RuntimeError("webhook audit API returned EndpointSlices without items")
+            return ["endpoint: webhook audit API returned EndpointSlices without items; rerun audit"]
         problems: list[str] = []
         ready = 0
         for endpoint_slice in slices:

@@ -8,6 +8,41 @@ from agent_bailiff.webhook.audit import PROTECTED_REVIEWS, WebhookAudit, _path
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
 
+def with_server_defaults(pod_spec):
+    pod_spec.update(
+        dnsPolicy="ClusterFirst",
+        enableServiceLinks=True,
+        preemptionPolicy="PreemptLowerPriority",
+        restartPolicy="Always",
+        schedulerName="default-scheduler",
+        serviceAccountName="default",
+        terminationGracePeriodSeconds=30,
+    )
+    for container in pod_spec["containers"]:
+        container.update(terminationMessagePath="/dev/termination-log", terminationMessagePolicy="File")
+        container["readinessProbe"].update(failureThreshold=3, periodSeconds=10, successThreshold=1, timeoutSeconds=1)
+        for port in container["ports"]:
+            port["protocol"] = "TCP"
+    for volume in pod_spec["volumes"]:
+        for source in ("configMap", "secret"):
+            if source in volume:
+                volume[source]["defaultMode"] = 420
+    return pod_spec
+
+
+def scheduled(pod_spec):
+    pod_spec.update(
+        nodeName="node-a",
+        priority=0,
+        serviceAccount="default",
+        tolerations=[
+            {"effect": "NoExecute", "key": key, "operator": "Exists", "tolerationSeconds": 300}
+            for key in ("node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable")
+        ],
+    )
+    return pod_spec
+
+
 class FakeApi:
     def __init__(self, manifests):
         self.objects = {_path(item): copy.deepcopy(item) for item in manifests["items"]}
@@ -17,6 +52,8 @@ class FakeApi:
         namespace = deployment["metadata"]["namespace"]
         live = self.objects[_path(deployment)]
         live["metadata"]["generation"] = 2
+        live["spec"].update(progressDeadlineSeconds=600, revisionHistoryLimit=10)
+        with_server_defaults(live["spec"]["template"]["spec"])
         live["status"] = {
             "observedGeneration": 2,
             "replicas": 2,
@@ -31,7 +68,7 @@ class FakeApi:
             template = copy.deepcopy(deployment["spec"]["template"])
             self.objects[f"/api/v1/namespaces/{namespace}/pods/{name}"] = {
                 "metadata": {"name": name, "namespace": namespace, "labels": template["metadata"]["labels"]},
-                "spec": template["spec"],
+                "spec": scheduled(with_server_defaults(template["spec"])),
                 "status": {"podIPs": [{"ip": ip}]},
             }
             endpoints.append(
@@ -62,16 +99,11 @@ class FakeApi:
 
 
 def test_drift_and_access_reviews_cover_the_webhook_assets():
-    manifests = generate_manifests(
-        namespace="bailiff-system",
-        image="example/release@sha256:" + "a" * 64,
-        ca_pem=b"-----BEGIN CERTIFICATE-----\nmock\n-----END CERTIFICATE-----\n",
-        pins={"catalog_digest": CATALOG.digest},
-        catalog=CATALOG,
-        enforce=True,
-    )
+    manifests = manifests_in("bailiff-system")
     api = FakeApi(manifests)
-    audit = WebhookAudit(api, "audit-token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"])
+    audit = WebhookAudit(
+        api, "audit-token", manifests, "bailiff-effector", "effector", ["bailiff:ta:scale"], ["staging"]
+    )
     assert audit.check() == []
     assert len(api.reviews) == 2 * sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS)
     webhook_path = "/validatingwebhookconfigurations/bailiff-release-webhook"
@@ -105,6 +137,7 @@ def manifests_in(namespace):
         pins={"catalog_digest": CATALOG.digest},
         catalog=CATALOG,
         enforce=True,
+        phase="target",
     )
 
 
@@ -200,10 +233,51 @@ def test_a_clean_cluster_has_no_endpoint_or_rollout_problems():
         lambda api: api.pod()["status"].update(podIPs=[{"ip": "10.9.9.9"}]),
         lambda api: api.endpoints()[0].pop("targetRef"),
         lambda api: api.endpoints()[0]["targetRef"].update(namespace="other"),
+        lambda api: api.pod()["spec"].update(hostAliases=[{"ip": "10.9.9.9", "hostnames": ["kubernetes.default"]}]),
+        lambda api: api.pod()["spec"].update(dnsPolicy="None", dnsConfig={"nameservers": ["10.9.9.9"]}),
+        lambda api: api.pod()["spec"].update(runtimeClassName="attacker"),
+        lambda api: api.pod()["spec"].update(hostUsers=True),
+        lambda api: api.pod()["spec"].update(serviceAccountName="attacker", serviceAccount="attacker"),
+        lambda api: api.pod()["spec"].update(serviceAccount="attacker"),
+        lambda api: api.pod()["spec"].update(readinessGates=[{"conditionType": "x"}]),
+        lambda api: api.pod()["spec"].update(priority=1000),
+        lambda api: api.pod()["spec"]["tolerations"].append({"operator": "Exists"}),
+        lambda api: api.pod()["spec"]["volumes"][1]["secret"].update(optional=True),
+        lambda api: api.pod()["spec"]["volumes"][0]["configMap"].update(items=[{"key": "x", "path": "webhook.json"}]),
+        lambda api: api.pod()["spec"]["volumes"].append({"name": "x", "emptyDir": {}}),
+        lambda api: api.pod()["spec"]["containers"][0]["volumeMounts"][0].update(subPath="x"),
+        lambda api: api.pod()["spec"]["containers"][0]["volumeMounts"][1].update(mountPropagation="Bidirectional"),
     ],
 )
 def test_an_endpoint_that_is_not_a_generated_webhook_pod_is_reported(mutate):
     assert any(problem.startswith("endpoint: ") for problem in audit_problems(mutate))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda spec: spec.update(paused=True),
+        lambda spec: spec.update(minReadySeconds=3600),
+        lambda spec: spec["template"]["spec"]["volumes"].append({"name": "x", "emptyDir": {}}),
+        lambda spec: spec["template"]["spec"].update(runtimeClassName="attacker"),
+    ],
+)
+def test_a_deployment_that_differs_from_the_generated_one_is_drift(mutate):
+    def change(api):
+        mutate(_live(api, "/deployments/" + NAME)["spec"])
+
+    assert any(problem.startswith("drift: Deployment ") for problem in audit_problems(change))
+
+
+def test_the_webhook_namespace_as_the_effector_namespace_is_reported():
+    manifests = manifests_in("bailiff-system")
+    audit = WebhookAudit(FakeApi(manifests), "token", manifests, "bailiff-system", "effector", [], ["staging"])
+    assert any("bailiff-system is also the effector namespace" in issue for issue in audit.check())
+
+
+def test_an_endpoint_slice_list_failure_is_reported():
+    problems = audit_problems(lambda api: api.objects.pop(api.slices_path))
+    assert any(problem.startswith("endpoint: webhook audit API returned 404") for problem in problems)
 
 
 def test_no_ready_endpoint_is_reported():
