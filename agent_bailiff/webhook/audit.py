@@ -63,6 +63,11 @@ THROTTLE_RETRIES = 5
 RETRY_BASE_SECONDS = 0.5
 RETRY_MAX_SECONDS = 8.0
 NODES_PATH = "/api/v1/nodes?limit=500"
+BINDING_PATHS = (
+    "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings?limit=500",
+    "/apis/rbac.authorization.k8s.io/v1/rolebindings?limit=500",
+)
+REVIEWED_GROUPS = (None, "system:nodes", "system:masters")
 METADATA_LIST = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json"
 Review = tuple[str, str, str | None, str | None, str | None, tuple[str, ...]]
 
@@ -146,7 +151,7 @@ PROTECTED_REVIEWS: tuple[Review, ...] = (
     (CONSTRAINED, "nodes", None, None, None, NODE_VERBS),
     *(
         review
-        for group in (None, "system:nodes", "system:masters")
+        for group in REVIEWED_GROUPS
         for review in (
             ("", "groups", None, None, group, ("impersonate",)),
             (CONSTRAINED, "groups", None, None, group, ("impersonate:user-info",)),
@@ -402,6 +407,7 @@ class WebhookAudit:
         self._webhook_namespace = namespaces.pop()
         self._deployers = _deployers(manifests, self._webhook_namespace)
         self._nodes: set[str] = set()
+        self._groups: set[str] = set()
         self._serving_pods: set[str] = set()
         items = manifests["items"]
         service = next(item for item in items if item["kind"] == "Service")
@@ -448,6 +454,7 @@ class WebhookAudit:
     def check(self) -> list[str]:
         problems: list[str] = []
         self._nodes = set()
+        self._groups = set()
         self._serving_pods = set()
         if self._webhook_namespace == self._namespace:
             problems.append(
@@ -477,31 +484,70 @@ class WebhookAudit:
                     "or move webhook to Audit mode, investigate, then rerun audit"
                 )
         problems.extend(self._cluster_nodes())
+        problems.extend(self._bound_groups())
         problems.extend(self._access_reviews())
         return problems
 
-    def _cluster_nodes(self) -> list[str]:
-        path = NODES_PATH
+    def _list(self, path: str, kind: str, accept: str = "application/json") -> list[dict[str, Any]]:
+        listed: list[dict[str, Any]] = []
+        page_path = path
         while True:
+            page = self._request("GET", page_path, accept=accept)
+            items = page.get("items")
+            metadata = page.get("metadata", {})
+            if not isinstance(items, list) or not isinstance(metadata, dict):
+                raise ValueError(f"webhook audit API returned {kind} without items")
+            if not all(isinstance(item, dict) for item in items):
+                raise ValueError(f"webhook audit API returned {kind} that are not objects")
+            listed.extend(items)
+            token = metadata.get("continue")
+            if not token:
+                return listed
+            if not isinstance(token, str):
+                raise ValueError(f"webhook audit API returned {kind} with an invalid continue token")
+            page_path = f"{path}&continue={urllib.parse.quote(token, safe='')}"
+
+    def _cluster_nodes(self) -> list[str]:
+        try:
+            nodes = self._list(NODES_PATH, "nodes", METADATA_LIST)
+        except ValueError as exc:
+            return [f"node: {exc}; rerun audit"]
+        except RuntimeError as exc:
+            return [
+                f"node: {exc}; grant the audit account list on nodes with agent-bailiff effector manifests, "
+                "then rerun audit"
+            ]
+        for node in nodes:
+            metadata = node.get("metadata")
+            name = metadata.get("name") if isinstance(metadata, dict) else None
+            if not isinstance(name, str) or not name:
+                return ["node: webhook audit API returned a node without a name; rerun audit"]
+            self._nodes.add(name)
+        return []
+
+    def _bound_groups(self) -> list[str]:
+        for path in BINDING_PATHS:
             try:
-                page = self._request("GET", path, accept=METADATA_LIST)
+                bindings = self._list(path, "role bindings")
+            except ValueError as exc:
+                return [f"group: {exc}; rerun audit"]
             except RuntimeError as exc:
                 return [
-                    f"node: {exc}; grant the audit account list on nodes with agent-bailiff effector manifests, "
-                    "then rerun audit"
+                    f"group: {exc}; grant the audit account list on role bindings with agent-bailiff effector "
+                    "manifests, then rerun audit"
                 ]
-            items = page.get("items")
-            if not isinstance(items, list):
-                return ["node: webhook audit API returned nodes without items; rerun audit"]
-            for node in items:
-                name = node.get("metadata", {}).get("name") if isinstance(node, dict) else None
-                if not isinstance(name, str) or not name:
-                    return ["node: webhook audit API returned a node without a name; rerun audit"]
-                self._nodes.add(name)
-            token = page.get("metadata", {}).get("continue")
-            if not token:
-                return []
-            path = f"{NODES_PATH}&continue={urllib.parse.quote(token, safe='')}"
+            for binding in bindings:
+                subjects = binding.get("subjects") or []
+                if not isinstance(subjects, list) or not all(isinstance(subject, dict) for subject in subjects):
+                    return ["group: webhook audit API returned a role binding with invalid subjects; rerun audit"]
+                for subject in subjects:
+                    if subject.get("kind") != "Group":
+                        continue
+                    name = subject.get("name")
+                    if not isinstance(name, str) or not name:
+                        return ["group: webhook audit API returned a group subject without a name; rerun audit"]
+                    self._groups.add(name)
+        return []
 
     def _rollout(self, live: Mapping[str, Any]) -> list[str]:
         status = live.get("status")
@@ -598,6 +644,9 @@ class WebhookAudit:
         for node in sorted(self._nodes):
             reviews.append(("", "users", None, None, f"system:node:{node}", ("impersonate",)))
             reviews.append((CONSTRAINED, "nodes", None, None, node, NODE_VERBS))
+        for group in sorted(self._groups - set(REVIEWED_GROUPS)):
+            reviews.append(("", "groups", None, None, group, ("impersonate",)))
+            reviews.append((CONSTRAINED, "groups", None, None, group, ("impersonate:user-info",)))
         return reviews
 
     def _access_reviews(self) -> list[str]:

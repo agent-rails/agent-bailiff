@@ -8,7 +8,14 @@ from test_effector import CATALOG
 
 from agent_bailiff.webhook import audit as audit_module
 from agent_bailiff.webhook import cli as webhook_cli
-from agent_bailiff.webhook.audit import METADATA_LIST, NODES_PATH, PROTECTED_REVIEWS, WebhookAudit, _path
+from agent_bailiff.webhook.audit import (
+    BINDING_PATHS,
+    METADATA_LIST,
+    NODES_PATH,
+    PROTECTED_REVIEWS,
+    WebhookAudit,
+    _path,
+)
 from agent_bailiff.webhook.guard import REGISTRATION_GUARD
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
@@ -89,6 +96,26 @@ class FakeApi:
         )
         self.objects[self.slices_path] = {"items": [{"metadata": {"name": NAME + "-x"}, "endpoints": endpoints}]}
         self.objects[NODES_PATH] = {"items": [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-idle"}}]}
+        group = {"apiGroup": "rbac.authorization.k8s.io", "kind": "Group"}
+        self.objects[BINDING_PATHS[0]] = {
+            "items": [
+                {"metadata": {"name": "ops"}, "subjects": [{**group, "name": "ops-admins"}]},
+                {"metadata": {"name": "masters"}, "subjects": [{**group, "name": "system:masters"}]},
+                {"metadata": {"name": "no-subjects"}},
+            ]
+        }
+        self.objects[BINDING_PATHS[1]] = {
+            "items": [
+                {
+                    "metadata": {"name": "dev", "namespace": "staging"},
+                    "subjects": [
+                        {**group, "name": "dev-team"},
+                        {"apiGroup": "rbac.authorization.k8s.io", "kind": "User", "name": "alice"},
+                        {"kind": "ServiceAccount", "name": "ci", "namespace": "staging"},
+                    ],
+                }
+            ]
+        }
 
     def pod(self, index=0):
         return next(value for path, value in self.objects.items() if path.endswith(f"/pods/{NAME}-abc-{index}"))
@@ -114,7 +141,7 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
     service_proxy = 9 * 2
     per_pod = 6 * 2 + 13 * 2
     assert len(api.reviews) == 2 * (
-        sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 2 * 3 + service_proxy + 2 * per_pod
+        sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 2 * 3 + 2 * 2 + service_proxy + 2 * per_pod
     )
     webhook_path = "/validatingwebhookconfigurations/bailiff-release-webhook"
     webhook = next(path for path in api.objects if path.endswith(webhook_path))
@@ -584,6 +611,62 @@ def test_access_reviews_cover_grants_scoped_to_a_serving_pod():
     assert ("", "webhook-ns", "pods", None, pod, "create") not in reviewed
 
 
+def test_every_group_named_in_a_role_binding_is_reviewed_for_impersonation():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
+    reviewed = reviewed_with_groups(api)
+    for group in ("ops-admins", "dev-team", "system:masters"):
+        assert ("", None, "groups", None, group, "impersonate") in reviewed
+        assert ("authentication.k8s.io", None, "groups", None, group, "impersonate:user-info") in reviewed
+    named = [(review[4], review[5]) for review in reviewed if review[2] in {"groups", "users"}]
+    assert ("alice", "impersonate") not in named
+    group_reviews = [review for review in api.reviews if review["resourceAttributes"]["resource"] == "groups"]
+    assert len(group_reviews) == len({str(review) for review in group_reviews})
+
+
+class GroupGrant(FakeApi):
+    def request(self, method, path, headers, body):
+        if method == "POST" and json.loads(body)["spec"]["resourceAttributes"].get("name") == "ops-admins":
+            self.reviews.append(json.loads(body)["spec"])
+            return 200, json.dumps({"status": {"allowed": True}}).encode()
+        return super().request(method, path, headers, body)
+
+
+def test_a_group_impersonation_grant_is_reported():
+    manifests = manifests_in("webhook-ns")
+    api = GroupGrant(manifests)
+    problems = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    assert [problem for problem in problems if "ops-admins" in problem] == [
+        "access: system:serviceaccount:bailiff-system:effector may impersonate groups/ops-admins in cluster scope; "
+        "remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit",
+        "access: system:serviceaccount:bailiff-system:effector may impersonate:user-info groups/ops-admins in "
+        "cluster scope; remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("index", "page", "message"),
+    [
+        (0, None, "group: webhook audit API returned 404 for /apis/rbac.authorization.k8s.io/v1/clusterrolebindings"),
+        (1, None, "group: webhook audit API returned 404 for /apis/rbac.authorization.k8s.io/v1/rolebindings"),
+        (0, {"items": None}, "group: webhook audit API returned role bindings without items"),
+        (1, {"items": [{"subjects": "x"}]}, "group: webhook audit API returned a role binding with invalid subjects"),
+        (0, {"items": [{"subjects": [{"kind": "Group"}]}]}, "group: webhook audit API returned a group subject"),
+        (1, {"items": [], "metadata": {"continue": 7}}, "group: webhook audit API returned role bindings with an"),
+    ],
+)
+def test_a_role_binding_list_that_cannot_be_read_is_reported(index, page, message):
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    if page is None:
+        del api.objects[BINDING_PATHS[index]]
+    else:
+        api.objects[BINDING_PATHS[index]] = page
+    problems = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    assert any(problem.startswith(message) for problem in problems), problems
+
+
 class PagedNodes(FakeApi):
     def __init__(self, manifests):
         super().__init__(manifests)
@@ -618,7 +701,7 @@ def test_node_lists_are_paged_as_metadata_and_every_page_is_reviewed():
         (None, "node: webhook audit API returned 404 for /api/v1/nodes?limit=500; grant the audit account list"),
         ({"items": "x"}, "node: webhook audit API returned nodes without items"),
         ({"items": [{"metadata": {}}]}, "node: webhook audit API returned a node without a name"),
-        ({"items": ["node-a"]}, "node: webhook audit API returned a node without a name"),
+        ({"items": ["node-a"]}, "node: webhook audit API returned nodes that are not objects; rerun audit"),
     ],
 )
 def test_a_node_list_that_cannot_be_read_is_reported(page, message):
