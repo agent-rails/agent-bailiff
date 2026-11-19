@@ -607,7 +607,9 @@ def test_node_lists_are_paged_as_metadata_and_every_page_is_reviewed():
     assert api.accepts == [METADATA_LIST, METADATA_LIST]
     reviewed = reviewed_with_groups(api)
     for node in ("node-1", "node-2"):
-        assert ("authentication.k8s.io", None, "nodes", None, node, "impersonate:arbitrary-node") in reviewed
+        assert ("", None, "users", None, f"system:node:{node}", "impersonate") in reviewed
+        for verb in ("impersonate:arbitrary-node", "impersonate:associated-node"):
+            assert ("authentication.k8s.io", None, "nodes", None, node, verb) in reviewed
 
 
 @pytest.mark.parametrize(
