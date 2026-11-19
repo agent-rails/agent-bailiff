@@ -4,10 +4,11 @@ import pytest
 from test_agentgateway_calls import message
 from test_agentgateway_config import gateway_config, problems_after
 
-from agent_bailiff.adapters.agentgateway.calls import CallRefused, ToolRoute, ToolRoutes, read_call, routes_from_catalog
+from agent_bailiff.adapters.agentgateway.calls import CallRefused, read_call
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor
 from agent_bailiff.effector.catalog import Argument, OperationCatalog
+from agent_bailiff.routes import ToolRoute, ToolRoutes, routes_from_catalog
 
 CATALOG = OperationCatalog.load(
     Path(__file__).resolve().parent.parent / "agent_bailiff" / "effector" / "catalogs" / "kubernetes.json"

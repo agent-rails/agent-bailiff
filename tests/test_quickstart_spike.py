@@ -10,12 +10,12 @@ from test_agentgateway_e2e import AGENT_TOKEN, BINARY, Agent, Gateway, agent_hea
 from test_custodian import NOW, docket_entries
 from test_decide import CUSTODIAN_ID, TENANT, make_request, make_root
 
-from agent_bailiff.adapters.agentgateway.calls import ToolRoute, ToolRoutes
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer
 from agent_bailiff.custodian import CredentialBinding, CredentialStore, LocalBackend
 from agent_bailiff.decide import CostTable, TargetBinding
+from agent_bailiff.routes import ToolRoute, ToolRoutes
 
 GITEA_MCP_URL = os.environ.get("AGENT_BAILIFF_TEST_GITEA_MCP_URL")
 GITEA_TOKEN_FILE = os.environ.get("AGENT_BAILIFF_TEST_GITEA_TOKEN_FILE")

@@ -6,11 +6,12 @@ from test_custodian import DEPLOY_SECRET, NOW, custodian_entries, docket_entries
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
-from agent_bailiff.adapters.agentgateway.calls import ToolRoute, ToolRoutes, read_call
+from agent_bailiff.adapters.agentgateway.calls import read_call
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.custodian import Refused, Released
 from agent_bailiff.decide import Decision
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.routes import ToolRoute, ToolRoutes
 
 ledger_path = test_custodian.ledger_path
 make_custodian = test_custodian.make_custodian

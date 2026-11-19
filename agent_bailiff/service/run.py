@@ -10,7 +10,6 @@ from typing import Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.adapters.agentgateway.calls import ToolRoutes
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ExtMcpProcessor, ProcessorServer
 from agent_bailiff.control.control import Control
@@ -33,6 +32,7 @@ from agent_bailiff.effector.rbac import generate_manifests
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
 from agent_bailiff.keys import key_id, load_signing_key
+from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.service.ledger import open_reader, open_writer
 from agent_bailiff.service.settings import (
     ControlSettings,

@@ -3,8 +3,9 @@ import json
 import pytest
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
-from agent_bailiff.adapters.agentgateway.calls import CallRefused, ToolRoute, ToolRoutes, read_call
+from agent_bailiff.adapters.agentgateway.calls import CallRefused, read_call
 from agent_bailiff.decide import OperationRequest
+from agent_bailiff.routes import ToolRoute, ToolRoutes
 
 ROUTES = ToolRoutes(
     [

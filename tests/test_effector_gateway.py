@@ -15,7 +15,6 @@ from test_custodian import docket_entries
 from test_decide import CUSTODIAN_ID, DECIDE_KEY, NOW, TENANT, make_request, make_root
 from test_effector import EFFECTOR_TOKEN, FakeTransport, RecordingDocket, Suspended, Verified
 
-from agent_bailiff.adapters.agentgateway.calls import routes_from_catalog
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer
@@ -27,6 +26,7 @@ from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.kubernetes import KubernetesClient
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer, _Handler
+from agent_bailiff.routes import routes_from_catalog
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
 pytestmark = test_agentgateway_e2e.pytestmark

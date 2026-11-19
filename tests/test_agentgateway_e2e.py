@@ -22,13 +22,13 @@ from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
-from agent_bailiff.adapters.agentgateway.calls import ToolRoute, ToolRoutes
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.routes import ToolRoute, ToolRoutes
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = "v1.7.0"

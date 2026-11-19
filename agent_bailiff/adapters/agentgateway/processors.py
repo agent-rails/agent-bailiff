@@ -15,7 +15,6 @@ from agent_bailiff.adapters.agentgateway.calls import (
     TASK_ROOT_HEADER,
     TOOLS_CALL,
     CallRefused,
-    ToolRoutes,
     read_call,
 )
 from agent_bailiff.custodian.bindings import HEADER_NAME
@@ -23,6 +22,7 @@ from agent_bailiff.custodian.custodian import Released, ReleaseResult
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import Decision
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.routes import ToolRoutes
 
 CLEARANCE_KEY = "clearance"
 RELEASE_REFUSED = "release_refused"
