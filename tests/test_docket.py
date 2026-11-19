@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import time
+import tracemalloc
 import warnings
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,7 @@ from agent_bailiff.docket import (
     DocketSink,
     Entry,
     Head,
+    Verification,
     decode_record,
     encode_record,
     repair,
@@ -420,6 +422,76 @@ def test_verify_detects_a_torn_tail(paths, start_sink):
         docket.write("partial")
     report = verify_docket(paths[0], WRITERS)
     assert (report.ok, report.line, report.reason, report.entries) == (False, 4, "torn_tail", 3)
+
+
+def write_records(path, count):
+    prev = None
+    with open(path, "w") as docket:
+        for number in range(1, count + 1):
+            record = encode_record(DECIDE_KEY, "decide-1", "decide", number, prev, make_entry(number))
+            docket.write(f"{record.token}\n")
+            prev = record.hash
+
+
+def test_verification_yields_each_record_with_its_line_and_end(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    with open(paths[0], "rb") as docket:
+        verification = Verification(docket, INDEX)
+        verified = list(verification)
+    ends = [len(line) + 1 for line in lines(paths[0])]
+    assert [item.line for item in verified] == [1, 2, 3]
+    assert [item.record.token for item in verified] == [record.token for record in records]
+    assert [item.end for item in verified] == [ends[0], ends[0] + ends[1], sum(ends)]
+    assert verification.report == verify_docket(paths[0], WRITERS)
+    assert verification.report.ok and verification.report.valid_bytes == sum(ends)
+
+
+def test_verification_stops_before_the_first_bad_line(paths, start_sink):
+    write_chain(paths, start_sink)
+    content = lines(paths[0])
+    paths[0].write_text("\n".join([content[0], content[2], content[1]]) + "\n")
+    with open(paths[0], "rb") as docket:
+        verification = Verification(docket, INDEX)
+        assert [item.line for item in verification] == [1]
+    assert verification.report == verify_docket(paths[0], WRITERS)
+    assert (verification.report.ok, verification.report.line, verification.report.reason) == (False, 2, "wrong_seq")
+
+
+def test_verification_has_no_report_before_its_end(paths, start_sink):
+    write_chain(paths, start_sink)
+    with open(paths[0], "rb") as docket:
+        verification = Verification(docket, INDEX)
+        lines_read = iter(verification)
+        next(lines_read)
+        with pytest.raises(RuntimeError):
+            _ = verification.report
+
+
+def test_verification_can_be_iterated_only_once(paths, start_sink):
+    write_chain(paths, start_sink)
+    with open(paths[0], "rb") as docket:
+        verification = Verification(docket, INDEX)
+        list(verification)
+        with pytest.raises(RuntimeError):
+            iter(verification)
+
+
+def peak_verification_bytes(path):
+    tracemalloc.start()
+    try:
+        with open(path, "rb") as docket:
+            for _ in Verification(docket, INDEX):
+                pass
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_verification_memory_does_not_grow_with_the_docket(workdir):
+    small, large = workdir / "small.log", workdir / "large.log"
+    write_records(small, 300)
+    write_records(large, 3_000)
+    assert peak_verification_bytes(large) < 1.5 * peak_verification_bytes(small)
 
 
 def test_sink_refuses_to_start_on_a_corrupt_docket(paths, start_sink):

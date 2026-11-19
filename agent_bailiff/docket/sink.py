@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -98,21 +98,63 @@ def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
 
 
 def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
-    heads: dict[str, Head] = {}
-    count = 0
-    offset = 0
-    while raw := docket.readline(MAX_TOKEN_CHARS + 2):
-        line_number = count + 1
-        if not raw.endswith(b"\n"):
-            if docket.read(1):
-                return VerifyReport(False, count, heads, line_number, "malformed", "line exceeds the limit", offset)
-            return VerifyReport(False, count, heads, line_number, "torn_tail", "last line is incomplete", offset)
-        refusal = _apply_line(raw[:-1], index, heads)
-        if refusal is not None:
-            return VerifyReport(False, count, heads, line_number, refusal.reason, refusal.detail, offset)
-        count = line_number
-        offset += len(raw)
-    return VerifyReport(True, count, heads, valid_bytes=offset)
+    verification = Verification(docket, index)
+    for _ in verification:
+        pass
+    return verification.report
+
+
+@dataclass(frozen=True)
+class VerifiedLine:
+    line: int
+    record: Record
+    end: int
+
+
+class Verification:
+    def __init__(self, docket: BinaryIO, index: KidIndex) -> None:
+        self._docket = docket
+        self._index = index
+        self._started = False
+        self._report: VerifyReport | None = None
+
+    @property
+    def report(self) -> VerifyReport:
+        if self._report is None:
+            raise RuntimeError("the verification has not read the docket to its end")
+        return self._report
+
+    def __iter__(self) -> Iterator[VerifiedLine]:
+        if self._started:
+            raise RuntimeError("a verification can be iterated only once")
+        self._started = True
+        return self._lines()
+
+    def _lines(self) -> Iterator[VerifiedLine]:
+        heads: dict[str, Head] = {}
+        count = 0
+        offset = 0
+        while raw := self._docket.readline(MAX_TOKEN_CHARS + 2):
+            line_number = count + 1
+            if not raw.endswith(b"\n"):
+                if self._docket.read(1):
+                    self._report = VerifyReport(
+                        False, count, heads, line_number, "malformed", "line exceeds the limit", offset
+                    )
+                else:
+                    self._report = VerifyReport(
+                        False, count, heads, line_number, "torn_tail", "last line is incomplete", offset
+                    )
+                return
+            record = _verify_line(raw[:-1], self._index, heads)
+            if isinstance(record, Refused):
+                self._report = VerifyReport(False, count, heads, line_number, record.reason, record.detail, offset)
+                return
+            heads[record.writer] = Head(seq=record.seq, hash=record.hash)
+            count = line_number
+            offset += len(raw)
+            yield VerifiedLine(line_number, record, offset)
+        self._report = VerifyReport(True, count, heads, valid_bytes=offset)
 
 
 def repair(docket_path: Path, side_path: Path, writers: Writers) -> VerifyReport:
@@ -157,7 +199,7 @@ def _write_side_file(path: Path, content: bytes) -> None:
         os.close(directory_fd)
 
 
-def _apply_line(raw: bytes, index: KidIndex, heads: dict[str, Head]) -> Refused | None:
+def _verify_line(raw: bytes, index: KidIndex, heads: Mapping[str, Head]) -> Record | Refused:
     try:
         token = raw.decode("ascii")
     except UnicodeDecodeError:
@@ -165,11 +207,7 @@ def _apply_line(raw: bytes, index: KidIndex, heads: dict[str, Head]) -> Refused 
     record = decode_record(token, index)
     if isinstance(record, Refused):
         return record
-    refusal = check_chain(heads, record)
-    if refusal is not None:
-        return refusal
-    heads[record.writer] = Head(seq=record.seq, hash=record.hash)
-    return None
+    return check_chain(heads, record) or record
 
 
 class DocketSink:
