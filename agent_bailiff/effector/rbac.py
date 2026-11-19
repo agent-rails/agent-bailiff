@@ -14,6 +14,7 @@ from agent_bailiff.effector.catalog import (
     OperationCatalog,
 )
 from agent_bailiff.effector.kubernetes import FIELD_MANAGER, OP_ID_EXTRA, RELEASE_EXTRA, TRACE_EXTRA, USER_PREFIX
+from agent_bailiff.webhook.guard import NAMESPACE_GUARD, REGISTRATION_GUARD
 
 GENERATED_LABEL = "bailiff.dev/generated"
 LABELS = {"app.kubernetes.io/managed-by": "agent-bailiff", GENERATED_LABEL: "true"}
@@ -66,6 +67,12 @@ AUDIT_RULES = [
         "apiGroups": ["admissionregistration.k8s.io"],
         "resources": ["validatingwebhookconfigurations"],
         "resourceNames": ["bailiff-release-webhook"],
+        "verbs": ["get"],
+    },
+    {
+        "apiGroups": ["admissionregistration.k8s.io"],
+        "resources": ["validatingadmissionpolicies", "validatingadmissionpolicybindings"],
+        "resourceNames": [NAMESPACE_GUARD, REGISTRATION_GUARD],
         "verbs": ["get"],
     },
     {

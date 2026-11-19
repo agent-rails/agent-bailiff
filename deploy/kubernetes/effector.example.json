@@ -176,6 +176,22 @@
         },
         {
           "apiGroups": [
+            "admissionregistration.k8s.io"
+          ],
+          "resourceNames": [
+            "bailiff-release-webhook-namespace",
+            "bailiff-release-webhook-registration"
+          ],
+          "resources": [
+            "validatingadmissionpolicies",
+            "validatingadmissionpolicybindings"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "apiGroups": [
             "apps"
           ],
           "resourceNames": [

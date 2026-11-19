@@ -210,7 +210,13 @@ def test_the_audit_identity_may_only_read_generated_webhook_objects_and_ask_acce
     gets = [rule for rule in role["rules"] if rule["verbs"] == ["get"]]
     assert all(
         set(rule["resourceNames"])
-        <= {"bailiff-release-webhook", "bailiff-release-webhook-pins", "bailiff-release-webhook-audit"}
+        <= {
+            "bailiff-release-webhook",
+            "bailiff-release-webhook-pins",
+            "bailiff-release-webhook-audit",
+            "bailiff-release-webhook-namespace",
+            "bailiff-release-webhook-registration",
+        }
         for rule in gets
     )
     binding = named(items, "ClusterRoleBinding", "bailiff-effector-audit")
