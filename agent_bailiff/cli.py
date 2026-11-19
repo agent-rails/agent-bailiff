@@ -20,7 +20,8 @@ from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecor
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
-from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked
+from agent_bailiff.docket.report import RecordFilter, json_row, pinned_writers, table_header, table_row, verify_records
+from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
@@ -50,6 +51,7 @@ PROG = "agent-bailiff"
 EXIT_REFUSED = 1
 EXIT_UNRECORDED = 3
 MAX_SECRET_BYTES = 65536
+TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
 STARTUP_ERRORS = (
     OSError,
@@ -110,6 +112,19 @@ def _parser() -> argparse.ArgumentParser:
             digest = component.add_parser("digest", help="print the catalog digest for custodian effector bindings")
             digest.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
             digest.set_defaults(handler=_effector_digest)
+        if name == "docket":
+            verify = component.add_parser(
+                "verify", help="verify every record against writer pins and print the selected ones"
+            )
+            verify.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            verify.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            verify.add_argument("--trace", help="print only records of this trace id")
+            verify.add_argument("--task", help="print only records of this task root")
+            verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
+            verify.add_argument("--json", action="store_true", help="print one JSON object per record")
+            verify.set_defaults(handler=_verify_docket)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -330,6 +345,35 @@ def _run_docket(args: argparse.Namespace) -> int:
         asyncio.run(_serve_docket_until_signal(settings))
     except STARTUP_ERRORS as exc:
         return _refused("docket", exc)
+    return 0
+
+
+def _verify_docket(args: argparse.Namespace) -> int:
+    selected = RecordFilter(trace=args.trace, task=args.task, since=args.since)
+    shown = 0
+
+    def emit(verified: VerifiedLine) -> None:
+        nonlocal shown
+        shown += 1
+        print(json_row(verified) if args.json else table_row(verified))
+
+    try:
+        writers = pinned_writers(read_pin(path) for path in args.pin)
+        if not args.json:
+            print(table_header())
+        report = verify_records(args.docket, writers, selected, emit)
+    except STARTUP_ERRORS + (InitError,) as exc:
+        return _refused("docket verify", exc)
+    if not report.ok:
+        print(
+            f"{PROG} docket verify: line {report.line} fails verification: {report.reason} {report.detail}; "
+            f"{report.entries} records before it verified, {shown} printed",
+            file=sys.stderr,
+        )
+        if report.reason == "torn_tail":
+            print(f"{PROG} docket verify: {TORN_TAIL_HINT}", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"{PROG} docket verify: {report.entries} records verified, {shown} printed", file=sys.stderr)
     return 0
 
 
