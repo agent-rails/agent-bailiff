@@ -25,6 +25,7 @@ from agent_bailiff.docket.socket_dir import (
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 
 DOCKET_MODE = 0o600
+READER_DOCKET_MODE = 0o640
 DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
@@ -157,14 +158,14 @@ class Verification:
         self._report = VerifyReport(True, count, heads, valid_bytes=offset)
 
 
-def repair(docket_path: Path, side_path: Path, writers: Writers) -> VerifyReport:
+def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: int | None = None) -> VerifyReport:
     index = build_kid_index(writers)
     directory_fd = open_private_dir(docket_path.parent)
     try:
         fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         try:
             _lock(fd, docket_path)
-            _check_docket_file(fd, docket_path)
+            _check_docket_file(fd, docket_path, reader_gid)
             report = _verify_fd(fd, index)
             if report.ok:
                 return report
@@ -219,6 +220,7 @@ class DocketSink:
         allowed_uids: Iterable[int],
         *,
         socket_gid: int | None = None,
+        reader_gid: int | None = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
@@ -232,6 +234,7 @@ class DocketSink:
         self._index = build_kid_index(writers)
         self._allowed_uids = frozenset(allowed_uids)
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
+        self._reader_gid = reader_gid
         self._max_frame_bytes = max_frame_bytes
         self._frame_timeout = frame_timeout
         self._idle_timeout = idle_timeout
@@ -260,7 +263,7 @@ class DocketSink:
     async def _start(self) -> None:
         self._fd = self._open_docket()
         _lock(self._fd, self._docket_path)
-        _check_docket_file(self._fd, self._docket_path)
+        _check_docket_file(self._fd, self._docket_path, self._reader_gid)
         report = _verify_fd(self._fd, self._index)
         if not report.ok:
             raise DocketCorrupt(report)
@@ -279,8 +282,13 @@ class DocketSink:
     def _open_docket(self) -> int:
         directory_fd = open_private_dir(self._docket_path.parent)
         try:
-            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
-            fd = os.open(self._docket_path.name, flags, DOCKET_MODE, dir_fd=directory_fd)
+            flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC
+            try:
+                fd = os.open(self._docket_path.name, flags | os.O_CREAT | os.O_EXCL, DOCKET_MODE, dir_fd=directory_fd)
+            except FileExistsError:
+                fd = os.open(self._docket_path.name, flags, dir_fd=directory_fd)
+            else:
+                self._share_with_readers(fd)
             try:
                 self._fsync(directory_fd)
             except OSError:
@@ -288,6 +296,16 @@ class DocketSink:
             return fd
         finally:
             os.close(directory_fd)
+
+    def _share_with_readers(self, fd: int) -> None:
+        if self._reader_gid is None:
+            return
+        try:
+            os.fchown(fd, -1, self._reader_gid)
+            os.fchmod(fd, READER_DOCKET_MODE)
+        except OSError:
+            os.close(fd)
+            raise
 
     async def close(self) -> None:
         if self._server is not None:
@@ -402,10 +420,17 @@ def _refusal(reason: str) -> dict[str, Any]:
     return {"ok": False, "reason": reason}
 
 
-def _check_docket_file(fd: int, path: Path) -> None:
+def _check_docket_file(fd: int, path: Path, reader_gid: int | None) -> None:
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
-        raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
+    owned = stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+    if reader_gid is None:
+        if not owned or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
+            raise PermissionError(f"{path} must be a regular file owned by uid {os.geteuid()} with mode 0600")
+        return
+    if not owned or stat.S_IMODE(info.st_mode) != READER_DOCKET_MODE or info.st_gid != reader_gid:
+        raise PermissionError(
+            f"{path} must be a regular file owned by uid {os.geteuid()}, group {reader_gid}, with mode 0640"
+        )
 
 
 def _lock(fd: int, path: Path) -> None:

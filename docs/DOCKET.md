@@ -12,11 +12,19 @@ The docket is one file of newline-terminated signed records. Each record names i
 ## Sink guarantees
 
 - One sink per docket and per socket: the sink holds an exclusive non-blocking `flock` on the docket and on `<socket>.lock` for its lifetime. A second sink fails with `DocketLocked`.
-- At start, under the lock, the sink checks the docket's parent directory (not a symlink, owned by the sink uid, not writable by group or others), the docket file (regular, owned by the sink uid, mode 0600), verifies every record through the same descriptor it appends to, and fsyncs the parent directory. A failed directory fsync makes the sink refuse every append.
+- At start, under the lock, the sink checks the docket's parent directory (not a symlink, owned by the sink uid, not writable by group or others), the docket file (regular, owned by the sink uid, mode 0600; with `reader_group` set, mode 0640 and that group instead), verifies every record through the same descriptor it appends to, and fsyncs the parent directory. A failed directory fsync makes the sink refuse every append.
 - An append is acknowledged only after the full line is written and fsynced. A failed write or fsync makes the sink refuse every later append until restart.
 - On close the sink removes the socket path only if it is still the socket it bound.
 - Connections: the peer uid is checked before a connection counts against `max_connections`. A connection is closed after `idle_timeout` without a frame, when a frame takes longer than `frame_timeout`, and at `max_lifetime`.
 - On macOS, `os.fsync` does not issue `F_FULLFSYNC`, so the drive may still hold acknowledged data in its cache.
+
+## Readers
+
+A docket config with `reader_group` set lets members of that group read the docket without running as the sink uid. `agent-bailiff init docket --reader-group <gid>` gives the docket directory that group and mode 0750; the sink creates a new docket with that group and mode 0640 and refuses to start on any other mode or group. The sink uid must be a member of the group, or init and the first start fail. `config.json` stays 0600, so readers never read the sink config; they take writer pins from their own copies of the writers' public key records.
+
+- Readers see every record: tools, resources, principals, tenants and argument digests, never the arguments themselves.
+- Readers cannot append, truncate or replace the docket. Verification detects forged, altered, reordered or deleted records within each writer's chain; it cannot detect the sink uid truncating the newest records of a writer.
+- Without `reader_group` the docket stays 0600 and only the sink uid and root can read it.
 
 ## Writer-side rollback detection
 

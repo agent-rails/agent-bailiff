@@ -27,6 +27,7 @@ from agent_bailiff.service.settings import (
 from agent_bailiff.strict_json import parse_strict_json
 
 PRIVATE_MODE = 0o700
+READER_DIRECTORY_MODE = 0o750
 FORBIDDEN_DIRECTORY_BITS = 0o077
 MAX_PIN_BYTES = 4096
 CONFIG = "config.json"
@@ -225,6 +226,7 @@ def init_docket(
     *,
     socket: Path,
     socket_group: int,
+    reader_group: int | None,
     allowed_uids: Iterable[int],
     pins: Iterable[PublicKeyRecord],
 ) -> Path:
@@ -233,10 +235,13 @@ def init_docket(
         "docket": str(directory / "docket.log"),
         "socket": str(socket),
         "socket_group": socket_group,
+        "reader_group": reader_group,
         "allowed_uids": sorted(set(allowed_uids)),
         "writers": _writers(pins),
     }
     parse_docket(document)
+    if reader_group is not None:
+        _share_directory(directory, reader_group)
     _write(directory / CONFIG, document)
     return directory / CONFIG
 
@@ -277,6 +282,15 @@ def _check_new(directory: Path, names: Iterable[str]) -> None:
     existing = sorted(name for name in names if os.path.lexists(directory / name))
     if existing:
         raise InitError(f"{directory} already holds {', '.join(existing)}; init never overwrites")
+
+
+def _share_directory(directory: Path, group: int) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fchown(fd, -1, group)
+        os.fchmod(fd, READER_DIRECTORY_MODE)
+    finally:
+        os.close(fd)
 
 
 def _make_private_dirs(directory: Path, names: Iterable[str]) -> None:

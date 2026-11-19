@@ -566,6 +566,76 @@ def test_sink_refuses_a_docket_file_with_loose_mode(paths):
         asyncio.run(sink.start())
 
 
+READER_GID = os.getegid()
+NON_MEMBER_GID = max([*os.getgroups(), READER_GID]) + 1000
+
+
+def file_mode(path):
+    info = os.lstat(path)
+    return stat.S_IMODE(info.st_mode), info.st_gid
+
+
+def test_sink_creates_a_docket_its_reader_group_can_read(paths, start_sink):
+    start_sink(reader_gid=READER_GID)
+    assert decide_client(paths).append(make_entry(1)).seq == 1
+    assert file_mode(paths[0]) == (0o640, READER_GID)
+
+
+def test_sink_restarts_on_a_docket_shared_with_its_reader_group(paths, start_sink):
+    start_sink(reader_gid=READER_GID).stop()
+    start_sink(reader_gid=READER_GID)
+    assert decide_client(paths).append(make_entry(1)).seq == 1
+
+
+def test_sink_without_a_reader_group_still_creates_a_0600_docket(paths, start_sink):
+    start_sink()
+    decide_client(paths).append(make_entry(1))
+    assert file_mode(paths[0])[0] == 0o600
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o644, 0o660, 0o740])
+def test_sink_with_a_reader_group_refuses_any_mode_but_0640(paths, mode):
+    paths[0].write_text("")
+    os.chown(paths[0], -1, READER_GID)
+    os.chmod(paths[0], mode)
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, reader_gid=READER_GID)
+    with pytest.raises(PermissionError, match="0640"):
+        asyncio.run(sink.start())
+
+
+def test_sink_without_a_reader_group_refuses_a_0640_docket(paths):
+    paths[0].write_text("")
+    os.chmod(paths[0], 0o640)
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(PermissionError, match="0600"):
+        asyncio.run(sink.start())
+
+
+def test_sink_refuses_a_0640_docket_in_another_group(paths):
+    paths[0].write_text("")
+    os.chown(paths[0], -1, READER_GID)
+    os.chmod(paths[0], 0o640)
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, reader_gid=NON_MEMBER_GID)
+    with pytest.raises(PermissionError, match=f"group {NON_MEMBER_GID}"):
+        asyncio.run(sink.start())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root may give a file to any group")
+def test_sink_cannot_share_a_new_docket_with_a_group_it_is_not_in(paths):
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, reader_gid=NON_MEMBER_GID)
+    with pytest.raises(PermissionError):
+        asyncio.run(sink.start())
+
+
+def test_sink_with_a_reader_group_refuses_a_group_writable_directory(paths, workdir):
+    os.chown(workdir, -1, READER_GID)
+    os.chmod(workdir, 0o770)
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, reader_gid=READER_GID)
+    with pytest.raises(PermissionError, match="writable"):
+        asyncio.run(sink.start())
+    assert not paths[0].exists()
+
+
 def test_sink_refuses_a_symlinked_docket_file(paths, workdir):
     target = workdir / "target.log"
     target.write_text("")
@@ -860,6 +930,18 @@ def test_repair_moves_a_torn_tail_aside(paths, start_sink, workdir):
     assert verify_docket(paths[0], WRITERS).ok
     start_sink()
     assert decide_client(paths).append(make_entry(4)).seq == 4
+
+
+def test_repair_keeps_a_docket_shared_with_its_reader_group(paths, start_sink, workdir):
+    handle = start_sink(reader_gid=READER_GID)
+    decide_client(paths).append(make_entry(1))
+    handle.stop()
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    assert repair(paths[0], workdir / "torn.tail", WRITERS, reader_gid=READER_GID).ok
+    assert file_mode(paths[0]) == (0o640, READER_GID)
+    with pytest.raises(PermissionError, match="0600"):
+        repair(paths[0], workdir / "other.tail", WRITERS)
 
 
 def test_repair_leaves_a_clean_docket_alone(paths, start_sink, workdir):

@@ -273,6 +273,45 @@ def test_docket_init_writes_a_config_that_loads(root, decide_pin, capsys):
     assert mode(directory / "config.json") == (0o600, UID)
 
 
+def docket_init(root, directory, decide_pin, capsys, *extra):
+    return init(
+        "docket",
+        "--dir", directory,
+        "--socket", root / "s" / "docket.sock",
+        "--socket-group", GID,
+        "--allowed-uid", UID,
+        "--pin", decide_pin,
+        *extra,
+        capsys=capsys,
+    )  # fmt: skip
+
+
+def test_docket_init_keeps_the_docket_private_without_a_reader_group(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    code, _, err = docket_init(root, directory, decide_pin, capsys)
+    assert code == 0, err
+    assert load_docket(directory / "config.json").reader_group is None
+    assert mode(directory) == (0o700, UID)
+
+
+def test_docket_init_shares_the_docket_directory_with_a_reader_group(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    code, _, err = docket_init(root, directory, decide_pin, capsys, "--reader-group", GID)
+    assert code == 0, err
+    assert load_docket(directory / "config.json").reader_group == GID
+    assert mode(directory) == (0o750, UID) and os.lstat(directory).st_gid == GID
+    assert mode(directory / "config.json") == (0o600, UID)
+
+
+@pytest.mark.skipif(UID == 0, reason="root may give a directory to any group")
+def test_docket_init_refuses_a_reader_group_it_is_not_in_and_writes_nothing(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    outsider = max([*os.getgroups(), GID]) + 1000
+    code, _, err = docket_init(root, directory, decide_pin, capsys, "--reader-group", outsider)
+    assert code == cli.EXIT_REFUSED, err
+    assert os.listdir(directory) == [] and mode(directory) == (0o700, UID)
+
+
 def edit(path, change):
     document = json.loads(path.read_text())
     change(document)

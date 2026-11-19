@@ -36,7 +36,7 @@ CUSTODIAN_KEYS = frozenset(
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
     | {"docket", "gateway"}
 )
-DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "allowed_uids", "writers"})
+DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "reader_group", "allowed_uids", "writers"})
 EFFECTOR_KEYS = frozenset(
     {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
     | {"max_clearance_lifetime", "port", "kubernetes", "rbac", "ledger", "docket"}
@@ -95,6 +95,9 @@ class Section:
 
     def os_id(self, name: str) -> int:
         return self.integer(name, 0, MAX_OS_ID)
+
+    def optional_os_id(self, name: str) -> int | None:
+        return None if self._document[name] is None else self.os_id(name)
 
     def wrap(self, name: str, problem: Exception) -> ConfigError:
         return ConfigError(f"{self._label}.{name}: {problem}")
@@ -209,6 +212,7 @@ class DocketSettings:
     docket: Path
     socket: Path
     socket_group: int
+    reader_group: int | None
     allowed_uids: frozenset[int]
     writers: Writers
 
@@ -365,6 +369,7 @@ def parse_docket(document: object) -> DocketSettings:
         docket=config.path("docket"),
         socket=config.path("socket"),
         socket_group=config.os_id("socket_group"),
+        reader_group=config.optional_os_id("reader_group"),
         allowed_uids=allowed,
         writers=_writers(config),
     )

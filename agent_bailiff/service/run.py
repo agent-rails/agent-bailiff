@@ -196,6 +196,7 @@ async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
         settings.writers,
         settings.allowed_uids,
         socket_gid=settings.socket_group,
+        reader_gid=settings.reader_group,
     )
     await sink.start()
     try:

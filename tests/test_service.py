@@ -199,6 +199,7 @@ class Deployment:
             "docket": str(self.docket / "docket.log"),
             "socket": str(self.sockets["docket"]),
             "socket_group": GID,
+            "reader_group": None,
             "allowed_uids": [UID],
             "writers": {name: self.pins(name) for name in self.keys},
         }
@@ -360,6 +361,9 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(allowed_uids=[True]),
         lambda doc: doc.update(writers={}),
         lambda doc: doc.update(socket_group=None),
+        lambda doc: doc.update(reader_group="0"),
+        lambda doc: doc.update(reader_group=True),
+        lambda doc: doc.update(reader_group=-1),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):
