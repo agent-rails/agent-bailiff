@@ -18,7 +18,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from agent_warrant.identity import encode_public_key
+from agent_warrant.identity import encode_public_key, is_valid_public_key
+from agent_warrant.task_root import issue_task_root
 
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.files import OwnedFileError
@@ -48,6 +49,8 @@ SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "c
 LEDGER = DIRS["ledger"] / "ledger.db"
 ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
 ISSUER_KEY = DIRS["issuer"] / "issuer.key"
+AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
+TASK_FILE = STATE / "tasks" / "task.json"
 
 TENANT = "quickstart"
 PRINCIPAL = "user:operator"
@@ -60,10 +63,14 @@ NAMES = {
 CREDENTIAL_ID = "gitea-token"
 TARGET = "gitea"
 CREDENTIAL_HEADER = "Authorization"
-ROUTES = [
-    {"service": "gitea", "name": "list_issues", "tool": "gitea.issues.list", "resource": "gitea/issues"},
-    {"service": "gitea", "name": "get_file_contents", "tool": "gitea.contents.read", "resource": "gitea/contents"},
-]
+ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text())["routes"]
+TASK_SCOPE = {
+    "tools": ["gitea.issues.list", "gitea.issues.read"],
+    "resources": ["gitea/issues"],
+    "max_cost_per_call": 1,
+}
+TASK_BUDGET = 20
+TASK_TTL_SECONDS = 3600
 POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "rules": []}}
 COSTS = {"version": 1, "tools": {route["tool"]: 1 for route in ROUTES}}
 
@@ -431,6 +438,36 @@ def bootstrap_gitea() -> str:
     return "created" if created or outcome == "created" else "kept"
 
 
+def issue_task() -> str:
+    subject = AGENT_PUBLIC_KEY.read_text().strip()
+    if not is_valid_public_key(subject):
+        raise BootstrapError(f"{AGENT_PUBLIC_KEY} does not hold an Ed25519 public key")
+    task_id = f"task-{secrets.token_hex(8)}"
+    now = int(time.time())
+    root = issue_task_root(
+        load_signing_key(ISSUER_KEY),
+        issuer=NAMES["issuer"],
+        task_id=task_id,
+        tenant_id=TENANT,
+        principal=PRINCIPAL,
+        purpose="triage-quickstart-demo",
+        budget=TASK_BUDGET,
+        max_depth=2,
+        issued_at=now,
+        expires_at=now + TASK_TTL_SECONDS,
+        scope=TASK_SCOPE,
+        subject=subject,
+    )
+    staged = TASK_FILE.with_name(f".{TASK_FILE.name}.new")
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    with os.fdopen(fd, "w") as target:
+        target.write(json.dumps({"task_id": task_id, "task_root": root.encode(), "decider_id": NAMES["decide"]}))
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(staged, TASK_FILE)
+    return task_id
+
+
 COMMANDS: dict[str, Callable[[], str]] = {
     "issuer": init_issuer,
     "decide": init_decide,
@@ -439,6 +476,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "docket": init_docket,
     "admin-secret": admin_secret,
     "gitea": bootstrap_gitea,
+    "issue": issue_task,
 }
 
 

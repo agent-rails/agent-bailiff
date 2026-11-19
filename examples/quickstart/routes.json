@@ -1,0 +1,7 @@
+{
+  "routes": [
+    {"service": "gitea", "name": "list_issues", "tool": "gitea.issues.list", "resource": "gitea/issues"},
+    {"service": "gitea", "name": "issue_read", "tool": "gitea.issues.read", "resource": "gitea/issues"},
+    {"service": "gitea", "name": "get_file_contents", "tool": "gitea.contents.read", "resource": "gitea/contents"}
+  ]
+}

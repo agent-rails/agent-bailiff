@@ -8,3 +8,5 @@ examples
 *.egg-info
 __pycache__
 !examples/quickstart/bootstrap.py
+!examples/quickstart/agent.py
+!examples/quickstart/routes.json

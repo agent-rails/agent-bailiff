@@ -148,6 +148,28 @@ services:
       custodian-init:
         condition: service_completed_successfully
 
+  agent-key:
+    <<: [*bailiff, *once, *offline]
+    user: "10006:10006"
+    command: ["/app/quickstart/agent.py", "key"]
+    volumes:
+      - agent-data:/var/lib/bailiff/agent
+      - agent-public:/var/lib/bailiff/agent-public
+
+  task-issuer:
+    <<: [*bailiff, *once, *offline]
+    user: "10007:10007"
+    command: ["/app/quickstart/bootstrap.py", "issue"]
+    volumes:
+      - issuer-data:/var/lib/bailiff/issuer:ro
+      - agent-public:/var/lib/bailiff/agent-public:ro
+      - tasks:/var/lib/bailiff/tasks
+    depends_on:
+      issuer-init:
+        condition: service_completed_successfully
+      agent-key:
+        condition: service_completed_successfully
+
   docket:
     <<: [*bailiff, *offline]
     user: "10001:10001"
@@ -255,6 +277,19 @@ services:
         condition: service_healthy
       gitea-mcp:
         condition: service_started
+      task-issuer:
+        condition: service_completed_successfully
+
+  agent:
+    <<: *bailiff
+    profiles: [agent]
+    user: "10006:10006"
+    entrypoint: ["python", "/app/quickstart/agent.py"]
+    networks: [edge]
+    volumes:
+      - agent-data:/var/lib/bailiff/agent:ro
+      - agent-public:/var/lib/bailiff/agent-public:ro
+      - tasks:/var/lib/bailiff/tasks:ro
 
   reader:
     <<: [*bailiff, *offline]
@@ -303,3 +338,6 @@ volumes:
   docket-run: {}
   decide-run: {}
   custodian-run: {}
+  agent-data: {}
+  agent-public: {}
+  tasks: {}

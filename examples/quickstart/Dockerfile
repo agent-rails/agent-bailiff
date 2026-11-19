@@ -6,7 +6,7 @@ COPY deploy/kubernetes/webhook-requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt
 COPY agent_bailiff /app/agent_bailiff
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"
-COPY examples/quickstart/bootstrap.py /app/quickstart/bootstrap.py
+COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/routes.json /app/quickstart/
 RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10001 -g 10001 -m 0700 /var/lib/bailiff/docket \
     && install -d -o 10002 -g 20001 -m 0700 /var/lib/bailiff/decide /var/lib/bailiff/control \
@@ -14,6 +14,9 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10003 -g 10003 -m 0700 /var/lib/bailiff/custodian \
     && install -d -o 10003 -g 20004 -m 0750 /var/lib/bailiff/gitea-admin \
     && install -d -o 10007 -g 10007 -m 0700 /var/lib/bailiff/issuer \
+    && install -d -o 10007 -g 10007 -m 0755 /var/lib/bailiff/tasks \
+    && install -d -o 10006 -g 10006 -m 0700 /var/lib/bailiff/agent \
+    && install -d -o 10006 -g 10006 -m 0755 /var/lib/bailiff/agent-public \
     && install -d -o 10001 -g 20000 -m 0750 /run/bailiff/docket \
     && install -d -o 10002 -g 20002 -m 0750 /run/bailiff/decide \
     && install -d -o 10003 -g 20002 -m 0750 /run/bailiff/custodian \

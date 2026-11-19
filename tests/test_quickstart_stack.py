@@ -40,6 +40,9 @@ VOLUMES = {
     "docket-run": "/run/bailiff/docket",
     "decide-run": "/run/bailiff/decide",
     "custodian-run": "/run/bailiff/custodian",
+    "agent-data": "/var/lib/bailiff/agent",
+    "agent-public": "/var/lib/bailiff/agent-public",
+    "tasks": "/var/lib/bailiff/tasks",
 }
 PRIVATE_VOLUMES = (
     "issuer-data",
@@ -106,6 +109,12 @@ EXPECTED_ENTRIES = {
     "custodian-run": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o750, DIRECTORY),
     "custodian-run/custodian.sock": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o660, SOCKET),
     "custodian-run/custodian.sock.lock": (*CUSTODIAN, 0o600, FILE),
+    "agent-data": (b.AGENT_UID, b.AGENT_UID, 0o700, DIRECTORY),
+    "agent-data/agent.key": (b.AGENT_UID, b.AGENT_UID, 0o600, FILE),
+    "agent-public": (b.AGENT_UID, b.AGENT_UID, 0o755, DIRECTORY),
+    "agent-public/agent.pub": (b.AGENT_UID, b.AGENT_UID, 0o644, FILE),
+    "tasks": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
+    "tasks/task.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
 }
 TRANSIENT_ENTRIES = {
     re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
@@ -129,6 +138,7 @@ ONE_SHOTS = (
     "gitea-secret",
     "gitea-admin",
     "bootstrap",
+    "agent-key",
 )
 STAT_SCRIPT = """
 import json, os, stat, sys
@@ -188,10 +198,12 @@ class Stack:
         self.project = project
         self.env = {**os.environ, "COMPOSE_PROJECT_NAME": project, "GITEA_MCP_PORT": str(free_port())}
 
-    def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS):
+    def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS, stdin=None, expect=0):
         command = ["docker", "compose", "--file", str(COMPOSE_FILE), *arguments]
-        result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=timeout, check=False)
-        assert result.returncode == 0, f"{' '.join(arguments)} failed:\n{result.stdout}\n{result.stderr}"
+        result = subprocess.run(
+            command, env=self.env, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
+        )
+        assert result.returncode == expect, f"{' '.join(arguments)} failed:\n{result.stdout}\n{result.stderr}"
         return result.stdout
 
     def container(self, service):
@@ -254,7 +266,19 @@ def test_uid_matrix(stack):
 def test_the_agent_uid_reads_no_bailiff_state(stack):
     denied = stack.probe(READ_PROBE, user=f"{b.AGENT_UID}:{b.AGENT_UID}")
     assert {name for name, refused in denied.items() if refused} == set(PRIVATE_VOLUMES)
-    assert denied["pins"] is False
+    assert {name for name, refused in denied.items() if not refused} == {"pins", "agent-data", "agent-public", "tasks"}
+
+
+def test_the_agent_mounts_no_bailiff_state(stack):
+    services = json.loads(stack.compose("--profile", "agent", "config", "--format", "json"))["services"]
+    agent = services["agent"]
+    assert sorted((volume["source"], volume.get("read_only", False)) for volume in agent["volumes"]) == [
+        ("agent-data", True),
+        ("agent-public", True),
+        ("tasks", True),
+    ]
+    assert list(agent["networks"]) == ["edge"]
+    assert "network_mode" not in agent
 
 
 def test_bootstrap_rerun_idempotent(stack):
@@ -269,6 +293,7 @@ def test_bootstrap_rerun_idempotent(stack):
         ("control-init", "control"),
         ("docket-init", "docket"),
         ("gitea-secret", "admin-secret"),
+        ("agent-key", "key"),
     ]:
         assert outputs[service].strip().splitlines()[-1] == f"{step}: kept", outputs[service]
     lines = outputs["bootstrap"].strip().splitlines()
