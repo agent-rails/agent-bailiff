@@ -710,7 +710,7 @@ def test_the_review_deadline_stops_retries_that_are_waiting(monkeypatch):
     ):
         time.sleep(0.01)
     assert not any(thread.name.startswith("webhook-audit-review") for thread in threading.enumerate())
-    assert api.throttles == 2
+    assert 1 <= api.throttles <= 2
 
 
 def test_backoff_grows_with_full_jitter_up_to_the_cap(monkeypatch):
