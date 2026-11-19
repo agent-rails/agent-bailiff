@@ -8,15 +8,8 @@ from typing import Protocol
 from google.protobuf import struct_pb2
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
-from agent_bailiff.adapters.agentgateway.calls import (
-    LEAF_PROOF_HEADER,
-    LINKS_HEADER,
-    NONCE_HEADER,
-    TASK_ROOT_HEADER,
-    TOOLS_CALL,
-    CallRefused,
-    read_call,
-)
+from agent_bailiff.adapters.agentgateway.calls import TOOLS_CALL, CallRefused, read_call
+from agent_bailiff.chain_headers import LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.custodian import Released, ReleaseResult
 from agent_bailiff.custodian.release import RELEASE_HEADER

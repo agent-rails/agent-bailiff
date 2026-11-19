@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_bailiff.adapters.agentgateway.calls import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
+from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.release import RELEASE_HEADER
 

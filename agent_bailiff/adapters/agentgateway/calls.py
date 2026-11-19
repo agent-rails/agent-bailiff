@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
+from agent_bailiff.chain_headers import (
+    CALL_HEADERS,
+    LEAF_PROOF_HEADER,
+    LINKS_HEADER,
+    NONCE_HEADER,
+    REQUIRED_HEADERS,
+    TASK_ROOT_HEADER,
+    TRACEPARENT,
+    TRACEPARENT_HEADER,
+)
 from agent_bailiff.decide.identity import MAX_ARGS_BYTES
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.strict_json import parse_strict_json
 
 TOOLS_CALL = "tools/call"
-TASK_ROOT_HEADER = "x-bailiff-task-root"
-LINKS_HEADER = "x-bailiff-links"
-LEAF_PROOF_HEADER = "x-bailiff-leaf-proof"
-NONCE_HEADER = "x-bailiff-nonce"
-TRACEPARENT_HEADER = "traceparent"
-REQUIRED_HEADERS = frozenset({TASK_ROOT_HEADER, LEAF_PROOF_HEADER, NONCE_HEADER})
-CALL_HEADERS = REQUIRED_HEADERS | {LINKS_HEADER, TRACEPARENT_HEADER}
 MAX_PARAMS_BYTES = 2 * MAX_ARGS_BYTES
 CALL_PARAMS = frozenset({"name", "arguments", "_meta"})
 META_TYPES: dict[str, tuple[type, ...]] = {
@@ -25,7 +27,6 @@ META_TYPES: dict[str, tuple[type, ...]] = {
     "io.modelcontextprotocol/clientInfo": (dict,),
     "io.modelcontextprotocol/clientCapabilities": (dict,),
 }
-TRACEPARENT = re.compile(r"00-(?!0{32})([0-9a-f]{32})-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}")
 
 
 class CallRefused(Exception):

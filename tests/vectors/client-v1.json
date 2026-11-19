@@ -1,0 +1,74 @@
+{
+  "contract_version": 1,
+  "vectors": [
+    {
+      "expected": {
+        "body": "{\"id\":7,\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"arguments\":{\"replicas\":2,\"service\":\"api\"},\"name\":\"deploy_service\"}}",
+        "headers": {
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          "x-bailiff-leaf-proof": "eyJhdWRpZW5jZSI6ImRlY2lkZS5leGFtcGxlIiwiYmluZGluZyI6InNIWVYxd1NSdGdMZDdiWlZaNnh4YXV0ZFRDVzBJRVgxNFl6REU1U2hIbjgiLCJpYXQiOjE4MDAwMDAwMDAsInJlcXVlc3RfZGlnZXN0IjoiYklsa0thM016aFZUMllkVF9mQ2ExdjUxUlpEd2FPXzd4R2I3ODExN1BuUSJ9.xJSRrqguRW2bD61Ii6PRg4vCRB6Kavk4ven7UXdx3An_LjWqjwVHEGvYva8Io5gGOkD_dEV4Tp7it9NGJUTEDg",
+          "x-bailiff-nonce": "6465666768696a6b6c6d6e6f70717273",
+          "x-bailiff-task-root": "eyJidWRnZXQiOjEwMCwiZXhwaXJlc19hdCI6MTgwMDAwMzYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJpc3N1ZXIuZXhhbXBsZSIsIm1heF9kZXB0aCI6NCwicHJpbmNpcGFsIjoidXNlcjphbGljZSIsInB1cnBvc2UiOiJyZWxlYXNlLWJvdCIsInNjb3BlIjp7Im1heF9jb3N0X3Blcl9jYWxsIjo1LCJyZXNvdXJjZXMiOlsiZW52L3N0YWdpbmcvKiIsIndhbGxldC8qIl0sInRvb2xzIjpbImRlcGxveS4qIiwic2lnbmVyLndpdGhkcmF3Il19LCJzdWJqZWN0IjoiUTgzQUk5SXRYNTRRZlJvR2swVjlOZEhSRHJmU0hISVJrdlZ2WGVRR1pkTSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.FAagEEW6X_daOAiCLpYAwHwatPt91AbmtgC3nToqpKfCF2ir4zEGTC-L7VPiZVTNCIebgQOTNhJDiIDqWCU3BA"
+        },
+        "request_digest": "bIlkKa3MzhVT2YdT_fCa1v51RZDwaO_7xGb78117PnQ"
+      },
+      "input": {
+        "arguments": {
+          "replicas": 2,
+          "service": "api"
+        },
+        "audience": "decide.example",
+        "holder_key_seed": "02030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021",
+        "links": [],
+        "nonce_bytes": "6465666768696a6b6c6d6e6f70717273",
+        "now": 1800000000,
+        "request_id": 7,
+        "route": {
+          "name": "deploy_service",
+          "resource": "env/staging/api",
+          "service": "deploy",
+          "tool": "deploy.service"
+        },
+        "task_root": "eyJidWRnZXQiOjEwMCwiZXhwaXJlc19hdCI6MTgwMDAwMzYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJpc3N1ZXIuZXhhbXBsZSIsIm1heF9kZXB0aCI6NCwicHJpbmNpcGFsIjoidXNlcjphbGljZSIsInB1cnBvc2UiOiJyZWxlYXNlLWJvdCIsInNjb3BlIjp7Im1heF9jb3N0X3Blcl9jYWxsIjo1LCJyZXNvdXJjZXMiOlsiZW52L3N0YWdpbmcvKiIsIndhbGxldC8qIl0sInRvb2xzIjpbImRlcGxveS4qIiwic2lnbmVyLndpdGhkcmF3Il19LCJzdWJqZWN0IjoiUTgzQUk5SXRYNTRRZlJvR2swVjlOZEhSRHJmU0hISVJrdlZ2WGVRR1pkTSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.FAagEEW6X_daOAiCLpYAwHwatPt91AbmtgC3nToqpKfCF2ir4zEGTC-L7VPiZVTNCIebgQOTNhJDiIDqWCU3BA",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+      },
+      "name": "root holder"
+    },
+    {
+      "expected": {
+        "body": "{\"id\":8,\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"arguments\":{\"replicas\":2,\"service\":\"api\"},\"name\":\"deploy_service\"}}",
+        "headers": {
+          "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+          "x-bailiff-leaf-proof": "eyJhdWRpZW5jZSI6ImRlY2lkZS5leGFtcGxlIiwiYmluZGluZyI6InlHQkdocWc5TU0zeEkyeHA5amMwbXRNX3oyV0ZFTWJoQVo5MEVqbVA1WFUiLCJpYXQiOjE4MDAwMDAwMDAsInJlcXVlc3RfZGlnZXN0IjoiM2FETDh2cW5xUHZVSzhaYzB3UDNxY1ZNRzkyakZUX0VDRGU0bHA2ZVVMZyJ9._duPUQeqDd32PaC5zMT7ORfUM7skbfCrCLkLicFBobMzkQqCgt8-_CbUU1Iq1PhWTl5UObMdT4-5DZQpFXh4Cg",
+          "x-bailiff-links": "eyJidWRnZXQiOjEwLCJkZXB0aCI6MSwiZXhwaXJlc19hdCI6MTgwMDAwMDYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJRODNBSTlJdFg1NFFmUm9HazBWOU5kSFJEcmZTSEhJUmt2VnZYZVFHWmRNIiwicGFyZW50X2hhc2giOiJzSFlWMXdTUnRnTGQ3YlpWWjZ4eGF1dGRUQ1cwSUVYMTRZekRFNVNoSG44Iiwic2NvcGUiOnsibWF4X2Nvc3RfcGVyX2NhbGwiOjIsInJlc291cmNlcyI6WyJlbnYvc3RhZ2luZy8qIl0sInRvb2xzIjpbImRlcGxveS5zZXJ2aWNlIl19LCJzdWJqZWN0IjoiU0I3ZWR5MmhWNFhKNVpvSVlnRzR3X25EQnhLZVA4Ylg4MHFrMy0xWUZPVSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0YXNrX3Jvb3QiOiJzSFlWMXdTUnRnTGQ3YlpWWjZ4eGF1dGRUQ1cwSUVYMTRZekRFNVNoSG44IiwidGVuYW50X2lkIjoidGVuYW50LWEifQ.J9-eR3VjR_VL2ZAqynUrckBZHNLgoYlJ20U_TGZhu1rEfsWNl6xykCfn5VzSIg8caUBVqyEq50CklEsTW_cGDQ",
+          "x-bailiff-nonce": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+          "x-bailiff-task-root": "eyJidWRnZXQiOjEwMCwiZXhwaXJlc19hdCI6MTgwMDAwMzYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJpc3N1ZXIuZXhhbXBsZSIsIm1heF9kZXB0aCI6NCwicHJpbmNpcGFsIjoidXNlcjphbGljZSIsInB1cnBvc2UiOiJyZWxlYXNlLWJvdCIsInNjb3BlIjp7Im1heF9jb3N0X3Blcl9jYWxsIjo1LCJyZXNvdXJjZXMiOlsiZW52L3N0YWdpbmcvKiIsIndhbGxldC8qIl0sInRvb2xzIjpbImRlcGxveS4qIiwic2lnbmVyLndpdGhkcmF3Il19LCJzdWJqZWN0IjoiUTgzQUk5SXRYNTRRZlJvR2swVjlOZEhSRHJmU0hISVJrdlZ2WGVRR1pkTSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.FAagEEW6X_daOAiCLpYAwHwatPt91AbmtgC3nToqpKfCF2ir4zEGTC-L7VPiZVTNCIebgQOTNhJDiIDqWCU3BA"
+        },
+        "request_digest": "3aDL8vqnqPvUK8Zc0wP3qcVMG92jFT_ECDe4lp6eULg"
+      },
+      "input": {
+        "arguments": {
+          "replicas": 2,
+          "service": "api"
+        },
+        "audience": "decide.example",
+        "holder_key_seed": "030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122",
+        "links": [
+          "eyJidWRnZXQiOjEwLCJkZXB0aCI6MSwiZXhwaXJlc19hdCI6MTgwMDAwMDYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJRODNBSTlJdFg1NFFmUm9HazBWOU5kSFJEcmZTSEhJUmt2VnZYZVFHWmRNIiwicGFyZW50X2hhc2giOiJzSFlWMXdTUnRnTGQ3YlpWWjZ4eGF1dGRUQ1cwSUVYMTRZekRFNVNoSG44Iiwic2NvcGUiOnsibWF4X2Nvc3RfcGVyX2NhbGwiOjIsInJlc291cmNlcyI6WyJlbnYvc3RhZ2luZy8qIl0sInRvb2xzIjpbImRlcGxveS5zZXJ2aWNlIl19LCJzdWJqZWN0IjoiU0I3ZWR5MmhWNFhKNVpvSVlnRzR3X25EQnhLZVA4Ylg4MHFrMy0xWUZPVSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0YXNrX3Jvb3QiOiJzSFlWMXdTUnRnTGQ3YlpWWjZ4eGF1dGRUQ1cwSUVYMTRZekRFNVNoSG44IiwidGVuYW50X2lkIjoidGVuYW50LWEifQ.J9-eR3VjR_VL2ZAqynUrckBZHNLgoYlJ20U_TGZhu1rEfsWNl6xykCfn5VzSIg8caUBVqyEq50CklEsTW_cGDQ"
+        ],
+        "nonce_bytes": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+        "now": 1800000000,
+        "request_id": 8,
+        "route": {
+          "name": "deploy_service",
+          "resource": "env/staging/api",
+          "service": "deploy",
+          "tool": "deploy.service"
+        },
+        "task_root": "eyJidWRnZXQiOjEwMCwiZXhwaXJlc19hdCI6MTgwMDAwMzYwMCwiaXNzdWVkX2F0IjoxODAwMDAwMDAwLCJpc3N1ZXIiOiJpc3N1ZXIuZXhhbXBsZSIsIm1heF9kZXB0aCI6NCwicHJpbmNpcGFsIjoidXNlcjphbGljZSIsInB1cnBvc2UiOiJyZWxlYXNlLWJvdCIsInNjb3BlIjp7Im1heF9jb3N0X3Blcl9jYWxsIjo1LCJyZXNvdXJjZXMiOlsiZW52L3N0YWdpbmcvKiIsIndhbGxldC8qIl0sInRvb2xzIjpbImRlcGxveS4qIiwic2lnbmVyLndpdGhkcmF3Il19LCJzdWJqZWN0IjoiUTgzQUk5SXRYNTRRZlJvR2swVjlOZEhSRHJmU0hISVJrdlZ2WGVRR1pkTSIsInRhc2tfaWQiOiJ0YXNrLTEiLCJ0ZW5hbnRfaWQiOiJ0ZW5hbnQtYSJ9.FAagEEW6X_daOAiCLpYAwHwatPt91AbmtgC3nToqpKfCF2ir4zEGTC-L7VPiZVTNCIebgQOTNhJDiIDqWCU3BA",
+        "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+      },
+      "name": "delegated holder"
+    }
+  ]
+}
