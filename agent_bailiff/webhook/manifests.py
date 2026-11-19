@@ -6,8 +6,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from agent_bailiff.effector.catalog import OperationCatalog
-from agent_bailiff.effector.rbac import LABELS
+from agent_bailiff.effector.catalog import LABEL, OperationCatalog
+from agent_bailiff.effector.rbac import LABELS, reserved_namespace
 
 IMAGE_DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 NAME = "bailiff-release-webhook"
@@ -26,6 +26,10 @@ def generate_manifests(
 ) -> dict[str, Any]:
     if phase not in {"all", "prepare", "register", "target"}:
         raise ValueError("phase must be all, prepare, register, or target")
+    if LABEL.fullmatch(namespace) is None:
+        raise ValueError(f"{namespace!r} is not a Kubernetes name")
+    if reserved_namespace(namespace):
+        raise ValueError("the webhook needs a dedicated namespace, not default or kube-*")
     if IMAGE_DIGEST.fullmatch(image) is None:
         raise ValueError("image must be pinned by sha256 digest")
     if not ca_pem.startswith(b"-----BEGIN CERTIFICATE-----"):

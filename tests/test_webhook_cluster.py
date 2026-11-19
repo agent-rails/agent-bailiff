@@ -119,7 +119,7 @@ def _patch_restart(cluster):
 
 
 def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(cluster):
-    namespace = cluster["names"]["sys"]
+    namespace = cluster["names"]["hook"]
     if kubectl("get", "validatingwebhookconfiguration", NAME, "--ignore-not-found", "-o", "name").stdout.strip():
         pytest.fail("webhook registration already exists; use a disposable cluster")
     directory = Path(cluster["directory"]) / "webhook-certs"
@@ -169,13 +169,15 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             cluster["transport"],
             (cluster["directory"] / "audit").read_text(),
             manifests,
-            namespace,
+            cluster["names"]["sys"],
             "effector",
             users,
             sorted({item for namespaces in cluster["tenants"].values() for item in namespaces}),
         )
         audit_problems = audit.check()
         assert audit_problems == [], audit_problems
+        effector_problems = cluster["audit"].check()
+        assert effector_problems == [], effector_problems
         time.sleep(3)
         assert _patch(cluster)[0] == 200  # Audit mode: the VAP still checks op-id and range.
         enforce_prepare = generate_manifests(
@@ -224,6 +226,29 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
         apply(json.dumps(enforce_registration))
         time.sleep(3)
         assert _patch(cluster)[0] == 403
+        enforce_target = generate_manifests(
+            namespace=namespace,
+            image=IMAGE,
+            ca_pem=(directory / "ca.crt").read_bytes(),
+            pins=_pins(),
+            catalog=CATALOG,
+            enforce=True,
+            phase="target",
+        )
+        if LOCAL_IMAGE:
+            deployment = next(item for item in enforce_target["items"] if item["kind"] == "Deployment")
+            deployment["spec"]["template"]["spec"]["containers"][0]["image"] = LOCAL_IMAGE
+        target_audit = WebhookAudit(
+            cluster["transport"],
+            (cluster["directory"] / "audit").read_text(),
+            enforce_target,
+            cluster["names"]["sys"],
+            "effector",
+            users,
+            sorted({item for namespaces in cluster["tenants"].values() for item in namespaces}),
+        )
+        target_problems = target_audit.check()
+        assert target_problems == [], target_problems
         probe_name = NAME + "-extra-probe-" + secrets.token_hex(3)
         size_policy = {
             "apiVersion": "admissionregistration.k8s.io/v1",

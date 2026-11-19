@@ -8,6 +8,17 @@ from typing import Any
 from agent_bailiff.effector.kubernetes import Transport
 
 NAME = "bailiff-release-webhook"
+CONTAINER_DEFAULTS = {
+    "terminationMessagePath": "/dev/termination-log",
+    "terminationMessagePolicy": "File",
+}
+REQUIRED_KINDS = (
+    "ConfigMap",
+    "Deployment",
+    "PodDisruptionBudget",
+    "Service",
+    "ValidatingWebhookConfiguration",
+)
 WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
 PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str, ...]], ...] = (
     ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, False, NAME, WRITE_VERBS),
@@ -120,14 +131,7 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
             return True
         if actual_container.get("securityContext") != expected_container.get("securityContext"):
             return True
-        container_defaults = {
-            "terminationMessagePath": "/dev/termination-log",
-            "terminationMessagePolicy": "File",
-        }
-        if any(
-            key not in expected_container and value != container_defaults.get(key)
-            for key, value in actual_container.items()
-        ):
+        if _extra_container_fields(expected_container, actual_container):
             return True
         if actual_container.get("volumeMounts") != expected_container.get("volumeMounts"):
             return True
@@ -148,6 +152,36 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
             ):
                 actual_source.pop("defaultMode")
     return normalized_volumes != expected_volumes
+
+
+def _extra_container_fields(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+    return any(key not in expected and value != CONTAINER_DEFAULTS.get(key) for key, value in actual.items())
+
+
+def _is_webhook_pod(pod: Mapping[str, Any], template: Mapping[str, Any], addresses: Sequence[str]) -> bool:
+    metadata = pod.get("metadata")
+    spec = pod.get("spec")
+    status = pod.get("status")
+    if not isinstance(metadata, dict) or not isinstance(spec, dict) or not isinstance(status, dict):
+        return False
+    if not _contains(template["metadata"]["labels"], metadata.get("labels")):
+        return False
+    expected = template["spec"]
+    if not _contains(expected, spec) or spec.get("securityContext") != expected.get("securityContext"):
+        return False
+    if spec.get("initContainers") or spec.get("ephemeralContainers"):
+        return False
+    if any(
+        spec.get(field, False) is not False for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace")
+    ):
+        return False
+    for expected_container, container in zip(expected["containers"], spec["containers"], strict=True):
+        if container.get("securityContext") != expected_container.get("securityContext"):
+            return False
+        if _extra_container_fields(expected_container, container):
+            return False
+    pod_ips = {entry.get("ip") for entry in status.get("podIPs") or [] if isinstance(entry, dict)}
+    return bool(addresses) and set(addresses) <= pod_ips
 
 
 def _path(item: Mapping[str, Any]) -> str:
@@ -184,6 +218,11 @@ class WebhookAudit:
         self._account = effector_account
         self._users = synthetic_users
         self._tenant_namespaces = tenant_namespaces
+        if sorted(item["kind"] for item in manifests["items"]) != list(REQUIRED_KINDS):
+            raise ValueError(
+                "audit needs the full webhook manifest set; render it without --phase in Audit mode "
+                "or with --enforce --phase target, never a prepare or register phase"
+            )
         namespaces = {item["metadata"].get("namespace") for item in manifests["items"]} - {None}
         if len(namespaces) != 1:
             raise ValueError("webhook manifests must place every namespaced object in one namespace")
@@ -216,6 +255,9 @@ class WebhookAudit:
             except RuntimeError as exc:
                 problems.append(str(exc))
                 continue
+            if item["kind"] == "Deployment":
+                problems.extend(self._rollout(live))
+                problems.extend(self._serving_endpoints(item["spec"]["template"]))
             fields = {key: item[key] for key in ("spec", "data", "webhooks") if key in item}
             if not _contains(fields, live) or _security_drift(item["kind"], item, live):
                 problems.append(
@@ -224,6 +266,69 @@ class WebhookAudit:
                     "or move webhook to Audit mode, investigate, then rerun audit"
                 )
         problems.extend(self._access_reviews())
+        return problems
+
+    def _rollout(self, live: Mapping[str, Any]) -> list[str]:
+        status = live.get("status")
+        spec = live.get("spec")
+        metadata = live.get("metadata")
+        if not isinstance(status, dict) or not isinstance(spec, dict) or not isinstance(metadata, dict):
+            return [
+                f"rollout: Deployment {self._webhook_namespace}/{NAME} has no status; wait for it, then rerun audit"
+            ]
+        replicas = spec.get("replicas")
+        counts = [status.get(field) for field in ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas")]
+        if status.get("observedGeneration") != metadata.get("generation") or any(count != replicas for count in counts):
+            return [
+                f"rollout: Deployment {self._webhook_namespace}/{NAME} has not converged on the generated template; "
+                "wait for rollout status to complete, then rerun audit"
+            ]
+        return []
+
+    def _serving_endpoints(self, template: Mapping[str, Any]) -> list[str]:
+        slices = self._request(
+            "GET",
+            f"/apis/discovery.k8s.io/v1/namespaces/{self._webhook_namespace}/endpointslices"
+            f"?labelSelector=kubernetes.io%2Fservice-name%3D{NAME}",
+        ).get("items")
+        if not isinstance(slices, list):
+            raise RuntimeError("webhook audit API returned EndpointSlices without items")
+        problems: list[str] = []
+        ready = 0
+        for endpoint_slice in slices:
+            slice_name = endpoint_slice.get("metadata", {}).get("name", "<unnamed>")
+            for endpoint in endpoint_slice.get("endpoints") or []:
+                addresses = endpoint.get("addresses") or []
+                reference = endpoint.get("targetRef") or {}
+                pod_name = reference.get("name")
+                if (
+                    reference.get("kind") != "Pod"
+                    or reference.get("namespace") != self._webhook_namespace
+                    or not isinstance(pod_name, str)
+                ):
+                    problems.append(
+                        f"endpoint: {addresses} in EndpointSlice {self._webhook_namespace}/{slice_name} does not "
+                        "target a webhook pod; delete the EndpointSlice, find who created it, then rerun audit"
+                    )
+                    continue
+                try:
+                    pod = self._request("GET", f"/api/v1/namespaces/{self._webhook_namespace}/pods/{pod_name}")
+                except RuntimeError as exc:
+                    problems.append(str(exc))
+                    continue
+                if not _is_webhook_pod(pod, template, addresses):
+                    problems.append(
+                        f"endpoint: pod {self._webhook_namespace}/{pod_name} serves the webhook Service but does not "
+                        "match the generated pod template; delete the pod, find who created it, then rerun audit"
+                    )
+                    continue
+                if (endpoint.get("conditions") or {}).get("ready") is not False:
+                    ready += 1
+        if ready == 0:
+            problems.append(
+                f"endpoint: no ready webhook pod serves {self._webhook_namespace}/{NAME}; in Enforce every bailiff "
+                "write is denied and in Audit none is checked; fix the rollout, then rerun audit"
+            )
         return problems
 
     def _access_reviews(self) -> list[str]:

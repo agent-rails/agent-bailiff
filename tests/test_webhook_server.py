@@ -17,7 +17,7 @@ from agent_bailiff.webhook.manifests import NAME, generate_manifests
 from agent_bailiff.webhook.server import WebhookServer
 
 
-def test_cli_refuses_a_single_bundle_for_enforce_mode():
+def test_cli_refuses_a_single_bundle_for_enforce_mode(capsys):
     with pytest.raises(SystemExit) as error:
         webhook_main(
             [
@@ -34,6 +34,7 @@ def test_cli_refuses_a_single_bundle_for_enforce_mode():
             ]
         )
     assert error.value.code == 2
+    assert "do not apply Enforce as one bundle" in capsys.readouterr().err
 
 
 def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
