@@ -76,6 +76,12 @@ def main(argv: list[str] | None = None) -> int:
     manifests.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     manifests.add_argument("--enforce", action="store_true")
     manifests.add_argument(
+        "--deployer",
+        action="append",
+        required=True,
+        help="a user allowed to change the webhook's objects (the GitOps applier); repeat for more",
+    )
+    manifests.add_argument(
         "--phase",
         choices=("all", "prepare", "register", "target"),
         default="all",
@@ -132,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
                 pins=pins,
                 catalog=catalog,
                 enforce=args.enforce,
+                deployers=args.deployer,
                 phase=args.phase,
             )
         except ValueError as exc:

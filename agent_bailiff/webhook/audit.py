@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_bailiff.effector.kubernetes import Transport
+from agent_bailiff.webhook.guard import NAMESPACE_GUARD, REGISTRATION_GUARD
 
 NAME = "bailiff-release-webhook"
 CONTAINER_DEFAULTS = {
@@ -33,8 +34,13 @@ REQUIRED_KINDS = (
     "Deployment",
     "PodDisruptionBudget",
     "Service",
+    "ValidatingAdmissionPolicy",
+    "ValidatingAdmissionPolicy",
+    "ValidatingAdmissionPolicyBinding",
+    "ValidatingAdmissionPolicyBinding",
     "ValidatingWebhookConfiguration",
 )
+POLICY_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
 WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
 PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str, ...]], ...] = (
     ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, False, NAME, WRITE_VERBS),
@@ -73,6 +79,11 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str
         None,
         ("create", "update", "patch"),
     ),
+    *(
+        ("admissionregistration.k8s.io", resource, None, False, guard, WRITE_VERBS)
+        for resource in ("validatingadmissionpolicies", "validatingadmissionpolicybindings")
+        for guard in (NAMESPACE_GUARD, REGISTRATION_GUARD)
+    ),
 )
 
 
@@ -106,6 +117,8 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
                 if selector not in expected_webhook and actual_webhook.get(selector) == {}:
                     actual_webhook.pop(selector)
         return expected_webhooks != actual_webhooks
+    if kind in POLICY_KINDS:
+        return bool(expected["spec"] != actual.get("spec"))
     if kind == "ConfigMap":
         return expected.get("data") != actual.get("data")
     if kind == "Service":
@@ -235,6 +248,13 @@ def _path(item: Mapping[str, Any]) -> str:
     namespace = item["metadata"].get("namespace")
     if kind == "ValidatingWebhookConfiguration":
         return f"/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations/{name}"
+    if kind in POLICY_KINDS:
+        plural = (
+            "validatingadmissionpolicies"
+            if kind == "ValidatingAdmissionPolicy"
+            else "validatingadmissionpolicybindings"
+        )
+        return f"/apis/admissionregistration.k8s.io/v1/{plural}/{name}"
     prefix = f"/namespaces/{namespace}"
     if kind == "Deployment":
         return f"/apis/apps/v1{prefix}/deployments/{name}"

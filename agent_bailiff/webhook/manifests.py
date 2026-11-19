@@ -3,11 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_bailiff.effector.catalog import LABEL, OperationCatalog
 from agent_bailiff.effector.rbac import LABELS, reserved_namespace
+from agent_bailiff.webhook.guard import guard_policies
 
 IMAGE_DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 NAME = "bailiff-release-webhook"
@@ -22,6 +23,7 @@ def generate_manifests(
     pins: Mapping[str, Any],
     catalog: OperationCatalog,
     enforce: bool,
+    deployers: Sequence[str],
     phase: str = "all",
 ) -> dict[str, Any]:
     if phase not in {"all", "prepare", "register", "target"}:
@@ -183,10 +185,13 @@ def generate_manifests(
             ],
         },
     ]
+    for guard in guard_policies(namespace, NAME, deployers, enforce):
+        guard["metadata"]["labels"] = labels
+        items.append(guard)
     if phase == "prepare":
         items = [item for item in items if item["kind"] != "ValidatingWebhookConfiguration"]
     elif phase == "register":
-        items = [item for item in items if item["kind"] in {"Service", "ValidatingWebhookConfiguration"}]
+        items = [item for item in items if item["kind"] not in {"ConfigMap", "Deployment", "PodDisruptionBudget"}]
     elif phase == "target":
         return {"apiVersion": "bailiff.dev/v1", "kind": "WebhookAuditTarget", "items": items}
     return {"apiVersion": "v1", "kind": "List", "items": items}

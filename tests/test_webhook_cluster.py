@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from agent_warrant.identity import encode_public_key
 from test_effector import CATALOG, CUSTODIAN_KEY, DECIDE_KEY, clearance_for
-from test_effector_cluster import apply, kubectl
+from test_effector_cluster import apply, kubectl, whoami
 
 from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import encode_clearance
@@ -140,6 +140,7 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
         ca_pem=(directory / "ca.crt").read_bytes(),
         pins=_pins(),
         catalog=CATALOG,
+        deployers=[whoami()],
         enforce=False,
     )
     if LOCAL_IMAGE:
@@ -186,6 +187,7 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             ca_pem=(directory / "ca.crt").read_bytes(),
             pins=_pins(),
             catalog=CATALOG,
+            deployers=[whoami()],
             enforce=True,
             phase="prepare",
         )
@@ -220,6 +222,7 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             ca_pem=(directory / "ca.crt").read_bytes(),
             pins=_pins(),
             catalog=CATALOG,
+            deployers=[whoami()],
             enforce=True,
             phase="register",
         )
@@ -232,6 +235,7 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             ca_pem=(directory / "ca.crt").read_bytes(),
             pins=_pins(),
             catalog=CATALOG,
+            deployers=[whoami()],
             enforce=True,
             phase="target",
         )

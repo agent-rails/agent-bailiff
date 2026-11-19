@@ -28,6 +28,7 @@ def test_a_single_bundle_for_enforce_mode_is_refused(tmp_path, capsys):
             ca_pem=(tmp_path / "certs" / "ca.crt").read_bytes(),
             pins=_pins(),
             catalog=CATALOG,
+            deployers=["gitops"],
             enforce=True,
         )
     with pytest.raises(SystemExit) as error:
@@ -42,6 +43,8 @@ def test_a_single_bundle_for_enforce_mode_is_refused(tmp_path, capsys):
                 str(tmp_path / "certs" / "ca.crt"),
                 "--pins",
                 str(tmp_path / "pins.json"),
+                "--deployer",
+                "gitops",
                 "--enforce",
             ]
         )
@@ -60,6 +63,7 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         ca_pem=ca,
         pins=pins,
         catalog=CATALOG,
+        deployers=["gitops"],
         enforce=False,
     )
     serialized = json.dumps(document)
@@ -78,6 +82,7 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         ca_pem=ca,
         pins=pins,
         catalog=CATALOG,
+        deployers=["gitops"],
         enforce=True,
         phase="target",
     )
@@ -93,6 +98,7 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         ca_pem=ca,
         pins=pins,
         catalog=CATALOG,
+        deployers=["gitops"],
         enforce=True,
         phase="prepare",
     )
@@ -102,11 +108,19 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         ca_pem=ca,
         pins=pins,
         catalog=CATALOG,
+        deployers=["gitops"],
         enforce=True,
         phase="register",
     )
     assert all(item["kind"] != "ValidatingWebhookConfiguration" for item in prepare["items"])
-    assert [item["kind"] for item in register["items"]] == ["Service", "ValidatingWebhookConfiguration"]
+    assert [item["kind"] for item in register["items"]] == [
+        "Service",
+        "ValidatingWebhookConfiguration",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+    ]
 
     admission = Admission(replace(CONFIG, skew_seconds=2), CATALOG, enforce=True)
     monkeypatch.setattr("agent_bailiff.webhook.server.time.time", lambda: NOW + 2)
@@ -194,6 +208,7 @@ def test_register_switches_the_service_to_enforce_pods_and_target_is_not_applyab
         "ca_pem": (directory / "ca.crt").read_bytes(),
         "pins": {"catalog_digest": CATALOG.digest},
         "catalog": CATALOG,
+        "deployers": ["gitops"],
     }
     prepare = generate_manifests(enforce=True, phase="prepare", **options)
     register = generate_manifests(enforce=True, phase="register", **options)
@@ -204,9 +219,26 @@ def test_register_switches_the_service_to_enforce_pods_and_target_is_not_applyab
     assert "bailiff.dev/webhook-mode" not in deployment["spec"]["selector"]["matchLabels"]
     prepared_service = next(item for item in prepare["items"] if item["kind"] == "Service")
     assert "bailiff.dev/webhook-mode" not in prepared_service["spec"]["selector"]
-    assert [item["kind"] for item in register["items"]] == ["Service", "ValidatingWebhookConfiguration"]
+    assert [item["kind"] for item in register["items"]] == [
+        "Service",
+        "ValidatingWebhookConfiguration",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+    ]
     assert register["items"][0]["spec"]["selector"]["bailiff.dev/webhook-mode"] == "enforce"
     assert register["items"][1]["webhooks"][0]["failurePolicy"] == "Fail"
+    assert all(
+        item["spec"]["validationActions"] == ["Deny"]
+        for item in register["items"]
+        if item["kind"] == "ValidatingAdmissionPolicyBinding"
+    )
+    assert all(
+        item["spec"]["validationActions"] == ["Audit", "Warn"]
+        for item in audit["items"]
+        if item["kind"] == "ValidatingAdmissionPolicyBinding"
+    )
     assert target["kind"] != "List"
     audit_service = next(item for item in audit["items"] if item["kind"] == "Service")
     assert "bailiff.dev/webhook-mode" not in audit_service["spec"]["selector"]

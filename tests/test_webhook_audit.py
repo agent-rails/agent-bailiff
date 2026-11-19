@@ -136,6 +136,7 @@ def manifests_in(namespace):
         ca_pem=b"-----BEGIN CERTIFICATE-----\nmock\n-----END CERTIFICATE-----\n",
         pins={"catalog_digest": CATALOG.digest},
         catalog=CATALOG,
+        deployers=["gitops"],
         enforce=True,
         phase="target",
     )
@@ -197,6 +198,7 @@ def test_a_phase_manifest_is_not_an_audit_target():
             ca_pem=b"-----BEGIN CERTIFICATE-----\nmock\n-----END CERTIFICATE-----\n",
             pins={"catalog_digest": CATALOG.digest},
             catalog=CATALOG,
+            deployers=["gitops"],
             enforce=True,
             phase=phase,
         )
@@ -327,3 +329,75 @@ def test_an_unconverged_rollout_is_reported(mutate):
 
 def _live(api, suffix):
     return next(value for path, value in api.objects.items() if path.endswith(suffix))
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate"),
+    [
+        ("namespace", lambda spec: spec.update(validationActions=["Audit"])),
+        ("namespace", lambda spec: spec["matchResources"].update(namespaceSelector={})),
+        ("namespace", lambda spec: spec["matchResources"].update(excludeResourceRules=[{"resources": ["pods"]}])),
+        ("registration", lambda spec: spec.update(paramRef={"name": "x"})),
+    ],
+)
+def test_a_changed_guard_binding_is_drift(name, mutate):
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"])
+    path = f"/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/bailiff-release-webhook-{name}"
+    mutate(api.objects[path]["spec"])
+    assert any(
+        f"drift: ValidatingAdmissionPolicyBinding <cluster>/bailiff-release-webhook-{name}" in issue
+        for issue in audit.check()
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda spec: spec["validations"].pop(),
+        lambda spec: spec["validations"][0].update(expression="true"),
+        lambda spec: spec.update(matchConditions=[{"name": "skip", "expression": "false"}]),
+        lambda spec: spec["matchConstraints"].update(excludeResourceRules=[{"resources": ["pods"]}]),
+        lambda spec: spec.update(failurePolicy="Ignore"),
+        lambda spec: spec["variables"][4].update(expression="true"),
+    ],
+)
+def test_a_changed_guard_policy_is_drift(mutate):
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"])
+    path = "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/bailiff-release-webhook-namespace"
+    mutate(api.objects[path]["spec"])
+    assert any(
+        "drift: ValidatingAdmissionPolicy <cluster>/bailiff-release-webhook-namespace" in issue
+        for issue in audit.check()
+    )
+
+
+def test_a_missing_guard_is_reported():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"])
+    del api.objects[
+        "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/bailiff-release-webhook-registration"
+    ]
+    assert any("validatingadmissionpolicies/bailiff-release-webhook-registration" in issue for issue in audit.check())
+
+
+def test_access_reviews_cover_writes_to_the_guards():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"]).check()
+    reviewed = {
+        (
+            review["resourceAttributes"]["resource"],
+            review["resourceAttributes"].get("name"),
+            review["resourceAttributes"]["verb"],
+        )
+        for review in api.reviews
+    }
+    for resource in ("validatingadmissionpolicies", "validatingadmissionpolicybindings"):
+        for guard in ("bailiff-release-webhook-namespace", "bailiff-release-webhook-registration"):
+            assert (resource, guard, "delete") in reviewed
+            assert (resource, guard, "patch") in reviewed
