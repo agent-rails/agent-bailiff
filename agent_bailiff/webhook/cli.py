@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ from agent_bailiff.keys import parse_pinned_keys
 from agent_bailiff.service.init import DEFAULT_CATALOG
 from agent_bailiff.strict_json import parse_strict_json
 from agent_bailiff.webhook.admission import Admission
-from agent_bailiff.webhook.audit import WebhookAudit
+from agent_bailiff.webhook.audit import REVIEW_DEADLINE_SECONDS, REVIEW_WORKERS, WebhookAudit
 from agent_bailiff.webhook.certs import issue_serving_certificate
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 from agent_bailiff.webhook.server import WebhookServer
@@ -104,12 +105,28 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--effector-namespace", required=True)
     audit.add_argument("--effector-account", required=True)
     audit.add_argument("--tenant", action="append", required=True)
+    audit.add_argument(
+        "--review-workers",
+        type=int,
+        default=REVIEW_WORKERS,
+        help="access reviews sent at once; lower it if the API server returns 429",
+    )
+    audit.add_argument(
+        "--review-deadline",
+        type=float,
+        default=REVIEW_DEADLINE_SECONDS,
+        help="seconds all access reviews must finish in, or the audit fails",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     if args.command == "certs":
         issue_serving_certificate(args.output_dir, NAME, args.namespace)
         return 0
     if args.command == "audit":
+        if args.review_workers < 1:
+            parser.error("--review-workers must be at least 1")
+        if not math.isfinite(args.review_deadline) or args.review_deadline <= 0:
+            parser.error("--review-deadline must be a positive number of seconds")
         manifest = _pins(args.manifest)
         tenants = parse_tenants(args.tenant)
         users = [f"bailiff:{tenant}:{identity}" for tenant in tenants for identity in ("read", "scale", "restart")]
@@ -121,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             args.effector_account,
             users,
             sorted({namespace for namespaces in tenants.values() for namespace in namespaces}),
+            review_workers=args.review_workers,
+            review_deadline=args.review_deadline,
         )
         problems = audit_check.check()
         for problem in problems:

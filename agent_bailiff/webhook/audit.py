@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -370,6 +371,15 @@ class WebhookAudit:
         self._account = effector_account
         self._users = synthetic_users
         self._tenant_namespaces = tenant_namespaces
+        if isinstance(review_workers, bool) or not isinstance(review_workers, int) or review_workers < 1:
+            raise ValueError("review_workers must be a positive integer")
+        if (
+            isinstance(review_deadline, bool)
+            or not isinstance(review_deadline, (int, float))
+            or not math.isfinite(review_deadline)
+            or review_deadline <= 0
+        ):
+            raise ValueError("review_deadline must be a positive number of seconds")
         self._review_workers = review_workers
         self._review_deadline = review_deadline
         if sorted(item["kind"] for item in manifests["items"]) != list(REQUIRED_KINDS):

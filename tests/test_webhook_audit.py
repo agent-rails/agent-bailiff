@@ -6,6 +6,7 @@ import time
 import pytest
 from test_effector import CATALOG
 
+from agent_bailiff.webhook import cli as webhook_cli
 from agent_bailiff.webhook.audit import PROTECTED_REVIEWS, WebhookAudit, _path
 from agent_bailiff.webhook.guard import REGISTRATION_GUARD
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
@@ -647,3 +648,88 @@ def test_an_access_review_api_error_fails_the_audit():
     audit = WebhookAudit(FailingReviews(manifests), "token", manifests, "bailiff-system", "effector", [], ["staging"])
     with pytest.raises(RuntimeError, match="webhook audit API returned 500 for /apis/authorization.k8s.io"):
         audit.check()
+
+
+@pytest.mark.parametrize(
+    ("workers", "deadline", "message"),
+    [
+        (0, 300.0, "review_workers"),
+        (-1, 300.0, "review_workers"),
+        (True, 300.0, "review_workers"),
+        (8, 0, "review_deadline"),
+        (8, -1.0, "review_deadline"),
+        (8, float("nan"), "review_deadline"),
+        (8, float("inf"), "review_deadline"),
+        (8, None, "review_deadline"),
+    ],
+)
+def test_review_workers_and_deadline_are_validated(workers, deadline, message):
+    manifests = manifests_in("webhook-ns")
+    with pytest.raises(ValueError, match=message):
+        WebhookAudit(
+            FakeApi(manifests),
+            "token",
+            manifests,
+            "bailiff-system",
+            "effector",
+            [],
+            ["staging"],
+            review_workers=workers,
+            review_deadline=deadline,
+        )
+
+
+def audit_argv(tmp_path, *extra):
+    return [
+        "audit",
+        "--manifest",
+        str(tmp_path / "manifest.json"),
+        "--kube-host",
+        "127.0.0.1",
+        "--kube-ca",
+        str(tmp_path / "ca.crt"),
+        "--token-file",
+        str(tmp_path / "token"),
+        "--effector-namespace",
+        "bailiff-system",
+        "--effector-account",
+        "effector",
+        "--tenant",
+        "ta=staging",
+        *extra,
+    ]
+
+
+def test_audit_cli_passes_review_workers_and_deadline(tmp_path, monkeypatch):
+    seen = {}
+
+    class RecordingAudit:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+
+        def check(self):
+            return []
+
+    monkeypatch.setattr(webhook_cli, "WebhookAudit", RecordingAudit)
+    monkeypatch.setattr(webhook_cli, "HttpsTransport", lambda *args: None)
+    monkeypatch.setattr(webhook_cli, "read_token", lambda path: "token")
+    monkeypatch.setattr(webhook_cli, "_pins", lambda path: {})
+    assert webhook_cli.main(audit_argv(tmp_path)) == 0
+    assert seen == {"review_workers": 8, "review_deadline": 300.0}
+    assert webhook_cli.main(audit_argv(tmp_path, "--review-workers", "2", "--review-deadline", "900")) == 0
+    assert seen == {"review_workers": 2, "review_deadline": 900.0}
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--review-workers", "0"), "--review-workers must be at least 1"),
+        (("--review-deadline", "0"), "--review-deadline must be a positive number of seconds"),
+        (("--review-deadline", "nan"), "--review-deadline must be a positive number of seconds"),
+    ],
+)
+def test_audit_cli_refuses_bad_review_settings(tmp_path, capsys, extra, message):
+    with pytest.raises(SystemExit) as exited:
+        webhook_cli.main(audit_argv(tmp_path, *extra))
+    assert exited.value.code == 2
+    assert message in capsys.readouterr().err
