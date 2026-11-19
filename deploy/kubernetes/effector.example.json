@@ -125,6 +125,17 @@
         },
         {
           "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "nodes"
+          ],
+          "verbs": [
+            "list"
+          ]
+        },
+        {
+          "apiGroups": [
             "rbac.authorization.k8s.io"
           ],
           "resources": [

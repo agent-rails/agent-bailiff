@@ -56,6 +56,7 @@ OBJECT_META_FIELDS = (
 SERVER_OWNED_META = ("generation", "managedFields", "resourceVersion")
 AUDIT_RULES = [
     {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list"]},
+    {"apiGroups": [""], "resources": ["nodes"], "verbs": ["list"]},
     {"apiGroups": ["rbac.authorization.k8s.io"], "resources": sorted(RBAC_WRITE_RESOURCES), "verbs": ["list"]},
     {
         "apiGroups": ["admissionregistration.k8s.io"],

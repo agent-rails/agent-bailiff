@@ -6,6 +6,7 @@ import json
 import math
 import random
 import threading
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -61,6 +62,8 @@ REVIEW_DEADLINE_SECONDS = 300.0
 THROTTLE_RETRIES = 5
 RETRY_BASE_SECONDS = 0.5
 RETRY_MAX_SECONDS = 8.0
+NODES_PATH = "/api/v1/nodes?limit=500"
+METADATA_LIST = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1,application/json"
 Review = tuple[str, str, str | None, str | None, str | None, tuple[str, ...]]
 
 
@@ -398,7 +401,7 @@ class WebhookAudit:
             raise ValueError("webhook manifests must place every namespaced object in one namespace")
         self._webhook_namespace = namespaces.pop()
         self._deployers = _deployers(manifests, self._webhook_namespace)
-        self._serving_nodes: set[str] = set()
+        self._nodes: set[str] = set()
         self._serving_pods: set[str] = set()
         items = manifests["items"]
         service = next(item for item in items if item["kind"] == "Service")
@@ -410,10 +413,15 @@ class WebhookAudit:
         )
 
     def _request(
-        self, method: str, path: str, body: object | None = None, stop: threading.Event | None = None
+        self,
+        method: str,
+        path: str,
+        body: object | None = None,
+        stop: threading.Event | None = None,
+        accept: str = "application/json",
     ) -> dict[str, Any]:
         stop = stop or threading.Event()
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
+        headers = {"Authorization": f"Bearer {self._token}", "Accept": accept}
         data = None if body is None else json.dumps(body).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -439,7 +447,7 @@ class WebhookAudit:
 
     def check(self) -> list[str]:
         problems: list[str] = []
-        self._serving_nodes = set()
+        self._nodes = set()
         self._serving_pods = set()
         if self._webhook_namespace == self._namespace:
             problems.append(
@@ -468,8 +476,32 @@ class WebhookAudit:
                     f"{item['metadata']['name']} differs from generated manifest; restore the generated object "
                     "or move webhook to Audit mode, investigate, then rerun audit"
                 )
+        problems.extend(self._cluster_nodes())
         problems.extend(self._access_reviews())
         return problems
+
+    def _cluster_nodes(self) -> list[str]:
+        path = NODES_PATH
+        while True:
+            try:
+                page = self._request("GET", path, accept=METADATA_LIST)
+            except RuntimeError as exc:
+                return [
+                    f"node: {exc}; grant the audit account list on nodes with agent-bailiff effector manifests, "
+                    "then rerun audit"
+                ]
+            items = page.get("items")
+            if not isinstance(items, list):
+                return ["node: webhook audit API returned nodes without items; rerun audit"]
+            for node in items:
+                name = node.get("metadata", {}).get("name") if isinstance(node, dict) else None
+                if not isinstance(name, str) or not name:
+                    return ["node: webhook audit API returned a node without a name; rerun audit"]
+                self._nodes.add(name)
+            token = page.get("metadata", {}).get("continue")
+            if not token:
+                return []
+            path = f"{NODES_PATH}&continue={urllib.parse.quote(token, safe='')}"
 
     def _rollout(self, live: Mapping[str, Any]) -> list[str]:
         status = live.get("status")
@@ -534,7 +566,7 @@ class WebhookAudit:
                 self._serving_pods.add(pod_name)
                 node = pod["spec"].get("nodeName")
                 if isinstance(node, str) and node:
-                    self._serving_nodes.add(node)
+                    self._nodes.add(node)
                 if (endpoint.get("conditions") or {}).get("ready") is not False:
                     ready += 1
         if ready == 0:
@@ -563,7 +595,7 @@ class WebhookAudit:
                 ("", "pods", "proxy", WEBHOOK_NAMESPACE, name, ("create", "get"))
                 for name in _proxy_names(pod, self._pod_ports)
             )
-        for node in sorted(self._serving_nodes):
+        for node in sorted(self._nodes):
             reviews.append(("", "users", None, None, f"system:node:{node}", ("impersonate",)))
             reviews.append((CONSTRAINED, "nodes", None, None, node, NODE_VERBS))
         return reviews

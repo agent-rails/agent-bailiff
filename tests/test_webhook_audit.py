@@ -8,7 +8,7 @@ from test_effector import CATALOG
 
 from agent_bailiff.webhook import audit as audit_module
 from agent_bailiff.webhook import cli as webhook_cli
-from agent_bailiff.webhook.audit import PROTECTED_REVIEWS, WebhookAudit, _path
+from agent_bailiff.webhook.audit import METADATA_LIST, NODES_PATH, PROTECTED_REVIEWS, WebhookAudit, _path
 from agent_bailiff.webhook.guard import REGISTRATION_GUARD
 from agent_bailiff.webhook.manifests import NAME, generate_manifests
 
@@ -88,6 +88,7 @@ class FakeApi:
             f"?labelSelector=kubernetes.io%2Fservice-name%3D{NAME}"
         )
         self.objects[self.slices_path] = {"items": [{"metadata": {"name": NAME + "-x"}, "endpoints": endpoints}]}
+        self.objects[NODES_PATH] = {"items": [{"metadata": {"name": "node-a"}}, {"metadata": {"name": "node-idle"}}]}
 
     def pod(self, index=0):
         return next(value for path, value in self.objects.items() if path.endswith(f"/pods/{NAME}-abc-{index}"))
@@ -113,7 +114,7 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
     service_proxy = 9 * 2
     per_pod = 6 * 2 + 13 * 2
     assert len(api.reviews) == 2 * (
-        sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 3 + service_proxy + 2 * per_pod
+        sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 2 * 3 + service_proxy + 2 * per_pod
     )
     webhook_path = "/validatingwebhookconfigurations/bailiff-release-webhook"
     webhook = next(path for path in api.objects if path.endswith(webhook_path))
@@ -486,7 +487,7 @@ def test_impersonation_reviews_use_the_api_group_each_mode_is_authorized_in():
     assert not any(group == "" and verb.startswith("impersonate:") for group, *_, verb in reviewed)
 
 
-def test_access_reviews_cover_impersonating_the_deployer_and_the_serving_nodes():
+def test_access_reviews_cover_impersonating_the_deployer_and_every_node():
     manifests = manifests_in("webhook-ns")
     api = FakeApi(manifests)
     assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
@@ -495,8 +496,11 @@ def test_access_reviews_cover_impersonating_the_deployer_and_the_serving_nodes()
     assert ("", None, "users", None, "gitops", "impersonate") in reviewed
     assert (constrained, None, "users", None, "gitops", "impersonate:user-info") in reviewed
     assert ("", None, "users", None, "system:node:node-a", "impersonate") in reviewed
+    for node in ("node-a", "node-idle"):
+        assert ("", None, "users", None, f"system:node:{node}", "impersonate") in reviewed
+        for verb in ("impersonate:arbitrary-node", "impersonate:associated-node"):
+            assert (constrained, None, "nodes", None, node, verb) in reviewed
     for verb in ("impersonate:arbitrary-node", "impersonate:associated-node"):
-        assert (constrained, None, "nodes", None, "node-a", verb) in reviewed
         assert (constrained, None, "nodes", None, None, verb) in reviewed
 
 
@@ -578,6 +582,52 @@ def test_access_reviews_cover_grants_scoped_to_a_serving_pod():
         for name in (pod, f"{pod}:9443", f"{pod}:https", f"https:{pod}:9443", f"http:{pod}:", f":{pod}:9443"):
             assert ("", "webhook-ns", "pods", "proxy", name, verb) in reviewed
     assert ("", "webhook-ns", "pods", None, pod, "create") not in reviewed
+
+
+class PagedNodes(FakeApi):
+    def __init__(self, manifests):
+        super().__init__(manifests)
+        self.objects[NODES_PATH] = {"metadata": {"continue": "a/b+c="}, "items": [{"metadata": {"name": "node-1"}}]}
+        self.objects[NODES_PATH + "&continue=a%2Fb%2Bc%3D"] = {
+            "metadata": {},
+            "items": [{"metadata": {"name": "node-2"}}],
+        }
+        self.accepts = []
+
+    def request(self, method, path, headers, body):
+        if path.startswith(NODES_PATH):
+            self.accepts.append(headers["Accept"])
+        return super().request(method, path, headers, body)
+
+
+def test_node_lists_are_paged_as_metadata_and_every_page_is_reviewed():
+    manifests = manifests_in("webhook-ns")
+    api = PagedNodes(manifests)
+    assert WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check() == []
+    assert api.accepts == [METADATA_LIST, METADATA_LIST]
+    reviewed = reviewed_with_groups(api)
+    for node in ("node-1", "node-2"):
+        assert ("authentication.k8s.io", None, "nodes", None, node, "impersonate:arbitrary-node") in reviewed
+
+
+@pytest.mark.parametrize(
+    ("page", "message"),
+    [
+        (None, "node: webhook audit API returned 404 for /api/v1/nodes?limit=500; grant the audit account list"),
+        ({"items": "x"}, "node: webhook audit API returned nodes without items"),
+        ({"items": [{"metadata": {}}]}, "node: webhook audit API returned a node without a name"),
+        ({"items": ["node-a"]}, "node: webhook audit API returned a node without a name"),
+    ],
+)
+def test_a_node_list_that_cannot_be_read_is_reported(page, message):
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    if page is None:
+        del api.objects[NODES_PATH]
+    else:
+        api.objects[NODES_PATH] = page
+    problems = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", [], ["staging"]).check()
+    assert any(problem.startswith(message) for problem in problems), problems
 
 
 class SlowReviews(FakeApi):
