@@ -8,6 +8,23 @@ from typing import Any
 from agent_bailiff.effector.kubernetes import Transport
 
 NAME = "bailiff-release-webhook"
+WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
+PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str, ...]], ...] = (
+    ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, False, NAME, WRITE_VERBS),
+    ("", "namespaces", None, False, "<namespace>", WRITE_VERBS),
+    ("apps", "deployments", None, True, NAME, WRITE_VERBS),
+    ("apps", "deployments", "scale", True, NAME, ("update", "patch")),
+    ("policy", "poddisruptionbudgets", None, True, NAME, WRITE_VERBS),
+    ("", "services", None, True, NAME, WRITE_VERBS),
+    ("", "configmaps", None, True, NAME + "-pins", WRITE_VERBS),
+    ("", "secrets", None, True, NAME + "-tls", WRITE_VERBS + ("get", "list", "watch")),
+    ("", "pods", None, True, None, ("create",)),
+    ("", "pods", "exec", True, None, ("create",)),
+    ("", "pods", "attach", True, None, ("create",)),
+    ("", "pods", "ephemeralcontainers", True, None, ("update", "patch")),
+    ("discovery.k8s.io", "endpointslices", None, True, None, ("create", "update", "patch")),
+    ("", "endpoints", None, True, None, ("create", "update", "patch")),
+)
 
 
 def _contains(expected: object, actual: object) -> bool:
@@ -47,7 +64,8 @@ def _security_drift(kind: str, expected: Mapping[str, Any], actual: Mapping[str,
         if not isinstance(spec, dict):
             return True
         return (
-            spec.get("type", "ClusterIP") != "ClusterIP"
+            spec.get("selector") != expected["spec"]["selector"]
+            or spec.get("type", "ClusterIP") != "ClusterIP"
             or bool(spec.get("externalIPs"))
             or bool(spec.get("externalName"))
             or bool(spec.get("loadBalancerClass"))
@@ -149,6 +167,7 @@ class WebhookAudit:
         effector_namespace: str,
         effector_account: str,
         synthetic_users: Sequence[str],
+        tenant_namespaces: Sequence[str],
     ) -> None:
         self._transport = transport
         self._token = token
@@ -156,6 +175,11 @@ class WebhookAudit:
         self._namespace = effector_namespace
         self._account = effector_account
         self._users = synthetic_users
+        self._tenant_namespaces = tenant_namespaces
+        namespaces = {item["metadata"].get("namespace") for item in manifests["items"]} - {None}
+        if len(namespaces) != 1:
+            raise ValueError("webhook manifests must place every namespaced object in one namespace")
+        self._webhook_namespace = namespaces.pop()
 
     def _request(self, method: str, path: str, body: object | None = None) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
@@ -172,6 +196,11 @@ class WebhookAudit:
 
     def check(self) -> list[str]:
         problems: list[str] = []
+        if self._webhook_namespace in self._tenant_namespaces:
+            problems.append(
+                f"namespace: webhook namespace {self._webhook_namespace} is also a tenant namespace; "
+                "move the webhook to a dedicated namespace, then rerun audit"
+            )
         for item in self._manifests["items"]:
             path = _path(item)
             try:
@@ -191,15 +220,6 @@ class WebhookAudit:
 
     def _access_reviews(self) -> list[str]:
         problems: list[str] = []
-        targets = [
-            ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, NAME),
-            ("", "namespaces", None, self._namespace),
-            ("apps", "deployments", self._namespace, NAME),
-            ("policy", "poddisruptionbudgets", self._namespace, NAME),
-            ("", "services", self._namespace, NAME),
-            ("", "configmaps", self._namespace, NAME + "-pins"),
-            ("", "secrets", self._namespace, NAME + "-tls"),
-        ]
         effector = f"system:serviceaccount:{self._namespace}:{self._account}"
         for user in [effector, *self._users]:
             groups = (
@@ -207,13 +227,16 @@ class WebhookAudit:
                 if user == effector
                 else ["system:authenticated"]
             )
-            for group, resource, namespace, name in targets:
-                for verb in ("create", "update", "patch", "delete", "deletecollection"):
+            for group, resource, subresource, namespaced, name, verbs in PROTECTED_REVIEWS:
+                target = self._webhook_namespace if name == "<namespace>" else name
+                for verb in verbs:
                     attributes = {"group": group, "resource": resource, "verb": verb}
-                    if namespace:
-                        attributes["namespace"] = namespace
-                    if verb not in {"create", "deletecollection"}:
-                        attributes["name"] = name
+                    if subresource:
+                        attributes["subresource"] = subresource
+                    if namespaced:
+                        attributes["namespace"] = self._webhook_namespace
+                    if target is not None and verb not in {"create", "deletecollection", "list", "watch"}:
+                        attributes["name"] = target
                     review = {
                         "apiVersion": "authorization.k8s.io/v1",
                         "kind": "SubjectAccessReview",
@@ -222,8 +245,9 @@ class WebhookAudit:
                     result = self._request("POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", review)
                     status = result.get("status")
                     if not isinstance(status, dict) or status.get("allowed") is not False:
+                        shown = f"{resource}/{subresource}" if subresource else resource
                         problems.append(
-                            f"access: {user} may {verb} {resource}/{name}; remove the grant, keep webhook "
-                            "in Enforce only after a clean audit, then rerun audit"
+                            f"access: {user} may {verb} {shown}/{target or '*'} in {self._webhook_namespace}; "
+                            "remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit"
                         )
         return problems

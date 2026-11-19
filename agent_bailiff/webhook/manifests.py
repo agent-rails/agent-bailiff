@@ -11,6 +11,7 @@ from agent_bailiff.effector.rbac import LABELS
 
 IMAGE_DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 NAME = "bailiff-release-webhook"
+MODE_LABEL = "bailiff.dev/webhook-mode"
 
 
 def generate_manifests(
@@ -34,6 +35,9 @@ def generate_manifests(
     service = {"name": NAME, "namespace": namespace, "path": "/validate", "port": 443}
     labels = {**LABELS, "app.kubernetes.io/name": NAME}
     pod_labels = {"app.kubernetes.io/name": NAME}
+    mode = "enforce" if enforce else "audit"
+    template_labels = {**pod_labels, MODE_LABEL: mode}
+    serving_selector = template_labels if enforce and phase in {"register", "target"} else pod_labels
     config = dict(pins)
     config["enforce"] = enforce
     items: list[dict[str, Any]] = [
@@ -48,7 +52,7 @@ def generate_manifests(
             "kind": "Service",
             "metadata": {"name": NAME, "namespace": namespace, "labels": labels},
             "spec": {
-                "selector": pod_labels,
+                "selector": serving_selector,
                 "ports": [{"port": 443, "targetPort": 9443, "protocol": "TCP"}],
             },
         },
@@ -62,7 +66,7 @@ def generate_manifests(
                 "selector": {"matchLabels": pod_labels},
                 "template": {
                     "metadata": {
-                        "labels": pod_labels,
+                        "labels": template_labels,
                         "annotations": {
                             "bailiff.dev/catalog-digest": catalog.digest,
                             "bailiff.dev/enforce-mode": str(enforce).lower(),
@@ -176,5 +180,7 @@ def generate_manifests(
     if phase == "prepare":
         items = [item for item in items if item["kind"] != "ValidatingWebhookConfiguration"]
     elif phase == "register":
-        items = [item for item in items if item["kind"] == "ValidatingWebhookConfiguration"]
+        items = [item for item in items if item["kind"] in {"Service", "ValidatingWebhookConfiguration"}]
+    elif phase == "target":
+        return {"apiVersion": "bailiff.dev/v1", "kind": "WebhookAuditTarget", "items": items}
     return {"apiVersion": "v1", "kind": "List", "items": items}

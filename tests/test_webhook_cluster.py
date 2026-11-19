@@ -172,6 +172,7 @@ def test_release_reaches_real_https_admission_and_enforce_blocks_token_only(clus
             namespace,
             "effector",
             users,
+            sorted({item for namespaces in cluster["tenants"].values() for item in namespaces}),
         )
         audit_problems = audit.check()
         assert audit_problems == [], audit_problems

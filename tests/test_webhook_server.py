@@ -1,7 +1,9 @@
 import http.client
 import json
+import socket
 import ssl
 import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -90,7 +92,7 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         phase="register",
     )
     assert all(item["kind"] != "ValidatingWebhookConfiguration" for item in prepare["items"])
-    assert [item["kind"] for item in register["items"]] == ["ValidatingWebhookConfiguration"]
+    assert [item["kind"] for item in register["items"]] == ["Service", "ValidatingWebhookConfiguration"]
 
     admission = Admission(replace(CONFIG, skew_seconds=2), CATALOG, enforce=True)
     monkeypatch.setattr("agent_bailiff.webhook.server.time.time", lambda: NOW + 2)
@@ -121,3 +123,76 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def _drip(port, context, stop):
+    try:
+        raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+        secure = context.wrap_socket(raw, server_hostname="localhost")
+        secure.sendall(b"GET /readyz/enforce HTTP/1.1\r\n")
+        while not stop.is_set():
+            secure.sendall(b"X")
+            time.sleep(0.2)
+    except OSError:
+        pass
+
+
+def test_slow_clients_cannot_hold_review_slots_past_the_connection_deadline(tmp_path):
+    directory = tmp_path / "certs"
+    issue_serving_certificate(directory, NAME, "bailiff-system")
+    admission = Admission(replace(CONFIG, skew_seconds=2), CATALOG, enforce=True)
+    server = WebhookServer(
+        admission,
+        "127.0.0.1",
+        0,
+        directory / "tls.crt",
+        directory / "tls.key",
+        max_concurrency=2,
+        connection_deadline=1,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    context = ssl.create_default_context(cafile=str(directory / "ca.crt"))
+    context.check_hostname = False
+    stop = threading.Event()
+    drippers = [threading.Thread(target=_drip, args=(server.server_port, context, stop), daemon=True) for _ in range(6)]
+    try:
+        for dripper in drippers:
+            dripper.start()
+        time.sleep(1.6)
+        connection = http.client.HTTPSConnection("127.0.0.1", server.server_port, context=context, timeout=3)
+        connection.request("GET", "/readyz/enforce")
+        assert connection.getresponse().status == 200
+        connection.close()
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_register_switches_the_service_to_enforce_pods_and_target_is_not_applyable(tmp_path):
+    directory = tmp_path / "certs"
+    issue_serving_certificate(directory, NAME, "bailiff-system")
+    options = {
+        "namespace": "bailiff-system",
+        "image": "registry.example/bailiff@sha256:" + "a" * 64,
+        "ca_pem": (directory / "ca.crt").read_bytes(),
+        "pins": {"catalog_digest": CATALOG.digest},
+        "catalog": CATALOG,
+    }
+    prepare = generate_manifests(enforce=True, phase="prepare", **options)
+    register = generate_manifests(enforce=True, phase="register", **options)
+    target = generate_manifests(enforce=True, phase="target", **options)
+    audit = generate_manifests(enforce=False, **options)
+    deployment = next(item for item in prepare["items"] if item["kind"] == "Deployment")
+    assert deployment["spec"]["template"]["metadata"]["labels"]["bailiff.dev/webhook-mode"] == "enforce"
+    assert "bailiff.dev/webhook-mode" not in deployment["spec"]["selector"]["matchLabels"]
+    prepared_service = next(item for item in prepare["items"] if item["kind"] == "Service")
+    assert "bailiff.dev/webhook-mode" not in prepared_service["spec"]["selector"]
+    assert [item["kind"] for item in register["items"]] == ["Service", "ValidatingWebhookConfiguration"]
+    assert register["items"][0]["spec"]["selector"]["bailiff.dev/webhook-mode"] == "enforce"
+    assert register["items"][1]["webhooks"][0]["failurePolicy"] == "Fail"
+    assert target["kind"] != "List"
+    audit_service = next(item for item in audit["items"] if item["kind"] == "Service")
+    assert "bailiff.dev/webhook-mode" not in audit_service["spec"]["selector"]

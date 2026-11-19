@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -106,11 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "audit":
         manifest = _pins(args.manifest)
-        users = [
-            f"bailiff:{tenant}:{identity}"
-            for tenant in parse_tenants(args.tenant)
-            for identity in ("read", "scale", "restart")
-        ]
+        tenants = parse_tenants(args.tenant)
+        users = [f"bailiff:{tenant}:{identity}" for tenant in tenants for identity in ("read", "scale", "restart")]
         audit_check = WebhookAudit(
             HttpsTransport(args.kube_host, args.kube_port, args.kube_ca),
             read_token(args.token_file),
@@ -118,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             args.effector_namespace,
             args.effector_account,
             users,
+            sorted({namespace for namespaces in tenants.values() for namespace in namespaces}),
         )
         problems = audit_check.check()
         for problem in problems:
@@ -138,11 +135,6 @@ def main(argv: list[str] | None = None) -> int:
             enforce=args.enforce,
             phase=args.phase,
         )
-        if args.enforce and args.phase == "target":
-            print(
-                "Target bundle is for audit comparison only; apply prepare then register as separate phases.",
-                file=sys.stderr,
-            )
         print(json.dumps(generated, indent=2, sort_keys=True))
         return 0
     admission = _admission(_pins(args.config), catalog, enforce=args.mode == "enforce")

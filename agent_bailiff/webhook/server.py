@@ -16,17 +16,37 @@ from agent_bailiff.webhook.admission import MAX_BODY_BYTES, Admission, Malformed
 
 logger = logging.getLogger(__name__)
 
+CONNECTION_DEADLINE_SECONDS = 5.0
+
+
+def _cut(connection: socket.socket) -> None:
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
 
 class WebhookServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     request_queue_size = 64
 
     def __init__(
-        self, admission: Admission, host: str, port: int, cert: Path, key: Path, *, max_concurrency: int = 32
+        self,
+        admission: Admission,
+        host: str,
+        port: int,
+        cert: Path,
+        key: Path,
+        *,
+        max_concurrency: int = 32,
+        connection_deadline: float = CONNECTION_DEADLINE_SECONDS,
     ) -> None:
         if max_concurrency < 1 or max_concurrency > 256:
             raise ValueError("max_concurrency must be 1..256")
+        if not 0 < connection_deadline <= 30:
+            raise ValueError("connection_deadline must be in (0, 30] seconds")
         self.admission = admission
+        self._deadline = connection_deadline
         self._slots = threading.BoundedSemaphore(max_concurrency)
         # TLS handshakes are network-facing work, separate from AdmissionReview
         # evaluation. A stalled handshake must not consume every review slot.
@@ -53,10 +73,15 @@ class WebhookServer(ThreadingMixIn, HTTPServer):
     ) -> None:
         handshake_acquired = True
         slot_acquired = False
+        raw = cast(socket.socket, request)
+        current: list[socket.socket] = [raw]
+        deadline = threading.Timer(self._deadline, lambda: _cut(current[0]))
+        deadline.daemon = True
+        deadline.start()
         try:
-            raw = cast(socket.socket, request)
             raw.settimeout(3)
             secure = self._context.wrap_socket(raw, server_side=True)
+            current[0] = secure
             self._handshakes.release()
             handshake_acquired = False
             if not self._slots.acquire(blocking=False):
@@ -68,6 +93,7 @@ class WebhookServer(ThreadingMixIn, HTTPServer):
         except (OSError, ssl.SSLError):
             pass
         finally:
+            deadline.cancel()
             if slot_acquired:
                 self._slots.release()
             if handshake_acquired:
