@@ -77,7 +77,16 @@ def test_other_headers_are_ignored():
     assert read_call(request, ROUTES).leaf_proof == "proof.token"
 
 
-@pytest.mark.parametrize("value", ["", "01-" + TRACE + "-00f067aa0ba902b7-01", "00-" + TRACE.upper() + "-0-01"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "01-" + TRACE + "-00f067aa0ba902b7-01",
+        "00-" + TRACE.upper() + "-0-01",
+        "00-" + "0" * 32 + "-00f067aa0ba902b7-01",
+        "00-" + TRACE + "-" + "0" * 16 + "-01",
+    ],
+)
 def test_an_invalid_traceparent_leaves_the_trace_id_empty(value):
     assert read_call(message(headers={**HEADERS, "traceparent": value or "x"}), ROUTES).trace_id == ""
 

@@ -25,7 +25,7 @@ META_TYPES: dict[str, tuple[type, ...]] = {
     "io.modelcontextprotocol/clientInfo": (dict,),
     "io.modelcontextprotocol/clientCapabilities": (dict,),
 }
-TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}")
+TRACEPARENT = re.compile(r"00-(?!0{32})([0-9a-f]{32})-(?!0{16})[0-9a-f]{16}-[0-9a-f]{2}")
 
 
 class CallRefused(Exception):
