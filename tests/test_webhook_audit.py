@@ -106,8 +106,8 @@ def test_drift_and_access_reviews_cover_the_webhook_assets():
         api, "audit-token", manifests, "bailiff-effector", "effector", ["bailiff:ta:scale"], ["staging"]
     )
     assert audit.check() == []
-    service_proxy = 7 * 2
-    per_pod = 6 * 2 + 10 * 2
+    service_proxy = 9 * 2
+    per_pod = 6 * 2 + 13 * 2
     assert len(api.reviews) == 2 * (
         sum(len(verbs) for *_, verbs in PROTECTED_REVIEWS) + 2 + 3 + service_proxy + 2 * per_pod
     )
@@ -535,7 +535,15 @@ def test_access_reviews_cover_proxying_to_the_webhook_and_watching_kube_system_s
     reviewed = reviewed_with_groups(api)
     for verb in ("create", "get"):
         assert ("", "webhook-ns", "pods", "proxy", None, verb) in reviewed
-        for name in (NAME, f"{NAME}:443", f"https:{NAME}:443", f"https:{NAME}:", f"http:{NAME}:443"):
+        for name in (
+            NAME,
+            f"{NAME}:443",
+            f"https:{NAME}:443",
+            f"https:{NAME}:",
+            f"http:{NAME}:443",
+            f":{NAME}:443",
+            f":{NAME}:",
+        ):
             assert ("", "webhook-ns", "services", "proxy", name, verb) in reviewed
     assert ("", "kube-system", "secrets", None, None, "watch") in reviewed
 
@@ -563,6 +571,6 @@ def test_access_reviews_cover_grants_scoped_to_a_serving_pod():
     for verb in ("create", "get"):
         for subresource in ("exec", "attach", "portforward"):
             assert ("", "webhook-ns", "pods", subresource, pod, verb) in reviewed
-        for name in (pod, f"{pod}:9443", f"{pod}:https", f"https:{pod}:9443", f"http:{pod}:"):
+        for name in (pod, f"{pod}:9443", f"{pod}:https", f"https:{pod}:9443", f"http:{pod}:", f":{pod}:9443"):
             assert ("", "webhook-ns", "pods", "proxy", name, verb) in reviewed
     assert ("", "webhook-ns", "pods", None, pod, "create") not in reviewed

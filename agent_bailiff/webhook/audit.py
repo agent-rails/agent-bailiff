@@ -72,7 +72,7 @@ def _proxy_names(name: str, ports: Sequence[str]) -> list[str]:
     return [
         name,
         *(f"{name}:{port}" for port in forms),
-        *(f"{scheme}:{name}:{port}" for scheme in ("http", "https") for port in forms),
+        *(f"{scheme}:{name}:{port}" for scheme in ("", "http", "https") for port in forms),
     ]
 
 
