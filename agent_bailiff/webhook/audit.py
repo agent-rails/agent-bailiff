@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agent_bailiff.effector.kubernetes import Transport
-from agent_bailiff.webhook.guard import NAMESPACE_GUARD, REGISTRATION_GUARD
+from agent_bailiff.webhook.guard import CONTROLLER_ACCOUNTS, CONTROLLERS, NAMESPACE_GUARD, REGISTRATION_GUARD
 
 NAME = "bailiff-release-webhook"
 CONTAINER_DEFAULTS = {
@@ -42,48 +42,60 @@ REQUIRED_KINDS = (
 )
 POLICY_KINDS = ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding")
 WRITE_VERBS = ("create", "update", "patch", "delete", "deletecollection")
-PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, bool, str | None, tuple[str, ...]], ...] = (
-    ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, False, NAME, WRITE_VERBS),
-    ("", "namespaces", None, False, "<namespace>", WRITE_VERBS),
-    ("apps", "deployments", None, True, NAME, WRITE_VERBS),
-    ("apps", "deployments", "scale", True, NAME, ("update", "patch")),
-    ("policy", "poddisruptionbudgets", None, True, NAME, WRITE_VERBS),
-    ("", "services", None, True, NAME, WRITE_VERBS),
-    ("", "configmaps", None, True, NAME + "-pins", WRITE_VERBS),
-    ("", "secrets", None, True, NAME + "-tls", WRITE_VERBS + ("get", "list", "watch")),
-    ("", "pods", None, True, None, ("create", "update", "patch")),
-    ("", "pods", "status", True, None, ("update", "patch")),
-    ("", "pods", "portforward", True, None, ("create", "get")),
-    ("", "serviceaccounts", "token", True, None, ("create",)),
-    ("apps", "replicasets", None, True, None, ("create", "update", "patch")),
-    ("apps", "statefulsets", None, True, None, ("create",)),
-    ("apps", "daemonsets", None, True, None, ("create",)),
-    ("batch", "jobs", None, True, None, ("create",)),
-    ("batch", "cronjobs", None, True, None, ("create",)),
-    ("", "replicationcontrollers", None, True, None, ("create",)),
-    ("rbac.authorization.k8s.io", "roles", None, True, None, ("create", "update", "patch")),
-    ("rbac.authorization.k8s.io", "rolebindings", None, True, None, ("create", "update", "patch")),
-    ("", "pods", "exec", True, None, ("create", "get")),
-    ("", "nodes", "proxy", False, None, ("create", "get")),
-    ("", "pods", "attach", True, None, ("create", "get")),
-    ("", "pods", "ephemeralcontainers", True, None, ("update", "patch")),
-    ("discovery.k8s.io", "endpointslices", None, True, None, ("create", "update", "patch")),
-    ("", "endpoints", None, True, None, ("create", "update", "patch")),
-    ("admissionregistration.k8s.io", "mutatingwebhookconfigurations", None, False, None, ("create", "update", "patch")),
-    ("admissionregistration.k8s.io", "mutatingadmissionpolicies", None, False, None, ("create", "update", "patch")),
+WEBHOOK_NAMESPACE = "<webhook>"
+IMPERSONATE_VERBS = ("impersonate", "impersonate:user-info", "impersonate:serviceaccount")
+PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, str | None, str | None, tuple[str, ...]], ...] = (
+    ("admissionregistration.k8s.io", "validatingwebhookconfigurations", None, None, NAME, WRITE_VERBS),
+    ("", "namespaces", None, None, "<namespace>", WRITE_VERBS),
+    ("apps", "deployments", None, WEBHOOK_NAMESPACE, NAME, WRITE_VERBS),
+    ("apps", "deployments", "scale", WEBHOOK_NAMESPACE, NAME, ("update", "patch")),
+    ("policy", "poddisruptionbudgets", None, WEBHOOK_NAMESPACE, NAME, WRITE_VERBS),
+    ("", "services", None, WEBHOOK_NAMESPACE, NAME, WRITE_VERBS),
+    ("", "configmaps", None, WEBHOOK_NAMESPACE, NAME + "-pins", WRITE_VERBS),
+    ("", "secrets", None, WEBHOOK_NAMESPACE, NAME + "-tls", WRITE_VERBS + ("get", "list", "watch")),
+    ("", "pods", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("", "pods", "status", WEBHOOK_NAMESPACE, None, ("update", "patch")),
+    ("", "pods", "portforward", WEBHOOK_NAMESPACE, None, ("create", "get")),
+    ("", "serviceaccounts", "token", WEBHOOK_NAMESPACE, None, ("create",)),
+    ("apps", "replicasets", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("apps", "statefulsets", None, WEBHOOK_NAMESPACE, None, ("create",)),
+    ("apps", "daemonsets", None, WEBHOOK_NAMESPACE, None, ("create",)),
+    ("batch", "jobs", None, WEBHOOK_NAMESPACE, None, ("create",)),
+    ("batch", "cronjobs", None, WEBHOOK_NAMESPACE, None, ("create",)),
+    ("", "replicationcontrollers", None, WEBHOOK_NAMESPACE, None, ("create",)),
+    ("rbac.authorization.k8s.io", "roles", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("rbac.authorization.k8s.io", "rolebindings", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("", "pods", "exec", WEBHOOK_NAMESPACE, None, ("create", "get")),
+    ("", "nodes", "proxy", None, None, ("create", "get")),
+    ("", "pods", "attach", WEBHOOK_NAMESPACE, None, ("create", "get")),
+    ("", "pods", "ephemeralcontainers", WEBHOOK_NAMESPACE, None, ("update", "patch")),
+    ("discovery.k8s.io", "endpointslices", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("", "endpoints", None, WEBHOOK_NAMESPACE, None, ("create", "update", "patch")),
+    ("admissionregistration.k8s.io", "mutatingwebhookconfigurations", None, None, None, ("create", "update", "patch")),
+    ("admissionregistration.k8s.io", "mutatingadmissionpolicies", None, None, None, ("create", "update", "patch")),
     (
         "admissionregistration.k8s.io",
         "mutatingadmissionpolicybindings",
         None,
-        False,
+        None,
         None,
         ("create", "update", "patch"),
     ),
     *(
-        ("admissionregistration.k8s.io", resource, None, False, guard, WRITE_VERBS)
+        ("admissionregistration.k8s.io", resource, None, None, guard, WRITE_VERBS)
         for resource in ("validatingadmissionpolicies", "validatingadmissionpolicybindings")
         for guard in (NAMESPACE_GUARD, REGISTRATION_GUARD)
     ),
+    ("", "serviceaccounts", None, "kube-system", None, ("create",)),
+    ("", "serviceaccounts", "token", "kube-system", None, ("create",)),
+    ("", "pods", None, "kube-system", None, ("create",)),
+    ("", "secrets", None, "kube-system", None, ("get", "list")),
+    *(
+        ("", "users", None, None, user, IMPERSONATE_VERBS)
+        for user in CONTROLLERS
+        if not user.startswith("system:serviceaccount:")
+    ),
+    *(("", "serviceaccounts", None, "kube-system", account, IMPERSONATE_VERBS) for account in CONTROLLER_ACCOUNTS),
 )
 
 
@@ -416,14 +428,15 @@ class WebhookAudit:
                 if user == effector
                 else ["system:authenticated"]
             )
-            for group, resource, subresource, namespaced, name, verbs in PROTECTED_REVIEWS:
+            for group, resource, subresource, namespace, name, verbs in PROTECTED_REVIEWS:
                 target = self._webhook_namespace if name == "<namespace>" else name
+                scope = self._webhook_namespace if namespace == WEBHOOK_NAMESPACE else namespace
                 for verb in verbs:
                     attributes = {"group": group, "resource": resource, "verb": verb}
                     if subresource:
                         attributes["subresource"] = subresource
-                    if namespaced:
-                        attributes["namespace"] = self._webhook_namespace
+                    if scope:
+                        attributes["namespace"] = scope
                     if target is not None and verb not in {"create", "deletecollection", "list", "watch"}:
                         attributes["name"] = target
                     review = {
@@ -436,7 +449,7 @@ class WebhookAudit:
                     if not isinstance(status, dict) or status.get("allowed") is not False:
                         shown = f"{resource}/{subresource}" if subresource else resource
                         problems.append(
-                            f"access: {user} may {verb} {shown}/{target or '*'} in {self._webhook_namespace}; "
+                            f"access: {user} may {verb} {shown}/{target or '*'} in {scope or 'cluster scope'}; "
                             "remove the grant, keep webhook in Enforce only after a clean audit, then rerun audit"
                         )
         return problems

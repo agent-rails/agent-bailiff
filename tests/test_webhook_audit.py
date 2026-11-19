@@ -148,7 +148,7 @@ def test_access_reviews_target_the_webhook_namespace_and_its_attack_surface():
     audit = WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"])
     assert audit.check() == []
     namespaces = {review["resourceAttributes"].get("namespace") for review in api.reviews}
-    assert namespaces == {None, "webhook-ns"}
+    assert namespaces == {None, "webhook-ns", "kube-system"}
     reviewed = {
         (
             review["resourceAttributes"]["resource"],
@@ -401,3 +401,36 @@ def test_access_reviews_cover_writes_to_the_guards():
         for guard in ("bailiff-release-webhook-namespace", "bailiff-release-webhook-registration"):
             assert (resource, guard, "delete") in reviewed
             assert (resource, guard, "patch") in reviewed
+
+
+def test_access_reviews_cover_minting_and_impersonating_controller_identities():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    WebhookAudit(api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"]).check()
+    reviewed = {
+        (
+            review["resourceAttributes"].get("namespace"),
+            review["resourceAttributes"]["resource"],
+            review["resourceAttributes"].get("subresource"),
+            review["resourceAttributes"].get("name"),
+            review["resourceAttributes"]["verb"],
+        )
+        for review in api.reviews
+    }
+    assert ("kube-system", "serviceaccounts", "token", None, "create") in reviewed
+    assert ("kube-system", "serviceaccounts", None, None, "create") in reviewed
+    assert ("kube-system", "pods", None, None, "create") in reviewed
+    assert ("kube-system", "secrets", None, None, "list") in reviewed
+    assert (None, "users", None, "system:kube-controller-manager", "impersonate") in reviewed
+    assert ("kube-system", "serviceaccounts", None, "replicaset-controller", "impersonate:serviceaccount") in reviewed
+
+
+def test_a_cluster_scoped_access_finding_names_cluster_scope():
+    manifests = manifests_in("webhook-ns")
+    api = FakeApi(manifests)
+    api.allowed = True
+    problems = WebhookAudit(
+        api, "token", manifests, "bailiff-system", "effector", ["bailiff:ta:scale"], ["staging"]
+    ).check()
+    assert any("nodes/proxy/* in cluster scope" in problem for problem in problems)
+    assert any("serviceaccounts/token/* in kube-system" in problem for problem in problems)
