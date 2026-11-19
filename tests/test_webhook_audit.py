@@ -654,6 +654,10 @@ def test_a_group_impersonation_grant_is_reported():
         (1, {"items": [{"subjects": "x"}]}, "group: webhook audit API returned a role binding with invalid subjects"),
         (0, {"items": [{"subjects": [{"kind": "Group"}]}]}, "group: webhook audit API returned a group subject"),
         (1, {"items": [], "metadata": {"continue": 7}}, "group: webhook audit API returned role bindings with an"),
+        (1, {"items": [], "metadata": {"continue": 0}}, "group: webhook audit API returned role bindings with an"),
+        (0, {"items": [], "metadata": {"continue": False}}, "group: webhook audit API returned role bindings with an"),
+        (1, {"items": [{"subjects": False}]}, "group: webhook audit API returned a role binding with invalid subjects"),
+        (0, {"items": [{"subjects": None}]}, "group: webhook audit API returned a role binding with invalid subjects"),
     ],
 )
 def test_a_role_binding_list_that_cannot_be_read_is_reported(index, page, message):

@@ -500,11 +500,11 @@ class WebhookAudit:
             if not all(isinstance(item, dict) for item in items):
                 raise ValueError(f"webhook audit API returned {kind} that are not objects")
             listed.extend(items)
-            token = metadata.get("continue")
-            if not token:
-                return listed
+            token = metadata.get("continue", "")
             if not isinstance(token, str):
                 raise ValueError(f"webhook audit API returned {kind} with an invalid continue token")
+            if not token:
+                return listed
             page_path = f"{path}&continue={urllib.parse.quote(token, safe='')}"
 
     def _cluster_nodes(self) -> list[str]:
@@ -537,7 +537,7 @@ class WebhookAudit:
                     "manifests, then rerun audit"
                 ]
             for binding in bindings:
-                subjects = binding.get("subjects") or []
+                subjects = binding.get("subjects", [])
                 if not isinstance(subjects, list) or not all(isinstance(subject, dict) for subject in subjects):
                     return ["group: webhook audit API returned a role binding with invalid subjects; rerun audit"]
                 for subject in subjects:
