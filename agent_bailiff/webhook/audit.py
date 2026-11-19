@@ -96,6 +96,9 @@ PROTECTED_REVIEWS: tuple[tuple[str, str, str | None, str | None, str | None, tup
         if not user.startswith("system:serviceaccount:")
     ),
     *(("", "serviceaccounts", None, "kube-system", account, IMPERSONATE_VERBS) for account in CONTROLLER_ACCOUNTS),
+    ("", "groups", None, None, "system:nodes", ("impersonate",)),
+    ("certificates.k8s.io", "certificatesigningrequests", "approval", None, None, ("update", "patch")),
+    ("certificates.k8s.io", "signers", None, None, "kubernetes.io/kube-apiserver-client-kubelet", ("approve",)),
 )
 
 

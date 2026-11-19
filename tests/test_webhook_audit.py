@@ -423,6 +423,9 @@ def test_access_reviews_cover_minting_and_impersonating_controller_identities():
     assert ("kube-system", "secrets", None, None, "list") in reviewed
     assert (None, "users", None, "system:kube-controller-manager", "impersonate") in reviewed
     assert ("kube-system", "serviceaccounts", None, "replicaset-controller", "impersonate:serviceaccount") in reviewed
+    assert (None, "groups", None, "system:nodes", "impersonate") in reviewed
+    assert (None, "certificatesigningrequests", "approval", None, "update") in reviewed
+    assert (None, "signers", None, "kubernetes.io/kube-apiserver-client-kubelet", "approve") in reviewed
 
 
 def test_a_cluster_scoped_access_finding_names_cluster_scope():
