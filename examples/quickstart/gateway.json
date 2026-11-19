@@ -1,0 +1,82 @@
+{
+  "config": {
+    "adminAddr": "127.0.0.1:15000",
+    "statsAddr": "127.0.0.1:15020",
+    "readinessAddr": "127.0.0.1:15021"
+  },
+  "mcp": {
+    "port": 8080,
+    "statefulMode": "stateless",
+    "targets": [
+      {
+        "name": "gitea",
+        "mcp": {
+          "host": "http://gitea-mcp:8080/mcp"
+        }
+      }
+    ],
+    "policies": {
+      "mcpAuthorization": {
+        "rules": [
+          "mcp.methodName == \"tools/call\" || mcp.methodName == \"tools/list\""
+        ]
+      },
+      "requestHeaderModifier": {
+        "remove": [
+          "authorization",
+          "proxy-authorization",
+          "cookie",
+          "bailiff-release"
+        ]
+      },
+      "mcpGuardrails": {
+        "processors": [
+          {
+            "kind": "expression",
+            "methods": {
+              "tools/call": "response"
+            },
+            "condition": "true",
+            "transform": "mcp.result"
+          },
+          {
+            "kind": "remote",
+            "host": "unix:/run/bailiff/decide/decide.sock",
+            "methods": {
+              "*": "request"
+            },
+            "failureMode": "failClosed",
+            "requestHeaders": {
+              "allowed": [
+                "x-bailiff-task-root",
+                "x-bailiff-links",
+                "x-bailiff-leaf-proof",
+                "x-bailiff-nonce",
+                "traceparent"
+              ]
+            }
+          },
+          {
+            "kind": "remote",
+            "host": "unix:/run/bailiff/custodian/custodian.sock",
+            "methods": {
+              "*": "request"
+            },
+            "requestHeaders": {
+              "allowed": [
+                "x-bailiff-task-root",
+                "x-bailiff-links",
+                "x-bailiff-leaf-proof",
+                "x-bailiff-nonce",
+                "traceparent"
+              ]
+            },
+            "metadata": {
+              "clearance": "mcpGuardrails.clearance"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,278 @@
+import importlib.util
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import uuid
+from pathlib import Path
+
+import pytest
+
+QUICKSTART = Path(__file__).resolve().parents[1] / "examples" / "quickstart"
+COMPOSE_FILE = QUICKSTART / "compose.yaml"
+IMAGE = "agent-bailiff-quickstart:dev"
+UP_TIMEOUT_SECONDS = 900
+RUN_TIMEOUT_SECONDS = 180
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("AGENT_BAILIFF_TEST_QUICKSTART") != "1",
+        reason="set AGENT_BAILIFF_TEST_QUICKSTART=1 to run the quickstart compose stack",
+    ),
+    pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed"),
+]
+
+_spec = importlib.util.spec_from_file_location("quickstart_bootstrap", QUICKSTART / "bootstrap.py")
+assert _spec is not None and _spec.loader is not None
+b = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(b)
+
+VOLUMES = {
+    "pins": "/pins",
+    "issuer-data": "/var/lib/bailiff/issuer",
+    "decide-data": "/var/lib/bailiff/decide",
+    "custodian-data": "/var/lib/bailiff/custodian",
+    "control-data": "/var/lib/bailiff/control",
+    "docket-data": "/var/lib/bailiff/docket",
+    "ledger": "/var/lib/bailiff/ledger",
+    "gitea-admin": "/var/lib/bailiff/gitea-admin",
+    "docket-run": "/run/bailiff/docket",
+    "decide-run": "/run/bailiff/decide",
+    "custodian-run": "/run/bailiff/custodian",
+}
+PRIVATE_VOLUMES = (
+    "issuer-data",
+    "decide-data",
+    "custodian-data",
+    "control-data",
+    "docket-data",
+    "ledger",
+    "gitea-admin",
+    "docket-run",
+    "decide-run",
+    "custodian-run",
+)
+
+DECIDE = (b.DECIDE_UID, b.LEDGER_GID)
+CUSTODIAN = (b.CUSTODIAN_UID, b.CUSTODIAN_UID)
+DIRECTORY, FILE, SOCKET = "directory", "file", "socket"
+EXPECTED_ENTRIES = {
+    "pins": (0, 0, 0o755, DIRECTORY),
+    "pins/issuer": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
+    "pins/issuer/issuer.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
+    "pins/decide": (b.DECIDE_UID, b.DECIDE_UID, 0o755, DIRECTORY),
+    "pins/decide/decide.json": (*DECIDE, 0o644, FILE),
+    "pins/custodian": (*CUSTODIAN, 0o755, DIRECTORY),
+    "pins/custodian/custodian.json": (*CUSTODIAN, 0o644, FILE),
+    "pins/control": (b.DECIDE_UID, b.DECIDE_UID, 0o755, DIRECTORY),
+    "pins/control/control.json": (*DECIDE, 0o644, FILE),
+    "issuer-data": (b.ISSUER_UID, b.ISSUER_UID, 0o700, DIRECTORY),
+    "issuer-data/issuer.key": (b.ISSUER_UID, b.ISSUER_UID, 0o600, FILE),
+    "decide-data": (*DECIDE, 0o700, DIRECTORY),
+    "decide-data/config.json": (*DECIDE, 0o600, FILE),
+    "decide-data/routes.json": (*DECIDE, 0o600, FILE),
+    "decide-data/signing.key": (*DECIDE, 0o600, FILE),
+    "decide-data/docket-state": (*DECIDE, 0o700, DIRECTORY),
+    "decide-data/grpc": (*DECIDE, 0o700, DIRECTORY),
+    "custodian-data": (*CUSTODIAN, 0o700, DIRECTORY),
+    "custodian-data/config.json": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/routes.json": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/bindings.json": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/signing.key": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/kek": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/credentials.db": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/claims.db": (*CUSTODIAN, 0o600, FILE),
+    "custodian-data/docket-state": (*CUSTODIAN, 0o700, DIRECTORY),
+    "custodian-data/grpc": (*CUSTODIAN, 0o700, DIRECTORY),
+    "control-data": (*DECIDE, 0o700, DIRECTORY),
+    "control-data/config.json": (*DECIDE, 0o600, FILE),
+    "control-data/signing.key": (*DECIDE, 0o600, FILE),
+    "control-data/docket-state": (*DECIDE, 0o700, DIRECTORY),
+    "docket-data": (b.DOCKET_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
+    "docket-data/config.json": (b.DOCKET_UID, b.DOCKET_UID, 0o600, FILE),
+    "docket-data/docket.log": (b.DOCKET_UID, b.DOCKET_READERS_GID, 0o640, FILE),
+    "ledger": (*DECIDE, 0o750, DIRECTORY),
+    "ledger/ledger.db": (*DECIDE, 0o640, FILE),
+    "ledger/ledger.db.suspension": (*DECIDE, 0o750, DIRECTORY),
+    "gitea-admin": (b.CUSTODIAN_UID, b.GITEA_ADMIN_GID, 0o750, DIRECTORY),
+    "gitea-admin/password": (b.CUSTODIAN_UID, b.GITEA_ADMIN_GID, 0o640, FILE),
+    "docket-run": (b.DOCKET_UID, b.DOCKET_WRITERS_GID, 0o750, DIRECTORY),
+    "docket-run/docket.sock": (b.DOCKET_UID, b.DOCKET_WRITERS_GID, 0o660, SOCKET),
+    "docket-run/docket.sock.lock": (b.DOCKET_UID, b.DOCKET_UID, 0o600, FILE),
+    "decide-run": (b.DECIDE_UID, b.GATEWAY_SOCKETS_GID, 0o750, DIRECTORY),
+    "decide-run/decide.sock": (b.DECIDE_UID, b.GATEWAY_SOCKETS_GID, 0o660, SOCKET),
+    "decide-run/decide.sock.lock": (*DECIDE, 0o600, FILE),
+    "custodian-run": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o750, DIRECTORY),
+    "custodian-run/custodian.sock": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o660, SOCKET),
+    "custodian-run/custodian.sock.lock": (*CUSTODIAN, 0o600, FILE),
+}
+TRANSIENT_ENTRIES = {
+    re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
+}
+EXPECTED_IDENTITIES = {
+    "docket": (b.DOCKET_UID, b.DOCKET_UID, {b.DOCKET_UID, b.DOCKET_WRITERS_GID, b.DOCKET_READERS_GID}),
+    "decide": (b.DECIDE_UID, b.LEDGER_GID, {b.LEDGER_GID, b.DOCKET_WRITERS_GID, b.GATEWAY_SOCKETS_GID}),
+    "custodian": (
+        b.CUSTODIAN_UID,
+        b.CUSTODIAN_UID,
+        {b.CUSTODIAN_UID, b.DOCKET_WRITERS_GID, b.LEDGER_GID, b.GATEWAY_SOCKETS_GID},
+    ),
+    "gateway": (b.GATEWAY_UID, b.GATEWAY_UID, {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID}),
+}
+ONE_SHOTS = (
+    "issuer-init",
+    "decide-init",
+    "custodian-init",
+    "control-init",
+    "docket-init",
+    "gitea-secret",
+    "gitea-admin",
+    "bootstrap",
+)
+STAT_SCRIPT = """
+import json, os, stat, sys
+kinds = {stat.S_IFDIR: "directory", stat.S_IFREG: "file", stat.S_IFSOCK: "socket"}
+entries = {}
+def record(path):
+    info = os.lstat(path)
+    kind = kinds.get(stat.S_IFMT(info.st_mode), "other")
+    entries[path[3:]] = [info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), kind]
+for top in sorted(os.listdir("/v")):
+    for root, dirs, files in os.walk(f"/v/{top}"):
+        record(root)
+        if os.path.basename(root) in ("docket-state", "grpc"):
+            dirs.clear()
+            continue
+        for name in files:
+            record(os.path.join(root, name))
+json.dump(entries, sys.stdout)
+"""
+SNAPSHOT_SCRIPT = """
+import hashlib, json, os, stat, sys
+snapshot = {}
+for top in sorted(os.listdir("/v")):
+    for root, dirs, files in os.walk(f"/v/{top}"):
+        dirs[:] = [name for name in dirs if name not in ("docket-state", "grpc")]
+        for name in files:
+            path = os.path.join(root, name)
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or name.endswith((".db", ".db-shm", ".db-wal", ".lock", "docket.log")):
+                continue
+            with open(path, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+            snapshot[path[3:]] = [digest, info.st_mtime_ns, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)]
+json.dump(snapshot, sys.stdout)
+"""
+READ_PROBE = """
+import json, os, sys
+denied = {}
+for top in sorted(os.listdir("/v")):
+    try:
+        os.listdir(f"/v/{top}")
+        denied[top] = False
+    except PermissionError:
+        denied[top] = True
+json.dump(denied, sys.stdout)
+"""
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class Stack:
+    def __init__(self, project):
+        self.project = project
+        self.env = {**os.environ, "COMPOSE_PROJECT_NAME": project, "GITEA_MCP_PORT": str(free_port())}
+
+    def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS):
+        command = ["docker", "compose", "--file", str(COMPOSE_FILE), *arguments]
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=timeout, check=False)
+        assert result.returncode == 0, f"{' '.join(arguments)} failed:\n{result.stdout}\n{result.stderr}"
+        return result.stdout
+
+    def container(self, service):
+        return self.compose("ps", "--all", "--quiet", service).strip()
+
+    def probe(self, script, user="0:0"):
+        mounts = [arg for name in VOLUMES for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
+        capabilities = ["--cap-add", "DAC_READ_SEARCH"] if user == "0:0" else []
+        command = [
+            "docker", "run", "--rm", "--network", "none", "--user", user, "--read-only",
+            "--cap-drop", "ALL", *capabilities, *mounts, IMAGE, "-c", script,
+        ]  # fmt: skip
+        result = subprocess.run(command, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=False)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def stack():
+    stack = Stack(f"bailiff-qs-{uuid.uuid4().hex[:8]}")
+    try:
+        stack.compose("up", "--build", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
+        yield stack
+    finally:
+        subprocess.run(
+            ["docker", "compose", "--file", str(COMPOSE_FILE), "down", "--volumes", "--remove-orphans"],
+            env=stack.env,
+            capture_output=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+
+def identity(container):
+    output = subprocess.run(
+        ["docker", "top", container, "-eo", "pid,uid,gid,supgid"],
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=True,
+    ).stdout
+    rows = [line.split() for line in output.splitlines()[1:]]
+    assert rows, output
+    return {(int(uid), int(gid), frozenset(int(group) for group in groups.split(","))) for _, uid, gid, groups in rows}
+
+
+def test_uid_matrix(stack):
+    for service, (uid, gid, groups) in EXPECTED_IDENTITIES.items():
+        assert identity(stack.container(service)) == {(uid, gid, frozenset(groups))}, service
+    entries = {path: tuple(values) for path, values in stack.probe(STAT_SCRIPT).items()}
+    for path, actual in entries.items():
+        if path in EXPECTED_ENTRIES:
+            assert actual == EXPECTED_ENTRIES[path], path
+            continue
+        transient = [expected for pattern, expected in TRANSIENT_ENTRIES.items() if pattern.fullmatch(path)]
+        assert transient == [actual], f"unexpected entry {path} {actual}"
+    assert set(EXPECTED_ENTRIES) <= set(entries)
+
+
+def test_the_agent_uid_reads_no_bailiff_state(stack):
+    denied = stack.probe(READ_PROBE, user=f"{b.AGENT_UID}:{b.AGENT_UID}")
+    assert {name for name, refused in denied.items() if refused} == set(PRIVATE_VOLUMES)
+    assert denied["pins"] is False
+
+
+def test_bootstrap_rerun_idempotent(stack):
+    before = stack.probe(SNAPSHOT_SCRIPT)
+    outputs = {service: stack.compose("run", "--rm", "--no-deps", service) for service in ONE_SHOTS}
+    after = stack.probe(SNAPSHOT_SCRIPT)
+    assert after == before
+    for service, step in [
+        ("issuer-init", "issuer"),
+        ("decide-init", "decide"),
+        ("custodian-init", "custodian"),
+        ("control-init", "control"),
+        ("docket-init", "docket"),
+        ("gitea-secret", "admin-secret"),
+    ]:
+        assert outputs[service].strip().splitlines()[-1] == f"{step}: kept", outputs[service]
+    lines = outputs["bootstrap"].strip().splitlines()
+    assert lines[-2:] == ["credential: kept", "gitea: kept"], outputs["bootstrap"]
+    assert not any(line.startswith("gitea: created") for line in lines)
+    reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential:", "gitea:"))))
+    assert reach["what this token can reach"]["probes"][f"read issues in {b.ORG}/demo"] == "allowed"
