@@ -367,7 +367,7 @@ class Deployment:
             "decider_id": DECIDE,
             "agent_key": str(key_path),
             "task_root": root.encode(),
-            "routes": {route["name"]: {"tool": route["tool"], "resource": route["resource"]} for route in ROUTES},
+            "routes": ROUTES,
             "workspace": str(workspace),
             "request_log": str(state_dir / "requests.jsonl"),
         }
@@ -513,9 +513,10 @@ def scenario_replay(deployment: Deployment) -> Outcome:
     task = deployment.task("task-replay")
     tools = shim.Shim(task["state"])
     first = tools.call("deploy_service", {"version": "1.5.0"})
+    tools.client.close()
     before = len(deployment.upstream_calls("deploy_service"))
     sent = json.loads(Path(task["state"]["request_log"]).read_text().splitlines()[-1])
-    replayed = shim.gateway_result(shim.post(task["state"]["gateway_url"], sent["body"], sent["headers"]))
+    replayed = shim.replay(task["state"], sent)
     outcome = Outcome("replay", "scripted: send the agent's exact request a second time")
     outcome.checks = {
         "first call": first["content"][0]["text"],

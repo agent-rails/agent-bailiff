@@ -4,21 +4,26 @@ through agentgateway. It holds the agent's signing key and task root, never a se
 from __future__ import annotations
 
 import json
-import secrets
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from agent_warrant.chain import prove_leaf
-from agent_warrant.task_root import TaskRoot
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.decide.identity import request_digest
+from agent_bailiff.client import (
+    BailiffClient,
+    GatewayError,
+    Holder,
+    NeedsApproval,
+    Outcome,
+    OutcomeUnknown,
+    PreparedCall,
+    Refused,
+    Result,
+)
+from agent_bailiff.routes import ToolRoute, ToolRoutes
 
-PROTOCOL = "2025-06-18"
+PROTOCOL = "2025-11-25"
 TOOLS = [
     {
         "name": "deploy_service",
@@ -45,9 +50,8 @@ TOOLS = [
 class Shim:
     def __init__(self, state: dict[str, Any]) -> None:
         self.state = state
-        self.key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(Path(state["agent_key"]).read_text().strip()))
-        self.root = TaskRoot.decode(state["task_root"])
-        self.next_id = 1
+        self.client = client_for(state)
+        self.services = {route["name"]: route["service"] for route in state["routes"]}
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -70,25 +74,16 @@ class Shim:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "read_document":
             return self.read_document(str(arguments.get("name", "")))
-        route = self.state["routes"].get(name)
-        if route is None:
+        if name not in self.services:
             return text(f"unknown tool {name}", error=True)
-        nonce = secrets.token_hex(8)
-        resource = route["resource"].format_map({key: arguments.get(key) for key in ("namespace", "name")})
-        digest = request_digest(route["tool"], resource, arguments, nonce)
-        proof = prove_leaf(
-            self.root, self.key, int(time.time()), audience=self.state["decider_id"], request_digest=digest
-        )
-        headers = {
-            "x-bailiff-task-root": self.state["task_root"],
-            "x-bailiff-leaf-proof": proof.encode(),
-            "x-bailiff-nonce": nonce,
-            "traceparent": f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01",
-        }
-        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        try:
+            call = self.client.prepare(self.services[name], name, arguments)
+        except ValueError as error:
+            return text(str(error), error=True)
         with open(self.state["request_log"], "a") as log:
-            log.write(json.dumps({"headers": headers, "body": body}) + "\n")
-        return gateway_result(post(self.state["gateway_url"], body, headers))
+            record = {"headers": dict(call.headers), "body": json.loads(call.body), "raw": call.body.decode()}
+            log.write(json.dumps(record) + "\n")
+        return send(self.client, call)
 
     def read_document(self, name: str) -> dict[str, Any]:
         workspace = Path(self.state["workspace"]).resolve()
@@ -98,47 +93,39 @@ class Shim:
         return text(path.read_text())
 
 
-def post(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    initialize = {
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": {"name": "agent", "version": "1"}},
-    }
-    send(url, initialize, {})
-    return send(url, body, headers)
+def client_for(state: dict[str, Any]) -> BailiffClient:
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(Path(state["agent_key"]).read_text().strip()))
+    holder = Holder(state["task_root"], (), key, state["decider_id"])
+    routes = ToolRoutes([ToolRoute(**route) for route in state["routes"]])
+    return BailiffClient(state["gateway_url"], holder, routes)
 
 
-def send(url: str, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        json.dumps(body).encode(),
-        {
-            "content-type": "application/json",
-            "accept": "application/json, text/event-stream",
-            "mcp-protocol-version": PROTOCOL,
-            **headers,
-        },
-        method="POST",
+def replay(state: dict[str, Any], sent: dict[str, Any]) -> dict[str, Any]:
+    call = PreparedCall(
+        sent["body"]["id"], "", "", sent["headers"]["x-bailiff-nonce"], sent["headers"], sent["raw"].encode()
     )
+    client = client_for(state)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return parse(response.read().decode())
-    except urllib.error.HTTPError as error:
-        return {"error": {"message": f"HTTP {error.code}: {error.read().decode()[:200]}"}}
+        return send(client, call)
+    finally:
+        client.close()
 
 
-def parse(raw: str) -> dict[str, Any]:
-    for line in raw.splitlines():
-        if line.startswith("data: "):
-            return json.loads(line[len("data: ") :])
-    return json.loads(raw) if raw.strip() else {}
+def send(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
+    try:
+        return mcp_result(client.send(call))
+    except GatewayError as error:
+        return text(f"gateway_error: {error}", error=True)
 
 
-def gateway_result(response: dict[str, Any]) -> dict[str, Any]:
-    if "result" in response:
-        return response["result"]
-    return text(f"refused: {response.get('error', {}).get('message', 'no response')}", error=True)
+def mcp_result(outcome: Outcome) -> dict[str, Any]:
+    if isinstance(outcome, Result):
+        return dict(outcome.result)
+    if isinstance(outcome, Refused | NeedsApproval):
+        return text(outcome.reason, error=True)
+    if isinstance(outcome, OutcomeUnknown):
+        return text(f"outcome_unknown: {outcome.detail}", error=True)
+    raise AssertionError(f"unexpected outcome {outcome!r}")
 
 
 def text(value: str, *, error: bool = False) -> dict[str, Any]:

@@ -6,7 +6,7 @@ Runs agent-bailiff end to end with a real model as the agent:
 - agentgateway v1.7.0 (the pinned release binary) in front of a fake upstream MCP server that records every request and its headers;
 - Claude Code in headless mode as the agent, with no built-in tools, no user or project settings, a minimal environment, and only three tools from `shim.py`: `deploy_service`, `withdraw_funds` and `read_document`.
 
-The shim is the agent's side of agent-bailiff. It holds the agent's signing key and task root, signs a leaf proof for each call and sends the call through the gateway. It never holds a service credential.
+The shim is the agent's side of agent-bailiff, built on `agent_bailiff.client` (see `docs/CLIENT.md`). It holds the agent's signing key and task root, signs a leaf proof for each call and sends the call through the gateway. It never holds a service credential.
 
 ## Scenarios
 
