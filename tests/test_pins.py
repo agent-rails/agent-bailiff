@@ -87,14 +87,25 @@ def test_lock_satisfies_pyproject_and_build_requirements():
 INSTALLER = re.compile(r"\b(pip3?|uv|pipx|poetry|conda|easy_install)\b")
 
 
-def test_ci_installs_only_from_the_hash_lock():
-    lines = WORKFLOW.read_text().splitlines()
-    installs = [line.strip().removeprefix("- run:").strip() for line in lines if INSTALLER.search(line)]
-    assert installs == [
-        "python -m pip install --require-hashes -r requirements-ci.txt",
-        "python -m pip install --no-deps --no-build-isolation -e .",
-        "python -m pip check",
-    ]
+JOB = re.compile(r"^  [a-z][a-z0-9-]*:$")
+
+
+def test_every_ci_job_installs_only_from_the_hash_lock():
+    jobs: dict[str, list[str]] = {}
+    current = None
+    for line in WORKFLOW.read_text().split("\njobs:\n", 1)[1].splitlines():
+        if JOB.match(line):
+            current = jobs.setdefault(line.strip().removesuffix(":"), [])
+        elif INSTALLER.search(line):
+            assert current is not None, line
+            current.append(line.strip().removeprefix("- run:").strip())
+    assert set(jobs) == {"test", "quickstart-integration"}
+    for name, installs in jobs.items():
+        assert installs == [
+            "python -m pip install --require-hashes -r requirements-ci.txt",
+            "python -m pip install --no-deps --no-build-isolation -e .",
+            "python -m pip check",
+        ], name
 
 
 def test_package_imports():
