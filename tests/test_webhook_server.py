@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 from test_effector import CATALOG, CONFIG, NOW
 from test_webhook_admission import review
+from test_webhook_cluster import _pins
 
 from agent_bailiff.webhook.admission import Admission
 from agent_bailiff.webhook.certs import issue_serving_certificate
@@ -17,19 +18,30 @@ from agent_bailiff.webhook.manifests import NAME, generate_manifests
 from agent_bailiff.webhook.server import WebhookServer
 
 
-def test_cli_refuses_a_single_bundle_for_enforce_mode(capsys):
+def test_a_single_bundle_for_enforce_mode_is_refused(tmp_path, capsys):
+    issue_serving_certificate(tmp_path / "certs", NAME, "bailiff-webhook")
+    (tmp_path / "pins.json").write_text(json.dumps(_pins()))
+    with pytest.raises(ValueError, match="do not apply Enforce as one bundle"):
+        generate_manifests(
+            namespace="bailiff-webhook",
+            image="registry.example/bailiff@sha256:" + "a" * 64,
+            ca_pem=(tmp_path / "certs" / "ca.crt").read_bytes(),
+            pins=_pins(),
+            catalog=CATALOG,
+            enforce=True,
+        )
     with pytest.raises(SystemExit) as error:
         webhook_main(
             [
                 "manifests",
                 "--namespace",
-                "bailiff-system",
+                "bailiff-webhook",
                 "--image",
                 "registry.example/bailiff@sha256:" + "a" * 64,
                 "--ca",
-                "ca.crt",
+                str(tmp_path / "certs" / "ca.crt"),
                 "--pins",
-                "pins.json",
+                str(tmp_path / "pins.json"),
                 "--enforce",
             ]
         )
@@ -67,6 +79,7 @@ def test_tls_review_and_manifest_keep_private_keys_out(tmp_path, monkeypatch):
         pins=pins,
         catalog=CATALOG,
         enforce=True,
+        phase="target",
     )
     enforce_deployment = next(item for item in enforce_target["items"] if item["kind"] == "Deployment")
     enforce_probe = enforce_deployment["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]

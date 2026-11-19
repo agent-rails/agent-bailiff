@@ -122,19 +122,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if problems else 0
     catalog = OperationCatalog.load(args.catalog)
     if args.command == "manifests":
-        if args.enforce and args.phase == "all":
-            parser.error("--enforce requires --phase prepare, register, or target; do not apply Enforce as one bundle")
         pins = _pins(args.pins)
         _admission({**pins, "enforce": args.enforce}, catalog)
-        generated = generate_manifests(
-            namespace=args.namespace,
-            image=args.image,
-            ca_pem=args.ca.read_bytes(),
-            pins=pins,
-            catalog=catalog,
-            enforce=args.enforce,
-            phase=args.phase,
-        )
+        try:
+            generated = generate_manifests(
+                namespace=args.namespace,
+                image=args.image,
+                ca_pem=args.ca.read_bytes(),
+                pins=pins,
+                catalog=catalog,
+                enforce=args.enforce,
+                phase=args.phase,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         print(json.dumps(generated, indent=2, sort_keys=True))
         return 0
     admission = _admission(_pins(args.config), catalog, enforce=args.mode == "enforce")

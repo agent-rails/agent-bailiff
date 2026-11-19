@@ -26,6 +26,8 @@ def generate_manifests(
 ) -> dict[str, Any]:
     if phase not in {"all", "prepare", "register", "target"}:
         raise ValueError("phase must be all, prepare, register, or target")
+    if enforce and phase == "all":
+        raise ValueError("--enforce requires --phase prepare, register, or target; do not apply Enforce as one bundle")
     if LABEL.fullmatch(namespace) is None:
         raise ValueError(f"{namespace!r} is not a Kubernetes name")
     if reserved_namespace(namespace):
