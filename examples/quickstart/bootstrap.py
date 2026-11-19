@@ -51,6 +51,7 @@ ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
 ISSUER_KEY = DIRS["issuer"] / "issuer.key"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
 TASK_FILE = STATE / "tasks" / "task.json"
+LOAD_FILE = STATE / "tasks" / "load.json"
 
 TENANT = "quickstart"
 PRINCIPAL = "user:operator"
@@ -71,6 +72,8 @@ TASK_SCOPE = {
 }
 TASK_BUDGET = 20
 TASK_TTL_SECONDS = 3600
+ISSUER_MAX_BUDGET = 100
+LOAD_TASKS = 32
 POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "rules": []}}
 COSTS = {"version": 1, "tools": {route["tool"]: 1 for route in ROUTES}}
 
@@ -164,7 +167,7 @@ def issuers() -> dict[str, Any]:
     return {
         NAMES["issuer"]: {
             "public_key": encode_public_key(record.public_key),
-            "max_budget": 100,
+            "max_budget": ISSUER_MAX_BUDGET,
             "max_depth": 4,
             "tenants": {TENANT: {"principals": [PRINCIPAL], "principal_prefixes": []}},
         }
@@ -438,10 +441,14 @@ def bootstrap_gitea() -> str:
     return "created" if created or outcome == "created" else "kept"
 
 
-def issue_task() -> str:
+def agent_subject() -> str:
     subject = AGENT_PUBLIC_KEY.read_text().strip()
     if not is_valid_public_key(subject):
         raise BootstrapError(f"{AGENT_PUBLIC_KEY} does not hold an Ed25519 public key")
+    return subject
+
+
+def task_document(subject: str, purpose: str, budget: int) -> dict[str, str]:
     task_id = f"task-{secrets.token_hex(8)}"
     now = int(time.time())
     root = issue_task_root(
@@ -450,22 +457,38 @@ def issue_task() -> str:
         task_id=task_id,
         tenant_id=TENANT,
         principal=PRINCIPAL,
-        purpose="triage-quickstart-demo",
-        budget=TASK_BUDGET,
+        purpose=purpose,
+        budget=budget,
         max_depth=2,
         issued_at=now,
         expires_at=now + TASK_TTL_SECONDS,
         scope=TASK_SCOPE,
         subject=subject,
     )
-    staged = TASK_FILE.with_name(f".{TASK_FILE.name}.new")
+    return {"task_id": task_id, "task_root": root.encode(), "decider_id": NAMES["decide"]}
+
+
+def write_public(path: Path, document: Any) -> None:
+    staged = path.with_name(f".{path.name}.new")
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
     with os.fdopen(fd, "w") as target:
-        target.write(json.dumps({"task_id": task_id, "task_root": root.encode(), "decider_id": NAMES["decide"]}))
+        target.write(json.dumps(document))
         target.flush()
         os.fsync(target.fileno())
-    os.replace(staged, TASK_FILE)
-    return task_id
+    os.replace(staged, path)
+
+
+def issue_task() -> str:
+    document = task_document(agent_subject(), "triage-quickstart-demo", TASK_BUDGET)
+    write_public(TASK_FILE, document)
+    return document["task_id"]
+
+
+def issue_load_tasks() -> str:
+    subject = agent_subject()
+    tasks = [task_document(subject, "quickstart-load", ISSUER_MAX_BUDGET) for _ in range(LOAD_TASKS)]
+    write_public(LOAD_FILE, {"budget": ISSUER_MAX_BUDGET, "tasks": tasks})
+    return f"{LOAD_TASKS} tasks"
 
 
 COMMANDS: dict[str, Callable[[], str]] = {
@@ -477,6 +500,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "admin-secret": admin_secret,
     "gitea": bootstrap_gitea,
     "issue": issue_task,
+    "issue-load": issue_load_tasks,
 }
 
 

@@ -67,6 +67,11 @@ jobs:
       - run: pytest -q -rs tests/test_quickstart_stack.py tests/test_quickstart.py tests/test_quickstart_canary.py | tee --append "$RUNNER_TEMP/pytest.out"
         env:
           AGENT_BAILIFF_TEST_QUICKSTART: "1"
+      - run: pytest -q -rs tests/test_quickstart_load.py | tee --append "$RUNNER_TEMP/pytest.out"
+        env:
+          AGENT_BAILIFF_TEST_QUICKSTART: "1"
+          AGENT_BAILIFF_TEST_QUICKSTART_LOAD: "1"
+      - run: cat benchmarks/quickstart-*.json
       - run: "! grep -q skipped \"$RUNNER_TEMP/pytest.out\""
       - if: always()
         run: docker compose down --volumes

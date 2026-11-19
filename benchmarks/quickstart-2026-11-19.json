@@ -1,0 +1,60 @@
+{
+  "recorded_at": "2026-11-19T22:18:05+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "docker": "29.6.2"
+  },
+  "calls_per_client": 20,
+  "tool": "list_issues",
+  "levels": [
+    {
+      "clients": 1,
+      "calls": 20,
+      "seconds": 0.69,
+      "calls_per_second": 29.0,
+      "p50_ms": 33.4,
+      "p99_ms": 48.5,
+      "outcomes": {
+        "result": 20
+      },
+      "docket_unavailable_rate": 0.0
+    },
+    {
+      "clients": 4,
+      "calls": 80,
+      "seconds": 1.176,
+      "calls_per_second": 68.0,
+      "p50_ms": 56.1,
+      "p99_ms": 77.9,
+      "outcomes": {
+        "result": 80
+      },
+      "docket_unavailable_rate": 0.0
+    },
+    {
+      "clients": 16,
+      "calls": 320,
+      "seconds": 3.614,
+      "calls_per_second": 88.5,
+      "p50_ms": 182.8,
+      "p99_ms": 284.6,
+      "outcomes": {
+        "result": 320
+      },
+      "docket_unavailable_rate": 0.0
+    },
+    {
+      "clients": 32,
+      "calls": 640,
+      "seconds": 7.246,
+      "calls_per_second": 88.3,
+      "p50_ms": 358.5,
+      "p99_ms": 604.5,
+      "outcomes": {
+        "result": 640
+      },
+      "docket_unavailable_rate": 0.0
+    }
+  ]
+}
