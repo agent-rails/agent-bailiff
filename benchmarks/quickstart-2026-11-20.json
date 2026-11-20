@@ -1,0 +1,68 @@
+{
+  "recorded_at": "2026-11-20T10:03:50+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "docker": "29.6.2"
+  },
+  "calls_per_client": 20,
+  "tool": "list_issues",
+  "levels": [
+    {
+      "clients": 1,
+      "calls": 20,
+      "seconds": 0.762,
+      "calls_per_second": 26.3,
+      "p50_ms": 36.6,
+      "p99_ms": 58.4,
+      "outcomes": {
+        "result": 20
+      },
+      "docket_unavailable_rate": 0.0,
+      "exporter_backlog_records": 0,
+      "exporter_catchup_seconds": 0.3
+    },
+    {
+      "clients": 4,
+      "calls": 80,
+      "seconds": 1.122,
+      "calls_per_second": 71.3,
+      "p50_ms": 53.4,
+      "p99_ms": 77.7,
+      "outcomes": {
+        "result": 80
+      },
+      "docket_unavailable_rate": 0.0,
+      "exporter_backlog_records": 28,
+      "exporter_catchup_seconds": 1.7
+    },
+    {
+      "clients": 16,
+      "calls": 320,
+      "seconds": 3.716,
+      "calls_per_second": 86.1,
+      "p50_ms": 197.5,
+      "p99_ms": 281.9,
+      "outcomes": {
+        "result": 320
+      },
+      "docket_unavailable_rate": 0.0,
+      "exporter_backlog_records": 69,
+      "exporter_catchup_seconds": 1.7
+    },
+    {
+      "clients": 32,
+      "calls": 640,
+      "seconds": 7.531,
+      "calls_per_second": 85.0,
+      "p50_ms": 365.9,
+      "p99_ms": 655.4,
+      "outcomes": {
+        "result": 640
+      },
+      "docket_unavailable_rate": 0.0,
+      "exporter_backlog_records": 25,
+      "exporter_catchup_seconds": 1.7
+    }
+  ]
+}
