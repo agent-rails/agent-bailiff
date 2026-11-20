@@ -399,6 +399,14 @@ def issue_credential(gitea: Gitea, admin: str) -> None:
     )  # fmt: skip
 
 
+def probe_outcome(label: str, status: int) -> str:
+    if status == 200:
+        return "allowed"
+    if status in (401, 403, 404):
+        return f"refused ({status})"
+    raise BootstrapError(f"token reach probe {label!r} returned {status}, neither allowed nor refused")
+
+
 def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
     probes = {
         "read own user": ("GET", "/api/v1/user", None),
@@ -411,7 +419,7 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
     reach = {}
     for label, (method, path, body) in probes.items():
         status, _ = gitea.request(method, path, credential, body)
-        reach[label] = "allowed" if status not in (401, 403, 404) else f"refused ({status})"
+        reach[label] = probe_outcome(label, status)
     search = gitea.expect({200}, "GET", "/api/v1/repos/search?limit=50", credential)
     return {
         "scopes": TOKEN_SCOPES,
