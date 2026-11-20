@@ -8,6 +8,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO
@@ -29,7 +30,7 @@ from agent_bailiff.docket.report import (
     table_row,
     verify_records,
 )
-from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine
+from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
@@ -133,6 +134,25 @@ def _parser() -> argparse.ArgumentParser:
             verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
             verify.add_argument("--json", action="store_true", help="print one JSON object per record")
             verify.set_defaults(handler=_verify_docket)
+            export = component.add_parser(
+                "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
+            )
+            export.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            export.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            export.add_argument(
+                "--checkpoint", type=Path, required=True, help="checkpoint file in the exporter's own 0700 directory"
+            )
+            export.add_argument(
+                "--otlp", required=True, help="OTLP/HTTP traces endpoint, e.g. http://jaeger:4318/v1/traces"
+            )
+            export.add_argument("--timeout", type=float, default=10.0, help="seconds per export, retries included")
+            export.add_argument("--batch-size", type=int, default=256)
+            export.add_argument("--max-failures", type=int, default=5, help="failed exports of one batch before exit")
+            export.add_argument("--poll-interval", type=float, default=1.0, help="seconds between reads at the end")
+            export.add_argument("--once", action="store_true", help="export to the current end, then exit")
+            export.set_defaults(handler=_export_docket)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -383,6 +403,47 @@ def _verify_docket(args: argparse.Namespace) -> int:
         return EXIT_REFUSED
     print(f"{PROG} docket verify: {report.entries} records verified, {shown} printed", file=sys.stderr)
     return 0
+
+
+def _export_docket(args: argparse.Namespace) -> int:
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import SpanExporter
+
+        from agent_bailiff.docket.otlp import CheckpointMismatch, DocketExporter, ExportFailed
+    except ImportError:
+        return _refused("docket export", ImportError("needs the otel extra: pip install 'agent-bailiff[otel]'"))
+    stop = _stop_on_signals()
+    try:
+        endpoint = _otlp_endpoint(args.otlp)
+        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        span_exporter: SpanExporter = OTLPSpanExporter(endpoint=endpoint, timeout=args.timeout)
+    except STARTUP_ERRORS + (InitError,) as exc:
+        return _refused("docket export", exc)
+    try:
+        exporter = DocketExporter(
+            args.docket,
+            index,
+            args.checkpoint,
+            span_exporter,
+            batch_size=args.batch_size,
+            max_failures=args.max_failures,
+            poll_interval=args.poll_interval,
+        )
+        exported = exporter.run(stop, follow=not args.once)
+    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed) as exc:
+        return _refused("docket export", exc)
+    finally:
+        span_exporter.shutdown()
+    print(f"{PROG} docket export: {exported} records exported", file=sys.stderr)
+    return 0
+
+
+def _otlp_endpoint(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("--otlp must be an http or https URL with a host and no user info")
+    return value
 
 
 async def _serve_docket_until_signal(settings: DocketSettings) -> None:
