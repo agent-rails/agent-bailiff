@@ -121,6 +121,26 @@ class AckLostDocket:
         return record
 
 
+class FailFirstDocket:
+    def __init__(self, inner):
+        self.inner = inner
+        self.failed = False
+
+    def append(self, entry):
+        if not self.failed:
+            self.failed = True
+            raise ConnectionError("sink unavailable")
+        return self.inner.append(entry)
+
+
+class FakeClock:
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
 class AckDocket:
     def __init__(self, inner, ack):
         self.inner = inner
@@ -398,14 +418,25 @@ def test_a_flood_of_unverified_requests_writes_nothing_to_the_docket(make_decide
 
 
 def test_verified_refusals_past_the_task_budget_are_not_recorded(make_decider, docket_paths):
-    decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60))
+    clock = FakeClock()
+    decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60, clock=clock))
     decisions = [decider.check(make_request(resource="env/prod/api", nonce=f"n-{n}"), NOW + n) for n in range(3)]
     assert [decision.reason for decision in decisions] == ["out_of_scope"] * 3
     assert [decision.entry_id is None for decision in decisions] == [False, False, True]
     assert len(docket_entries(docket_paths)) == 2
+    clock.now += 60
     later = decider.check(make_request(resource="env/prod/api", nonce="n-later"), NOW + 60)
     assert later.entry_id is not None
     assert len(docket_entries(docket_paths)) == 3
+
+
+def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_decider, docket_paths, client_options):
+    docket = FailFirstDocket(DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options))
+    decider = make_decider(docket=docket, refusal_budget=RefusalBudget(limit=1, window_seconds=60, clock=FakeClock()))
+    first = decider.check(make_request(resource="env/prod/api", nonce="n-1"), NOW)
+    second = decider.check(make_request(resource="env/prod/api", nonce="n-2"), NOW)
+    assert (first.entry_id, second.entry_id is not None) == (None, True)
+    assert len(docket_entries(docket_paths)) == 1
 
 
 def test_policy_refusal_entry_names_the_rule(make_decider, docket_paths):
