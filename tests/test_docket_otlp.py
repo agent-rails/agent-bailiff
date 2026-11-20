@@ -20,15 +20,8 @@ from test_docket_report import PINS, WRITERS, Docket
 
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketCorrupt
-from agent_bailiff.docket.otlp import (
-    CheckpointMismatch,
-    DocketExporter,
-    ExporterLocked,
-    ExportFailed,
-    load_checkpoint,
-    span_id_for,
-    to_span,
-)
+from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, load_checkpoint
+from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, span_id_for, to_span
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import VerifiedLine, build_kid_index
 
@@ -486,7 +479,7 @@ def test_a_docket_replaced_while_following_is_refused(docket, checkpoint):
     thread.join(5)
     stop.set()
     thread.join(5)
-    assert errors == [f"{docket.path} was replaced while exporting"]
+    assert errors == [f"{docket.path} was replaced while following"]
     assert load_checkpoint(checkpoint).entries == 1
 
 
@@ -496,7 +489,7 @@ def test_a_second_exporter_on_the_same_checkpoint_is_refused(docket, checkpoint)
 
     def second(_):
         if not attempts:
-            with pytest.raises(ExporterLocked, match="held by another exporter"):
+            with pytest.raises(FollowerLocked, match="held by another follower"):
                 export(docket, checkpoint, FakeExporter())
             attempts.append(True)
 
