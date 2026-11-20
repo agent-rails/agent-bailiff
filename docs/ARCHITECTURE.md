@@ -56,7 +56,7 @@ flowchart LR
    - writes a signed docket entry and waits for the acknowledgement;
    - sets the credential as a header on the upstream request.
 
-   It also removes the agent's own `authorization`, `proxy-authorization`, `cookie` and `bailiff-release` headers and the four chain headers (`x-bailiff-task-root`, `x-bailiff-links`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`).
+   It also removes every agent header except `accept`, `content-type`, `mcp-protocol-version`, `traceparent` and `tracestate`.
 4. The upstream MCP server receives the call with the credential header.
 
 The entries for a verified call carry the clearance's trace id and op_id, so the decide and custodian entries for one call can be joined. Early refusals may have no op_id. Decide and custodian refusals before verification are logged, not docketed, and decide records at most 16 agent-caused and 16 other refusals per task root per 60 s, each followed by one capped marker.
@@ -96,7 +96,7 @@ Decide and the custodian fail closed:
 
 Control applies its action first and reports it as unrecorded if its entry is not acknowledged.
 
-- check-config refuses a gateway config with `failOpen`, a missing header allowlist, the wrong processor order or a non-Unix processor target.
+- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, the wrong processor order or a non-Unix processor target.
 
 ## Credential tiers
 
