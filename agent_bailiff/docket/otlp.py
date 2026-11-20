@@ -22,6 +22,7 @@ from agent_bailiff.docket.follower import DEFAULT_BATCH_SIZE, DEFAULT_POLL_INTER
 from agent_bailiff.docket.report import RELEASED, printable
 from agent_bailiff.docket.sink import KidIndex, VerifiedLine
 
+BACKEND_MESSAGE_LIMIT = 200
 SEMCONV_COMMIT = "622b2b6073b15e5ed886c3c12a65a892b9cd5c70"
 SCOPE = InstrumentationScope(
     "agent_bailiff.docket.otlp",
@@ -164,9 +165,13 @@ class SpansRejected(Exception):
     pass
 
 
+class UnexpectedReply(Exception):
+    pass
+
+
 class OtlpHttpExporter(SpanExporter):
     def __init__(self, endpoint: str, *, timeout: float) -> None:
-        self._rejection: SpansRejected | None = None
+        self._rejection: SpansRejected | UnexpectedReply | None = None
         session = requests.Session()
         session.hooks["response"].append(self._check_partial_success)
         self._exporter: SpanExporter = OTLPSpanExporter(endpoint=endpoint, timeout=timeout, session=session)
@@ -182,17 +187,26 @@ class OtlpHttpExporter(SpanExporter):
         self._exporter.shutdown()
 
     def _check_partial_success(self, response: requests.Response, *args: object, **kwargs: object) -> None:
-        if response.status_code != 200:
+        if response.status_code >= 400:
             return
+        if response.status_code != 200:
+            self._rejection = UnexpectedReply(f"the backend answered HTTP {response.status_code} instead of 200")
+            raise self._rejection
         reply = ExportTraceServiceResponse()
         reply.ParseFromString(response.content)
         rejected = reply.partial_success.rejected_spans
-        message = printable(reply.partial_success.error_message)
+        message = backend_message(reply.partial_success.error_message)
         if rejected:
             self._rejection = SpansRejected(f"the backend rejected {rejected} of the spans: {message}")
             raise self._rejection
         if reply.partial_success.error_message:
             logger.warning("the backend accepted the batch with a warning: %s", message)
+
+
+def backend_message(text: str) -> str:
+    if len(text) <= BACKEND_MESSAGE_LIMIT:
+        return printable(text)
+    return f"{printable(text[:BACKEND_MESSAGE_LIMIT])}... ({len(text)} characters)"
 
 
 class DocketExporter:
@@ -256,6 +270,11 @@ class DocketExporter:
                 f"lines {batch[0].line}-{batch[-1].line}: {exc}; a partial rejection is not retried; "
                 f"the checkpoint stays at line {batch[0].line - 1}; find the rejected record with --batch-size 1 "
                 "and pass its line to --skip-line"
+            ) from None
+        except UnexpectedReply as exc:
+            raise ExportFailed(
+                f"lines {batch[0].line}-{batch[-1].line}: {exc}; the export is not retried; "
+                f"the checkpoint stays at line {batch[0].line - 1}; point --otlp at the collector's final URL"
             ) from None
 
     def _span(self, verified: VerifiedLine) -> ReadableSpan:
