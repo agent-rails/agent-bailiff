@@ -23,6 +23,7 @@ from agent_bailiff.docket.protocol import (
     read_frame,
 )
 from agent_bailiff.docket.sink import Head
+from agent_bailiff.docket.socket_dir import try_lock
 
 DEFAULT_TIMEOUT = 5.0
 STATE_MODE = 0o600
@@ -66,10 +67,23 @@ class DocketClient:
         self._lock = threading.Lock()
         self._state_dir = state_dir
         self._state_name = f"{writer}.head"
-        self._acked = self._load_acked()
+        self._lock_fd = self._lock_writer()
+        try:
+            self._acked = self._load_acked()
+        except BaseException:
+            os.close(self._lock_fd)
+            raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._lock_fd >= 0:
+                os.close(self._lock_fd)
+                self._lock_fd = -1
 
     def append(self, entry: Entry) -> Record:
         with self._lock:
+            if self._lock_fd < 0:
+                raise DocketError("closed", "the docket client is closed")
             try:
                 return self._append(entry)
             except BaseException:
@@ -107,6 +121,24 @@ class DocketClient:
         if head.seq == acked.seq and head.hash != acked.hash:
             raise DocketRollback("rollback", f"sink entry at acked seq {acked.seq} has a different hash")
         return head
+
+    def _lock_writer(self) -> int:
+        name = f"{self._writer}.lock"
+        directory_fd = open_private_dir(self._state_dir)
+        try:
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, STATE_MODE, dir_fd=directory_fd)
+        except OSError as exc:
+            raise DocketError("state_invalid", f"cannot open {name}: {exc.strerror}") from exc
+        finally:
+            os.close(directory_fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            os.close(fd)
+            raise DocketError("state_invalid", f"{name} must be a regular file owned by uid {os.geteuid()}")
+        if not try_lock(fd):
+            os.close(fd)
+            raise DocketError("writer_locked", f"writer {self._writer} is in use by another client on this state")
+        return fd
 
     def _load_acked(self) -> Head | None:
         directory_fd = open_private_dir(self._state_dir)

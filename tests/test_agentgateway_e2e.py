@@ -74,6 +74,7 @@ pytestmark = pytest.mark.skipif(
 ledger_path = test_custodian.ledger_path
 make_custodian = test_custodian.make_custodian
 make_decider = test_custodian.make_decider
+open_docket = test_custodian.open_docket
 private = test_custodian.private
 reader = test_custodian.reader
 sink = test_custodian.sink

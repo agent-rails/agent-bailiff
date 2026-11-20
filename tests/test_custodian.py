@@ -188,6 +188,22 @@ def docket_client(workdir, private, writer_name, kid, key):
     return DocketClient(workdir / "s" / "docket.sock", writer_name, kid, key, sink_uid=UID, state_dir=state_dir)
 
 
+@pytest.fixture
+def open_docket(workdir, private):
+    opened = {}
+
+    def open_client(writer_name, kid, key):
+        previous = opened.pop(writer_name, None)
+        if previous is not None:
+            previous.close()
+        opened[writer_name] = docket_client(workdir, private, writer_name, kid, key)
+        return opened[writer_name]
+
+    yield open_client
+    for client in opened.values():
+        client.close()
+
+
 def trust_policy():
     return IssuerTrustPolicy(
         {
@@ -199,7 +215,7 @@ def trust_policy():
 
 
 @pytest.fixture
-def make_decider(workdir, private, sink, writer):
+def make_decider(open_docket, sink, writer):
     def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None):
         return Decider(
             config=DeciderConfig(
@@ -215,7 +231,7 @@ def make_decider(workdir, private, sink, writer):
             trust_policy=trust_policy(),
             policy=PolicyRef.from_dict("default", "1", POLICY),
             suspension=Suspension(),
-            docket=docket_client(workdir, private, "decide", "decide-1", DECIDE_KEY),
+            docket=open_docket("decide", "decide-1", DECIDE_KEY),
             signing_key=DECIDE_KEY,
             costs=costs,
             refusal_budget=refusal_budget,
@@ -225,7 +241,7 @@ def make_decider(workdir, private, sink, writer):
 
 
 @pytest.fixture
-def make_custodian(workdir, private, sink, reader, state):
+def make_custodian(open_docket, sink, reader, state):
     opened = []
 
     def make(docket=None, ledger=None, claims=None, suspension=None, bindings=None, release_signer=None, **config):
@@ -252,7 +268,7 @@ def make_custodian(workdir, private, sink, reader, state):
             ledger=ledger or reader,
             resolver=PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
             trust_policy=trust_policy(),
-            docket=docket or docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY),
+            docket=docket or open_docket("custodian", "custodian-1", CUSTODIAN_KEY),
             suspension=suspension or Suspension(),
             release_signer=release_signer,
         )
@@ -519,9 +535,9 @@ def test_no_secret_without_a_docket_acknowledgement_and_the_claim_stays(make_cus
         lambda record: replace(record, token=""),
     ],
 )
-def test_mismatched_docket_acknowledgement_returns_no_secret(make_custodian, issue, workdir, private, ack):
+def test_mismatched_docket_acknowledgement_returns_no_secret(make_custodian, issue, open_docket, ack):
     request, token = issue()
-    inner = docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY)
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
     custodian = make_custodian(docket=AckDocket(inner, ack))
     assert custodian.release(token, request, NOW + 1) == Refused("docket_unavailable")
 
@@ -756,9 +772,9 @@ def test_recorded_refusals_are_bounded_and_evict_the_oldest(make_custodian, issu
     assert refusals(workdir) == [(first, "already_issued"), (second, "already_issued"), (first, "already_issued")]
 
 
-def test_lost_release_acknowledgement_leaves_only_the_release_entry(make_custodian, issue, workdir, private):
+def test_lost_release_acknowledgement_leaves_only_the_release_entry(make_custodian, issue, open_docket, workdir):
     request, token = issue()
-    inner = docket_client(workdir, private, "custodian", "custodian-1", CUSTODIAN_KEY)
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
     custodian = make_custodian(docket=AckDocket(inner, lambda record: None))
     assert custodian.release(token, request, NOW + 1) == Refused("docket_unavailable")
     entries = [(entry.decision, entry.reason, entry.performed) for entry in custodian_entries(workdir)]

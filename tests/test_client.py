@@ -44,6 +44,7 @@ binary = test_agentgateway_e2e.binary
 ledger_path = test_agentgateway_e2e.ledger_path
 make_custodian = test_agentgateway_e2e.make_custodian
 make_decider = test_agentgateway_e2e.make_decider
+open_docket = test_agentgateway_e2e.open_docket
 private = test_agentgateway_e2e.private
 reader = test_agentgateway_e2e.reader
 sink = test_agentgateway_e2e.sink
