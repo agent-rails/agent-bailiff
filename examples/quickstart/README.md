@@ -15,6 +15,9 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 | `docket` | 10001 | Signed append-only record sink |
 | `reader` | 10005 | `agent-bailiff docket verify`, read-only, docket reader group |
 | `control` | 10002 | Operator revoke, run on demand |
+| `rule` | 10002 | `rule` profile: revokes a task on an out-of-scope refusal |
+| `exporter` | 10008 | `trace` profile: verified docket records to OTLP spans |
+| `jaeger` | 10009 | `trace` profile: trace UI on `127.0.0.1:16686` |
 | `agent` | 10006 | Scripted agent on the internal `edge` network only |
 | `*-init`, `bootstrap`, `task-issuer`, `agent-key` | per component | One-shot setup |
 
@@ -117,31 +120,66 @@ agent-bailiff docket verify: 10 records verified, 10 printed
 
 The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke (line 10) carries no task handle, because decide could not verify the chain, so `--task` filters it out.
 
-Remove the stack and its volumes:
+## Tracing and the revoke rule
+
+Two optional profiles. `trace` runs Jaeger and `agent-bailiff docket export`; `rule` runs `rule.py`, a rule (not detection) that revokes a task when decide refuses one of its `gitea.contents.read` calls as `out_of_scope`.
 
 ```console
-$ rm run.json
-$ docker compose down --volumes --remove-orphans
+$ docker compose --profile trace --profile rule up --build --detach --wait
+$ docker compose run --rm -T agent inject | tee inject.json
+{
+  "task_id": "task-a03d0f63b02ae5a0",
+  "checks": [
+    {"scenario": "allowed call reaches gitea", "expected": "result", "observed": "result", "pass": true},
+    {"scenario": "injected out-of-scope call refused", "expected": "refused: out_of_scope", "observed": "refused: out_of_scope", "pass": true}
+  ]
+}
+$ docker compose logs --no-log-prefix rule
+{"entry_id": "ce93d73633cb4f31a90c34d5a69e7c50", "line": 5, "rule": "out_of_scope", "task": "task-a03d0f63b02ae5a0", "tenant": "quickstart"}
+$ docker compose run --rm -T reader --task "$(jq -r .task_id inject.json)"
+...
+5	2026-11-20T10:16:21Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/contents	out_of_scope	-
+6	2026-11-20T10:16:21Z	rule.quickstart	1	revoke	-	-	task	-
+agent-bailiff docket verify: 6 records verified, 6 printed
+$ docker compose run --rm -T agent after-revoke
+...
+    {"scenario": "call after revoke refused", "expected": "refused: chain_invalid", "observed": "refused: chain_invalid", "pass": true}
 ```
 
-`tests/test_quickstart_stack.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the same stack under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
+`inject` stops after the refused call, so no later scenario races the revoke. Jaeger is at <http://127.0.0.1:16686> (`JAEGER_PORT`). Each docket writer is one service, for example `agent-bailiff-rule.quickstart`. The revoke span is a child of the `decide refuse` span in the same trace.
+
+- The rule matches signed fields only: writer `decide.quickstart`, decision `refuse`, reason `out_of_scope`, and a configured tool. It sees only what decide recorded, and it decides nothing about intent.
+- It follows the verified docket with its own checkpoint (`rule-data`), saved after each batch it handled. A restart does not revoke again. A crash between the revoke and the checkpoint revokes again on restart: one extra `revoke` record, no second effect, because the ledger revoke is idempotent.
+- It signs as its own docket writer, `rule.quickstart`, so it never shares a sequence with the operator `control` command. It runs as decide's uid, like `control`; see H1.
+- Spans come from verified docket records, never from the call path. The exporter reads the docket read-only, as uid 10008 in the docket reader group, on an internal network that reaches only Jaeger. A slow or stopped exporter delays spans; it never delays or refuses a call. The gateway itself is not traced.
+- Export is not evidence. Jaeger is a view; the signed docket is the record, and `docket verify` checks it.
+- Jaeger marks each span with a "Negative duration detected" warning. Docket records are instants, so every span has zero duration; the warning is cosmetic.
+
+Remove the stack and its volumes, including any profile services:
+
+```console
+$ rm -f run.json inject.json
+$ docker compose --profile "*" down --volumes --remove-orphans
+```
+
+`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the same stack under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
 
 ## What this shows
 
 - Scoped claims: decide allows a call only when the tool and resource are in the task scope, the budget has room and the call was not seen before. The scope names a tool and a fixed resource; it does not read tool arguments.
 - The agent never holds the Gitea token. The canary test reads the stored token and scans for it, its base64 form and the base64 of `token <value>` across every bailiff named volume (not Gitea's own `gitea-data` and `gitea-config`), the agent container's whole filesystem and environment, and the logs of every service. The only place the test permits a hit is Gitea's own logs. It passed on agent-warrant 0.3.0.
 - Each release is bound to one decide allow, and the custodian limits releases to 60 per task per 60 seconds (`rate_limit`, `rate_window`).
-- An operator revoke stops later calls on the task.
-- Load baseline (`benchmarks/quickstart-2026-11-19.json`, one Apple-silicon Docker Desktop host, `list_issues`, 20 calls per client): every call returned a result and none was refused with `docket_unavailable`.
+- An operator revoke stops later calls on the task, and so does the rule's revoke after an out-of-scope refusal.
+- Load baseline with tracing on (`benchmarks/quickstart-2026-11-20.json`, one Apple-silicon Docker Desktop host, `list_issues`, 20 calls per client): every call returned a result and none was refused with `docket_unavailable`. Backlog is the docket records not yet exported when the clients finished; catch-up is the time until the exporter's checkpoint reached the end of the docket.
 
-  | Clients | Calls | Calls/s | p50 ms | p99 ms |
-  | --- | --- | --- | --- | --- |
-  | 1 | 20 | 29.0 | 33.4 | 48.5 |
-  | 4 | 80 | 68.0 | 56.1 | 77.9 |
-  | 16 | 320 | 88.5 | 182.8 | 284.6 |
-  | 32 | 640 | 88.3 | 358.5 | 604.5 |
+  | Clients | Calls | Calls/s | p50 ms | p99 ms | Backlog | Catch-up s |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 1 | 20 | 26.3 | 36.6 | 58.4 | 0 | 0.3 |
+  | 4 | 80 | 71.3 | 53.4 | 77.7 | 28 | 1.7 |
+  | 16 | 320 | 86.1 | 197.5 | 281.9 | 69 | 1.7 |
+  | 32 | 640 | 85.0 | 365.9 | 655.4 | 25 | 1.7 |
 
-  Throughput flattens near 88 calls per second from 16 clients; latency then grows with queueing. This is one host and one tool. It is not a capacity claim.
+  Throughput flattens near 86 calls per second from 16 clients; latency then grows with queueing. The run without tracing (`benchmarks/quickstart-2026-11-19.json`) plateaued near 88 calls per second; one run each on one host cannot separate that gap from noise. This is one host and one tool. It is not a capacity claim.
 
 ## What this does not show
 
@@ -153,17 +191,18 @@ $ docker compose down --volumes --remove-orphans
 - `list_issues` on `quickstart/payroll` stays allowed: the resource is `gitea/issues`, not a repository, so the scope cannot tell `demo` from `payroll`.
 - `issue_read` accepts any `method` value gitea-mcp offers. Decide does not inspect it; the read-only token scope is what keeps it read-only.
 - gitea-mcp's `tools/list` exposes 48 tools, writes included, and the gateway returns all of them. Only the three routed tools can be called; the decide processor refuses any other name with `unknown_tool` before a scope check.
+- The rule is not detection. It acts on one signed refusal pattern for one configured tool; misuse that decide allows, or refuses for another reason, does not trigger it.
 - The `bootstrap` container can read the Gitea admin password from the `gitea-admin` volume, to create the agent user and token. The running `custodian` container has the same uid (10003) but does not mount that volume.
 - Evidence is scoped:
   - Not every refusal is recorded. An `unknown_tool` refusal writes no record, and a refusal on an unverifiable chain has no task handle.
   - A `release` record means the custodian released the token, not that Gitea applied the call: `released, target outcome unknown`.
   - The docket owner (uid 10001) can truncate the docket. The reader verifies signatures and order of what is there, not that nothing was removed from the end.
 - Limits of this setup:
-  - H1: each service runs as its own uid, except `control`, which runs as decide's uid (10002) because it writes the decide-owned ledger. It mounts `decide-data` read-only for decide's config, so it can also read decide's signing key; anyone who can run `control` can sign as decide. The isolation rests on uids and socket peer checks, not on separate hosts.
+  - H1: each service runs as its own uid, except `control` and `rule`, which run as decide's uid (10002) because they write the decide-owned ledger. Both mount `decide-data` read-only for decide's config, so they can also read decide's signing key; anyone who can run `control`, or who controls the `rule` container, can sign as decide. The isolation rests on uids and socket peer checks, not on separate hosts.
   - H2: state lives in named volumes only; a bind mount on macOS breaks socket ownership.
   - H3: containers share the host kernel. Isolation is as strong as separate host users, no stronger.
   - H5: the agent is a script. This shows what the gateway enforces, not how a model behaves under injection.
   - H6: an allowed tool used for harm inside its scope is not stopped (OWASP ASI02, LLM06).
-  - H7: there is no tracing in this stack. When tracing is added it stays off the call path and is not evidence; the docket is.
+  - H7: tracing is optional (`trace` profile), built after the fact from verified docket records, and off the call path. It is not evidence; the docket is. Span delivery is at least once: a restart after a failed export can send a span again.
   - H8: the task root comes from a local issuer key, not a human login. A later login flow uses device code; the password grant is forbidden (RFC 9700 section 2.4).
 - The gateway config is `gateway.json`, not `gateway.yaml`: `check-config` reads JSON only, and `gateway-check` verifies that same file against the routes and bindings before the gateway starts.
