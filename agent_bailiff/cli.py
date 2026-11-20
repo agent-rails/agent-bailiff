@@ -152,6 +152,11 @@ def _parser() -> argparse.ArgumentParser:
             export.add_argument("--max-failures", type=int, default=5, help="failed exports of one batch before exit")
             export.add_argument("--poll-interval", type=float, default=1.0, help="seconds between reads at the end")
             export.add_argument("--once", action="store_true", help="export to the current end, then exit")
+            export.add_argument(
+                "--skip-line",
+                type=int,
+                help="export the next line, which must be this one, as a skipped marker span instead of its record",
+            )
             export.set_defaults(handler=_export_docket)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
@@ -430,6 +435,7 @@ def _export_docket(args: argparse.Namespace) -> int:
             batch_size=args.batch_size,
             max_failures=args.max_failures,
             poll_interval=args.poll_interval,
+            skip_line=args.skip_line,
         )
         exported = exporter.run(stop, follow=not args.once)
     except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed, FollowerLocked) as exc:

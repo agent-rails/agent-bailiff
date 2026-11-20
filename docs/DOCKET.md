@@ -15,7 +15,7 @@ The docket is one file of newline-terminated signed records. Each record names i
 - At start, under the lock, the sink checks the docket's parent directory (not a symlink, owned by the sink uid, not writable by group or others), the docket file (regular, owned by the sink uid, mode 0600; with `reader_group` set, mode 0640 and that group instead), verifies every record through the same descriptor it appends to, and fsyncs the parent directory. A failed directory fsync makes the sink refuse every append.
 - An append is acknowledged only after the full line is written and fsynced. A failed write or fsync makes the sink refuse every later append until restart.
 - On close the sink removes the socket path only if it is still the socket it bound.
-- Connections: the peer uid is checked before a connection counts against `max_connections`. A connection is closed after `idle_timeout` without a frame, when a frame takes longer than `frame_timeout`, and at `max_lifetime`.
+- Connections: the peer uid is checked before a connection counts against `max_connections` (default 16). A connection past the limit gets the refusal `overloaded` and is closed; nothing is appended, so the writer knows the record was not written. Every allowed peer shares the limit: an allowed peer that holds 16 connections open delays the other writers' appends until `idle_timeout` or `max_lifetime` closes them. Only the uids in `allowed_uids` can do this. A connection is closed after `idle_timeout` without a frame, when a frame takes longer than `frame_timeout`, and at `max_lifetime`.
 - On macOS, `os.fsync` does not issue `F_FULLFSYNC`, so the drive may still hold acknowledged data in its cache.
 
 ## Readers
@@ -45,7 +45,7 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 
 ```
 pip install 'agent-bailiff[otel]'
-agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once]
+agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once] [--skip-line N]
 ```
 
 Run it as a reader group member in its own process, with its own uid and a 0700 checkpoint directory. It reads the docket and pins the same way `docket verify` does, verifies every record, and sends each one as an OTLP/HTTP span. It is off the call path: decide and the custodian never wait for it, and a stopped or failing exporter changes no decision. Without `--once` it follows the docket until SIGTERM or SIGINT.
@@ -74,6 +74,7 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 ### Resume runbook
 
 - Exit 1 after failed exports: check the backend is reachable at `--otlp`, then start the exporter again. It resumes after the last exported record.
+- Exit 1 because the backend refuses one record (the same batch keeps failing while the backend accepts others): run `--once --batch-size 1` to find the line; the error names it. Then run once with `--skip-line N`. N must be the next line to export, or the command exits 1 and sends nothing. That line is sent as a marker span named `docket export_skipped`, with error status, `bailiff.export_skipped` = true, and the entry id, docket line, writer, seq, kid and record hash, but none of the record's other fields; the exporter logs a warning and moves on. The record stays in the docket: `docket verify` still prints it. A `--skip-line` past the end of the docket exits 1 with nothing skipped.
 - An incomplete last line is not an error: `--once` exports the records before it and exits 0, and following waits and warns. If the warning keeps repeating, follow Torn tail repair, then run a `--once` export again.
 - Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. This is a docket integrity incident, not an exporter fault.
 - Exit 1 with "not the file the checkpoint was written for", "replaced while following", "shorter than the checkpoint offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
