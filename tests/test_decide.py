@@ -464,7 +464,7 @@ def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_deci
     assert [entry.reason for entry in docket_entries(docket_paths)] == ["out_of_scope"]
 
 
-@pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed"])
+@pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed", "write_failed"])
 def test_a_refusal_whose_entry_may_have_been_written_uses_the_budget(
     make_decider, docket_paths, client_options, reason
 ):

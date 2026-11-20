@@ -28,7 +28,7 @@ DEFAULT_TIMEOUT = 5.0
 STATE_MODE = 0o600
 MAX_STATE_BYTES = 256
 CHAIN_REFUSALS = frozenset({"wrong_seq", "broken_prev"})
-UNACKNOWLEDGED = frozenset({"no_ack", "bad_ack", "state_write_failed"})
+UNACKNOWLEDGED = frozenset({"no_ack", "bad_ack", "state_write_failed", "write_failed"})
 WRITER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
