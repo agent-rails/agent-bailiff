@@ -76,8 +76,8 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 - Exit 1 after failed exports: check the backend is reachable at `--otlp`, then start the exporter again. It resumes after the last exported record.
 - An incomplete last line is not an error: `--once` exports the records before it and exits 0, and following waits and warns. If the warning keeps repeating, follow Torn tail repair, then run a `--once` export again.
 - Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. This is a docket integrity incident, not an exporter fault.
-- Exit 1 with "not the file the checkpoint was written for", "replaced while exporting", "shorter than the exported offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
-- Exit 1 with "held by another exporter": another exporter uses this checkpoint. Stop one; two exporters on one checkpoint would send every record twice.
+- Exit 1 with "not the file the checkpoint was written for", "replaced while following", "shorter than the checkpoint offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
+- Exit 1 with "held by another follower": another exporter uses this checkpoint. Stop one; two exporters on one checkpoint would send every record twice.
 - Exit 1 on the checkpoint itself (mode, owner, fields): the checkpoint is 0600, owned by the exporter uid and version 1. Do not edit it; move it aside to export from the start.
 
 ## Writer-side rollback detection
