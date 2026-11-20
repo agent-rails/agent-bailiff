@@ -34,6 +34,7 @@ ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text(
 SERVICE = "gitea"
 ORG = "quickstart"
 INJECTED_TOOL = "get_file_contents"
+UNROUTED = {"service": SERVICE, "name": "issue_write", "tool": "gitea.issues.write", "resource": "gitea/issues"}
 
 
 class ScenarioFailed(Exception):
@@ -90,14 +91,14 @@ def load_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(AGENT_KEY.read_text().strip()))
 
 
-def client_for(task: dict[str, str], key: Ed25519PrivateKey) -> BailiffClient:
+def client_for(task: dict[str, str], key: Ed25519PrivateKey, extra: Sequence[dict[str, str]] = ()) -> BailiffClient:
     holder = Holder(task["task_root"], (), key, task["decider_id"])
-    return BailiffClient(GATEWAY_URL, holder, ToolRoutes([ToolRoute(**route) for route in ROUTES]))
+    return BailiffClient(GATEWAY_URL, holder, ToolRoutes([ToolRoute(**route) for route in [*ROUTES, *extra]]))
 
 
-def open_client() -> tuple[BailiffClient, str]:
+def open_client(extra: Sequence[dict[str, str]] = ()) -> tuple[BailiffClient, str]:
     task = json.loads(TASK_FILE.read_text())
-    return client_for(task, load_key()), task["task_id"]
+    return client_for(task, load_key(), extra), task["task_id"]
 
 
 def copy_call(call: PreparedCall) -> PreparedCall:
@@ -137,6 +138,10 @@ def run_scenarios(client: BailiffClient) -> list[Check]:
     checks.append(expect("replayed call refused", "refused: already_*", replayed, refused_already))
     payroll = client.call(SERVICE, "list_issues", {"owner": ORG, "repo": "payroll"})
     checks.append(expect("disclosed: list_issues on payroll stays allowed", "result", payroll, is_result))
+    arguments = {"method": "create", "owner": ORG, "repo": "demo", "title": "written by the agent"}
+    unrouted = client.call(SERVICE, UNROUTED["name"], arguments)
+    unknown = refused_with("unknown_tool")
+    checks.append(expect("disclosed: unrouted write tool refused", "refused: unknown_tool", unrouted, unknown))
     return checks
 
 
@@ -204,7 +209,7 @@ def report(task_id: str, checks: list[Check]) -> int:
 
 
 def run(scenarios: Callable[[BailiffClient], list[Check]]) -> int:
-    client, task_id = open_client()
+    client, task_id = open_client([UNROUTED])
     try:
         return report(task_id, scenarios(client))
     finally:
