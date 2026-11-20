@@ -6,7 +6,7 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -112,10 +112,27 @@ class VerifiedLine:
     end: int
 
 
+class LineSource(Protocol):
+    def readline(self, size: int = -1, /) -> bytes: ...
+
+    def read(self, size: int = -1, /) -> bytes: ...
+
+
 class Verification:
-    def __init__(self, docket: BinaryIO, index: KidIndex) -> None:
+    def __init__(
+        self,
+        docket: LineSource,
+        index: KidIndex,
+        *,
+        heads: Mapping[str, Head] | None = None,
+        entries: int = 0,
+        offset: int = 0,
+    ) -> None:
         self._docket = docket
         self._index = index
+        self._heads = dict(heads or {})
+        self._entries = entries
+        self._offset = offset
         self._started = False
         self._report: VerifyReport | None = None
 
@@ -132,9 +149,9 @@ class Verification:
         return self._lines()
 
     def _lines(self) -> Iterator[VerifiedLine]:
-        heads: dict[str, Head] = {}
-        count = 0
-        offset = 0
+        heads = self._heads
+        count = self._entries
+        offset = self._offset
         while raw := self._docket.readline(MAX_TOKEN_CHARS + 2):
             line_number = count + 1
             if not raw.endswith(b"\n"):
