@@ -80,6 +80,10 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 - Exit 1 with "held by another follower": another exporter uses this checkpoint. Stop one; two exporters on one checkpoint would send every record twice.
 - Exit 1 on the checkpoint itself (mode, owner, fields): the checkpoint is 0600, owned by the exporter uid and version 1. Do not edit it; move it aside to export from the start.
 
+## One client per writer
+
+`DocketClient` takes an exclusive, non-blocking `flock` on `<state_dir>/<writer>.lock` (mode 0600, no symlinks) when it starts and holds it until `close()`. A second client for the same writer and state directory, in this or another process, fails at start with `writer_locked`; a closed client refuses appends with `closed`. The lock only covers one state directory. Two instances of one writer on separate state directories or hosts are not detected and race on `wrong_seq`, so run one instance per writer name and give each replica its own writer and key.
+
 ## Writer-side rollback detection
 
 `DocketClient` stores its last acknowledged `seq` and hash in `<state_dir>/<writer>.head` (mode 0600, replaced atomically, fsynced). On every head fetch, and when the sink refuses an append with `wrong_seq` or `broken_prev`, the client raises `DocketRollback` if the sink's head `seq` is below the stored `seq`, or equals it with a different hash. Callers must treat it as a failed append.
