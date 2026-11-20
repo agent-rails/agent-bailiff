@@ -114,11 +114,10 @@ $ docker compose run --rm -T agent after-revoke
 $ docker compose run --rm -T reader
 ...
 9	2026-11-20T08:37:54Z	control.quickstart	1	revoke	-	-	task	-
-10	2026-11-20T08:37:55Z	decide.quickstart	6	refuse	gitea.issues.list	gitea/issues	chain_invalid	-
-agent-bailiff docket verify: 10 records verified, 10 printed
+agent-bailiff docket verify: 9 records verified, 9 printed
 ```
 
-The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke (line 10) carries no task handle, because decide could not verify the chain, so `--task` filters it out.
+The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke is not in the docket: decide could not verify the chain, so it logs the refusal instead of recording it.
 
 ## Tracing and the revoke rule
 
