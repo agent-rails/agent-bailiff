@@ -134,7 +134,10 @@ def test_the_admission_policies_fail_closed_and_bound_the_replica_range():
 def test_the_binding_policy_names_the_effector_and_the_applier():
     policy = named(manifests(), "ValidatingAdmissionPolicy", "bailiff-effector-rbac")
     expression = policy["spec"]["validations"][0]["expression"]
-    assert "s.namespace == 'bailiff-system' && s.name in ['effector', 'effector-audit']" in expression
+    assert (
+        "(has(s.namespace) ? s.namespace : object.metadata.namespace) == 'bailiff-system'"
+        " && s.name in ['effector', 'effector-audit']"
+    ) in expression
     assert "s.name.startsWith('bailiff:')" in expression
     assert (
         "s.name in ['system:serviceaccount:bailiff-system:effector',"

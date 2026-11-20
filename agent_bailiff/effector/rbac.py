@@ -470,7 +470,9 @@ def _binding_policy(effector: EffectorIdentity) -> list[dict[str, Any]]:
     accounts = [effector.service_account, effector.audit_account]
     usernames = [service_account_user(effector.namespace, account) for account in accounts]
     reaches = (
-        f"(s.kind == 'ServiceAccount' && s.namespace == '{effector.namespace}' && s.name in {accounts})"
+        "(s.kind == 'ServiceAccount'"
+        f" && (has(s.namespace) ? s.namespace : object.metadata.namespace) == '{effector.namespace}'"
+        f" && s.name in {accounts})"
         f" || (s.kind == 'User' && (s.name.startsWith('{USER_PREFIX}:') || s.name in {usernames}))"
         f" || (request.resource.resource == 'rolebindings' && s.kind == 'Group'"
         f" && s.name in {reaching_groups(effector.namespace)})"

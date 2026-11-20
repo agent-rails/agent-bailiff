@@ -191,6 +191,25 @@ def test_only_the_applier_may_grant_to_the_effector_or_synthetic_users(cluster, 
     restore.append(("-n", staging, "rolebinding", "fine"))
 
 
+def test_a_service_account_subject_without_a_namespace_is_judged_in_the_binding_namespace(cluster, restore):
+    def binding(namespace):
+        return json.dumps(
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": "bare", "namespace": namespace},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "view"},
+                "subjects": [{"kind": "ServiceAccount", "name": "effector"}],
+            }
+        )
+
+    refused = kubectl("create", "-f", "-", stdin=binding(cluster["names"]["sys"]), check=False, user="mallory")
+    assert refused.returncode != 0 and "only the applier may grant" in refused.stderr, refused.stderr
+    staging = cluster["names"]["stg"]
+    kubectl("create", "-f", "-", stdin=binding(staging), user="mallory")
+    restore.append(("-n", staging, "rolebinding", "bare"))
+
+
 def test_the_generated_set_is_clean(cluster):
     assert cluster["audit"].check() == []
     assert cluster["audit"].check_restart_schema() == []

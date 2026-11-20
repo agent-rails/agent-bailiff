@@ -17,6 +17,10 @@ MODE_LABEL = "bailiff.dev/webhook-mode"
 WEBHOOK = "release.bailiff.dev"
 SERVICE_PATH = "/validate"
 SERVICE_PORT = 443
+REVIEW_VERSIONS = ["v1"]
+TIMEOUT_SECONDS = 3
+POD_LABELS = {"app.kubernetes.io/name": NAME}
+ENFORCE_SELECTOR = {**POD_LABELS, MODE_LABEL: "enforce"}
 MATCH_CONDITIONS = [{"name": "bailiff-user", "expression": "request.userInfo.username.startsWith('bailiff:')"}]
 RULES = [
     {
@@ -56,7 +60,7 @@ def generate_manifests(
         raise ValueError("pins catalog digest does not match the loaded catalog")
     service = {"name": NAME, "namespace": namespace, "path": SERVICE_PATH, "port": SERVICE_PORT}
     labels = {**LABELS, "app.kubernetes.io/name": NAME}
-    pod_labels = {"app.kubernetes.io/name": NAME}
+    pod_labels = dict(POD_LABELS)
     mode = "enforce" if enforce else "audit"
     template_labels = {**pod_labels, MODE_LABEL: mode}
     serving_selector = template_labels if enforce and phase in {"register", "target"} else pod_labels
@@ -177,10 +181,10 @@ def generate_manifests(
             "webhooks": [
                 {
                     "name": WEBHOOK,
-                    "admissionReviewVersions": ["v1"],
+                    "admissionReviewVersions": list(REVIEW_VERSIONS),
                     "sideEffects": "None",
                     "failurePolicy": "Fail" if enforce else "Ignore",
-                    "timeoutSeconds": 3,
+                    "timeoutSeconds": TIMEOUT_SECONDS,
                     "matchPolicy": "Exact",
                     "matchConditions": copy.deepcopy(MATCH_CONDITIONS),
                     "rules": copy.deepcopy(RULES),
