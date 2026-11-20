@@ -30,6 +30,10 @@ class KubernetesUnavailable(Exception):
     pass
 
 
+class StaleConnection(KubernetesUnavailable):
+    pass
+
+
 @dataclass(frozen=True)
 class KubernetesResult:
     status: int
@@ -81,7 +85,7 @@ class PooledTransport:
         else:
             try:
                 status, will_close, data = self._exchange(connection, method, path, headers, body)
-            except KubernetesUnavailable:
+            except StaleConnection:
                 connection = self._connect()
                 status, will_close, data = self._exchange(connection, method, path, headers, body)
         oversized = len(data) > self._max
@@ -118,6 +122,9 @@ class PooledTransport:
             connection.request(method, path, body=body, headers=dict(headers))
             response = connection.getresponse()
             data = response.read(self._max + 1)
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            connection.close()
+            raise StaleConnection(str(exc)) from None
         except (OSError, http.client.HTTPException) as exc:
             connection.close()
             raise KubernetesUnavailable(str(exc)) from None

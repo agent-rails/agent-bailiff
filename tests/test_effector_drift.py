@@ -105,7 +105,9 @@ class FakeApi:
             "webhooks": [
                 {
                     "name": webhook.WEBHOOK,
+                    "admissionReviewVersions": ["v1"],
                     "failurePolicy": "Fail",
+                    "timeoutSeconds": 3,
                     "matchPolicy": "Exact",
                     "namespaceSelector": {},
                     "objectSelector": {},
@@ -610,6 +612,20 @@ def test_a_binding_naming_the_effector_service_account_username_as_a_user_is_dri
     assert audit.check() == ["the ClusterRoleBinding sneak grants to the effector or a synthetic user"]
 
 
+@pytest.mark.parametrize(("namespace", "drift"), [("bailiff-system", True), ("staging", False)])
+def test_a_service_account_subject_without_a_namespace_is_in_the_binding_namespace(api, audit, namespace, drift):
+    api.objects.append(
+        {
+            "kind": "RoleBinding",
+            "metadata": {"name": "sneak", "namespace": namespace},
+            "roleRef": {"kind": "ClusterRole", "name": "view"},
+            "subjects": [{"kind": "ServiceAccount", "name": "effector"}],
+        }
+    )
+    problem = f"the RoleBinding {namespace}/sneak grants to the effector or a synthetic user"
+    assert (problem in audit.check()) is drift
+
+
 def test_a_throttled_request_is_retried_with_bounded_backoff(api, audit):
     api.throttled = 3
     assert audit.check() == []
@@ -637,6 +653,14 @@ def hook(api):
     ("change", "problem"),
     [
         (lambda api: hook(api).update(failurePolicy="Ignore"), "release.bailiff.dev does not fail closed"),
+        (
+            lambda api: hook(api).update(admissionReviewVersions=["v1beta1", "v1"]),
+            "release.bailiff.dev does not use the generated review version and timeout",
+        ),
+        (
+            lambda api: hook(api).update(timeoutSeconds=1),
+            "release.bailiff.dev does not use the generated review version and timeout",
+        ),
         (
             lambda api: hook(api)["rules"][0].update(operations=["CREATE"]),
             "release.bailiff.dev does not match every write by a synthetic user",
@@ -666,6 +690,14 @@ def hook(api):
             "the Service bailiff-webhook/bailiff-release-webhook does not select only Enforce-mode webhook pods",
         ),
         (
+            lambda api: api.service["spec"]["selector"].update({"app.kubernetes.io/name": "other"}),
+            "the Service bailiff-webhook/bailiff-release-webhook does not select only Enforce-mode webhook pods",
+        ),
+        (
+            lambda api: api.service["spec"]["selector"].update(extra="x"),
+            "the Service bailiff-webhook/bailiff-release-webhook does not select only Enforce-mode webhook pods",
+        ),
+        (
             lambda api: api.registration["webhooks"].append(copy.deepcopy(hook(api))),
             "the ValidatingWebhookConfiguration bailiff-release-webhook does not register release.bailiff.dev",
         ),
@@ -678,6 +710,28 @@ def hook(api):
 def test_a_weakened_release_webhook_is_reported(api, audit, change, problem):
     change(api)
     assert audit.check_release_webhook() == [problem]
+
+
+def test_the_generated_enforce_webhook_passes_the_check(api, audit, tmp_path):
+    from test_effector import CATALOG
+
+    from agent_bailiff.webhook.certs import issue_serving_certificate
+
+    issue_serving_certificate(tmp_path / "certs", webhook.NAME, "bailiff-webhook")
+    generated = webhook.generate_manifests(
+        namespace="bailiff-webhook",
+        image="registry.example/bailiff@sha256:" + "a" * 64,
+        ca_pem=(tmp_path / "certs" / "ca.crt").read_bytes(),
+        pins={"catalog_digest": CATALOG.digest},
+        catalog=CATALOG,
+        deployers=["gitops"],
+        enforce=True,
+        phase="register",
+    )
+    items = {item["kind"]: item for item in generated["items"]}
+    api.registration = items["ValidatingWebhookConfiguration"]
+    api.service = items["Service"]
+    assert audit.check_release_webhook() == []
 
 
 @pytest.mark.parametrize("fault", ["changed", "unreadable", "missing service"])
@@ -707,21 +761,48 @@ def test_writes_are_healthy_only_while_both_checks_are_fresh(api, audit):
     assert not any(path == WEBHOOK_PATH for _, path, _ in api.requests[-3:])
 
 
-def test_freshness_is_counted_from_the_end_of_the_check(api, audit):
-    clock = Clock()
-
+def slow_audit(audit, clock, seconds):
     class Slow:
         def check(self):
-            clock.now += 50
+            clock.now += seconds
             return audit.check()
 
         def __getattr__(self, name):
             return getattr(audit, name)
 
-    gate = RbacGate(Slow(), clock, interval=60)
+    return Slow()
+
+
+def test_freshness_is_counted_from_the_start_of_the_check(api, audit):
+    clock = Clock()
+    gate = RbacGate(slow_audit(audit, clock, 50), clock, interval=60)
     gate.verify()
-    assert gate.healthy(1170) and gate.healthy(1050 + 120)
-    assert gate.healthy(1171) is False
+    assert gate.healthy(1120) and gate.write_healthy(1120)
+    assert gate.healthy(1121) is False and gate.write_healthy(1121) is False
+
+
+def test_a_check_longer_than_twice_the_interval_never_makes_the_gate_healthy(api, audit):
+    clock = Clock()
+    gate = RbacGate(slow_audit(audit, clock, 121), clock, interval=60)
+    gate.verify()
+    assert gate.healthy(clock.now) is False
+
+
+def test_each_check_starts_one_interval_after_the_previous_one_started(api, audit):
+    clock = Clock()
+    gate = RbacGate(slow_audit(audit, clock, 50), clock, interval=60)
+    delays = []
+
+    class Stop:
+        def wait(self, delay):
+            delays.append(delay)
+            if len(delays) == 2:
+                gate._audit = slow_audit(audit, clock, 70)
+            return len(delays) > 3
+
+    gate._stop = Stop()
+    gate._run()
+    assert delays == [60, 10, 0, 0]
 
 
 def test_closing_the_gate_closes_the_audit_transport(api, audit):

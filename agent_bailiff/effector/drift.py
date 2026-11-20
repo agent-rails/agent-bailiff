@@ -24,10 +24,12 @@ from agent_bailiff.effector.rbac import (
     synthetic_user,
 )
 from agent_bailiff.webhook.manifests import (
+    ENFORCE_SELECTOR,
     MATCH_CONDITIONS,
-    MODE_LABEL,
+    REVIEW_VERSIONS,
     SERVICE_PATH,
     SERVICE_PORT,
+    TIMEOUT_SECONDS,
     WEBHOOK,
 )
 from agent_bailiff.webhook.manifests import NAME as WEBHOOK_NAME
@@ -191,6 +193,8 @@ class RbacAudit:
         problems: list[str] = []
         if hook.get("failurePolicy") != "Fail":
             problems.append(f"{WEBHOOK} does not fail closed")
+        if hook.get("admissionReviewVersions") != REVIEW_VERSIONS or hook.get("timeoutSeconds") != TIMEOUT_SECONDS:
+            problems.append(f"{WEBHOOK} does not use the generated review version and timeout")
         if hook.get("matchConditions") != MATCH_CONDITIONS or hook.get("rules") != WEBHOOK_RULES:
             problems.append(f"{WEBHOOK} does not match every write by a synthetic user")
         if hook.get("namespaceSelector") or hook.get("objectSelector"):
@@ -200,8 +204,7 @@ class RbacAudit:
         service = self._request(
             self._audit_token, "GET", f"/api/v1/namespaces/{namespace}/services/{WEBHOOK_NAME}", None
         )
-        selector = (service.get("spec") or {}).get("selector") or {}
-        if selector.get(MODE_LABEL) != "enforce":
+        if (service.get("spec") or {}).get("selector") != ENFORCE_SELECTOR:
             problems.append(f"the Service {namespace}/{WEBHOOK_NAME} does not select only Enforce-mode webhook pods")
         return problems
 
@@ -359,13 +362,14 @@ class RbacAudit:
             service_account_user(identity.namespace, account)
             for account in (identity.service_account, identity.audit_account)
         }
+        binding_namespace = (binding.get("metadata") or {}).get("namespace")
         for subject in binding.get("subjects") or []:
             name = str(subject.get("name", ""))
             if subject.get("kind") == "User" and (name.startswith(f"{USER_PREFIX}:") or name in usernames):
                 return True
             if (
                 subject.get("kind") == "ServiceAccount"
-                and subject.get("namespace") == identity.namespace
+                and (subject.get("namespace") or binding_namespace) == identity.namespace
                 and subject.get("name") in (identity.service_account, identity.audit_account)
             ):
                 return True
@@ -440,13 +444,13 @@ class RbacGate:
         self._thread: threading.Thread | None = None
 
     def verify(self) -> None:
+        now = self._clock()
         try:
             problems = self._audit.check()
         except Exception as exc:
             problems = [f"the RBAC check failed: {exc}"]
         restart_problems = [] if problems else self._extra("the Deployment schema", self._audit.check_restart_schema)
         write_problems = [] if problems else self._extra("the release webhook", self._audit.check_release_webhook)
-        now = self._clock()
         with self._lock:
             self._verified_at = None if problems else now
             self._restart_verified_at = None if problems or restart_problems else now
@@ -495,11 +499,14 @@ class RbacGate:
         self._audit.close()
 
     def _run(self) -> None:
-        while not self._stop.wait(self._interval):
+        delay = self._interval
+        while not self._stop.wait(delay):
+            started = self._clock()
             try:
                 self.verify()
             except RbacDrift:
                 logger.error("the effector refuses calls until its RBAC matches the generated set")
+            delay = max(0, self._interval - (self._clock() - started))
 
 
 def _key(item: Mapping[str, Any], kind: str | None = None) -> Key:

@@ -525,6 +525,18 @@ def test_the_pooled_transport_retries_a_stale_connection_once_on_a_new_one(poole
     assert PooledConnection.opened[0].closed and len(PooledConnection.opened) == 2
 
 
+def test_the_pooled_transport_never_resends_after_a_timeout(pooled, monkeypatch):
+    pooled.request("GET", "/api", {}, None)
+
+    def timeout(*args, **kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(PooledConnection.opened[0], "getresponse", timeout)
+    with pytest.raises(KubernetesUnavailable, match="timed out"):
+        pooled.request("GET", "/api", {}, None)
+    assert len(PooledConnection.opened) == 1 and PooledConnection.opened[0].closed
+
+
 def test_the_pooled_transport_drops_a_connection_the_server_closes_or_that_overflows(pooled):
     pooled.request("GET", "/api", {}, None)
     PooledConnection.opened[0].responses = [PooledResponse(will_close=True)]
