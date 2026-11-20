@@ -41,6 +41,42 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 - Exit 0 when every record verifies. Exit 1 when a line fails: the records before it are printed, and stderr names the line and reason. Exit 1 too for an unreadable docket or pin.
 - Verifying a docket while the sink is appending can report `torn_tail` for a line still being written. Run it again; if `torn_tail` stays, follow Torn tail repair.
 
+## docket export
+
+```
+pip install 'agent-bailiff[otel]'
+agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once]
+```
+
+Run it as a reader group member in its own process, with its own uid and a 0700 checkpoint directory. It reads the docket and pins the same way `docket verify` does, verifies every record, and sends each one as an OTLP/HTTP span. It is off the call path: decide and the custodian never wait for it, and a stopped or failing exporter changes no decision. Without `--once` it follows the docket until SIGTERM or SIGINT.
+
+- Spans are a view, not evidence. The docket and `docket verify` are the record; a collector or trace backend can drop, alter or invent spans without a writer key.
+- The span id is the first 8 bytes of sha256 over a fixed tag and the entry id, and the parent is derived the same way from `parent_entry`. Re-exporting a record sends the same ids. Two entry ids sharing an 8-byte prefix would collide; with random 128-bit entry ids this is negligible.
+- Attributes are the record's fields under `bailiff.*`, the docket line, writer, seq, kid and record hash, and `gen_ai.tool.name`, `gen_ai.operation.name` and `error.type` from the [GenAI semantic conventions at 622b2b6](https://github.com/open-telemetry/semantic-conventions-genai/blob/622b2b6073b15e5ed886c3c12a65a892b9cd5c70/docs/gen-ai/mcp.md), whose status is Development and may change. A refusal is an error span with its reason. A release carries `bailiff.note` = `released, target outcome unknown`. Arguments are never exported; the docket holds only their digest.
+- The span backend then holds what docket readers see: principals, tenants, tools and resources. Restrict access to it as you restrict the reader group.
+- The resource `service.name` is `agent-bailiff-<writer>`. The span ends at the record's `at` (whole seconds) and starts `latency_ms` earlier.
+
+### Trace ids
+
+The trace id comes from the caller's `traceparent` and is not authenticated: an agent can choose any trace id, including one already used by another agent's calls, so grouping spans by trace says nothing about who made them. Use the signed `bailiff.principal`, `bailiff.tenant` and `bailiff.task_root` attributes, or `docket verify`, to attribute a call. The gateway adapter treats an all-zero trace or parent id as absent. A record whose trace id is not 32 lowercase hex characters, or is all zeros, gets a trace id derived from its entry id, `bailiff.trace_id_mapped` is set, and the raw value is not exported, so a caller cannot place text of its choosing in the trace id field.
+
+### Delivery and checkpoint
+
+- At least once. After each batch the backend accepts, the exporter writes the checkpoint (mode 0600, written to a temporary file, fsynced, renamed, directory fsynced). A crash between acceptance and the checkpoint write sends that batch again on restart. Backends that do not deduplicate by span id may keep both copies.
+- The checkpoint holds the byte offset and count of exported records, each writer's head, the docket's device and inode, the hash of its first record and the hash and offset of the last exported one. On start the exporter refuses a docket that is another file, shorter than the offset, or whose first or last exported record differs, then verifies forward from the saved heads.
+- Each pass reads only up to the size the docket had at its start. Reading stops while a batch is exported, so a slow backend slows the exporter and nothing is dropped.
+- A failed batch is sent again. The SDK retries transient errors (429, 502, 503, 504 and connection errors) with backoff within `--timeout`; after `--max-failures` failed attempts of one batch the command exits 1 and the checkpoint stays at the last exported record.
+- SIGTERM lets the batch in flight finish and write its checkpoint, then exits 0.
+- An incomplete last line is left for the next pass. If it stays for 30s the exporter logs a warning naming the line after the last exported record; see Torn tail repair.
+- A line the sink wrote but could not fsync was refused to its writer but is still in the file; if it verifies, the exporter sends it.
+
+### Resume runbook
+
+- Exit 1 after failed exports: check the backend is reachable at `--otlp`, then start the exporter again. It resumes after the last exported record.
+- Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. For `torn_tail` follow Torn tail repair; anything else is a docket integrity incident, not an exporter fault.
+- Exit 1 with "not the file the checkpoint was written for", "shorter than the exported offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
+- Exit 1 on the checkpoint itself (mode, owner, fields): the checkpoint is 0600, owned by the exporter uid and version 1. Do not edit it; move it aside to export from the start.
+
 ## Writer-side rollback detection
 
 `DocketClient` stores its last acknowledged `seq` and hash in `<state_dir>/<writer>.head` (mode 0600, replaced atomically, fsynced). On every head fetch, and when the sink refuses an append with `wrong_seq` or `broken_prev`, the client raises `DocketRollback` if the sink's head `seq` is below the stored `seq`, or equals it with a different hash. Callers must treat it as a failed append.
