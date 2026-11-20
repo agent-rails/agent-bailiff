@@ -13,6 +13,7 @@ SCENARIOS = {
     "injected out-of-scope call refused": "refused: out_of_scope",
     "replayed call refused": "refused: already_issued",
     "disclosed: list_issues on payroll stays allowed": "result",
+    "disclosed: unrouted write tool refused": "refused: unknown_tool",
 }
 
 
