@@ -385,6 +385,49 @@ def test_a_malformed_checkpoint_is_refused(docket, checkpoint, change):
         export(docket, checkpoint, FakeExporter())
 
 
+def test_export_failure_says_how_to_skip_one_record(docket, checkpoint):
+    fill(docket, 1)
+    with pytest.raises(ExportFailed, match="--batch-size 1 and pass its line to --skip-line"):
+        export(docket, checkpoint, FakeExporter(failures=10), max_failures=1)
+
+
+def test_a_skipped_line_is_exported_as_a_marker_and_checkpointed(docket, checkpoint, caplog):
+    fill(docket, 1)
+    export(docket, checkpoint, FakeExporter())
+    fill(docket, 2, start=2)
+    exporter = FakeExporter()
+    assert export(docket, checkpoint, exporter, skip_line=2) == 2
+    [marker, after] = exporter.batches[0]
+    assert marker.name == "docket export_skipped" and marker.status.status_code is StatusCode.ERROR
+    assert marker.attributes["bailiff.export_skipped"] is True
+    assert marker.attributes["bailiff.docket.line"] == 2
+    assert marker.attributes["bailiff.docket.hash"] == docket.records[1].hash
+    assert marker.context.span_id == span_id_for("e-2")
+    assert "bailiff.principal" not in marker.attributes
+    assert after.attributes["bailiff.entry_id"] == "e-3" and "bailiff.export_skipped" not in after.attributes
+    assert load_checkpoint(checkpoint).entries == 3
+    assert "line 2 (writer decide seq 2) is exported as a skipped marker" in caplog.text
+
+
+@pytest.mark.parametrize("line", [1, 3])
+def test_a_skip_line_that_is_not_next_exports_nothing(docket, checkpoint, line):
+    fill(docket, 1)
+    export(docket, checkpoint, FakeExporter())
+    fill(docket, 2, start=2)
+    before = checkpoint.read_bytes()
+    exporter = FakeExporter()
+    with pytest.raises(ExportFailed, match=f"--skip-line {line} is not the next line to export, which is line 2"):
+        export(docket, checkpoint, exporter, skip_line=line)
+    assert exporter.attempts == 0 and checkpoint.read_bytes() == before
+
+
+def test_a_skip_line_past_the_end_is_refused(docket, checkpoint):
+    fill(docket, 2)
+    export(docket, checkpoint, FakeExporter())
+    with pytest.raises(ExportFailed, match="line 3 was not reached; nothing was skipped"):
+        export(docket, checkpoint, FakeExporter(), skip_line=3)
+
+
 def test_cli_exports_once_to_an_otlp_endpoint(docket, checkpoint, workdir, collector, capsys):
     fill(docket, 3)
     pin = workdir / "decide.pub.json"
@@ -410,6 +453,18 @@ def test_cli_exports_once_to_an_otlp_endpoint(docket, checkpoint, workdir, colle
     assert cli.main(arguments) == 0
     assert "0 records exported" in capsys.readouterr().err
     assert len(collector.spans()) == 3
+
+
+def test_cli_skip_line_exports_a_marker(docket, checkpoint, workdir, collector, capsys):
+    fill(docket, 2)
+    pin = workdir / "decide.pub.json"
+    pin.write_text(json.dumps(PINS["decide"].to_document()))
+    arguments = ["docket", "export", "--docket", str(docket.path), "--pin", str(pin)]
+    arguments += ["--checkpoint", str(checkpoint), "--otlp", collector.endpoint, "--once", "--skip-line", "1"]
+    assert cli.main(arguments) == 0
+    assert "2 records exported" in capsys.readouterr().err
+    [marker, record] = collector.spans()
+    assert marker.name == "docket export_skipped" and record.name != "docket export_skipped"
 
 
 @pytest.mark.parametrize("endpoint", ["ftp://host/v1/traces", "http:///v1/traces", "http://user:pw@host/v1/traces"])

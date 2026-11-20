@@ -124,6 +124,34 @@ def to_span(verified: VerifiedLine) -> ReadableSpan:
     )
 
 
+def to_skipped_span(verified: VerifiedLine) -> ReadableSpan:
+    record = verified.record
+    trace_id, mapped = trace_id_for(record.entry.trace_id, record.entry.entry_id)
+    attributes: dict[str, AttributeValue] = {
+        "bailiff.entry_id": record.entry.entry_id,
+        "bailiff.export_skipped": True,
+        "bailiff.docket.line": verified.line,
+        "bailiff.docket.writer": record.writer,
+        "bailiff.docket.seq": record.seq,
+        "bailiff.docket.kid": record.kid,
+        "bailiff.docket.hash": record.hash,
+    }
+    if mapped:
+        attributes["bailiff.trace_id_mapped"] = True
+    end = record.entry.at * 1_000_000_000
+    return ReadableSpan(
+        name="docket export_skipped",
+        context=SpanContext(trace_id, span_id_for(record.entry.entry_id), is_remote=False, trace_flags=SAMPLED),
+        resource=Resource({"service.name": f"agent-bailiff-{record.writer}"}),
+        attributes=attributes,
+        kind=SpanKind.INTERNAL,
+        status=Status(StatusCode.ERROR, "export skipped by the operator; the record is in the docket"),
+        start_time=end,
+        end_time=end,
+        instrumentation_scope=SCOPE,
+    )
+
+
 class ExportFailed(Exception):
     pass
 
@@ -141,11 +169,15 @@ class DocketExporter:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         stall_after: float = DEFAULT_STALL_AFTER,
         clock: Callable[[], float] = time.monotonic,
+        skip_line: int | None = None,
     ) -> None:
         if max_failures < 1:
             raise ValueError("max failures must be at least 1")
+        if skip_line is not None and skip_line < 1:
+            raise ValueError("the line to skip must be at least 1")
         self._exporter = exporter
         self._max_failures = max_failures
+        self._skip_line = skip_line
         self._follower = DocketFollower(
             docket_path,
             index,
@@ -158,17 +190,37 @@ class DocketExporter:
         )
 
     def run(self, stop: threading.Event, *, follow: bool) -> int:
-        return self._follower.run(stop, follow=follow)
+        exported = self._follower.run(stop, follow=follow)
+        if self._skip_line is not None and not stop.is_set():
+            raise ExportFailed(f"line {self._skip_line} was not reached; nothing was skipped")
+        return exported
 
     def _ship(self, batch: Sequence[VerifiedLine], stop: threading.Event) -> None:
-        spans = [to_span(verified) for verified in batch]
+        spans = [self._span(verified) for verified in batch]
         failures = 0
         while self._exporter.export(spans) is not SpanExportResult.SUCCESS:
             failures += 1
             if failures >= self._max_failures or stop.is_set():
                 raise ExportFailed(
                     f"lines {batch[0].line}-{batch[-1].line} were not exported after {failures} attempts; "
-                    f"the checkpoint stays at line {batch[0].line - 1}"
+                    f"the checkpoint stays at line {batch[0].line - 1}; if the backend refuses one record, "
+                    "find it with --batch-size 1 and pass its line to --skip-line"
                 )
             logger.warning("export of lines %d-%d failed, attempt %d", batch[0].line, batch[-1].line, failures)
         logger.info("exported lines %d-%d", batch[0].line, batch[-1].line)
+
+    def _span(self, verified: VerifiedLine) -> ReadableSpan:
+        if self._skip_line is None:
+            return to_span(verified)
+        if verified.line != self._skip_line:
+            raise ExportFailed(
+                f"--skip-line {self._skip_line} is not the next line to export, which is line {verified.line}"
+            )
+        self._skip_line = None
+        logger.warning(
+            "line %d (writer %s seq %d) is exported as a skipped marker instead of its record",
+            verified.line,
+            verified.record.writer,
+            verified.record.seq,
+        )
+        return to_skipped_span(verified)
