@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import gc
 import os
 import shutil
@@ -912,6 +913,9 @@ def test_a_closed_client_releases_the_writer_and_refuses_appends(paths, start_si
     with pytest.raises(DocketError) as error:
         client.append(make_entry(2))
     assert error.value.reason == "closed"
+    with pytest.raises(DocketError) as error:
+        client.head()
+    assert error.value.reason == "closed"
     assert decide_client(paths).append(make_entry(2)).seq == 2
 
 
@@ -939,6 +943,27 @@ def test_a_symlinked_writer_lock_is_refused(paths, start_sink, workdir):
         decide_client(paths)
     assert error.value.reason == "state_invalid"
     assert not (workdir / "elsewhere.lock").exists()
+
+
+def test_a_writer_lock_readable_by_others_is_refused(paths, start_sink):
+    start_sink()
+    decide_client(paths).close()
+    (state_dir(paths) / "decide.lock").chmod(0o644)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths)
+    assert error.value.reason == "state_invalid"
+
+
+def test_a_lock_error_is_a_docket_error(paths, start_sink, monkeypatch):
+    start_sink()
+
+    def refuse(fd):
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr("agent_bailiff.docket.client.try_lock", refuse)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths)
+    assert error.value.reason == "state_invalid"
 
 
 def test_client_state_file_is_private(paths, start_sink):

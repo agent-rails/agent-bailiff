@@ -300,16 +300,25 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
     rbac.verify()
     suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)
     docket = docket_client(settings.docket, settings.name, key)
-    effector = Effector(
-        EffectorConfig(settings.name, settings.name),
-        catalog,
-        check,
-        client,
-        suspension,
-        docket,
-        rbac,
-    )
-    server = EffectorServer(effector, settings.port)
-    server.start()
-    rbac.start()
-    return RunningEffector(server, rbac, docket)
+    try:
+        effector = Effector(
+            EffectorConfig(settings.name, settings.name),
+            catalog,
+            check,
+            client,
+            suspension,
+            docket,
+            rbac,
+        )
+        server = EffectorServer(effector, settings.port)
+    except BaseException:
+        docket.close()
+        raise
+    running = RunningEffector(server, rbac, docket)
+    try:
+        server.start()
+        rbac.start()
+    except BaseException:
+        running.close()
+        raise
+    return running
