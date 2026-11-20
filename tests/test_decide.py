@@ -420,23 +420,37 @@ def test_a_flood_of_unverified_requests_writes_nothing_to_the_docket(make_decide
 def test_verified_refusals_past_the_task_budget_are_not_recorded(make_decider, docket_paths):
     clock = FakeClock()
     decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60, clock=clock))
-    decisions = [decider.check(make_request(resource="env/prod/api", nonce=f"n-{n}"), NOW + n) for n in range(3)]
-    assert [decision.reason for decision in decisions] == ["out_of_scope"] * 3
-    assert [decision.entry_id is None for decision in decisions] == [False, False, True]
-    assert len(docket_entries(docket_paths)) == 2
+    decisions = [decider.check(make_request(resource="env/prod/api", nonce=f"n-{n}"), NOW + n) for n in range(4)]
+    assert [decision.reason for decision in decisions] == ["out_of_scope"] * 4
+    assert [decision.entry_id is None for decision in decisions] == [False, False, False, True]
+    assert [entry.reason for entry in docket_entries(docket_paths)] == ["out_of_scope"] * 2 + ["refusals_capped"]
     clock.now += 60
     later = decider.check(make_request(resource="env/prod/api", nonce="n-later"), NOW + 60)
     assert later.entry_id is not None
-    assert len(docket_entries(docket_paths)) == 3
+    assert len(docket_entries(docket_paths)) == 4
 
 
-def test_refusals_of_another_kind_do_not_hide_the_first_out_of_scope_refusal(make_decider, docket_paths):
+def test_padding_refusals_record_a_capped_marker_before_a_probe_is_hidden(make_decider, docket_paths):
     decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60, clock=FakeClock()))
     padding = [decider.check(make_request(tool="deploy.delete", nonce=f"pad-{n}"), NOW) for n in range(5)]
-    assert {decision.reason for decision in padding} != {"out_of_scope"}
+    assert "out_of_scope" not in {decision.reason for decision in padding}
     probe = decider.check(make_request(resource="env/prod/api", nonce="probe"), NOW)
-    assert (probe.reason, probe.entry_id is not None) == ("out_of_scope", True)
-    assert [entry.reason for entry in docket_entries(docket_paths)][-1] == "out_of_scope"
+    assert (probe.reason, probe.entry_id) == ("out_of_scope", None)
+    [*_, marker] = docket_entries(docket_paths)
+    assert (marker.decision, marker.reason, marker.handles["task"]) == ("refuse", "refusals_capped", "task-1")
+
+
+def test_other_tasks_filling_the_tenant_share_record_a_tenant_capped_marker(make_decider, docket_paths):
+    budget = RefusalBudget(limit=2, window_seconds=60, max_tasks_per_tenant=2, clock=FakeClock())
+    decider = make_decider(refusal_budget=budget)
+    for n in range(3):
+        root = make_root(task_id=f"filler-{n}")
+        decider.check(make_request(root, tool="deploy.delete", nonce=f"fill-{n}"), NOW)
+    probe = decider.check(make_request(resource="env/prod/api", nonce="probe"), NOW)
+    assert (probe.reason, probe.entry_id) == ("out_of_scope", None)
+    reasons = [entry.reason for entry in docket_entries(docket_paths)]
+    assert reasons.count("tenant_refusals_capped") == 1
+    assert "out_of_scope" not in reasons
 
 
 def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_decider, docket_paths, client_options):
@@ -445,7 +459,7 @@ def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_deci
     first = decider.check(make_request(resource="env/prod/api", nonce="n-1"), NOW)
     second = decider.check(make_request(resource="env/prod/api", nonce="n-2"), NOW)
     assert (first.entry_id, second.entry_id is not None) == (None, True)
-    assert len(docket_entries(docket_paths)) == 1
+    assert [entry.reason for entry in docket_entries(docket_paths)] == ["out_of_scope"]
 
 
 def test_policy_refusal_entry_names_the_rule(make_decider, docket_paths):

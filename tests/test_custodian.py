@@ -200,7 +200,7 @@ def trust_policy():
 
 @pytest.fixture
 def make_decider(workdir, private, sink, writer):
-    def make(bindings=DECIDE_BINDINGS, costs=COSTS):
+    def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None):
         return Decider(
             config=DeciderConfig(
                 DECIDER_ID,
@@ -218,6 +218,7 @@ def make_decider(workdir, private, sink, writer):
             docket=docket_client(workdir, private, "decide", "decide-1", DECIDE_KEY),
             signing_key=DECIDE_KEY,
             costs=costs,
+            refusal_budget=refusal_budget,
         )
 
     return make

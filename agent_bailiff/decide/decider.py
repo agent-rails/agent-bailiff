@@ -23,7 +23,7 @@ from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.config import DeciderConfig, PolicyRef
 from agent_bailiff.decide.costs import CostError, CostTable
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
-from agent_bailiff.decide.refusals import RefusalBudget
+from agent_bailiff.decide.refusals import CAPPED_REASON, TENANT_CAPPED_REASON, RefusalBudget
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.signing import token_hash
@@ -379,25 +379,35 @@ class Decider:
         if tenant is None or task is None:
             logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
-        tool = entry.tool or ""
-        window = self._refusal_budget.admit(tenant, task, reason, tool)
-        if window is None:
+        admission = self._refusal_budget.admit(tenant, task)
+        if admission.verdict == "drop":
             logger.info(
                 "refusal %s of %s for tenant %s task %s agent %s over the record budget, not docketed (trace %s)",
                 reason,
-                tool,
+                entry.tool,
                 tenant,
                 task,
                 entry.agent_key,
                 entry.trace_id,
             )
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
+        recorded = reason
+        if admission.verdict == "capped":
+            recorded = TENANT_CAPPED_REASON if admission.tenant_overflow else CAPPED_REASON
+            logger.warning(
+                "tenant %s task %s passed the refusal record budget; recording %s for refusal %s (trace %s)",
+                tenant,
+                task,
+                recorded,
+                reason,
+                entry.trace_id,
+            )
         entry_id: str | None
         try:
-            entry_id = self._append(replace(entry, decision="refuse", reason=reason))
+            entry_id = self._append(replace(entry, decision="refuse", reason=recorded))
         except Exception:
             logger.warning("docket entry for a refusal was not written", exc_info=True)
-            self._refusal_budget.refund(tenant, task, reason, tool, window)
+            self._refusal_budget.refund(tenant, task, admission)
             entry_id = None
         return Decision(allowed=False, reason=reason, entry_id=entry_id, op_id=entry.op_id)
 
