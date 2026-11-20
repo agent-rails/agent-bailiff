@@ -167,3 +167,10 @@ def test_the_rule_runs_as_decide_with_docket_access(stack):
     identity = test_quickstart_stack.identity(stack.container("rule"))
     groups = frozenset({b.LEDGER_GID, b.DOCKET_WRITERS_GID, b.DOCKET_READERS_GID})
     assert identity == {(b.DECIDE_UID, b.LEDGER_GID, groups)}
+
+
+def test_the_rule_restarts_on_failure_and_its_init_reads_decide_only(stack):
+    services = json.loads(stack.compose("--profile", "rule", "config", "--format", "json"))["services"]
+    assert services["rule"]["restart"] == "on-failure"
+    decide = [volume for volume in services["rule-init"]["volumes"] if volume["source"] == "decide-data"]
+    assert [volume.get("read_only", False) for volume in decide] == [True]
