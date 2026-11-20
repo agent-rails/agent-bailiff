@@ -160,7 +160,13 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
     if decide != [len(processors) - 2] or custodian != [len(processors) - 1]:
         problems.append("processor order: decide must run immediately before custodian, and custodian must be last")
     _check_bailiff_processor(problems, "decide", processors[decide[0]], {})
+    _check_header_filter(problems, "decide", processors[decide[0]].get("requestHeaders"))
     _check_bailiff_processor(problems, "custodian", processors[custodian[0]], {CLEARANCE_KEY: CLEARANCE_EXPRESSION})
+    if "requestHeaders" in processors[custodian[0]]:
+        problems.append(
+            "the custodian processor must not filter requestHeaders; "
+            "it removes every header outside the upstream allowlist, so it must see them all"
+        )
 
 
 def _bailiff_processors(processors: list[Any], socket_path: Path) -> list[int]:
@@ -183,7 +189,6 @@ def _check_bailiff_processor(
     if processor.get("metadata", {}) != metadata:
         expected = f"exactly {dict(metadata)}" if metadata else "no metadata"
         problems.append(f"the {label} processor must send {expected} (clearance channel)")
-    _check_header_filter(problems, label, processor.get("requestHeaders"))
 
 
 def _check_header_filter(problems: list[str], label: str, header_filter: object) -> None:

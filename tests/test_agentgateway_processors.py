@@ -180,6 +180,35 @@ def test_custodian_release_sets_the_credential_header_and_strips_chain_headers()
     assert (token, request, now) == ("clearance.token", read_call(message(), ROUTES), NOW)
 
 
+AGENT_EXTRA_HEADERS = (
+    ("Sudo", b"root"),
+    ("x-forwarded-user", b"admin"),
+    ("x-bailiff-extra", b"1"),
+    ("user-agent", b"agent/1"),
+    ("X-Api-Key", b"forged"),
+    (":authority", b"gateway"),
+    ("accept", b"application/json"),
+    ("content-type", b"application/json"),
+    ("mcp-protocol-version", b"2025-06-18"),
+    ("tracestate", b"vendor=1"),
+)
+FORWARDED = {"accept", "content-type", "mcp-protocol-version", "traceparent", "tracestate"}
+
+
+@pytest.mark.parametrize("method", ["tools/call", "tools/list", "initialize"])
+def test_custodian_removes_every_agent_header_outside_the_upstream_allowlist(method):
+    request = with_clearance(message(extra_headers=AGENT_EXTRA_HEADERS))
+    request.method = method
+    result = CustodianProcessor(FakeCustodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW).check_request(request)
+    assert result_kind(result) == "pass"
+    removed = set(result.header_mutation.remove)
+    sent = {header.key.lower() for header in request.headers if not header.key.startswith(":")}
+    released = {item.key.lower() for item in result.header_mutation.set}
+    assert sent - removed == FORWARDED | released
+    assert {"sudo", "x-forwarded-user", "x-bailiff-extra", "user-agent"} <= removed
+    assert not [name for name in removed if name.startswith(":")]
+
+
 @pytest.mark.parametrize("context", ["absent", "empty", None, 7])
 def test_custodian_refuses_without_a_string_clearance(context):
     custodian = FakeCustodian()

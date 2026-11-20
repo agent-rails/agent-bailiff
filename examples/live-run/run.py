@@ -280,7 +280,6 @@ class Deployment:
                                 "kind": "remote",
                                 "host": f"unix:{self.sockets['custodian']}",
                                 "methods": {"*": "request"},
-                                "requestHeaders": {"allowed": CHAIN_HEADERS},
                                 "metadata": {"clearance": "mcpGuardrails.clearance"},
                             },
                         ]

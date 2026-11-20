@@ -9,7 +9,13 @@ from google.protobuf import struct_pb2
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.calls import TOOLS_CALL, CallRefused, read_call
-from agent_bailiff.chain_headers import LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER
+from agent_bailiff.chain_headers import (
+    LEAF_PROOF_HEADER,
+    LINKS_HEADER,
+    NONCE_HEADER,
+    TASK_ROOT_HEADER,
+    TRACEPARENT_HEADER,
+)
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.custodian import Released, ReleaseResult
 from agent_bailiff.custodian.release import RELEASE_HEADER
@@ -23,6 +29,7 @@ METHOD_REFUSED = "method_refused"
 SESSION_METHODS = frozenset({"initialize", "ping", "tools/list"})
 AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", RELEASE_HEADER})
 CHAIN_HEADERS = frozenset({LEAF_PROOF_HEADER, LINKS_HEADER, NONCE_HEADER, TASK_ROOT_HEADER})
+UPSTREAM_HEADERS = frozenset({"accept", "content-type", "mcp-protocol-version", TRACEPARENT_HEADER, "tracestate"})
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +105,7 @@ class CustodianProcessor:
 
     def _check(self, message: ext_mcp_pb2.McpRequest) -> ext_mcp_pb2.McpRequestResult:
         if message.method != TOOLS_CALL:
-            return self._passed_without(frozenset())
+            return self._passed_without(message, frozenset())
         clearance = _clearance(message)
         if clearance is None:
             logger.warning("custodian processor refused a call without a clearance in the metadata context")
@@ -113,14 +120,18 @@ class CustodianProcessor:
             logger.warning("custodian processor refused a release: %s", result.reason)
             return refuse(RELEASE_REFUSED)
         released = ext_mcp_pb2.McpHeader(key=result.header_name, value=result.header_value.encode("ascii"))
-        return self._passed_without(frozenset({result.header_name.lower()}), released)
+        return self._passed_without(message, frozenset({result.header_name.lower()}), released)
 
     def _passed_without(
-        self, kept: frozenset[str], released: ext_mcp_pb2.McpHeader | None = None
+        self,
+        message: ext_mcp_pb2.McpRequest,
+        kept: frozenset[str],
+        released: ext_mcp_pb2.McpHeader | None = None,
     ) -> ext_mcp_pb2.McpRequestResult:
+        seen = {header.key.lower() for header in message.headers if not header.key.startswith(":")}
         mutation = ext_mcp_pb2.HeaderMutation(
             set=[released] if released is not None else [],
-            remove=sorted(self._stripped - kept),
+            remove=sorted((self._stripped | seen) - UPSTREAM_HEADERS - kept),
         )
         return ext_mcp_pb2.McpRequestResult(**{"pass": ext_mcp_pb2.Pass()}, header_mutation=mutation)
 
