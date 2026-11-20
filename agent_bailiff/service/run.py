@@ -26,8 +26,8 @@ from agent_bailiff.decide.decider import Decider
 from agent_bailiff.docket.client import DocketClient
 from agent_bailiff.docket.sink import DocketSink
 from agent_bailiff.effector.catalog import OperationCatalog
-from agent_bailiff.effector.drift import RbacAudit, RbacGate
-from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient
+from agent_bailiff.effector.drift import REVIEW_WORKERS, RbacAudit, RbacGate
+from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, PooledTransport
 from agent_bailiff.effector.rbac import generate_manifests
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
@@ -288,7 +288,7 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
     client = KubernetesClient(transport, kubernetes.token_file)
     manifests = generate_manifests(catalog, settings.rbac, settings.tenants)
     audit = RbacAudit(
-        transport,
+        PooledTransport(kubernetes.host, kubernetes.port, kubernetes.ca, REVIEW_WORKERS),
         kubernetes.token_file,
         kubernetes.audit_token_file,
         settings.rbac,
@@ -297,7 +297,11 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
         catalog.operations,
     )
     rbac = RbacGate(audit, lambda: int(time.time()))
-    rbac.verify()
+    try:
+        rbac.verify()
+    except BaseException:
+        rbac.close()
+        raise
     suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)
     docket = docket_client(settings.docket, settings.name, key)
     try:

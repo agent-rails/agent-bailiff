@@ -16,10 +16,15 @@ from agent_bailiff.effector.drift import (
     RbacAudit,
     RbacDrift,
     RbacGate,
+    grants,
 )
 from agent_bailiff.effector.kubernetes import KubernetesUnavailable
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
+from agent_bailiff.webhook import manifests as webhook
+
+WEBHOOK_PATH = f"/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations/{webhook.NAME}"
+SERVICE_PATH = f"/api/v1/namespaces/bailiff-webhook/services/{webhook.NAME}"
 
 IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops", "bailiff-webhook")
 TENANTS = {"tenant-a": ["staging"]}
@@ -86,6 +91,7 @@ class FakeApi:
                 "subjects": [{"kind": "Group", "name": "system:authenticated"}],
             }
         )
+        self.tenants = TENANTS
         self.extra_rules = {}
         self.audit_extra_rules = {}
         self.extra_non_resource = []
@@ -95,13 +101,48 @@ class FakeApi:
         self.page_size = None
         self.requests = []
         self.schema = apps_schema()
+        self.registration = {
+            "webhooks": [
+                {
+                    "name": webhook.WEBHOOK,
+                    "failurePolicy": "Fail",
+                    "matchPolicy": "Exact",
+                    "namespaceSelector": {},
+                    "objectSelector": {},
+                    "matchConditions": copy.deepcopy(webhook.MATCH_CONDITIONS),
+                    "rules": copy.deepcopy(webhook.RULES),
+                    "clientConfig": {
+                        "service": {
+                            "name": webhook.NAME,
+                            "namespace": "bailiff-webhook",
+                            "path": webhook.SERVICE_PATH,
+                            "port": webhook.SERVICE_PORT,
+                        },
+                        "caBundle": "Y2E=",
+                    },
+                }
+            ]
+        }
+        self.service = {"spec": {"selector": {"app.kubernetes.io/name": webhook.NAME, webhook.MODE_LABEL: "enforce"}}}
+        self.throttled = 0
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def request(self, method, path, headers, body):
         self.requests.append((method, path, headers["Authorization"]))
+        if self.throttled:
+            self.throttled -= 1
+            return 429, b""
         url = urllib.parse.urlsplit(path)
         query = dict(urllib.parse.parse_qsl(url.query))
         if url.path == APPS_SCHEMA_PATH:
             return self.status.get("openapi", 200), json.dumps(self.schema).encode()
+        if url.path == WEBHOOK_PATH:
+            return self.status.get("webhook", 200), json.dumps(self.registration).encode()
+        if url.path == SERVICE_PATH:
+            return self.status.get("service", 200), json.dumps(self.service).encode()
         plural = url.path.rsplit("/", 1)[-1]
         if plural in self.status:
             return self.status[plural], b"{}"
@@ -115,7 +156,7 @@ class FakeApi:
                 attributes["resource"] + ("/" + attributes["subresource"] if "subresource" in attributes else ""),
             )
             tenant, identity = spec["user"].split(":")[1:]
-            allowed = attributes["namespace"] in TENANTS.get(tenant, []) and any(
+            allowed = attributes["namespace"] in self.tenants.get(tenant, []) and any(
                 operation.identity == identity
                 and operation.call.verb == attributes["verb"]
                 and operation.call.resource == attributes["resource"]
@@ -165,7 +206,24 @@ def audit(api, tmp_path):
     for name, value in (("effector", EFFECTOR_TOKEN), ("audit", AUDIT_TOKEN)):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
-    return RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, MANIFESTS, TENANTS, CATALOG.operations)
+    return RbacAudit(
+        api,
+        tmp_path / "effector",
+        tmp_path / "audit",
+        IDENTITY,
+        MANIFESTS,
+        TENANTS,
+        CATALOG.operations,
+        sleep=SLEEPS.append,
+    )
+
+
+SLEEPS: list[float] = []
+
+
+@pytest.fixture(autouse=True)
+def no_sleeps():
+    SLEEPS.clear()
 
 
 def test_the_generated_set_with_server_defaults_is_clean(api, audit):
@@ -447,3 +505,226 @@ def test_a_changed_restart_policy_variable_is_drift(api, audit):
     policy = api.find("ValidatingAdmissionPolicy", "bailiff-restart-deployment")
     policy["spec"]["variables"][0]["expression"] = "{}"
     assert audit.check() == ["the generated ValidatingAdmissionPolicy bailiff-restart-deployment was changed"]
+
+
+def test_synthetic_users_are_reviewed_only_in_their_own_tenant_namespaces(api, tmp_path, audit):
+    tenants = {"tenant-a": ["staging"], "tenant-b": ["dev", "qa"], "tenant-c": ["prod"]}
+    api.tenants = tenants
+    generated = generate_manifests(CATALOG, IDENTITY, tenants)
+    api.objects = [served(item) for item in generated["items"] if item["kind"] not in ("Namespace", "ServiceAccount")]
+    api.namespaces += ["dev", "qa", "prod"]
+    wide = RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, generated, tenants, CATALOG.operations)
+    assert wide.check() == []
+    access = [path for _, path, _ in api.requests if path.endswith("/subjectaccessreviews")]
+    assert len(access) == 3 * len(CATALOG.operations) * 4
+
+
+def shared(kind, namespace, role_kind, role_name, group="system:authenticated"):
+    metadata = {"name": "shared"} if namespace is None else {"name": "shared", "namespace": namespace}
+    return {
+        "kind": kind,
+        "metadata": metadata,
+        "roleRef": {"kind": role_kind, "name": role_name},
+        "subjects": [{"kind": "Group", "name": group}],
+    }
+
+
+def scale_role(kind, namespace=None):
+    metadata = {"name": "scaler"} if namespace is None else {"name": "scaler", "namespace": namespace}
+    return {
+        "kind": kind,
+        "metadata": metadata,
+        "rules": [{"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["patch"]}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("binding", "role", "label"),
+    [
+        (
+            shared("RoleBinding", "staging", "Role", "scaler"),
+            scale_role("Role", "staging"),
+            "RoleBinding staging/shared",
+        ),
+        (
+            shared("RoleBinding", "staging", "ClusterRole", "scaler"),
+            scale_role("ClusterRole"),
+            "RoleBinding staging/shared",
+        ),
+        (
+            shared("ClusterRoleBinding", None, "ClusterRole", "scaler"),
+            scale_role("ClusterRole"),
+            "ClusterRoleBinding shared",
+        ),
+    ],
+)
+def test_a_catalog_grant_to_every_authenticated_user_is_drift(api, audit, binding, role, label):
+    api.objects += [binding, role]
+    assert audit.check() == [
+        f"the {label} grants scale_deployment to every synthetic user through system:authenticated"
+    ]
+
+
+def test_a_shared_grant_outside_tenant_namespaces_or_without_catalog_calls_is_not_drift(api, audit):
+    api.objects += [
+        shared("RoleBinding", "default", "ClusterRole", "scaler"),
+        scale_role("ClusterRole"),
+        shared("RoleBinding", "staging", "ClusterRole", "viewer"),
+        {
+            "kind": "ClusterRole",
+            "metadata": {"name": "viewer"},
+            "rules": [{"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"]}],
+        },
+        shared("RoleBinding", "staging", "Role", "absent"),
+    ]
+    assert audit.check() == []
+
+
+@pytest.mark.parametrize(
+    ("rule", "granted"),
+    [
+        ({"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}, True),
+        ({"apiGroups": ["apps"], "resources": ["*/scale"], "verbs": ["patch"]}, True),
+        ({"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["*"]}, True),
+        ({"apiGroups": ["apps"], "resources": ["deployments/*"], "verbs": ["patch"]}, False),
+        ({"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"]}, False),
+        ({"apiGroups": [""], "resources": ["deployments/scale"], "verbs": ["patch"]}, False),
+        ({"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["get"]}, False),
+        ({"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["patch"], "resourceNames": ["x"]}, True),
+    ],
+)
+def test_shared_grants_follow_rbac_resource_matching(rule, granted):
+    assert grants([rule], CATALOG.operation("scale_deployment")) is granted
+
+
+@pytest.mark.parametrize("account", ["effector", "effector-audit"])
+def test_a_binding_naming_the_effector_service_account_username_as_a_user_is_drift(api, audit, account):
+    api.objects.append(
+        {
+            "kind": "ClusterRoleBinding",
+            "metadata": {"name": "sneak"},
+            "roleRef": {"kind": "ClusterRole", "name": "edit"},
+            "subjects": [{"kind": "User", "name": f"system:serviceaccount:bailiff-system:{account}"}],
+        }
+    )
+    assert audit.check() == ["the ClusterRoleBinding sneak grants to the effector or a synthetic user"]
+
+
+def test_a_throttled_request_is_retried_with_bounded_backoff(api, audit):
+    api.throttled = 3
+    assert audit.check() == []
+    assert len(SLEEPS) == 3 and all(0 <= delay <= 8.0 for delay in SLEEPS)
+
+
+def test_a_request_throttled_past_the_retries_fails_the_check(api, audit):
+    api.throttled = 6
+    with pytest.raises(KubernetesUnavailable):
+        audit.check()
+    assert len(SLEEPS) == 5
+
+
+def test_the_release_webhook_is_read_with_the_audit_token(api, audit):
+    assert audit.check_release_webhook() == []
+    assert ("GET", WEBHOOK_PATH, f"Bearer {AUDIT_TOKEN}") in api.requests
+    assert ("GET", SERVICE_PATH, f"Bearer {AUDIT_TOKEN}") in api.requests
+
+
+def hook(api):
+    return api.registration["webhooks"][0]
+
+
+@pytest.mark.parametrize(
+    ("change", "problem"),
+    [
+        (lambda api: hook(api).update(failurePolicy="Ignore"), "release.bailiff.dev does not fail closed"),
+        (
+            lambda api: hook(api)["rules"][0].update(operations=["CREATE"]),
+            "release.bailiff.dev does not match every write by a synthetic user",
+        ),
+        (
+            lambda api: hook(api)["matchConditions"][0].update(expression="false"),
+            "release.bailiff.dev does not match every write by a synthetic user",
+        ),
+        (
+            lambda api: hook(api).update(namespaceSelector={"matchLabels": {"a": "b"}}),
+            "release.bailiff.dev is narrowed by a selector",
+        ),
+        (
+            lambda api: hook(api).update(objectSelector={"matchLabels": {"a": "b"}}),
+            "release.bailiff.dev is narrowed by a selector",
+        ),
+        (
+            lambda api: hook(api)["clientConfig"].update(url="https://example.invalid/validate"),
+            "release.bailiff.dev does not call the bailiff-webhook/bailiff-release-webhook Service",
+        ),
+        (
+            lambda api: hook(api)["clientConfig"]["service"].update(namespace="other"),
+            "release.bailiff.dev does not call the bailiff-webhook/bailiff-release-webhook Service",
+        ),
+        (
+            lambda api: api.service["spec"]["selector"].pop(webhook.MODE_LABEL),
+            "the Service bailiff-webhook/bailiff-release-webhook does not select only Enforce-mode webhook pods",
+        ),
+        (
+            lambda api: api.registration["webhooks"].append(copy.deepcopy(hook(api))),
+            "the ValidatingWebhookConfiguration bailiff-release-webhook does not register release.bailiff.dev",
+        ),
+        (
+            lambda api: api.registration.update(webhooks=[]),
+            "the ValidatingWebhookConfiguration bailiff-release-webhook does not register release.bailiff.dev",
+        ),
+    ],
+)
+def test_a_weakened_release_webhook_is_reported(api, audit, change, problem):
+    change(api)
+    assert audit.check_release_webhook() == [problem]
+
+
+@pytest.mark.parametrize("fault", ["changed", "unreadable", "missing service"])
+def test_a_release_webhook_problem_withdraws_only_writes(api, audit, fault):
+    if fault == "changed":
+        hook(api).update(failurePolicy="Ignore")
+    elif fault == "unreadable":
+        api.status["webhook"] = 404
+    else:
+        api.status["service"] = 404
+    gate = RbacGate(audit, Clock(), interval=60)
+    gate.verify()
+    assert gate.healthy(1000) and gate.restart_healthy(1000)
+    assert gate.write_healthy(1000) is False
+
+
+def test_writes_are_healthy_only_while_both_checks_are_fresh(api, audit):
+    gate = RbacGate(audit, Clock(), interval=60)
+    assert gate.write_healthy(1000) is False
+    gate.verify()
+    assert gate.write_healthy(1000) and gate.write_healthy(1120)
+    assert gate.write_healthy(1121) is False
+    api.status["rolebindings"] = 403
+    with pytest.raises(RbacDrift):
+        gate.verify()
+    assert gate.write_healthy(1000) is False
+    assert not any(path == WEBHOOK_PATH for _, path, _ in api.requests[-3:])
+
+
+def test_freshness_is_counted_from_the_end_of_the_check(api, audit):
+    clock = Clock()
+
+    class Slow:
+        def check(self):
+            clock.now += 50
+            return audit.check()
+
+        def __getattr__(self, name):
+            return getattr(audit, name)
+
+    gate = RbacGate(Slow(), clock, interval=60)
+    gate.verify()
+    assert gate.healthy(1170) and gate.healthy(1050 + 120)
+    assert gate.healthy(1171) is False
+
+
+def test_closing_the_gate_closes_the_audit_transport(api, audit):
+    gate = RbacGate(audit, Clock(), interval=60)
+    gate.close()
+    assert api.closed is True

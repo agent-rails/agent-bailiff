@@ -37,6 +37,8 @@ class RbacCheck(Protocol):
 
     def restart_healthy(self, now: int) -> bool: ...
 
+    def write_healthy(self, now: int) -> bool: ...
+
 
 class Effector:
     def __init__(
@@ -74,6 +76,8 @@ class Effector:
             return _error(refusal.reason)
         if checked.operation.call.restarts and not self._rbac.restart_healthy(now):
             return _error("restart_unverified")
+        if checked.operation.call.verb == "patch" and not self._rbac.write_healthy(now):
+            return _error("webhook_unverified")
         attempt = self._entry(checked, "attempt", now)
         if not self._record(attempt):
             return _error("docket_unavailable")

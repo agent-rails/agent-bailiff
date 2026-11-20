@@ -116,7 +116,11 @@ class Verified:
     def restart_healthy(self, now):
         return self.value and self.restart
 
+    def write_healthy(self, now):
+        return self.value and self.write
+
     restart = True
+    write = True
 
 
 class Suspended:
@@ -462,6 +466,83 @@ def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
         kubernetes.HttpsTransport("127.0.0.1", 6443, tmp_path / "ca.crt").request("GET", "/api", {}, None)
 
 
+class PooledResponse:
+    def __init__(self, status=200, body=b"{}", will_close=False):
+        self.status, self.body, self.will_close = status, body, will_close
+
+    def read(self, limit):
+        return self.body[:limit]
+
+    def isclosed(self):
+        return True
+
+
+class PooledConnection:
+    opened = []
+
+    def __init__(self, *args, **kwargs):
+        self.responses, self.closed, self.sent = [], False, 0
+        PooledConnection.opened.append(self)
+
+    def request(self, *args, **kwargs):
+        self.sent += 1
+        if not self.responses:
+            raise ConnectionResetError("stale")
+
+    def getresponse(self):
+        return self.responses.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def pooled(monkeypatch, tmp_path):
+    from agent_bailiff.effector import kubernetes
+
+    monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda cafile: None)
+    PooledConnection.opened = []
+
+    def connect(*args, **kwargs):
+        connection = PooledConnection()
+        connection.responses = [PooledResponse() for _ in range(3)]
+        return connection
+
+    monkeypatch.setattr(kubernetes.http.client, "HTTPSConnection", connect)
+    return kubernetes.PooledTransport("127.0.0.1", 6443, tmp_path / "ca.crt", 2)
+
+
+def test_the_pooled_transport_reuses_an_idle_connection(pooled):
+    assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
+    assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
+    assert len(PooledConnection.opened) == 1 and PooledConnection.opened[0].sent == 2
+
+
+def test_the_pooled_transport_retries_a_stale_connection_once_on_a_new_one(pooled):
+    pooled.request("GET", "/api", {}, None)
+    PooledConnection.opened[0].responses.clear()
+    assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
+    assert PooledConnection.opened[0].closed and len(PooledConnection.opened) == 2
+
+
+def test_the_pooled_transport_drops_a_connection_the_server_closes_or_that_overflows(pooled):
+    pooled.request("GET", "/api", {}, None)
+    PooledConnection.opened[0].responses = [PooledResponse(will_close=True)]
+    pooled.request("GET", "/api", {}, None)
+    assert PooledConnection.opened[0].closed
+    pooled.request("GET", "/api", {}, None)
+    PooledConnection.opened[1].responses = [PooledResponse(body=b"x" * ((1 << 20) + 1))]
+    with pytest.raises(KubernetesUnavailable, match="larger than the limit"):
+        pooled.request("GET", "/api", {}, None)
+    assert PooledConnection.opened[1].closed
+
+
+def test_closing_the_pooled_transport_closes_idle_connections(pooled):
+    pooled.request("GET", "/api", {}, None)
+    pooled.close()
+    assert PooledConnection.opened[0].closed
+
+
 def test_a_restart_patches_the_deployment_as_its_own_field_manager_at_the_release_time(token_file):
     from test_effector_catalog import with_restart
 
@@ -507,6 +588,19 @@ def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run
     assert result["content"][0]["text"] == "restart_unverified"
     assert transport.requests == [] and docket.entries == []
     assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
+
+
+def test_a_write_is_refused_without_a_verified_release_webhook_while_reads_run(token_file):
+    instance, transport, docket = effector(token_file)
+    instance._rbac.write = False
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "webhook_unverified"
+    assert transport.requests == [] and docket.entries == []
+    arguments = {"namespace": "staging", "limit": 5}
+    clearance = clearance_for("list_pods", arguments, op_id="op-list-1")
+    assert (
+        instance.call({"name": "list_pods", "arguments": arguments}, release_for(clearance), NOW + 2)["isError"]
+        is False
+    )
 
 
 @pytest.mark.parametrize(
