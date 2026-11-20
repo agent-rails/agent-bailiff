@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+    ExportTraceServiceResponse,
+)
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -22,7 +25,7 @@ from test_docket_report import PINS, WRITERS, Docket
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketCorrupt
 from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, load_checkpoint
-from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, span_id_for, to_span
+from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, OtlpHttpExporter, span_id_for, to_span
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import VerifiedLine, build_kid_index
 
@@ -33,6 +36,7 @@ TRACE = "0af7651916cd43dd8448eb211c80319c"
 class Collector:
     def __init__(self) -> None:
         self.requests: list[ExportTraceServiceRequest] = []
+        self.reply = b""
         collector = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -42,8 +46,10 @@ class Collector:
                 request.ParseFromString(body)
                 collector.requests.append(request)
                 self.send_response(200)
-                self.send_header("Content-Length", "0")
+                self.send_header("Content-Type", "application/x-protobuf")
+                self.send_header("Content-Length", str(len(collector.reply)))
                 self.end_headers()
+                self.wfile.write(collector.reply)
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
@@ -491,6 +497,64 @@ def test_cli_refuses_a_bad_endpoint(docket, checkpoint, workdir, capsys, endpoin
     assert "--otlp must be an http or https URL" in capsys.readouterr().err
 
 
+def partial_success(rejected, message=""):
+    reply = ExportTraceServiceResponse()
+    reply.partial_success.rejected_spans = rejected
+    reply.partial_success.error_message = message
+    return reply.SerializeToString()
+
+
+def test_a_partial_rejection_fails_without_retry_and_keeps_the_checkpoint(docket, checkpoint, collector):
+    fill(docket, 3)
+    collector.reply = partial_success(1, "span 2 has an invalid attribute")
+    exporter = OtlpHttpExporter(collector.endpoint, timeout=5)
+
+    with pytest.raises(ExportFailed) as failure:
+        export(docket, checkpoint, exporter, max_failures=5)
+
+    assert "lines 1-3: the backend rejected 1 of the spans: span 2 has an invalid attribute" in str(failure.value)
+    assert "not retried" in str(failure.value) and "--skip-line" in str(failure.value)
+    assert len(collector.requests) == 1
+    assert not checkpoint.exists()
+
+
+def test_a_partial_success_warning_without_rejections_is_exported_and_logged(docket, checkpoint, collector, caplog):
+    fill(docket, 2)
+    collector.reply = partial_success(0, "attribute truncated\x1b[2J")
+    exporter = OtlpHttpExporter(collector.endpoint, timeout=5)
+
+    with caplog.at_level("WARNING", logger="agent_bailiff.docket.otlp"):
+        assert export(docket, checkpoint, exporter) == 2
+
+    assert load_checkpoint(checkpoint).entries == 2
+    assert "the backend accepted the batch with a warning: attribute truncated\\x1b[2J" in caplog.text
+
+
+def test_a_reply_that_is_not_an_otlp_response_fails_the_export(docket, checkpoint, collector):
+    fill(docket, 1)
+    collector.reply = b"\xff\xff\xff"
+    exporter = OtlpHttpExporter(collector.endpoint, timeout=5)
+
+    with pytest.raises(ExportFailed, match="were not exported after 2 attempts"):
+        export(docket, checkpoint, exporter, max_failures=2)
+
+    assert not checkpoint.exists()
+
+
+def test_cli_fails_a_partially_rejected_export(docket, checkpoint, workdir, collector, capsys):
+    fill(docket, 2)
+    collector.reply = partial_success(2, "quota")
+    pin = workdir / "decide.pub.json"
+    pin.write_text(json.dumps(PINS["decide"].to_document()))
+    arguments = ["docket", "export", "--docket", str(docket.path), "--pin", str(pin)]
+    arguments += ["--checkpoint", str(checkpoint), "--otlp", collector.endpoint, "--once"]
+
+    assert cli.main(arguments) == 1
+
+    assert "the backend rejected 2 of the spans: quota" in capsys.readouterr().err
+    assert not checkpoint.exists()
+
+
 def test_a_lasting_torn_tail_is_logged(docket, checkpoint, caplog):
     fill(docket, 1)
     with open(docket.path, "ab") as stream:
@@ -514,6 +578,7 @@ def test_a_lasting_torn_tail_is_logged(docket, checkpoint, caplog):
 
 def test_cli_without_the_otel_extra_says_what_to_install(docket, checkpoint, workdir, capsys, monkeypatch):
     monkeypatch.setitem(sys.modules, "opentelemetry.exporter.otlp.proto.http.trace_exporter", None)
+    monkeypatch.delitem(sys.modules, "agent_bailiff.docket.otlp")
     pin = workdir / "decide.pub.json"
     pin.write_text(json.dumps(PINS["decide"].to_document()))
     arguments = ["docket", "export", "--docket", str(docket.path), "--pin", str(pin)]
