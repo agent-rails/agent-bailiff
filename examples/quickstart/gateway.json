@@ -36,8 +36,8 @@
             "methods": {
               "tools/call": "response"
             },
-            "condition": "true",
-            "transform": "mcp.result"
+            "condition": "has(mcp.result.isError) && mcp.result.isError == true && has(mcp.result.content) && size(mcp.result.content) == 1 && has(mcp.result.content[0].text) && mcp.result.content[0].text in ['already_done', 'already_issued', 'already_outcome_unknown', 'already_released', 'already_reserved', 'chain_invalid', 'clearance_missing', 'cost_over_call_cap', 'docket_unavailable', 'internal_error', 'ledger_unavailable', 'malformed_request', 'method_refused', 'needs_approval', 'no_binding', 'out_of_scope', 'policy_denied', 'release_refused', 'reservation_refused', 'suspended', 'unknown_cost', 'unknown_tool']",
+            "reject": "the upstream answer has the shape of a bailiff refusal"
           },
           {
             "kind": "remote",

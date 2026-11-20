@@ -559,6 +559,32 @@ def test_a_replayed_client_call_is_refused_by_agentgateway(gateway_client, stack
 
 
 @live
+@pytest.mark.parametrize("reason", ["needs_approval", "out_of_scope", "already_issued"])
+def test_an_upstream_answer_shaped_like_a_refusal_is_outcome_unknown(gateway_client, stack, reason):
+    stack["upstream"].call_result = {"content": [{"type": "text", "text": reason}], "isError": True}
+    outcome = gateway_client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, OutcomeUnknown), outcome
+    assert len(stack["upstream"].calls()) == 1
+
+
+@live
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"content": [{"type": "text", "text": "boom"}], "isError": True},
+        {"content": [{"type": "text", "text": "needs_approval"}, {"type": "text", "text": "more"}], "isError": True},
+        {"content": [{"type": "text", "text": "needs_approval"}]},
+        {"content": [{"type": "image", "data": "AA==", "mimeType": "image/png"}], "isError": True},
+        {"content": []},
+    ],
+)
+def test_other_upstream_answers_pass_the_refusal_guard(gateway_client, stack, result):
+    stack["upstream"].call_result = result
+    outcome = gateway_client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, Result) and outcome.result["content"] == result["content"], outcome
+
+
+@live
 def test_a_call_outside_the_scope_is_refused_by_agentgateway(gateway_client, stack):
     assert gateway_client.call("deploy", "deploy_production", ARGS) == Refused("out_of_scope")
     assert stack["upstream"].calls() == []
