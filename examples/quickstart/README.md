@@ -15,7 +15,7 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 | `docket` | 10001 | Signed append-only record sink |
 | `reader` | 10005 | `agent-bailiff docket verify`, read-only, docket reader group |
 | `control` | 10002 | Operator revoke, run on demand |
-| `rule` | 10002 | `rule` profile: revokes a task on an out-of-scope refusal |
+| `rule` | 10002 | `rule` profile: revokes a task on an out-of-scope refusal or a capped refusal budget |
 | `exporter` | 10008 | `trace` profile: verified docket records to OTLP spans |
 | `jaeger` | 10009 | `trace` profile: trace UI on `127.0.0.1:16686` |
 | `agent` | 10006 | Scripted agent on the internal `edge` network only |
@@ -121,7 +121,7 @@ The `revoke` record is the operator's; the agent container mounts neither the co
 
 ## Tracing and the revoke rule
 
-Two optional profiles. `trace` runs Jaeger and `agent-bailiff docket export`; `rule` runs `rule.py`, a rule (not detection) that revokes a task when decide refuses one of its `gitea.contents.read` calls as `out_of_scope`.
+Two optional profiles. `trace` runs Jaeger and `agent-bailiff docket export`; `rule` runs `rule.py`, a rule (not detection) that revokes a task when decide refuses one of its `gitea.contents.read` calls as `out_of_scope` or records `refusals_capped` for it.
 
 ```console
 $ docker compose --profile trace --profile rule up --build --detach --wait
@@ -196,7 +196,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - The rule is not detection. It acts on one signed refusal pattern for one configured tool; misuse that decide allows, or refuses for another reason, does not trigger it. An agent probing the payroll repo with `list_issues` (`gitea.issues.list`) is refused but not revoked.
 - The `bootstrap` container can read the Gitea admin password from the `gitea-admin` volume, to create the agent user and token. The running `custodian` container has the same uid (10003) but does not mount that volume.
 - Evidence is scoped:
-  - Not every refusal is recorded. An `unknown_tool` refusal, a refusal on an unverifiable chain (`chain_invalid`, including a call after a revoke) and any refusal past 16 of the same reason and tool per task per 60 s write no record. The first `out_of_scope` refusal of `gitea.contents.read` in a window is always recorded, so the rule sees it.
+  - Not every refusal is recorded. An `unknown_tool` refusal, a refusal on an unverifiable chain (`chain_invalid`, including a call after a revoke) and any refusal past the 17th for one task in 60 s write no record. The 17th is recorded as `refusals_capped`, and the rule revokes on it as on `out_of_scope`, so padding a task with other refusals does not hide a later probe. Past 4096 refusing tasks in one tenant per 60 s, decide records one `tenant_refusals_capped` marker and the rule takes no action (THREAT_MODEL "Unrecorded refusals").
   - A `release` record means the custodian released the token, not that Gitea applied the call: `released, target outcome unknown`.
   - The docket owner (uid 10001) can truncate the docket. The reader verifies signatures and order of what is there, not that nothing was removed from the end.
 - Limits of this setup:
