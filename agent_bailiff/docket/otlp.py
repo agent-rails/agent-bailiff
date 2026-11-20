@@ -8,6 +8,9 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import requests
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceResponse
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
@@ -16,7 +19,7 @@ from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, Trace
 from opentelemetry.util.types import AttributeValue
 
 from agent_bailiff.docket.follower import DEFAULT_BATCH_SIZE, DEFAULT_POLL_INTERVAL, DEFAULT_STALL_AFTER, DocketFollower
-from agent_bailiff.docket.report import RELEASED
+from agent_bailiff.docket.report import RELEASED, printable
 from agent_bailiff.docket.sink import KidIndex, VerifiedLine
 
 SEMCONV_COMMIT = "622b2b6073b15e5ed886c3c12a65a892b9cd5c70"
@@ -157,6 +160,41 @@ class ExportFailed(Exception):
     pass
 
 
+class SpansRejected(Exception):
+    pass
+
+
+class OtlpHttpExporter(SpanExporter):
+    def __init__(self, endpoint: str, *, timeout: float) -> None:
+        self._rejection: SpansRejected | None = None
+        session = requests.Session()
+        session.hooks["response"].append(self._check_partial_success)
+        self._exporter: SpanExporter = OTLPSpanExporter(endpoint=endpoint, timeout=timeout, session=session)
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self._rejection = None
+        result = self._exporter.export(spans)
+        if self._rejection is not None:
+            raise self._rejection
+        return result
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+    def _check_partial_success(self, response: requests.Response, *args: object, **kwargs: object) -> None:
+        if response.status_code != 200:
+            return
+        reply = ExportTraceServiceResponse()
+        reply.ParseFromString(response.content)
+        rejected = reply.partial_success.rejected_spans
+        message = printable(reply.partial_success.error_message)
+        if rejected:
+            self._rejection = SpansRejected(f"the backend rejected {rejected} of the spans: {message}")
+            raise self._rejection
+        if reply.partial_success.error_message:
+            logger.warning("the backend accepted the batch with a warning: %s", message)
+
+
 class DocketExporter:
     def __init__(
         self,
@@ -199,7 +237,7 @@ class DocketExporter:
     def _ship(self, batch: Sequence[VerifiedLine], stop: threading.Event) -> None:
         spans = [self._span(verified) for verified in batch]
         failures = 0
-        while self._exporter.export(spans) is not SpanExportResult.SUCCESS:
+        while self._export(spans, batch) is not SpanExportResult.SUCCESS:
             failures += 1
             if failures >= self._max_failures or stop.is_set():
                 raise ExportFailed(
@@ -209,6 +247,16 @@ class DocketExporter:
                 )
             logger.warning("export of lines %d-%d failed, attempt %d", batch[0].line, batch[-1].line, failures)
         logger.info("exported lines %d-%d", batch[0].line, batch[-1].line)
+
+    def _export(self, spans: Sequence[ReadableSpan], batch: Sequence[VerifiedLine]) -> SpanExportResult:
+        try:
+            return self._exporter.export(spans)
+        except SpansRejected as exc:
+            raise ExportFailed(
+                f"lines {batch[0].line}-{batch[-1].line}: {exc}; a partial rejection is not retried; "
+                f"the checkpoint stays at line {batch[0].line - 1}; find the rejected record with --batch-size 1 "
+                "and pass its line to --skip-line"
+            ) from None
 
     def _span(self, verified: VerifiedLine) -> ReadableSpan:
         if self._skip_line is None:
