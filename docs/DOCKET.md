@@ -63,18 +63,21 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 ### Delivery and checkpoint
 
 - At least once. After each batch the backend accepts, the exporter writes the checkpoint (mode 0600, written to a temporary file, fsynced, renamed, directory fsynced). A crash between acceptance and the checkpoint write sends that batch again on restart. Backends that do not deduplicate by span id may keep both copies.
-- The checkpoint holds the byte offset and count of exported records, each writer's head, the docket's device and inode, the hash of its first record and the hash and offset of the last exported one. On start the exporter refuses a docket that is another file, shorter than the offset, or whose first or last exported record differs, then verifies forward from the saved heads.
+- The checkpoint holds the byte offset and count of exported records, each writer's head, the docket's device and inode, the hash of its first record and the hash and offset of the last exported one. On start the exporter refuses a docket that is another file, shorter than the offset, or whose first or last exported record differs, then verifies forward from the saved heads. It does not read the exported records between the first and last again, so a change to them by the sink uid or root is not detected on resume; `docket verify` checks every record. While following, it refuses a docket path that now names another file.
+- One exporter per checkpoint: it holds an exclusive `flock` on `<checkpoint>.lock` while it runs, and a second exporter exits 1.
 - Each pass reads only up to the size the docket had at its start. Reading stops while a batch is exported, so a slow backend slows the exporter and nothing is dropped.
 - A failed batch is sent again. The SDK retries transient errors (429, 502, 503, 504 and connection errors) with backoff within `--timeout`; after `--max-failures` failed attempts of one batch the command exits 1 and the checkpoint stays at the last exported record.
-- SIGTERM lets the batch in flight finish and write its checkpoint, then exits 0.
+- SIGTERM lets the batch in flight finish and write its checkpoint, then exits 0. If that batch fails, it is not sent again: the command exits 1 and the checkpoint stays at the last exported record.
 - An incomplete last line is left for the next pass. If it stays for 30s the exporter logs a warning naming the line after the last exported record; see Torn tail repair.
 - A line the sink wrote but could not fsync was refused to its writer but is still in the file; if it verifies, the exporter sends it.
 
 ### Resume runbook
 
 - Exit 1 after failed exports: check the backend is reachable at `--otlp`, then start the exporter again. It resumes after the last exported record.
-- Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. For `torn_tail` follow Torn tail repair; anything else is a docket integrity incident, not an exporter fault.
-- Exit 1 with "not the file the checkpoint was written for", "shorter than the exported offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
+- An incomplete last line is not an error: `--once` exports the records before it and exits 0, and following waits and warns. If the warning keeps repeating, follow Torn tail repair, then run a `--once` export again.
+- Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. This is a docket integrity incident, not an exporter fault.
+- Exit 1 with "not the file the checkpoint was written for", "replaced while exporting", "shorter than the exported offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
+- Exit 1 with "held by another exporter": another exporter uses this checkpoint. Stop one; two exporters on one checkpoint would send every record twice.
 - Exit 1 on the checkpoint itself (mode, owner, fields): the checkpoint is 0600, owned by the exporter uid and version 1. Do not edit it; move it aside to export from the start.
 
 ## Writer-side rollback detection
