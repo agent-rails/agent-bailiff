@@ -44,6 +44,7 @@ VOLUMES = {
     "agent-public": "/var/lib/bailiff/agent-public",
     "tasks": "/var/lib/bailiff/tasks",
 }
+PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
     "issuer-data",
     "decide-data",
@@ -194,12 +195,24 @@ def free_port():
 
 
 class Stack:
-    def __init__(self, project):
+    def __init__(self, project, profiles=()):
         self.project = project
-        self.env = {**os.environ, "COMPOSE_PROJECT_NAME": project, "GITEA_MCP_PORT": str(free_port())}
+        self.profiles = tuple(profiles)
+        self.jaeger_port = free_port()
+        self.env = {
+            **os.environ,
+            "COMPOSE_PROJECT_NAME": project,
+            "GITEA_MCP_PORT": str(free_port()),
+            "JAEGER_PORT": str(self.jaeger_port),
+        }
+        self.volumes = {
+            **VOLUMES,
+            **{name: path for p in self.profiles for name, path in PROFILE_VOLUMES.get(p, {}).items()},
+        }
 
     def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS, stdin=None, expect=0):
-        command = ["docker", "compose", "--file", str(COMPOSE_FILE), *arguments]
+        selected = [arg for profile in self.profiles for arg in ("--profile", profile)]
+        command = ["docker", "compose", "--file", str(COMPOSE_FILE), *selected, *arguments]
         result = subprocess.run(
             command, env=self.env, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
         )
@@ -210,7 +223,7 @@ class Stack:
         return self.compose("ps", "--all", "--quiet", service).strip()
 
     def probe(self, script, user="0:0", arguments=()):
-        mounts = [arg for name in VOLUMES for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
+        mounts = [arg for name in self.volumes for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
         capabilities = ["--cap-add", "DAC_READ_SEARCH"] if user == "0:0" else []
         command = [
             "docker", "run", "--rm", "--network", "none", "--user", user, "--read-only",
@@ -222,14 +235,24 @@ class Stack:
 
 
 @pytest.fixture(scope="module")
-def stack():
-    stack = Stack(f"bailiff-qs-{uuid.uuid4().hex[:8]}")
+def stack(request):
+    stack = Stack(f"bailiff-qs-{uuid.uuid4().hex[:8]}", getattr(request.module, "PROFILES", ()))
     try:
         stack.compose("up", "--build", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
         yield stack
     finally:
         subprocess.run(
-            ["docker", "compose", "--file", str(COMPOSE_FILE), "down", "--volumes", "--remove-orphans"],
+            [
+                "docker",
+                "compose",
+                "--file",
+                str(COMPOSE_FILE),
+                "--profile",
+                "*",
+                "down",
+                "--volumes",
+                "--remove-orphans",
+            ],
             env=stack.env,
             capture_output=True,
             timeout=RUN_TIMEOUT_SECONDS,

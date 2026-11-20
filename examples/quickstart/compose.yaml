@@ -5,10 +5,19 @@ x-bailiff: &bailiff
   build:
     context: ../..
     dockerfile: examples/quickstart/Dockerfile
+    target: quickstart
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   tmpfs: [/tmp]
+
+x-trace: &trace
+  <<: *bailiff
+  image: agent-bailiff-quickstart-trace:dev
+  build:
+    context: ../..
+    dockerfile: examples/quickstart/Dockerfile
+    target: trace
 
 x-once: &once
   restart: "no"
@@ -315,6 +324,38 @@ services:
       - ledger:/var/lib/bailiff/ledger
       - docket-run:/run/bailiff/docket
 
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0@sha256:836b967b5abcf1f7758066aa6b348619267a2f1459f72d472840570f9bd88a17
+    profiles: [trace]
+    user: "10009:10009"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    ports:
+      - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
+    networks: [trace, trace-ui]
+
+  exporter:
+    <<: *trace
+    profiles: [trace]
+    user: "10008:10008"
+    group_add: ["20003"]
+    command: ["-m", "agent_bailiff.cli", "docket", "export", "--docket", "/var/lib/bailiff/docket/docket.log",
+              "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
+              "--pin", "/pins/control/control.json", "--checkpoint", "/var/lib/bailiff/exporter/checkpoint.json",
+              "--otlp", "http://jaeger:4318/v1/traces", "--timeout", "30"]
+    networks: [trace]
+    volumes:
+      - docket-data:/var/lib/bailiff/docket:ro
+      - pins:/pins:ro
+      - exporter-data:/var/lib/bailiff/exporter
+    depends_on:
+      docket:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+
 configs:
   gateway:
     file: ./gateway.json
@@ -323,6 +364,9 @@ networks:
   edge:
     internal: true
   upstream: {}
+  trace:
+    internal: true
+  trace-ui: {}
 
 volumes:
   gitea-data: {}
@@ -341,3 +385,4 @@ volumes:
   agent-data: {}
   agent-public: {}
   tasks: {}
+  exporter-data: {}

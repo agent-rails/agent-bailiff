@@ -1,10 +1,16 @@
 import base64
 import json
+import time
+from datetime import UTC, datetime, timedelta
 
 import test_quickstart_stack
+from test_quickstart import verified_rows
+from test_quickstart_trace import jaeger, spans_in, wait_for_export
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
+PROFILES = ("trace",)
+JAEGER_TIMEOUT_SECONDS = 60
 
 ALLOWED_LOG_SERVICES = {"gitea"}
 CONTROL = 3
@@ -78,6 +84,34 @@ def log_hits(stack, patterns):
     return hits
 
 
+def jaeger_spans(stack):
+    exported = wait_for_export(stack)["exported"]
+    deadline = time.monotonic() + JAEGER_TIMEOUT_SECONDS
+    while True:
+        now = datetime.now(UTC)
+        window = {
+            "query.start_time_min": (now - timedelta(hours=1)).isoformat(),
+            "query.start_time_max": now.isoformat(),
+        }
+        services = [
+            name for name in jaeger(stack, "/services").get("services", []) if name.startswith("agent-bailiff-")
+        ]
+        spans = {
+            span["spanId"]: span
+            for service in services
+            for span in spans_in(jaeger(stack, "/traces", **{"query.service_name": service, **window}))
+        }
+        if len(spans) >= exported:
+            return list(spans.values())
+        assert time.monotonic() < deadline, f"jaeger holds {len(spans)} of {exported} exported spans"
+        time.sleep(1)
+
+
+def jaeger_hits(stack, patterns):
+    traces = json.dumps(jaeger_spans(stack))
+    return [index for index, needle in enumerate(patterns) if needle in traces]
+
+
 def only_control(hits):
     return {index for _, index in hits} == {CONTROL}
 
@@ -93,3 +127,5 @@ def test_no_surface_holds_the_credential(stack):
     logs = log_hits(stack, [*patterns[:CONTROL], "credential: "])
     assert {service for service, found in logs.items() if found != [CONTROL]} <= ALLOWED_LOG_SERVICES, logs
     assert logs["bootstrap"] == [CONTROL]
+    entry_id = verified_rows(stack, report["task_id"])[0]["entry"]["entry_id"]
+    assert jaeger_hits(stack, [*patterns[:CONTROL], entry_id]) == [CONTROL]
