@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
+from agent_bailiff.adapters.agentgateway.config_check import (
+    REFUSAL_GUARD,
+    GatewayExpectations,
+    validate_gateway_config,
+)
 
 DECIDE_SOCKET = Path("/run/bailiff-decide/decide.sock")
 CUSTODIAN_SOCKET = Path("/run/bailiff-custodian/custodian.sock")
@@ -43,12 +47,7 @@ def gateway_config(
                 "requestHeaderModifier": {"remove": [*AGENT_CREDENTIALS, *credential_headers]},
                 "mcpGuardrails": {
                     "processors": [
-                        {
-                            "kind": "expression",
-                            "methods": {"tools/call": "response"},
-                            "condition": "true",
-                            "transform": "mcp.result",
-                        },
+                        dict(REFUSAL_GUARD),
                         {
                             "kind": "remote",
                             "host": f"unix:{decide_socket}",
@@ -132,6 +131,30 @@ def test_an_allowlist_beyond_the_chain_headers_is_refused(extra):
 def test_an_allowlist_without_a_required_chain_header_is_refused(missing):
     problems = problems_after(lambda config: processors(config)[1]["requestHeaders"]["allowed"].remove(missing))
     assert any(missing in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda processors: processors.pop(0),
+        lambda processors: processors[0].update(condition="false"),
+        lambda processors: processors[0].update(methods={"*": "response"}),
+        lambda processors: processors[0].pop("reject"),
+        lambda processors: processors.insert(
+            1,
+            {
+                "kind": "expression",
+                "methods": {"tools/call": "response"},
+                "condition": "true",
+                "transform": "mcp.result",
+            },
+        ),
+        lambda processors: processors[1].update(methods={"*": "request", "tools/call": "response"}),
+    ],
+)
+def test_a_missing_or_weakened_refusal_guard_is_refused(change):
+    problems = problems_after(lambda config: change(processors(config)))
+    assert any("refusal guard" in problem for problem in problems)
 
 
 def test_custodian_before_decide_is_refused():

@@ -24,6 +24,7 @@ from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
+from agent_bailiff.adapters.agentgateway.config_check import REFUSAL_GUARD
 from agent_bailiff.docket.entry import decode_record
 from agent_bailiff.docket.sink import build_kid_index, verify_docket
 from agent_bailiff.service.settings import load_docket
@@ -263,12 +264,7 @@ class Deployment:
                     },
                     "mcpGuardrails": {
                         "processors": [
-                            {
-                                "kind": "expression",
-                                "methods": {"tools/call": "response"},
-                                "condition": "true",
-                                "transform": "mcp.result",
-                            },
+                            dict(REFUSAL_GUARD),
                             {
                                 "kind": "remote",
                                 "host": f"unix:{self.sockets['decide']}",

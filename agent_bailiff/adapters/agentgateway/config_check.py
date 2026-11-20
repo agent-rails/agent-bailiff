@@ -9,6 +9,7 @@ from typing import Any
 
 from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
 from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
+from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.release import RELEASE_HEADER
 
@@ -33,6 +34,19 @@ AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "c
 CHAIN_HEADER_PREFIX = "x-bailiff-"
 REMOVE_PATH = "$.mcp.policies.requestHeaderModifier.remove"
 CLEARANCE_EXPRESSION = f"mcpGuardrails.{CLEARANCE_KEY}"
+
+REFUSAL_SHAPE = (
+    "has(mcp.result.isError) && mcp.result.isError == true"
+    " && has(mcp.result.content) && size(mcp.result.content) == 1"
+    " && has(mcp.result.content[0].text) && mcp.result.content[0].text in "
+    + "[" + ", ".join(f"'{reason}'" for reason in sorted(REFUSAL_REASONS)) + "]"
+)
+REFUSAL_GUARD = {
+    "kind": "expression",
+    "methods": {"tools/call": "response"},
+    "condition": REFUSAL_SHAPE,
+    "reject": "the upstream answer has the shape of a bailiff refusal",
+}
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -152,6 +166,7 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
         problems.append("mcp.policies.mcpGuardrails must be an object with only a processors list")
         return
     processors = guardrails["processors"]
+    _check_refusal_guard(problems, processors)
     decide = _bailiff_processors(processors, expected.decide_socket)
     custodian = _bailiff_processors(processors, expected.custodian_socket)
     for label, found in (("decide", decide), ("custodian", custodian)):
@@ -168,6 +183,21 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
         problems.append(
             "the custodian processor must not filter requestHeaders; "
             "it removes every header outside the upstream allowlist, so it must see them all"
+        )
+
+
+def _check_refusal_guard(problems: list[str], processors: list[Any]) -> None:
+    responding = [
+        processor
+        for processor in processors
+        if not isinstance(processor, dict)
+        or not isinstance(processor.get("methods"), dict)
+        or "response" in processor["methods"].values()
+    ]
+    if responding != [REFUSAL_GUARD]:
+        problems.append(
+            "the only response-phase processor must be the refusal guard (config_check.REFUSAL_GUARD); "
+            "without it an upstream can answer with a bailiff refusal after acting"
         )
 
 

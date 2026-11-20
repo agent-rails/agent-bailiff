@@ -96,6 +96,7 @@ class Upstream(ThreadingHTTPServer):
     def __init__(self):
         super().__init__(("127.0.0.1", 0), UpstreamHandler)
         self.requests = []
+        self.call_result = {"content": [{"type": "text", "text": "deployed"}]}
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -136,7 +137,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
                 "serverInfo": {"name": "fake-deploy", "version": "1"},
             },
             "tools/list": {"tools": [{"name": "deploy_service", "inputSchema": {"type": "object"}}]},
-            "tools/call": {"content": [{"type": "text", "text": "deployed"}]},
+            "tools/call": self.server.call_result,
         }
         data = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": results.get(body["method"], {})}).encode()
         self.send_response(200)
