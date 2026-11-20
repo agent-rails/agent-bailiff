@@ -1,6 +1,6 @@
 # Governed tool access quickstart
 
-A Docker Compose stack in which a scripted agent calls Gitea through agentgateway and gitea-mcp. The agent holds a task chain and its own signing key, never the Gitea token. Decide checks each `tools/call` against the task's scope, budget and replay ledger; the custodian injects the Gitea token only for an allowed call; every allow, release, refuse and revoke goes to a signed docket that an operator verifies.
+A Docker Compose stack in which a scripted agent calls Gitea through agentgateway and gitea-mcp. The agent holds a task chain and its own signing key, never the Gitea token. Decide checks each `tools/call` against the task's scope, budget and replay ledger; the custodian injects the Gitea token only for an allowed call; allows, releases, revokes and most refusals go to a signed docket that an operator verifies.
 
 Requirements: Docker with Compose v2 and `jq`. Run every command from this directory.
 
@@ -129,7 +129,7 @@ $ docker compose down --volumes --remove-orphans
 ## What this shows
 
 - Scoped claims: decide allows a call only when the tool and resource are in the task scope, the budget has room and the call was not seen before. The scope names a tool and a fixed resource; it does not read tool arguments.
-- The agent never holds the Gitea token. The canary test reads the stored token and scans for it, its base64 form and the base64 of `token <value>` across every named volume, the agent container's whole filesystem and environment, and the logs of every service. The only place the test permits a hit is Gitea's own logs. It passed on agent-warrant 0.3.0.
+- The agent never holds the Gitea token. The canary test reads the stored token and scans for it, its base64 form and the base64 of `token <value>` across every bailiff named volume (not Gitea's own `gitea-data` and `gitea-config`), the agent container's whole filesystem and environment, and the logs of every service. The only place the test permits a hit is Gitea's own logs. It passed on agent-warrant 0.3.0.
 - Each release is bound to one decide allow, and the custodian limits releases to 60 per task per 60 seconds (`rate_limit`, `rate_window`).
 - An operator revoke stops later calls on the task.
 - Load baseline (`benchmarks/quickstart-2026-11-19.json`, one Apple-silicon Docker Desktop host, `list_issues`, 20 calls per client): every call returned a result and none was refused with `docket_unavailable`.
@@ -159,7 +159,7 @@ $ docker compose down --volumes --remove-orphans
   - A `release` record means the custodian released the token, not that Gitea applied the call: `released, target outcome unknown`.
   - The docket owner (uid 10001) can truncate the docket. The reader verifies signatures and order of what is there, not that nothing was removed from the end.
 - Limits of this setup:
-  - H1: each service runs as its own uid. The isolation rests on uids and socket peer checks, not on separate hosts.
+  - H1: each service runs as its own uid, except `control`, which runs as decide's uid (10002) because it writes the decide-owned ledger. It mounts `decide-data` read-only for decide's config, so it can also read decide's signing key; anyone who can run `control` can sign as decide. The isolation rests on uids and socket peer checks, not on separate hosts.
   - H2: state lives in named volumes only; a bind mount on macOS breaks socket ownership.
   - H3: containers share the host kernel. Isolation is as strong as separate host users, no stronger.
   - H5: the agent is a script. This shows what the gateway enforces, not how a model behaves under injection.
