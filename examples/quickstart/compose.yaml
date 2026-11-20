@@ -136,7 +136,7 @@ services:
     command: ["/app/quickstart/bootstrap.py", "rule"]
     volumes:
       - rule-data:/var/lib/bailiff/rule
-      - decide-data:/var/lib/bailiff/decide
+      - decide-data:/var/lib/bailiff/decide:ro
       - pins:/pins
     depends_on:
       control-init:
@@ -371,6 +371,7 @@ services:
   rule:
     <<: [*bailiff, *offline]
     profiles: [rule]
+    restart: on-failure
     user: "10002:20001"
     group_add: ["20000", "20003"]
     command: ["/app/quickstart/rule.py"]
