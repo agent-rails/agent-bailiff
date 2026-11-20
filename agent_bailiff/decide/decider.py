@@ -23,8 +23,9 @@ from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.config import DeciderConfig, PolicyRef
 from agent_bailiff.decide.costs import CostError, CostTable
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
-from agent_bailiff.decide.refusals import CAPPED_REASON, TENANT_CAPPED_REASON, RefusalBudget
+from agent_bailiff.decide.refusals import RefusalBudget, capped_reason
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.docket.client import UNACKNOWLEDGED, DocketError
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.signing import token_hash
 
@@ -379,7 +380,8 @@ class Decider:
         if tenant is None or task is None:
             logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
-        admission = self._refusal_budget.admit(tenant, task)
+        root = entry.handles.get("root", "")
+        admission = self._refusal_budget.admit(tenant, task, root, reason)
         if admission.verdict == "drop":
             logger.info(
                 "refusal %s of %s for tenant %s task %s agent %s over the record budget, not docketed (trace %s)",
@@ -393,7 +395,7 @@ class Decider:
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
         recorded = reason
         if admission.verdict == "capped":
-            recorded = TENANT_CAPPED_REASON if admission.tenant_overflow else CAPPED_REASON
+            recorded = capped_reason(reason, admission)
             logger.warning(
                 "tenant %s task %s passed the refusal record budget; recording %s for refusal %s (trace %s)",
                 tenant,
@@ -405,9 +407,10 @@ class Decider:
         entry_id: str | None
         try:
             entry_id = self._append(replace(entry, decision="refuse", reason=recorded))
-        except Exception:
-            logger.warning("docket entry for a refusal was not written", exc_info=True)
-            self._refusal_budget.refund(tenant, task, admission)
+        except Exception as error:
+            logger.warning("docket entry for a refusal may not have been written", exc_info=True)
+            if isinstance(error, DocketError) and error.reason not in UNACKNOWLEDGED:
+                self._refusal_budget.refund(tenant, task, root, reason, admission)
             entry_id = None
         return Decision(allowed=False, reason=reason, entry_id=entry_id, op_id=entry.op_id)
 

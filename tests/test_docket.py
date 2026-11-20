@@ -672,7 +672,7 @@ def test_stalled_frame_is_dropped_at_the_deadline(paths, start_sink):
 def test_client_raises_when_the_sink_is_down(paths):
     with pytest.raises(DocketError) as error:
         decide_client(paths, timeout=0.5).append(make_entry(1))
-    assert error.value.reason == "no_ack"
+    assert error.value.reason == "sink_unreachable"
 
 
 def test_kid_pinned_for_two_writers_is_a_configuration_error():

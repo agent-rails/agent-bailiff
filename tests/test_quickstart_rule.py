@@ -149,8 +149,20 @@ def test_padding_past_the_record_budget_revokes_the_task(make_decider, workdir, 
     assert decider.check(make_request(root, nonce="after"), NOW + 1).reason == "chain_invalid"
 
 
+def test_replays_of_an_allowed_call_past_the_record_budget_do_not_revoke(make_decider, workdir, checkpoint):
+    request = make_request(make_root(), nonce="victim")
+    decider = make_decider(refusal_budget=RefusalBudget(limit=2, clock=FakeClock()))
+    assert decider.check(request, NOW).allowed
+    replays = {decider.check(request, NOW).reason for _ in range(4)}
+    assert replays == {"already_issued"}
+    recording = RecordingControl()
+    rule, _ = make_rule(recording)
+    assert follow(workdir, checkpoint, rule) == 4
+    assert recording.calls == []
+
+
 def test_a_tenant_capped_marker_does_not_revoke(make_decider, workdir, checkpoint):
-    decider = make_decider(refusal_budget=RefusalBudget(max_tasks_per_tenant=1, clock=FakeClock()))
+    decider = make_decider(refusal_budget=RefusalBudget(max_windows_per_tenant=1, clock=FakeClock()))
     for n in range(2):
         decider.check(make_request(make_root(task_id=f"task-{n}"), tool="deploy.delete", nonce=f"n-{n}"), NOW)
     recording = RecordingControl()
