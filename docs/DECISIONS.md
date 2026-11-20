@@ -117,10 +117,15 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** admission can verify signatures and the exact object change without requiring API-server flags or a state store in the write path. The remaining replay and suspension window is explicitly accepted to keep admission stateless; it lasts no longer than the release lifetime plus the configured skew bound.
 
+## D18. Traces from the verified docket, off the call path
+
+**Decision:** spans are built by a separate exporter that follows the docket, verifies each record against pinned writer keys and sends it over OTLP/HTTP. Decide, the custodian and the gateway emit no spans. Automated responses, such as a revoke rule, follow the same verified docket with their own checkpoint and act through `Control` as their own docket writer.
+
+**Why:** emitting spans on the call path would add a dependency that can slow or fail calls, and would produce a second, unsigned record that could disagree with the docket. Building spans from verified records keeps one source of truth, and a stopped exporter changes no decision. A separate writer for automation avoids two processes sharing one writer sequence, which the docket client does not lock across processes.
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
 - Effector targets other than Kubernetes, and more than one effector instance.
-- OpenTelemetry export of docket entries.
 - A `CheckResponse` hook for outcomes (reconciliation covers them).
 - A standards check of the chain format against RFC 8693 and the OAuth Transaction Tokens draft before 1.0.

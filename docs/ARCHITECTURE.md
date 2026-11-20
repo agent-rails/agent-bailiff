@@ -10,6 +10,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 | custodian | its own uid; in the ledger group | its signing key, key encryption key, credential store, binding table, claims database, routes; the ledger and suspension state read-only | Unix socket for the gateway (ExtMcp) |
 | docket | its own uid | the docket file, pinned writer keys | Unix socket for decide, custodian and control |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
+| docket export (optional) | its own uid; in the docket reader group | its checkpoint, pinned writer keys | none; sends OTLP/HTTP to a collector |
 | agentgateway | its own uid | gateway config | the agent's MCP connection |
 | effector | its own uid | its signing key, the operation catalog, the cluster token and audit token, pinned custodian and decide keys | 127.0.0.1 HTTP, the gateway's MCP upstream for catalog tools |
 
@@ -83,6 +84,8 @@ All records are Ed25519 signatures over agent-warrant's canonical JSON, encoded 
 - `suspend` and `resume` set or clear the suspension switch.
 
 Each action is applied first and then recorded as a control entry in the source record's trace. An unacknowledged entry is reported as unrecorded.
+
+Automation that revokes from docket records, such as the quickstart's `rule.py`, uses the same `Control` API with its own control key, so it signs as a separate docket writer and never shares a sequence with the operator CLI. It has control's authority.
 
 ## Failure behaviour
 

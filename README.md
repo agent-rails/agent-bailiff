@@ -91,6 +91,7 @@ Each component has its own commands, run as that component's uid:
 - `agent-bailiff init {decide,custodian,control,docket}` creates the component's config; for decide, custodian and control it also creates the signing key. Decide starts with a deny-all policy and the custodian with no credential bindings.
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
 - `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
+- `agent-bailiff docket verify` checks every record against pinned writer keys; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
 
 ## Documentation
 
@@ -101,6 +102,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 - [docs/EFFECTOR.md](docs/EFFECTOR.md): the Kubernetes effector, its catalog, generated RBAC and admission, drift check and limits
 - [docs/RELEASE_WEBHOOK.md](docs/RELEASE_WEBHOOK.md): release admission, operator signals, response steps and rollout gates
+- [examples/quickstart](examples/quickstart/README.md): local Docker Compose stack with Gitea, a scripted agent, optional tracing and a revoke rule
 - [examples/live-run](examples/live-run/README.md): end-to-end run with Claude as the agent, and its results
 
 ## Development
