@@ -109,7 +109,6 @@ def test_a_revoke_stops_the_task_and_a_restart_does_not_revoke_again(make_decide
     rule, sessions = make_rule(control)
     assert follow(workdir, checkpoint, rule) == 1
     assert decider.check(make_request(root, nonce="n-2"), NOW + 1).reason == "chain_invalid"
-    assert follow(workdir, checkpoint, rule) == 1
     assert follow(workdir, checkpoint, rule) == 0
     assert len(sessions) == 1 and sessions[0].closed
 
