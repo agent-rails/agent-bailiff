@@ -149,7 +149,7 @@ $ docker compose run --rm -T agent after-revoke
 `inject` stops after the refused call, so no later scenario races the revoke. Jaeger is at <http://127.0.0.1:16686> (`JAEGER_PORT`). Each docket writer is one service, for example `agent-bailiff-rule.quickstart`. The revoke span is a child of the `decide refuse` span in the same trace.
 
 - The rule matches signed fields only: writer `decide.quickstart`, decision `refuse`, reason `out_of_scope`, and a configured tool. It sees only what decide recorded, and it decides nothing about intent.
-- It follows the verified docket with its own checkpoint (`rule-data`), saved after each batch it handled. A restart does not revoke again. A crash between the revoke and the checkpoint revokes again on restart: one extra `revoke` record, no second effect, because the ledger revoke is idempotent.
+- It follows the verified docket with its own checkpoint (`rule-data`), saved after each batch it handled. A restart does not revoke again. A crash before the checkpoint is saved repeats every revoke in that batch on restart: one extra `revoke` record per task, no second effect, because the ledger revoke is idempotent.
 - It signs as its own docket writer, `rule.quickstart`, so it never shares a sequence with the operator `control` command. It runs as decide's uid, like `control`; see H1.
 - Spans come from verified docket records, never from the call path. The exporter reads the docket read-only, as uid 10008 in the docket reader group, on an internal network that reaches only Jaeger. A slow or stopped exporter delays spans; it never delays or refuses a call. The gateway itself is not traced.
 - Export is not evidence. Jaeger is a view; the signed docket is the record, and `docket verify` checks it.
