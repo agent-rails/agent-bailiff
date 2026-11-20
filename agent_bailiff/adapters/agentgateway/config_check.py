@@ -39,7 +39,9 @@ REFUSAL_SHAPE = (
     "has(mcp.result.isError) && mcp.result.isError == true"
     " && has(mcp.result.content) && size(mcp.result.content) == 1"
     " && has(mcp.result.content[0].text) && mcp.result.content[0].text in "
-    + "[" + ", ".join(f"'{reason}'" for reason in sorted(REFUSAL_REASONS)) + "]"
+    + "["
+    + ", ".join(f"'{reason}'" for reason in sorted(REFUSAL_REASONS))
+    + "]"
 )
 REQUEST_ONLY_PHASES = frozenset({"request", "off"})
 REFUSAL_GUARD = {
