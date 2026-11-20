@@ -37,6 +37,7 @@ class Collector:
     def __init__(self) -> None:
         self.requests: list[ExportTraceServiceRequest] = []
         self.reply = b""
+        self.status = 200
         collector = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -45,7 +46,9 @@ class Collector:
                 request = ExportTraceServiceRequest()
                 request.ParseFromString(body)
                 collector.requests.append(request)
-                self.send_response(200)
+                self.send_response(collector.status)
+                if collector.status in (301, 302, 307, 308):
+                    self.send_header("Location", "https://elsewhere.invalid/v1/traces")
                 self.send_header("Content-Type", "application/x-protobuf")
                 self.send_header("Content-Length", str(len(collector.reply)))
                 self.end_headers()
@@ -539,6 +542,32 @@ def test_a_reply_that_is_not_an_otlp_response_fails_the_export(docket, checkpoin
         export(docket, checkpoint, exporter, max_failures=2)
 
     assert not checkpoint.exists()
+
+
+@pytest.mark.parametrize("status", [201, 202, 204, 302, 307])
+def test_a_success_status_other_than_200_fails_without_retry(docket, checkpoint, collector, status):
+    fill(docket, 2)
+    collector.status = status
+    collector.reply = b"" if status == 204 else partial_success(1)
+    exporter = OtlpHttpExporter(collector.endpoint, timeout=5)
+
+    with pytest.raises(ExportFailed, match=f"lines 1-2: the backend answered HTTP {status} instead of 200"):
+        export(docket, checkpoint, exporter, max_failures=5)
+
+    assert len(collector.requests) == 1
+    assert not checkpoint.exists()
+
+
+def test_a_long_backend_message_is_cut_before_it_is_escaped(docket, checkpoint, collector):
+    fill(docket, 1)
+    collector.reply = partial_success(1, "\x1b" * 1_000_000)
+    exporter = OtlpHttpExporter(collector.endpoint, timeout=5)
+
+    with pytest.raises(ExportFailed) as failure:
+        export(docket, checkpoint, exporter)
+
+    assert "\\x1b" * 200 + "... (1000000 characters)" in str(failure.value)
+    assert len(str(failure.value)) < 2000
 
 
 def test_cli_fails_a_partially_rejected_export(docket, checkpoint, workdir, collector, capsys):
