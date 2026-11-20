@@ -45,7 +45,10 @@ GITEA_ADMIN_GID = 20004
 STATE = Path("/var/lib/bailiff")
 RUN = Path("/run/bailiff")
 PINS = Path("/pins")
-DIRS = {name: STATE / name for name in ("docket", "decide", "custodian", "control", "issuer", "ledger", "gitea-admin")}
+DIRS = {
+    name: STATE / name
+    for name in ("docket", "decide", "custodian", "control", "rule", "issuer", "ledger", "gitea-admin")
+}
 SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "custodian")}
 LEDGER = DIRS["ledger"] / "ledger.db"
 ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
@@ -60,8 +63,10 @@ NAMES = {
     "decide": "decide.quickstart",
     "custodian": "custodian.quickstart",
     "control": "control.quickstart",
+    "rule": "rule.quickstart",
     "issuer": "issuer.quickstart",
 }
+WRITERS = ("decide", "custodian", "control", "rule")
 CREDENTIAL_ID = "gitea-token"
 TARGET = "gitea"
 CREDENTIAL_HEADER = "Authorization"
@@ -143,7 +148,9 @@ def replace_owned(path: Path, document: Any) -> bool:
     return True
 
 
-def ensure_component(component: str, loader: Callable[[Path], Any], arguments: Sequence[object]) -> str:
+def ensure_component(
+    component: str, loader: Callable[[Path], Any], arguments: Sequence[object], kind: str | None = None
+) -> str:
     config = DIRS[component] / "config.json"
     pin = pin_path(component)
     if config.exists():
@@ -151,7 +158,7 @@ def ensure_component(component: str, loader: Callable[[Path], Any], arguments: S
         return "kept"
     if pin.exists():
         raise BootstrapError(f"{pin} exists without {config}; run docker compose down --volumes and start again")
-    write_pin(pin, cli("init", component, "--dir", DIRS[component], "--name", NAMES[component], *arguments))
+    write_pin(pin, cli("init", kind or component, "--dir", DIRS[component], "--name", NAMES[component], *arguments))
     return "created"
 
 
@@ -231,17 +238,24 @@ def init_custodian() -> str:
     return "updated" if changed and outcome == "kept" else outcome
 
 
-def init_control() -> str:
-    arguments = [
+def control_arguments() -> list[object]:
+    return [
         "--decide-config", DIRS["decide"] / "config.json", "--pin", pin_path("decide"),
         "--pin", pin_path("custodian"), *docket_client(),
     ]  # fmt: skip
-    return ensure_component("control", load_control, arguments)
+
+
+def init_control() -> str:
+    return ensure_component("control", load_control, control_arguments())
+
+
+def init_rule() -> str:
+    return ensure_component("rule", load_control, control_arguments(), kind="control")
 
 
 def init_docket() -> str:
     config = DIRS["docket"] / "config.json"
-    pins = [read_pin(pin_path(component)) for component in ("decide", "custodian", "control")]
+    pins = [read_pin(pin_path(component)) for component in WRITERS]
     expected = {pin.component: {pin.kid} for pin in pins}
     if config.exists():
         writers = {component: set(keys) for component, keys in load_docket(config).writers.items()}
@@ -253,7 +267,7 @@ def init_docket() -> str:
         "--socket-group", DOCKET_WRITERS_GID, "--reader-group", DOCKET_READERS_GID,
         "--allowed-uid", DECIDE_UID, "--allowed-uid", CUSTODIAN_UID,
     ]  # fmt: skip
-    for component in ("decide", "custodian", "control"):
+    for component in WRITERS:
         arguments += ["--pin", pin_path(component)]
     cli(*arguments)
     return "created"
@@ -505,6 +519,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "decide": init_decide,
     "custodian": init_custodian,
     "control": init_control,
+    "rule": init_rule,
     "docket": init_docket,
     "admin-secret": admin_secret,
     "gitea": bootstrap_gitea,

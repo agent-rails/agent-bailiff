@@ -121,7 +121,7 @@ def is_result(outcome: Outcome) -> bool:
     return isinstance(outcome, Result) and not outcome.is_error
 
 
-def run_scenarios(client: BailiffClient) -> list[Check]:
+def run_injection(client: BailiffClient) -> tuple[list[Check], PreparedCall]:
     allowed = client.prepare(SERVICE, "list_issues", {"owner": ORG, "repo": "demo"})
     retained = copy_call(allowed)
     first = client.send(allowed)
@@ -134,6 +134,15 @@ def run_scenarios(client: BailiffClient) -> list[Check]:
     checks.append(
         expect("injected out-of-scope call refused", "refused: out_of_scope", injected, refused_with("out_of_scope"))
     )
+    return checks, retained
+
+
+def run_inject(client: BailiffClient) -> list[Check]:
+    return run_injection(client)[0]
+
+
+def run_scenarios(client: BailiffClient) -> list[Check]:
+    checks, retained = run_injection(client)
     replayed = client.send(retained)
     checks.append(expect("replayed call refused", "refused: already_*", replayed, refused_already))
     payroll = client.call(SERVICE, "list_issues", {"owner": ORG, "repo": "payroll"})
@@ -147,9 +156,7 @@ def run_scenarios(client: BailiffClient) -> list[Check]:
 
 def run_after_revoke(client: BailiffClient) -> list[Check]:
     outcome = client.call(SERVICE, "list_issues", {"owner": ORG, "repo": "demo"})
-    return [
-        expect("call after operator revoke refused", "refused: chain_invalid", outcome, refused_with("chain_invalid"))
-    ]
+    return [expect("call after revoke refused", "refused: chain_invalid", outcome, refused_with("chain_invalid"))]
 
 
 def percentile(latencies: list[float], fraction: float) -> float:
@@ -216,9 +223,16 @@ def run(scenarios: Callable[[BailiffClient], list[Check]]) -> int:
         client.close()
 
 
+SCENARIO_STEPS: dict[str, Callable[[BailiffClient], list[Check]]] = {
+    "run": run_scenarios,
+    "inject": run_inject,
+    "after-revoke": run_after_revoke,
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=["key", "run", "after-revoke", "load"])
+    parser.add_argument("step", choices=["key", *SCENARIO_STEPS, "load"])
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--calls", type=int, default=20)
     args = parser.parse_args(argv)
@@ -229,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.step == "load":
             print(json.dumps(run_load(args.clients, args.calls)))
             return 0
-        return run(run_scenarios if args.step == "run" else run_after_revoke)
+        return run(SCENARIO_STEPS[args.step])
     except (ScenarioFailed, OSError, ValueError) as error:
         print(f"agent {args.step} failed: {error}", file=sys.stderr)
         return 1

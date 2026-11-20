@@ -130,6 +130,18 @@ services:
       custodian-init:
         condition: service_completed_successfully
 
+  rule-init:
+    <<: [*bailiff, *once, *offline]
+    user: "10002:20001"
+    command: ["/app/quickstart/bootstrap.py", "rule"]
+    volumes:
+      - rule-data:/var/lib/bailiff/rule
+      - decide-data:/var/lib/bailiff/decide
+      - pins:/pins
+    depends_on:
+      control-init:
+        condition: service_completed_successfully
+
   docket-init:
     <<: [*bailiff, *once, *offline]
     user: "10001:10001"
@@ -139,7 +151,7 @@ services:
       - docket-data:/var/lib/bailiff/docket
       - pins:/pins:ro
     depends_on:
-      control-init:
+      rule-init:
         condition: service_completed_successfully
 
   bootstrap:
@@ -307,7 +319,7 @@ services:
     group_add: ["20003"]
     entrypoint: ["python", "-m", "agent_bailiff.cli", "docket", "verify", "--docket", "/var/lib/bailiff/docket/docket.log",
                  "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
-                 "--pin", "/pins/control/control.json"]
+                 "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json"]
     volumes:
       - docket-data:/var/lib/bailiff/docket:ro
       - pins:/pins:ro
@@ -343,7 +355,7 @@ services:
     group_add: ["20003"]
     command: ["-m", "agent_bailiff.cli", "docket", "export", "--docket", "/var/lib/bailiff/docket/docket.log",
               "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
-              "--pin", "/pins/control/control.json", "--checkpoint", "/var/lib/bailiff/exporter/checkpoint.json",
+              "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json", "--checkpoint", "/var/lib/bailiff/exporter/checkpoint.json",
               "--otlp", "http://jaeger:4318/v1/traces", "--timeout", "30"]
     networks: [trace]
     volumes:
@@ -355,6 +367,25 @@ services:
         condition: service_healthy
       jaeger:
         condition: service_started
+
+  rule:
+    <<: [*bailiff, *offline]
+    profiles: [rule]
+    user: "10002:20001"
+    group_add: ["20000", "20003"]
+    command: ["/app/quickstart/rule.py"]
+    volumes:
+      - rule-data:/var/lib/bailiff/rule
+      - decide-data:/var/lib/bailiff/decide:ro
+      - ledger:/var/lib/bailiff/ledger
+      - docket-run:/run/bailiff/docket
+      - docket-data:/var/lib/bailiff/docket:ro
+      - pins:/pins:ro
+    depends_on:
+      docket:
+        condition: service_healthy
+      decide:
+        condition: service_healthy
 
 configs:
   gateway:
@@ -377,6 +408,7 @@ volumes:
   decide-data: {}
   custodian-data: {}
   control-data: {}
+  rule-data: {}
   docket-data: {}
   ledger: {}
   docket-run: {}
