@@ -12,6 +12,13 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 - check-config requires `statefulMode` to be `stateless`. In stateful mode the GET event stream reaches the upstream with the agent's headers and no processor. In stateless mode agentgateway answers GET and DELETE with 405.
 - Not probed: client responses to server-initiated requests.
 
+## Refusal guard
+
+- check-config requires exactly one response-phase processor: the refusal guard (`config_check.REFUSAL_GUARD`), an expression processor on `tools/call` responses. When an upstream answer is a tool error whose only content item has `text` equal to a bailiff refusal reason, it rejects the answer, and agentgateway returns a JSON-RPC error (`-32001`) to the agent instead.
+- Without it, an upstream that acted and then answered `needs_approval` or `out_of_scope` would be classified by the client as not executed, and preparing the call again would run it twice.
+- agentgateway fails an expression evaluation error closed. A malformed upstream error answer therefore also becomes a JSON-RPC error.
+- Gateway refusals are written by the request path and never pass through a response-phase processor, so they still reach the agent as tool errors.
+
 ## Clearance visibility
 
 - Decide returns the signed clearance in the `metadata` bag of its `CheckRequest` result. agentgateway records that bag in its access log and exposes it to backend CEL as `mcpGuardrails.clearance`.
