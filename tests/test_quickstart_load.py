@@ -22,6 +22,7 @@ BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 CLIENTS = (1, 4, 16, 32)
 CALLS_PER_CLIENT = 20
 ACCEPTED = {"result", "refused: docket_unavailable"}
+MAX_DOCKET_UNAVAILABLE_RATE = 0.01
 
 
 def measure(stack, clients):
@@ -42,6 +43,7 @@ def test_quickstart_load(stack):
     for level in levels:
         assert level["calls"] == level["clients"] * CALLS_PER_CLIENT
         assert set(level["outcomes"]) <= ACCEPTED, level
+        assert level["docket_unavailable_rate"] <= MAX_DOCKET_UNAVAILABLE_RATE, level
     now = datetime.now(UTC)
     baseline = {
         "recorded_at": now.isoformat(timespec="seconds"),
