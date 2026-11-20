@@ -23,6 +23,7 @@ from opentelemetry.util.types import AttributeValue
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import DocketCorrupt, Head, KidIndex, Verification, VerifiedLine
+from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 from agent_bailiff.signing import MAX_TOKEN_CHARS, token_hash
 
 SEMCONV_COMMIT = "622b2b6073b15e5ed886c3c12a65a892b9cd5c70"
@@ -71,6 +72,10 @@ class CheckpointMismatch(Exception):
 
 
 class ExportFailed(Exception):
+    pass
+
+
+class ExporterLocked(Exception):
     pass
 
 
@@ -310,6 +315,16 @@ class DocketExporter:
         self._exported = 0
 
     def run(self, stop: threading.Event, *, follow: bool) -> int:
+        lock_path = self._checkpoint_path.with_name(f"{self._checkpoint_path.name}.lock")
+        lock_fd = open_lock_file(lock_path)
+        try:
+            if not try_lock(lock_fd):
+                raise ExporterLocked(f"{lock_path} is held by another exporter")
+            return self._run_locked(stop, follow=follow)
+        finally:
+            os.close(lock_fd)
+
+    def _run_locked(self, stop: threading.Event, *, follow: bool) -> int:
         with open(self._docket_path, "rb") as docket:
             info = os.fstat(docket.fileno())
             identity = (info.st_dev, info.st_ino)
@@ -326,6 +341,9 @@ class DocketExporter:
         return self._exported
 
     def _pass(self, docket: BinaryIO, identity: tuple[int, int], position: _Position, stop: threading.Event) -> bool:
+        current = os.stat(self._docket_path)
+        if (current.st_dev, current.st_ino) != identity:
+            raise CheckpointMismatch(f"{self._docket_path} was replaced while exporting")
         end = os.fstat(docket.fileno()).st_size
         if end < position.offset:
             raise CheckpointMismatch(f"{self._docket_path} is shorter than the exported offset {position.offset}")

@@ -23,6 +23,7 @@ from agent_bailiff.docket import DocketCorrupt
 from agent_bailiff.docket.otlp import (
     CheckpointMismatch,
     DocketExporter,
+    ExporterLocked,
     ExportFailed,
     load_checkpoint,
     span_id_for,
@@ -457,3 +458,48 @@ def test_cli_without_the_otel_extra_says_what_to_install(docket, checkpoint, wor
     arguments += ["--checkpoint", str(checkpoint), "--otlp", "http://127.0.0.1:1/v1/traces", "--once"]
     assert cli.main(arguments) == 1
     assert "needs the otel extra" in capsys.readouterr().err
+
+
+def test_a_docket_replaced_while_following_is_refused(docket, checkpoint):
+    fill(docket, 1)
+    stop = threading.Event()
+    replaced = []
+
+    def replace(_):
+        if not replaced:
+            content = docket.path.read_bytes()
+            docket.path.unlink()
+            docket.path.write_bytes(content)
+            replaced.append(True)
+
+    runner = DocketExporter(docket.path, INDEX, checkpoint, FakeExporter(during=replace), poll_interval=0.01)
+    errors = []
+
+    def follow():
+        try:
+            runner.run(stop, follow=True)
+        except CheckpointMismatch as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=follow)
+    thread.start()
+    thread.join(5)
+    stop.set()
+    thread.join(5)
+    assert errors == [f"{docket.path} was replaced while exporting"]
+    assert load_checkpoint(checkpoint).entries == 1
+
+
+def test_a_second_exporter_on_the_same_checkpoint_is_refused(docket, checkpoint):
+    fill(docket, 1)
+    attempts = []
+
+    def second(_):
+        if not attempts:
+            with pytest.raises(ExporterLocked, match="held by another exporter"):
+                export(docket, checkpoint, FakeExporter())
+            attempts.append(True)
+
+    assert export(docket, checkpoint, FakeExporter(during=second)) == 1
+    assert attempts == [True]
+    assert export(docket, checkpoint, FakeExporter()) == 0

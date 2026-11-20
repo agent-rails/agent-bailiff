@@ -410,7 +410,7 @@ def _export_docket(args: argparse.Namespace) -> int:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         from opentelemetry.sdk.trace.export import SpanExporter
 
-        from agent_bailiff.docket.otlp import CheckpointMismatch, DocketExporter, ExportFailed
+        from agent_bailiff.docket.otlp import CheckpointMismatch, DocketExporter, ExporterLocked, ExportFailed
     except ImportError:
         return _refused("docket export", ImportError("needs the otel extra: pip install 'agent-bailiff[otel]'"))
     stop = _stop_on_signals()
@@ -431,7 +431,7 @@ def _export_docket(args: argparse.Namespace) -> int:
             poll_interval=args.poll_interval,
         )
         exported = exporter.run(stop, follow=not args.once)
-    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed) as exc:
+    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed, ExporterLocked) as exc:
         return _refused("docket export", exc)
     finally:
         span_exporter.shutdown()
