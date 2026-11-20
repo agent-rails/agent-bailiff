@@ -805,6 +805,21 @@ def test_each_check_starts_one_interval_after_the_previous_one_started(api, audi
     assert delays == [60, 10, 0, 0]
 
 
+def test_a_clock_set_back_during_a_check_does_not_delay_the_next_one(api, audit):
+    clock = Clock()
+    gate = RbacGate(slow_audit(audit, clock, -3600), clock, interval=60)
+    delays = []
+
+    class Stop:
+        def wait(self, delay):
+            delays.append(delay)
+            return len(delays) > 1
+
+    gate._stop = Stop()
+    gate._run()
+    assert delays == [60, 60]
+
+
 def test_closing_the_gate_closes_the_audit_transport(api, audit):
     gate = RbacGate(audit, Clock(), interval=60)
     gate.close()
