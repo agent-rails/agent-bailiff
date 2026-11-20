@@ -1,6 +1,6 @@
 """Quickstart revoke rule. It follows the verified docket and revokes a task through control when decide refuses one
-of the task's calls as out_of_scope for a configured tool. It is a rule, not detection: it matches one set of signed
-fields and sees only what decide recorded."""
+of the task's calls as out_of_scope for a configured tool, or records that the task passed its refusal record budget
+(refusals_capped). It is a rule, not detection: it matches signed fields and sees only what decide recorded."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from typing import Protocol
 from agent_warrant.ledger import LedgerError
 
 from agent_bailiff.control.control import Control, ControlRefused, ControlUnrecorded
+from agent_bailiff.decide.refusals import CAPPED_REASON
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.follower import CheckpointMismatch, DocketFollower, FollowerLocked
 from agent_bailiff.docket.report import pinned_writers
@@ -69,12 +70,9 @@ class RevokeRule:
 
     def matches(self, verified: VerifiedLine) -> bool:
         entry = verified.record.entry
-        return (
-            verified.record.writer == self._writer
-            and entry.decision == "refuse"
-            and entry.reason == "out_of_scope"
-            and entry.tool in self._tools
-        )
+        if verified.record.writer != self._writer or entry.decision != "refuse":
+            return False
+        return entry.reason == CAPPED_REASON or (entry.reason == "out_of_scope" and entry.tool in self._tools)
 
     def __call__(self, batch: Sequence[VerifiedLine], stop: threading.Event) -> None:
         revoked: set[tuple[str | None, str | None]] = set()
@@ -94,7 +92,8 @@ class RevokeRule:
             outcome = session.control.revoke(verified.record.token, "task", ACTOR, int(self._clock()))
         finally:
             session.close()
-        line = {"rule": "out_of_scope", "line": verified.line, "entry_id": outcome.entry_id, **outcome.handles}
+        reason = verified.record.entry.reason
+        line = {"rule": reason, "line": verified.line, "entry_id": outcome.entry_id, **outcome.handles}
         print(json.dumps(line, sort_keys=True), flush=True)
 
 

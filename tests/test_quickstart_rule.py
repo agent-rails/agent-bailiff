@@ -8,10 +8,11 @@ import test_custodian
 from test_control import MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import WRITERS
-from test_decide import NOW, make_request, make_root
+from test_decide import NOW, FakeClock, make_request, make_root
 
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.control.control import ControlRefused, Outcome
+from agent_bailiff.decide.refusals import RefusalBudget
 from agent_bailiff.docket.follower import DocketFollower, load_checkpoint
 from agent_bailiff.docket.sink import build_kid_index
 
@@ -135,6 +136,27 @@ def test_two_refusals_of_one_task_in_a_batch_revoke_once(make_decider, workdir, 
     rule, _ = make_rule(recording)
     assert follow(workdir, checkpoint, rule) == 2
     assert len(recording.calls) == 1
+
+
+def test_padding_past_the_record_budget_revokes_the_task(make_decider, workdir, checkpoint, control):
+    root = make_root()
+    decider = make_decider(refusal_budget=RefusalBudget(limit=2, clock=FakeClock()))
+    for n in range(4):
+        decider.check(make_request(root, tool="deploy.delete", nonce=f"pad-{n}"), NOW)
+    assert decider.check(make_request(root, nonce="probe", **OUT_OF_SCOPE), NOW).entry_id is None
+    rule, _ = make_rule(control)
+    assert follow(workdir, checkpoint, rule) == 3
+    assert decider.check(make_request(root, nonce="after"), NOW + 1).reason == "chain_invalid"
+
+
+def test_a_tenant_capped_marker_does_not_revoke(make_decider, workdir, checkpoint):
+    decider = make_decider(refusal_budget=RefusalBudget(max_tasks_per_tenant=1, clock=FakeClock()))
+    for n in range(2):
+        decider.check(make_request(make_root(task_id=f"task-{n}"), tool="deploy.delete", nonce=f"n-{n}"), NOW)
+    recording = RecordingControl()
+    rule, _ = make_rule(recording, frozenset({"deploy.delete"}))
+    assert follow(workdir, checkpoint, rule) == 2
+    assert recording.calls == []
 
 
 def test_a_refused_revoke_stops_the_rule_before_the_checkpoint(make_decider, workdir, checkpoint):
