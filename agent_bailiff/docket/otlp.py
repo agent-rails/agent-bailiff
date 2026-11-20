@@ -135,10 +135,11 @@ def to_skipped_span(verified: VerifiedLine) -> ReadableSpan:
         "bailiff.docket.seq": record.seq,
         "bailiff.docket.kid": record.kid,
         "bailiff.docket.hash": record.hash,
+        "bailiff.entry_at": record.entry.at,
     }
     if mapped:
         attributes["bailiff.trace_id_mapped"] = True
-    end = record.entry.at * 1_000_000_000
+    now = time.time_ns()
     return ReadableSpan(
         name="docket export_skipped",
         context=SpanContext(trace_id, span_id_for(record.entry.entry_id), is_remote=False, trace_flags=SAMPLED),
@@ -146,8 +147,8 @@ def to_skipped_span(verified: VerifiedLine) -> ReadableSpan:
         attributes=attributes,
         kind=SpanKind.INTERNAL,
         status=Status(StatusCode.ERROR, "export skipped by the operator; the record is in the docket"),
-        start_time=end,
-        end_time=end,
+        start_time=now,
+        end_time=now,
         instrumentation_scope=SCOPE,
     )
 
@@ -191,7 +192,7 @@ class DocketExporter:
 
     def run(self, stop: threading.Event, *, follow: bool) -> int:
         exported = self._follower.run(stop, follow=follow)
-        if self._skip_line is not None and not stop.is_set():
+        if self._skip_line is not None:
             raise ExportFailed(f"line {self._skip_line} was not reached; nothing was skipped")
         return exported
 

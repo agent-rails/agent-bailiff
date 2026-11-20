@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -396,8 +397,11 @@ def test_a_skipped_line_is_exported_as_a_marker_and_checkpointed(docket, checkpo
     export(docket, checkpoint, FakeExporter())
     fill(docket, 2, start=2)
     exporter = FakeExporter()
+    before = time.time_ns()
     assert export(docket, checkpoint, exporter, skip_line=2) == 2
     [marker, after] = exporter.batches[0]
+    assert marker.start_time == marker.end_time >= before
+    assert marker.attributes["bailiff.entry_at"] == docket.records[1].entry.at
     assert marker.name == "docket export_skipped" and marker.status.status_code is StatusCode.ERROR
     assert marker.attributes["bailiff.export_skipped"] is True
     assert marker.attributes["bailiff.docket.line"] == 2
@@ -426,6 +430,16 @@ def test_a_skip_line_past_the_end_is_refused(docket, checkpoint):
     export(docket, checkpoint, FakeExporter())
     with pytest.raises(ExportFailed, match="line 3 was not reached; nothing was skipped"):
         export(docket, checkpoint, FakeExporter(), skip_line=3)
+
+
+def test_a_stopped_follow_that_never_reached_the_skip_line_fails(docket, checkpoint):
+    fill(docket, 2)
+    export(docket, checkpoint, FakeExporter())
+    stop = threading.Event()
+    stop.set()
+    exporter = DocketExporter(docket.path, INDEX, checkpoint, FakeExporter(), skip_line=3)
+    with pytest.raises(ExportFailed, match="line 3 was not reached; nothing was skipped"):
+        exporter.run(stop, follow=True)
 
 
 def test_cli_exports_once_to_an_otlp_endpoint(docket, checkpoint, workdir, collector, capsys):
