@@ -506,7 +506,7 @@ class RbacGate:
                 self.verify()
             except RbacDrift:
                 logger.error("the effector refuses calls until its RBAC matches the generated set")
-            delay = max(0, self._interval - (self._clock() - started))
+            delay = min(self._interval, max(0, self._interval - (self._clock() - started)))
 
 
 def _key(item: Mapping[str, Any], kind: str | None = None) -> Key:
