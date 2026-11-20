@@ -9,7 +9,8 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 - agentgateway v1.7.0 runs no request-phase hook for `resources/subscribe`, `resources/unsubscribe`, `completion/complete` or `tasks/*`. check-config requires `mcpAuthorization.rules` to be exactly `mcp.methodName == "tools/call" || mcp.methodName == "tools/list"`; with a rule present, agentgateway denies those methods before they reach an upstream. Under that rule alone, `prompts/list` and `resources/list` return empty lists; decide refuses both before that.
 - check-config requires `requestHeaderModifier` to be exactly `{"remove": [...]}` naming `authorization`, `proxy-authorization`, `cookie`, `bailiff-release` and every binding-table credential header, and naming no `x-bailiff-*` header or `traceparent`. agentgateway applies it before the processors run, on every message, and it does not remove the header the custodian sets.
 - Client notifications (`notifications/initialized`, `notifications/cancelled`, `notifications/progress`, `notifications/roots/list_changed` and custom notifications) run no processor and no `mcpAuthorization` check in v1.7.0. They reach every upstream carrying every agent header except those `requestHeaderModifier` removes: the `x-bailiff-*` headers and any other header the agent adds (for example `sudo` or `x-forwarded-user`), but no agent credential header. An upstream must not trust any request header on a notification.
-- Not probed: client responses to server-initiated requests, the SSE GET stream, session DELETE, and stateful mode.
+- check-config requires `statefulMode` to be `stateless`. In stateful mode the GET event stream reaches the upstream with the agent's headers and no processor. In stateless mode agentgateway answers GET and DELETE with 405.
+- Not probed: client responses to server-initiated requests.
 
 ## Clearance visibility
 
@@ -22,7 +23,7 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 - The processor accepts each connection itself, refuses any peer whose uid is not the configured gateway uid, and relays accepted connections to its gRPC server on a socket in a 0700 directory.
 - The relay holds at most 64 connections and has no idle timeout. A connection over the cap is closed.
 - A refused, closed or unreachable processor fails the call closed, because check-config requires `failClosed`.
-- Each gRPC server runs 8 workers and admits at most 16 concurrent calls; a call past that is refused with `RESOURCE_EXHAUSTED`, which fails it closed.
+- Each gRPC server runs 8 workers and admits at most 256 concurrent calls; a call past that is refused with `RESOURCE_EXHAUSTED`, which fails it closed. The limit is fixed. At the quickstart's measured rate (about 115 calls a second at 32 clients), 256 queued calls drain well inside the gateway's 10-second processor timeout.
 - agentgateway abandons a processor call after 10 seconds. grpcio drops a call the gateway abandoned while it was still queued, so the processor never sees it and it never reserves a ledger slot or claims an op_id. A call already inside the processor runs to completion; its result is discarded and its op_id stays claimed.
 
 ## check-config

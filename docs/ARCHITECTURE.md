@@ -96,7 +96,7 @@ Decide and the custodian fail closed:
 
 Control applies its action first and reports it as unrecorded if its entry is not acknowledged.
 
-- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, the wrong processor order or a non-Unix processor target.
+- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order or a non-Unix processor target.
 
 ## Credential tiers
 

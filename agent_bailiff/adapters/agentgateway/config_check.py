@@ -73,6 +73,8 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         problems.append("the gateway config must have an mcp object")
         return tuple(problems)
     _only_keys(problems, "mcp", mcp, MCP_KEYS)
+    if mcp.get("statefulMode") != "stateless":
+        problems.append('mcp.statefulMode must be "stateless"; the stateful event stream reaches upstreams unchecked')
     _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
     _check_policies(problems, mcp.get("policies"), expected)
     _check_credential_headers(problems, document, expected.credential_headers)
