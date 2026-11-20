@@ -403,6 +403,25 @@ def test_tools_list_reaches_the_upstream(stack):
     assert len(stack["upstream"].calls("tools/list")) == 1
 
 
+EXTRA_AGENT_HEADERS = {"sudo": "root", "x-forwarded-user": "admin", "x-bailiff-extra": "1"}
+UPSTREAM_VISIBLE = {"accept", "content-type", "mcp-protocol-version", "traceparent", "tracestate"}
+GATEWAY_SET = {"host", "content-length", "accept-encoding", "mcp-method", "mcp-name"}
+
+
+@pytest.mark.parametrize("method", ["tools/call", "tools/list"])
+def test_only_allowlisted_agent_headers_reach_the_upstream(stack, method):
+    request = make_request()
+    headers = {**agent_headers(request), **EXTRA_AGENT_HEADERS, "tracestate": "vendor=1"}
+    if method == "tools/call":
+        stack["agent"].call("deploy_service", request.args, headers)
+    else:
+        stack["agent"].post({"method": method}, headers)
+    [seen] = stack["upstream"].calls(method)
+    released = {"authorization"} if method == "tools/call" else set()
+    assert set(seen) <= UPSTREAM_VISIBLE | GATEWAY_SET | released, seen
+    assert seen["tracestate"] == "vendor=1"
+
+
 def test_a_notification_reaches_the_upstream_without_agent_credentials(stack):
     request = make_request()
     status, body = stack["agent"].post(
@@ -456,6 +475,9 @@ def test_a_call_without_chain_headers_is_refused(stack):
 UNSAFE = {
     "fail_open": lambda policies, processors: processors[2].update(failureMode="failOpen"),
     "no_header_allowlist": lambda policies, processors: processors[1].pop("requestHeaders"),
+    "custodian_header_filter": lambda policies, processors: processors[2].update(
+        requestHeaders={"allowed": ["x-bailiff-nonce"]}
+    ),
     "custodian_before_decide": lambda policies, processors: processors.insert(1, processors.pop(2)),
     "custodian_over_tcp": lambda policies, processors: processors[2].update(host="127.0.0.1:9"),
     "tools_call_only": lambda policies, processors: processors[1].update(methods={"tools/call": "request"}),
@@ -538,3 +560,19 @@ def test_a_direct_custodian_call_from_a_non_gateway_uid_is_refused(stack, workdi
         timeout=30,
     )
     assert result.stdout.strip() == "closed", result
+
+
+def test_the_custodian_sees_agent_headers_without_agent_credentials(stack, monkeypatch):
+    seen = []
+    check_request = CustodianProcessor.check_request
+
+    def recording(processor, message):
+        seen.append({header.key for header in message.headers})
+        return check_request(processor, message)
+
+    monkeypatch.setattr(CustodianProcessor, "check_request", recording)
+    request = make_request()
+    stack["agent"].call("deploy_service", request.args, {**agent_headers(request), **EXTRA_AGENT_HEADERS})
+    [names] = seen
+    assert set(EXTRA_AGENT_HEADERS) <= names
+    assert not {"authorization", "proxy-authorization", "cookie"} & names

@@ -60,7 +60,6 @@ def gateway_config(
                             "kind": "remote",
                             "host": f"unix:{custodian_socket}",
                             "methods": {"*": "request"},
-                            "requestHeaders": {"allowed": list(CHAIN_HEADERS)},
                             "metadata": {"clearance": "mcpGuardrails.clearance"},
                         },
                     ]
@@ -90,19 +89,26 @@ def test_fail_open_is_refused(index):
     assert any("failClosed" in problem for problem in problems)
 
 
-@pytest.mark.parametrize("index", [1, 2])
 @pytest.mark.parametrize(
     "headers",
     [None, {}, {"allowed": []}, {"disallowed": ["authorization"]}],
 )
-def test_a_missing_or_empty_header_allowlist_is_refused(index, headers):
+def test_a_missing_or_empty_decide_header_allowlist_is_refused(headers):
     def change(config):
         if headers is None:
-            del processors(config)[index]["requestHeaders"]
+            del processors(config)[1]["requestHeaders"]
         else:
-            processors(config)[index]["requestHeaders"] = headers
+            processors(config)[1]["requestHeaders"] = headers
 
     assert any("allowlist" in problem for problem in problems_after(change))
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {"allowed": list(CHAIN_HEADERS)}, {"disallowed": ["sudo"]}, {"allowed": ["x-bailiff-nonce"]}]
+)
+def test_a_custodian_header_filter_is_refused(headers):
+    problems = problems_after(lambda config: processors(config)[2].update(requestHeaders=headers))
+    assert any("custodian processor must not filter requestHeaders" in problem for problem in problems)
 
 
 @pytest.mark.parametrize("extra", ["authorization", "Authorization", "cookie", ":authority"])
@@ -113,7 +119,7 @@ def test_an_allowlist_beyond_the_chain_headers_is_refused(extra):
 
 @pytest.mark.parametrize("missing", ["x-bailiff-task-root", "x-bailiff-leaf-proof", "x-bailiff-nonce"])
 def test_an_allowlist_without_a_required_chain_header_is_refused(missing):
-    problems = problems_after(lambda config: processors(config)[2]["requestHeaders"]["allowed"].remove(missing))
+    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"]["allowed"].remove(missing))
     assert any(missing in problem for problem in problems)
 
 
@@ -423,10 +429,9 @@ def test_check_config_refuses_one_tool_and_resource_routed_from_two_services(own
     assert "deploy.service" in result.stderr
 
 
-@pytest.mark.parametrize("index", [1, 2])
 @pytest.mark.parametrize("name", CHAIN_HEADERS + ["X-Bailiff-Nonce"])
-def test_a_chain_header_in_disallowed_is_refused(index, name):
-    problems = problems_after(lambda config: processors(config)[index]["requestHeaders"].update(disallowed=[name]))
+def test_a_chain_header_in_disallowed_is_refused(name):
+    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=[name]))
     assert any("disallowed" in problem and name in problem for problem in problems)
 
 

@@ -62,15 +62,6 @@
             "methods": {
               "*": "request"
             },
-            "requestHeaders": {
-              "allowed": [
-                "x-bailiff-task-root",
-                "x-bailiff-links",
-                "x-bailiff-leaf-proof",
-                "x-bailiff-nonce",
-                "traceparent"
-              ]
-            },
             "metadata": {
               "clearance": "mcpGuardrails.clearance"
             }
