@@ -653,7 +653,7 @@ def test_sink_refuses_a_symlinked_docket_file(paths, workdir):
         asyncio.run(sink.start())
 
 
-def test_connections_over_the_limit_are_closed(paths, start_sink):
+def test_connections_over_the_limit_are_refused_as_overloaded(paths, start_sink):
     start_sink(max_connections=1)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as idle:
         idle.settimeout(5)
@@ -663,7 +663,11 @@ def test_connections_over_the_limit_are_closed(paths, start_sink):
         client = decide_client(paths)
         with pytest.raises(DocketError) as error:
             client.append(make_entry(1))
-        assert error.value.reason == "no_ack"
+        assert error.value.reason == "overloaded"
+        assert paths[0].read_bytes() == b""
+        with connect_raw(paths[1]) as extra:
+            (length,) = LENGTH.unpack(extra.recv(LENGTH.size))
+            assert decode_response(extra.recv(length)) == {"ok": False, "reason": "overloaded"}
     assert client.append(make_entry(1)).seq == 1
 
 

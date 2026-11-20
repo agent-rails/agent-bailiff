@@ -362,7 +362,10 @@ class DocketSink:
         if uid not in self._allowed_uids:
             await self._reply(writer, _refusal("peer_not_allowed"))
             return False
-        return self._active < self._max_connections
+        if self._active >= self._max_connections:
+            await self._reply(writer, _refusal("overloaded"))
+            return False
+        return True
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         while True:
