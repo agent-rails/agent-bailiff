@@ -30,6 +30,7 @@ from agent_bailiff.decide import (
     request_digest,
     snapshot_args,
 )
+from agent_bailiff.decide.refusals import RefusalBudget
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused, token_hash
@@ -343,13 +344,6 @@ def test_delegated_request_binds_the_leaf_link(make_decider, docket_paths):
 @pytest.mark.parametrize(
     ("reason", "request_options"),
     [
-        ("malformed_request", {"nonce": "has space"}),
-        ("malformed_request", {"tool": "deploy.*"}),
-        ("malformed_request", {"args": {"replicas": 1.5}, "proof_args": ARGS}),
-        ("malformed_request", {"args": {"replicas": 2**53}, "proof_args": ARGS}),
-        ("chain_invalid", {"proof_audience": "other-decider.example"}),
-        ("chain_invalid", {"proof_args": {"service": "web", "replicas": 2}}),
-        ("chain_invalid", {"at": NOW - MAX_PROOF_AGE - 1}),
         ("out_of_scope", {"resource": "env/prod/api"}),
         ("unknown_cost", {"tool": "deploy.restart"}),
         ("unknown_cost", {"tool": "signer.withdraw", "resource": "wallet/w1", "args": {"amount": "1"}}),
@@ -371,6 +365,47 @@ def test_refusals_return_no_clearance_reserve_nothing_and_write_an_entry(
     assert (entry.entry_id, entry.decision, entry.reason) == (decision.entry_id, "refuse", reason)
     with pytest.raises(LedgerRefused, match="unknown task"):
         ledger.task_budget(TENANT, "task-1", NOW)
+
+
+@pytest.mark.parametrize(
+    ("reason", "request_options"),
+    [
+        ("malformed_request", {"nonce": "has space"}),
+        ("malformed_request", {"tool": "deploy.*"}),
+        ("malformed_request", {"args": {"replicas": 1.5}, "proof_args": ARGS}),
+        ("malformed_request", {"args": {"replicas": 2**53}, "proof_args": ARGS}),
+        ("chain_invalid", {"proof_audience": "other-decider.example"}),
+        ("chain_invalid", {"proof_args": {"service": "web", "replicas": 2}}),
+        ("chain_invalid", {"at": NOW - MAX_PROOF_AGE - 1}),
+    ],
+)
+def test_unverified_refusals_return_no_clearance_and_write_no_entry(
+    make_decider, ledger, docket_paths, reason, request_options
+):
+    decision = make_decider().check(make_request(**request_options), NOW)
+    assert (decision.allowed, decision.reason, decision.clearance, decision.entry_id) == (False, reason, None, None)
+    assert docket_entries(docket_paths) == []
+    with pytest.raises(LedgerRefused, match="unknown task"):
+        ledger.task_budget(TENANT, "task-1", NOW)
+
+
+def test_a_flood_of_unverified_requests_writes_nothing_to_the_docket(make_decider, docket_paths):
+    decider = make_decider()
+    garbage = replace(make_request(), task_root="garbage", links=(), leaf_proof="garbage")
+    reasons = {decider.check(replace(garbage, nonce=f"n-{n}"), NOW).reason for n in range(200)}
+    assert reasons == {"chain_invalid"}
+    assert docket_entries(docket_paths) == []
+
+
+def test_verified_refusals_past_the_task_budget_are_not_recorded(make_decider, docket_paths):
+    decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60))
+    decisions = [decider.check(make_request(resource="env/prod/api", nonce=f"n-{n}"), NOW + n) for n in range(3)]
+    assert [decision.reason for decision in decisions] == ["out_of_scope"] * 3
+    assert [decision.entry_id is None for decision in decisions] == [False, False, True]
+    assert len(docket_entries(docket_paths)) == 2
+    later = decider.check(make_request(resource="env/prod/api", nonce="n-later"), NOW + 60)
+    assert later.entry_id is not None
+    assert len(docket_entries(docket_paths)) == 3
 
 
 def test_policy_refusal_entry_names_the_rule(make_decider, docket_paths):
@@ -411,7 +446,7 @@ def test_unexpected_error_is_refused_as_internal_error(make_decider, docket_path
     decision = make_decider(suspension=ExplodingSuspension()).check(make_request(), NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "internal_error", None)
     [entry] = docket_entries(docket_paths)
-    assert entry.reason == "internal_error"
+    assert (entry.reason, entry.handles["tenant"], entry.handles["task"]) == ("internal_error", TENANT, "task-1")
 
 
 def test_signing_failure_writes_no_allow_entry_and_leaves_the_reservation_issued(make_decider, ledger, docket_paths):

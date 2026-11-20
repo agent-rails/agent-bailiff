@@ -39,6 +39,7 @@ from test_decide import (
 from agent_bailiff.control import Control, ControlRefused, ControlUnrecorded, Suspension
 from agent_bailiff.decide import Decider, DeciderConfig, PolicyRef
 from agent_bailiff.docket import DocketClient, DocketSink, Record, decode_record, encode_record
+from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused
 
@@ -326,9 +327,11 @@ def test_a_record_that_is_not_a_str_is_refused(make_control):
 
 
 @pytest.mark.parametrize("level", LEVELS)
-def test_a_record_without_handles_is_refused_at_every_level(decider, make_control, workdir, level):
-    decision = decider.check(make_request(nonce="has space"), NOW)
-    assert decision.reason == "malformed_request"
+def test_a_record_without_handles_is_refused_at_every_level(make_control, workdir, level):
+    entry = Entry(
+        entry_id="e-1", trace_id="trace-1", hop="decide", component=DECIDER_ID, decision="refuse", at=NOW, reason="x"
+    )
+    client(workdir, "decide", "decide-1", DECIDE_KEY).append(entry)
     with pytest.raises(ControlRefused) as refused:
         make_control().revoke(record_line(workdir, decision="refuse"), level, "ops", NOW + 1)
     assert refused.value.reason == "no_handle"

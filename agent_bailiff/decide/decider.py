@@ -5,7 +5,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from agent_guard.audit import MemoryAuditSink
 from agent_guard.decision import Decision as PolicyDecision
@@ -22,7 +22,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.config import DeciderConfig, PolicyRef
 from agent_bailiff.decide.costs import CostError, CostTable
-from agent_bailiff.decide.identity import ArgsError, derive_op_id, request_digest, snapshot_args
+from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
+from agent_bailiff.decide.refusals import RefusalBudget
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.signing import token_hash
@@ -80,6 +81,7 @@ class Decider:
         docket: DocketWriter,
         signing_key: Ed25519PrivateKey,
         costs: CostTable,
+        refusal_budget: RefusalBudget | None = None,
     ) -> None:
         self._config = config
         self._ledger = ledger
@@ -90,6 +92,7 @@ class Decider:
         self._docket = docket
         self._signing_key = signing_key
         self._costs = costs
+        self._refusal_budget = refusal_budget or RefusalBudget()
         self._issued: dict[str, _Issued] = {}
         self._in_flight: set[str] = set()
         self._lock = threading.Lock()
@@ -214,11 +217,31 @@ class Decider:
         )
         if not chain.valid or chain.root is None or chain.leaf_scope is None or chain.leaf_subject is None:
             raise _Refusal("chain_invalid", entry)
-        root = chain.root
-        links = chain.links
+        entry = _with_who(entry, chain.root, chain.links, chain.leaf_subject)
+        try:
+            return self._decide(
+                request, now, entry, snapshot, digest, chain.root, chain.links, chain.leaf_scope, chain.leaf_subject
+            )
+        except _Refusal:
+            raise
+        except Exception:
+            logger.exception("decide failed with an internal error")
+            raise _Refusal("internal_error", entry) from None
+
+    def _decide(
+        self,
+        request: OperationRequest,
+        now: int,
+        entry: Entry,
+        snapshot: ArgsSnapshot,
+        digest: str,
+        root: TaskRoot,
+        links: tuple[ChainLink, ...],
+        scope: dict[str, Any],
+        agent_key: str,
+    ) -> Decision:
+        operation_args_digest = snapshot.digest
         leaf_binding = links[-1].binding() if links else root.binding()
-        entry = _with_who(entry, root, links, chain.leaf_subject)
-        scope = chain.leaf_scope
         if not covers(scope, request.tool, request.resource):
             raise _Refusal("out_of_scope", entry)
         try:
@@ -231,7 +254,7 @@ class Decider:
         binding = self._config.binding(root.tenant_id, request.tool, request.resource)
         if binding is None:
             raise _Refusal("no_binding", entry)
-        allowed, verdict = Guard(self._policy.policy, MemoryAuditSink(), agent_id=chain.leaf_subject).decide(
+        allowed, verdict = Guard(self._policy.policy, MemoryAuditSink(), agent_id=agent_key).decide(
             request.tool, snapshot.thaw()
         )
         entry = replace(
@@ -352,6 +375,13 @@ class Decider:
         )
 
     def _refuse(self, reason: str, entry: Entry) -> Decision:
+        tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
+        if tenant is None or task is None:
+            logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
+            return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
+        if not self._refusal_budget.admit(tenant, task, entry.at):
+            logger.info("refusal %s for task %s over the record budget, not docketed", reason, task)
+            return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
         entry_id: str | None
         try:
             entry_id = self._append(replace(entry, decision="refuse", reason=reason))
