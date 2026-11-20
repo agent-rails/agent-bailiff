@@ -25,6 +25,7 @@ from agent_bailiff.signing import sign
 
 make_custodian = test_custodian.make_custodian
 make_decider = test_custodian.make_decider
+open_docket = test_custodian.open_docket
 issue = test_custodian.issue
 private = test_custodian.private
 reader = test_custodian.reader

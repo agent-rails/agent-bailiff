@@ -48,7 +48,7 @@ DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
 ISSUER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
 AGENT_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(2, 34)))
 CHILD_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(3, 35)))
-WRITERS = {"decide": {"decide-1": DECIDE_KEY.public_key()}}
+WRITERS = {"decide": {"decide-1": DECIDE_KEY.public_key()}, "decide-b": {"decide-b-1": DECIDE_KEY.public_key()}}
 PINNED = {"decide-1": DECIDE_KEY.public_key()}
 SCOPE = {
     "tools": ["deploy.*", "signer.withdraw"],
@@ -195,7 +195,16 @@ def client_options(workdir):
 
 @pytest.fixture
 def make_decider(workdir, docket_paths, sink, ledger, client_options):
-    def make(**overrides):
+    opened = {}
+
+    def open_docket(writer):
+        previous = opened.pop(writer, None)
+        if previous is not None:
+            previous.close()
+        opened[writer] = DocketClient(docket_paths[1], writer, f"{writer}-1", DECIDE_KEY, **client_options)
+        return opened[writer]
+
+    def make(writer="decide", **overrides):
         options = {
             "config": DeciderConfig(
                 DECIDER_ID,
@@ -203,7 +212,7 @@ def make_decider(workdir, docket_paths, sink, ledger, client_options):
                 frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}),
                 MAX_PROOF_AGE,
                 BINDINGS,
-                "decide",
+                writer,
             ),
             "ledger": ledger,
             "resolver": PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
@@ -216,14 +225,17 @@ def make_decider(workdir, docket_paths, sink, ledger, client_options):
             ),
             "policy": PolicyRef.from_dict("default", "1", POLICY),
             "suspension": Suspension(),
-            "docket": DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options),
             "signing_key": DECIDE_KEY,
             "costs": COSTS,
         }
         options.update(overrides)
+        if "docket" not in options:
+            options["docket"] = open_docket(writer)
         return Decider(**options)
 
-    return make
+    yield make
+    for client in opened.values():
+        client.close()
 
 
 def make_root(*, budget=100, ttl=3600, scope=None, task_id="task-1"):
@@ -843,7 +855,7 @@ def test_reconcile_skips_an_operation_still_being_issued(make_decider, ledger, d
 
 def test_reconcile_survives_another_decider_reconciling_the_same_ledger(make_decider, ledger, docket_paths):
     one = make_decider()
-    two = make_decider()
+    two = make_decider(writer="decide-b")
     first = one.check(make_request(nonce="n-1"), NOW)
     second = one.check(make_request(nonce="n-2"), NOW)
     expires_at = ledger.reservation(TENANT, "task-1", first.op_id, NOW).expires_at

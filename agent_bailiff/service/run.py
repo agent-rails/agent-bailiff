@@ -111,7 +111,10 @@ def start_decide(settings: DecideSettings) -> RunningDecide:
     key = load_signing_key(settings.key)
     routes = load_routes(settings.routes)
     ledger = open_writer(settings.ledger.path, settings.ledger.group)
+    opened: list[Closeable] = [ledger]
     try:
+        docket = docket_client(settings.docket, settings.name, key)
+        opened.append(docket)
         decider = Decider(
             config=DeciderConfig(
                 settings.name,
@@ -126,16 +129,16 @@ def start_decide(settings: DecideSettings) -> RunningDecide:
             trust_policy=settings.issuers.trust_policy,
             policy=settings.policy,
             suspension=Suspension(settings.suspension_dir, settings.ledger.group),
-            docket=docket_client(settings.docket, settings.name, key),
+            docket=docket,
             signing_key=key,
             costs=settings.costs,
         )
         server = processor_server(DecideProcessor(decider, routes), settings.gateway)
         server.start()
     except BaseException:
-        ledger.close()
+        _close_all(tuple(opened))
         raise
-    return RunningDecide(decider, server, settings.reconcile_seconds, (ledger,))
+    return RunningDecide(decider, server, settings.reconcile_seconds, tuple(opened))
 
 
 def start_custodian(settings: CustodianSettings) -> RunningCustodian:
@@ -150,6 +153,8 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
         opened.append(claims)
         ledger = open_reader(settings.ledger.path, settings.ledger.writer_uid, settings.ledger.group)
         opened.append(ledger)
+        docket = docket_client(settings.docket, settings.name, key)
+        opened.append(docket)
         custodian = Custodian(
             config=CustodianConfig(
                 custodian_id=settings.name,
@@ -168,7 +173,7 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
             ledger=ledger,
             resolver=settings.issuers.resolver,
             trust_policy=settings.issuers.trust_policy,
-            docket=docket_client(settings.docket, settings.name, key),
+            docket=docket,
             suspension=SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group),
             release_signer=ReleaseSigner(settings.name, key, key_id(settings.name, key.public_key())),
         )
@@ -208,28 +213,31 @@ async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
 @dataclass
 class ControlSession:
     control: Control
-    _ledger: Closeable
+    _close: tuple[Closeable, ...]
 
     def close(self) -> None:
-        _close_all((self._ledger,))
+        _close_all(self._close)
 
 
 def open_control(settings: ControlSettings, decide: DecideSettings) -> ControlSession:
     key = load_signing_key(settings.key)
     ledger = open_writer(decide.ledger.path, decide.ledger.group)
+    opened: list[Closeable] = [ledger]
     try:
+        docket = docket_client(settings.docket, settings.name, key)
+        opened.append(docket)
         control = Control(
             component=settings.name,
             writers=settings.writers,
             ledger=ledger,
             suspension=Suspension(decide.suspension_dir, decide.ledger.group),
-            docket=docket_client(settings.docket, settings.name, key),
+            docket=docket,
             docket_writer=settings.name,
         )
     except BaseException:
-        ledger.close()
+        _close_all(tuple(opened))
         raise
-    return ControlSession(control, ledger)
+    return ControlSession(control, tuple(opened))
 
 
 def reconcile(decider: Decider, now: int) -> None:
@@ -251,10 +259,12 @@ def _close_all(resources: tuple[Closeable, ...]) -> None:
 class RunningEffector:
     server: EffectorServer
     rbac: RbacGate
+    docket: DocketClient
 
     def close(self) -> None:
         self.server.close()
         self.rbac.close()
+        self.docket.close()
 
 
 def start_effector(settings: EffectorSettings) -> RunningEffector:
@@ -289,16 +299,17 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
     rbac = RbacGate(audit, lambda: int(time.time()))
     rbac.verify()
     suspension = SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group)
+    docket = docket_client(settings.docket, settings.name, key)
     effector = Effector(
         EffectorConfig(settings.name, settings.name),
         catalog,
         check,
         client,
         suspension,
-        docket_client(settings.docket, settings.name, key),
+        docket,
         rbac,
     )
     server = EffectorServer(effector, settings.port)
     server.start()
     rbac.start()
-    return RunningEffector(server, rbac)
+    return RunningEffector(server, rbac, docket)

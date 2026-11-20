@@ -4,6 +4,8 @@ import os
 import shutil
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -351,6 +353,7 @@ def test_restart_recovers_chain_state(paths, start_sink):
     old_client = decide_client(paths)
     first = old_client.append(make_entry(1))
     second = old_client.append(make_entry(2))
+    old_client.close()
     first_run.stop()
     second_run = start_sink()
     assert second_run.sink.heads == {"decide": Head(2, second.hash)}
@@ -363,7 +366,9 @@ def test_restart_recovers_chain_state(paths, start_sink):
 def test_client_resyncs_after_a_refusal(paths, start_sink):
     start_sink()
     client = decide_client(paths)
-    other = decide_client(paths)
+    elsewhere = paths[0].parent / "state-elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    other = decide_client(paths, state_dir=elsewhere)
     client.append(make_entry(1))
     other.append(make_entry(2))
     with pytest.raises(DocketError) as error:
@@ -376,6 +381,7 @@ def write_chain(paths, start_sink, count=3):
     handle = start_sink()
     client = decide_client(paths)
     records = [client.append(make_entry(number)) for number in range(1, count + 1)]
+    client.close()
     handle.stop()
     return records
 
@@ -653,10 +659,11 @@ def test_connections_over_the_limit_are_closed(paths, start_sink):
         idle.connect(str(paths[1]))
         idle.sendall(encode_frame(OP_HEAD + b"decide"))
         assert idle.recv(64)
+        client = decide_client(paths)
         with pytest.raises(DocketError) as error:
-            decide_client(paths).append(make_entry(1))
+            client.append(make_entry(1))
         assert error.value.reason == "no_ack"
-    assert decide_client(paths).append(make_entry(1)).seq == 1
+    assert client.append(make_entry(1)).seq == 1
 
 
 def test_stalled_frame_is_dropped_at_the_deadline(paths, start_sink):
@@ -846,6 +853,7 @@ def test_restarted_client_detects_a_rolled_back_sink(paths, start_sink):
     client = decide_client(paths)
     client.append(make_entry(1))
     client.append(make_entry(2))
+    client.close()
     first_run.stop()
     roll_back_to(paths, 1)
     start_sink()
@@ -886,13 +894,60 @@ def test_client_detects_a_replaced_entry_at_its_acked_seq(paths, start_sink, wor
         client.head()
 
 
+def test_a_second_client_for_one_writer_and_state_is_refused(paths, start_sink):
+    start_sink()
+    client = decide_client(paths)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths)
+    assert error.value.reason == "writer_locked"
+    assert client.append(make_entry(1)).seq == 1
+
+
+def test_a_closed_client_releases_the_writer_and_refuses_appends(paths, start_sink):
+    start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    client.close()
+    client.close()
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(2))
+    assert error.value.reason == "closed"
+    assert decide_client(paths).append(make_entry(2)).seq == 2
+
+
+def test_another_process_cannot_take_a_held_writer(paths, start_sink):
+    start_sink()
+    client = decide_client(paths)
+    probe = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+        "try:\n"
+        "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "except BlockingIOError:\n"
+        "    sys.exit(3)\n"
+    )
+    lock = state_dir(paths) / "decide.lock"
+    assert subprocess.run([sys.executable, "-c", probe, str(lock)], check=False).returncode == 3
+    client.close()
+    assert subprocess.run([sys.executable, "-c", probe, str(lock)], check=False).returncode == 0
+
+
+def test_a_symlinked_writer_lock_is_refused(paths, start_sink, workdir):
+    start_sink()
+    (state_dir(paths) / "decide.lock").symlink_to(workdir / "elsewhere.lock")
+    with pytest.raises(DocketError) as error:
+        decide_client(paths)
+    assert error.value.reason == "state_invalid"
+    assert not (workdir / "elsewhere.lock").exists()
+
+
 def test_client_state_file_is_private(paths, start_sink):
     start_sink()
     record = decide_client(paths).append(make_entry(1))
     state = state_dir(paths) / "decide.head"
     assert stat.S_IMODE(os.lstat(state).st_mode) == 0o600
     assert state.read_bytes() == f'{{"hash":"{record.hash}","seq":1}}'.encode()
-    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.head"]
+    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.head", "decide.lock"]
 
 
 def test_client_refuses_a_state_directory_writable_by_others(paths):
