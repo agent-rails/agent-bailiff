@@ -118,6 +118,14 @@ def synthetic_user(tenant: str, identity: str) -> str:
     return f"{USER_PREFIX}:{tenant}:{identity}"
 
 
+def service_account_user(namespace: str, account: str) -> str:
+    return f"system:serviceaccount:{namespace}:{account}"
+
+
+def reaching_groups(namespace: str) -> list[str]:
+    return ["system:authenticated", "system:serviceaccounts", f"system:serviceaccounts:{namespace}"]
+
+
 def generate_manifests(
     catalog: OperationCatalog, effector: EffectorIdentity, tenants: Mapping[str, Sequence[str]]
 ) -> dict[str, Any]:
@@ -459,10 +467,13 @@ def _restart_policy(operation: CatalogOperation) -> list[dict[str, Any]]:
 
 
 def _binding_policy(effector: EffectorIdentity) -> list[dict[str, Any]]:
+    accounts = [effector.service_account, effector.audit_account]
+    usernames = [service_account_user(effector.namespace, account) for account in accounts]
     reaches = (
-        f"(s.kind == 'ServiceAccount' && s.namespace == '{effector.namespace}'"
-        f" && (s.name == '{effector.service_account}' || s.name == '{effector.audit_account}'))"
-        f" || (s.kind == 'User' && s.name.startsWith('{USER_PREFIX}:'))"
+        f"(s.kind == 'ServiceAccount' && s.namespace == '{effector.namespace}' && s.name in {accounts})"
+        f" || (s.kind == 'User' && (s.name.startsWith('{USER_PREFIX}:') || s.name in {usernames}))"
+        f" || (request.resource.resource == 'rolebindings' && s.kind == 'Group'"
+        f" && s.name in {reaching_groups(effector.namespace)})"
     )
     generated = f"(has({{0}}.metadata.labels) && '{GENERATED_LABEL}' in {{0}}.metadata.labels)"
     expression = (
@@ -490,7 +501,10 @@ def _binding_policy(effector: EffectorIdentity) -> list[dict[str, Any]]:
             "validations": [
                 {
                     "expression": expression,
-                    "message": "only the applier may grant to the effector or synthetic users or change generated RBAC",
+                    "message": (
+                        "only the applier may grant to the effector, synthetic users or groups that hold them,"
+                        " or change generated RBAC"
+                    ),
                 }
             ],
         },
