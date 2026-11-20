@@ -10,7 +10,7 @@ import pytest
 
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacAudit
-from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, KubernetesUnavailable
+from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, KubernetesUnavailable, PooledTransport
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
@@ -77,7 +77,7 @@ def cluster(tmp_path_factory):
             "transport": transport,
             "client": KubernetesClient(transport, directory / "effector"),
             "audit": RbacAudit(
-                transport,
+                PooledTransport(url.hostname, url.port, directory / "ca.crt", 4),
                 directory / "effector",
                 directory / "audit",
                 identity,
@@ -172,6 +172,16 @@ def test_only_the_applier_may_grant_to_the_effector_or_synthetic_users(cluster, 
     refused = [
         ("create", "rolebinding", "sneak", "--clusterrole=edit", f"--serviceaccount={sys_namespace}:effector"),
         ("create", "rolebinding", "sneak", "--clusterrole=edit", "--user=bailiff:ta:read"),
+        (
+            "create",
+            "rolebinding",
+            "sneak",
+            "--clusterrole=edit",
+            f"--user=system:serviceaccount:{sys_namespace}:effector",
+        ),
+        ("create", "rolebinding", "sneak", "--clusterrole=edit", "--group=system:authenticated"),
+        ("create", "rolebinding", "sneak", "--clusterrole=edit", "--group=system:serviceaccounts"),
+        ("create", "rolebinding", "sneak", "--clusterrole=edit", f"--group=system:serviceaccounts:{sys_namespace}"),
         ("label", "role", "bailiff-ta-scale", "extra=1"),
     ]
     for args in refused:
@@ -244,9 +254,31 @@ def test_a_cross_tenant_group_grant_is_drift_and_its_write_is_denied(cluster, re
     restore.extend([("-n", other, "rolebinding", "wide"), ("-n", other, "role", "wide")])
     time.sleep(SETTLE_SECONDS)
     problems = cluster["audit"].check()
-    assert f"bailiff:ta:scale may scale_deployment in {other}" in problems
+    assert (
+        f"the RoleBinding {other}/wide grants scale_deployment to every synthetic user through system:authenticated"
+    ) in problems
     assert scale(cluster, other) == 422
     assert scale(cluster, other, tenant="tb") == 200
+
+
+def test_a_user_subject_spelled_as_the_effector_username_grants_the_effector_and_is_drift(cluster, restore):
+    staging, sys_namespace = cluster["names"]["stg"], cluster["names"]["sys"]
+    user = f"system:serviceaccount:{sys_namespace}:effector"
+    kubectl("-n", staging, "create", "rolebinding", "spelled", "--clusterrole=view", f"--user={user}")
+    restore.append(("-n", staging, "rolebinding", "spelled"))
+    time.sleep(SETTLE_SECONDS)
+    allowed = kubectl("-n", staging, "auth", "can-i", "list", "configmaps", f"--as={user}", check=False)
+    assert allowed.stdout.strip() == "yes"
+    assert f"the RoleBinding {staging}/spelled grants to the effector or a synthetic user" in cluster["audit"].check()
+
+
+def test_the_audit_account_may_read_the_release_webhook_objects(cluster):
+    account = f"system:serviceaccount:{cluster['names']['sys']}:effector-audit"
+    for args in (
+        ("get", "validatingwebhookconfigurations/bailiff-release-webhook"),
+        ("-n", cluster["names"]["hook"], "get", "services/bailiff-release-webhook"),
+    ):
+        assert kubectl("auth", "can-i", *args, f"--as={account}", check=False).stdout.strip() == "yes", args
 
 
 def test_deleting_the_effector_binding_stops_the_next_call_and_is_drift(cluster, restore):

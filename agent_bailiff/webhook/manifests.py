@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,19 @@ from agent_bailiff.webhook.guard import guard_policies
 IMAGE_DIGEST = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 NAME = "bailiff-release-webhook"
 MODE_LABEL = "bailiff.dev/webhook-mode"
+WEBHOOK = "release.bailiff.dev"
+SERVICE_PATH = "/validate"
+SERVICE_PORT = 443
+MATCH_CONDITIONS = [{"name": "bailiff-user", "expression": "request.userInfo.username.startsWith('bailiff:')"}]
+RULES = [
+    {
+        "operations": ["CREATE", "UPDATE", "DELETE"],
+        "apiGroups": ["*"],
+        "apiVersions": ["*"],
+        "resources": ["*/*"],
+        "scope": "*",
+    }
+]
 
 
 def generate_manifests(
@@ -40,7 +54,7 @@ def generate_manifests(
         raise ValueError("ca_pem must be a PEM certificate")
     if pins.get("catalog_digest") != catalog.digest:
         raise ValueError("pins catalog digest does not match the loaded catalog")
-    service = {"name": NAME, "namespace": namespace, "path": "/validate", "port": 443}
+    service = {"name": NAME, "namespace": namespace, "path": SERVICE_PATH, "port": SERVICE_PORT}
     labels = {**LABELS, "app.kubernetes.io/name": NAME}
     pod_labels = {"app.kubernetes.io/name": NAME}
     mode = "enforce" if enforce else "audit"
@@ -162,24 +176,14 @@ def generate_manifests(
             "metadata": {"name": NAME, "labels": labels},
             "webhooks": [
                 {
-                    "name": "release.bailiff.dev",
+                    "name": WEBHOOK,
                     "admissionReviewVersions": ["v1"],
                     "sideEffects": "None",
                     "failurePolicy": "Fail" if enforce else "Ignore",
                     "timeoutSeconds": 3,
                     "matchPolicy": "Exact",
-                    "matchConditions": [
-                        {"name": "bailiff-user", "expression": "request.userInfo.username.startsWith('bailiff:')"}
-                    ],
-                    "rules": [
-                        {
-                            "operations": ["CREATE", "UPDATE", "DELETE"],
-                            "apiGroups": ["*"],
-                            "apiVersions": ["*"],
-                            "resources": ["*/*"],
-                            "scope": "*",
-                        }
-                    ],
+                    "matchConditions": copy.deepcopy(MATCH_CONDITIONS),
+                    "rules": copy.deepcopy(RULES),
                     "clientConfig": {"service": service, "caBundle": base64.b64encode(ca_pem).decode("ascii")},
                 }
             ],

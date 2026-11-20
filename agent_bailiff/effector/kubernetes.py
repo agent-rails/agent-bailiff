@@ -4,6 +4,7 @@ import base64
 import binascii
 import http.client
 import json
+import queue
 import ssl
 import urllib.parse
 from collections.abc import Mapping
@@ -61,6 +62,66 @@ class HttpsTransport:
             raise KubernetesUnavailable(str(exc)) from None
         finally:
             connection.close()
+
+
+class PooledTransport:
+    def __init__(self, host: str, port: int, ca_file: Path, size: int, max_response_bytes: int = 1 << 20) -> None:
+        self._host = host
+        self._port = port
+        self._context = ssl.create_default_context(cafile=str(ca_file))
+        self._max = max_response_bytes
+        self._idle: queue.LifoQueue[http.client.HTTPSConnection] = queue.LifoQueue(maxsize=size)
+
+    def request(self, method: str, path: str, headers: Mapping[str, str], body: bytes | None) -> tuple[int, bytes]:
+        try:
+            connection = self._idle.get_nowait()
+        except queue.Empty:
+            connection = self._connect()
+            status, will_close, data = self._exchange(connection, method, path, headers, body)
+        else:
+            try:
+                status, will_close, data = self._exchange(connection, method, path, headers, body)
+            except KubernetesUnavailable:
+                connection = self._connect()
+                status, will_close, data = self._exchange(connection, method, path, headers, body)
+        oversized = len(data) > self._max
+        if oversized or will_close:
+            connection.close()
+        else:
+            try:
+                self._idle.put_nowait(connection)
+            except queue.Full:
+                connection.close()
+        if oversized:
+            raise KubernetesUnavailable("response larger than the limit")
+        return status, data if 200 <= status < 300 else b""
+
+    def close(self) -> None:
+        while True:
+            try:
+                self._idle.get_nowait().close()
+            except queue.Empty:
+                return
+
+    def _connect(self) -> http.client.HTTPSConnection:
+        return http.client.HTTPSConnection(self._host, self._port, timeout=TIMEOUT_SECONDS, context=self._context)
+
+    def _exchange(
+        self,
+        connection: http.client.HTTPSConnection,
+        method: str,
+        path: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+    ) -> tuple[int, bool, bytes]:
+        try:
+            connection.request(method, path, body=body, headers=dict(headers))
+            response = connection.getresponse()
+            data = response.read(self._max + 1)
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise KubernetesUnavailable(str(exc)) from None
+        return response.status, not response.isclosed() or response.will_close, data
 
 
 class KubernetesClient:
