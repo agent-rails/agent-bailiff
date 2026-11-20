@@ -105,7 +105,7 @@ $ docker compose run --rm -T agent after-revoke
 {
   "task_id": "task-7a8ba7e75eb39931",
   "checks": [
-    {"scenario": "call after operator revoke refused", "expected": "refused: chain_invalid", "observed": "refused: chain_invalid", "pass": true}
+    {"scenario": "call after revoke refused", "expected": "refused: chain_invalid", "observed": "refused: chain_invalid", "pass": true}
   ]
 }
 $ docker compose run --rm -T reader

@@ -4,6 +4,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import pytest
 import test_quickstart_stack
 from test_quickstart import agent, verified_rows
 from test_quickstart_stack import b
@@ -12,12 +13,19 @@ from agent_bailiff.docket.otlp import span_id_for, trace_id_for
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
-PROFILES = ("trace",)
+PROFILES = ("trace", "rule")
+DECIDE = b.NAMES["decide"]
+RULE = b.NAMES["rule"]
+RULE_TIMEOUT_SECONDS = 60
+INJECTED = {
+    "allowed call reaches gitea": "result",
+    "injected out-of-scope call refused": "refused: out_of_scope",
+}
 
 EXPORT_TIMEOUT_SECONDS = 60
 CHECKPOINT_SCRIPT = """
 import json, os, stat, sys
-info = os.lstat("/v/exporter-data/checkpoint.json")
+info = os.lstat(sys.argv[1])
 json.dump([info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)], sys.stdout)
 """
 PROGRESS_SCRIPT = """
@@ -95,9 +103,43 @@ def exported_spans(stack, trace_ids, wanted):
         time.sleep(1)
 
 
-def test_every_verified_record_is_a_span_under_its_parent(stack):
-    task_id, _ = agent(stack, "run")
-    expected = expected_spans(verified_rows(stack, task_id))
+def rule_revokes(rows):
+    return [row for row in rows if row["writer"] == RULE and row["entry"]["decision"] == "revoke"]
+
+
+@pytest.fixture(scope="module")
+def revoked(stack):
+    task_id, observed = agent(stack, "inject")
+    assert observed == INJECTED
+    deadline = time.monotonic() + RULE_TIMEOUT_SECONDS
+    while not rule_revokes(verified_rows(stack, task_id)):
+        assert time.monotonic() < deadline, "the rule did not revoke the task"
+        time.sleep(1)
+    after_task, after = agent(stack, "after-revoke")
+    assert after_task == task_id
+    assert after == {"call after revoke refused": "refused: chain_invalid"}
+    return task_id, verified_rows(stack, task_id)
+
+
+def test_an_out_of_scope_refusal_revokes_its_task_through_the_rule(stack, revoked):
+    task_id, rows = revoked
+    refusals = [
+        row["entry"]
+        for row in rows
+        if row["writer"] == DECIDE and (row["entry"]["decision"], row["entry"]["reason"]) == ("refuse", "out_of_scope")
+    ]
+    assert [entry["tool"] for entry in refusals] == ["gitea.contents.read"]
+    [revoke] = [row["entry"] for row in rule_revokes(rows)]
+    assert revoke["parent_entry"] == refusals[0]["entry_id"]
+    assert (revoke["principal"], revoke["reason"], revoke["tenant"]) == ("rule", "task", b.TENANT)
+    assert not [row for row in rows if row["writer"] == b.NAMES["control"]]
+    checkpoint = "/v/rule-data/checkpoint.json"
+    assert stack.probe(CHECKPOINT_SCRIPT, arguments=[checkpoint]) == [b.DECIDE_UID, b.LEDGER_GID, 0o600]
+
+
+def test_every_verified_record_is_a_span_under_its_parent(stack, revoked):
+    _, rows = revoked
+    expected = expected_spans(rows)
     spans = exported_spans(stack, {trace_id for trace_id, _, _ in expected.values()}, set(expected))
     assert set(expected) <= set(spans), sorted(set(expected) - set(spans))
     children = 0
@@ -112,9 +154,16 @@ def test_every_verified_record_is_a_span_under_its_parent(stack):
         assert span["parentSpanId"] == f"{parent:016x}", span
         assert spans[parent]["traceId"] == span["traceId"]
     assert children == 3
-    assert stack.probe(CHECKPOINT_SCRIPT) == [b.EXPORTER_UID, b.EXPORTER_UID, 0o600]
+    checkpoint = "/v/exporter-data/checkpoint.json"
+    assert stack.probe(CHECKPOINT_SCRIPT, arguments=[checkpoint]) == [b.EXPORTER_UID, b.EXPORTER_UID, 0o600]
 
 
 def test_the_exporter_runs_as_its_own_uid(stack):
     identity = test_quickstart_stack.identity(stack.container("exporter"))
     assert identity == {(b.EXPORTER_UID, b.EXPORTER_UID, frozenset({b.EXPORTER_UID, b.DOCKET_READERS_GID}))}
+
+
+def test_the_rule_runs_as_decide_with_docket_access(stack):
+    identity = test_quickstart_stack.identity(stack.container("rule"))
+    groups = frozenset({b.LEDGER_GID, b.DOCKET_WRITERS_GID, b.DOCKET_READERS_GID})
+    assert identity == {(b.DECIDE_UID, b.LEDGER_GID, groups)}

@@ -49,7 +49,7 @@ def test_quickstart(stack):
     assert revoked["action"] == "revoke" and revoked["handles"] == {"task": task_id, "tenant": b.TENANT}
     after_task, after = agent(stack, "after-revoke")
     assert after_task == task_id
-    assert after == {"call after operator revoke refused": "refused: chain_invalid"}
+    assert after == {"call after revoke refused": "refused: chain_invalid"}
     decisions = [
         (row["writer"], row["entry"]["decision"], row["entry"]["tool"], row["entry"]["reason"])
         for row in verified_rows(stack, task_id)

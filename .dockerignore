@@ -9,5 +9,6 @@ examples
 __pycache__
 !examples/quickstart/bootstrap.py
 !examples/quickstart/agent.py
+!examples/quickstart/rule.py
 !examples/quickstart/routes.json
 !examples/quickstart/trace-requirements.txt
