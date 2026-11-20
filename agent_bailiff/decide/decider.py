@@ -379,15 +379,25 @@ class Decider:
         if tenant is None or task is None:
             logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
-        if not self._refusal_budget.admit(tenant, task):
-            logger.info("refusal %s for task %s over the record budget, not docketed", reason, task)
+        tool = entry.tool or ""
+        window = self._refusal_budget.admit(tenant, task, reason, tool)
+        if window is None:
+            logger.info(
+                "refusal %s of %s for tenant %s task %s agent %s over the record budget, not docketed (trace %s)",
+                reason,
+                tool,
+                tenant,
+                task,
+                entry.agent_key,
+                entry.trace_id,
+            )
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
         entry_id: str | None
         try:
             entry_id = self._append(replace(entry, decision="refuse", reason=reason))
         except Exception:
             logger.warning("docket entry for a refusal was not written", exc_info=True)
-            self._refusal_budget.refund(tenant, task)
+            self._refusal_budget.refund(tenant, task, reason, tool, window)
             entry_id = None
         return Decision(allowed=False, reason=reason, entry_id=entry_id, op_id=entry.op_id)
 

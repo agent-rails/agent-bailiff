@@ -430,6 +430,15 @@ def test_verified_refusals_past_the_task_budget_are_not_recorded(make_decider, d
     assert len(docket_entries(docket_paths)) == 3
 
 
+def test_refusals_of_another_kind_do_not_hide_the_first_out_of_scope_refusal(make_decider, docket_paths):
+    decider = make_decider(refusal_budget=RefusalBudget(limit=2, window_seconds=60, clock=FakeClock()))
+    padding = [decider.check(make_request(tool="deploy.delete", nonce=f"pad-{n}"), NOW) for n in range(5)]
+    assert {decision.reason for decision in padding} != {"out_of_scope"}
+    probe = decider.check(make_request(resource="env/prod/api", nonce="probe"), NOW)
+    assert (probe.reason, probe.entry_id is not None) == ("out_of_scope", True)
+    assert [entry.reason for entry in docket_entries(docket_paths)][-1] == "out_of_scope"
+
+
 def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_decider, docket_paths, client_options):
     docket = FailFirstDocket(DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options))
     decider = make_decider(docket=docket, refusal_budget=RefusalBudget(limit=1, window_seconds=60, clock=FakeClock()))
