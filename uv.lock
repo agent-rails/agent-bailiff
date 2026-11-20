@@ -28,7 +28,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-warrant", specifier = "==0.2.0" },
+    { name = "agent-warrant", specifier = "==0.3.0" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "grpcio", specifier = "==1.85.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = "==1.85.1" },
@@ -42,14 +42,14 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "agent-warrant"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7c/d5/b32221c3061736048e8ab5d9bcfbdecc7297f9747a87a602c1dc5bbf83f5/agent_warrant-0.2.0.tar.gz", hash = "sha256:f74ad7959694eaa0b2715989f05210790fc331aa830fed0aeb781b25efdacf1e", size = 107613, upload-time = "2026-11-15T21:18:14.803Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/76/5223312f9bd1d70807719ec1125199c1188bf76b18ce308ea76488eaedd2/agent_warrant-0.3.0.tar.gz", hash = "sha256:af137e4ebc82cbc51d1e930202f4d8d8a4d6bd2961655aef93119583edc31896", size = 108736, upload-time = "2026-11-20T08:32:56.814Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/f0/b5b885cd7291e6b821eabb9e52e605603fb3b7dce1f0005038f7b425a40d/agent_warrant-0.2.0-py3-none-any.whl", hash = "sha256:88781d900121dd6e5fb79c8473f1580bdb8a5423287b571ca795a414f9b201df", size = 58075, upload-time = "2026-11-15T21:18:13.534Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/50/2f065dc08d6c4e47ad88c46b69bd35a3c6b66d3284aee3df4360ffbdea58/agent_warrant-0.3.0-py3-none-any.whl", hash = "sha256:40fbd6ccc50310a47835f47198d709dd7145309f5ba70fcc33e845d32762b214", size = 58469, upload-time = "2026-11-20T08:32:55.452Z" },
 ]
 
 [[package]]
