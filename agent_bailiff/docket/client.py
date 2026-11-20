@@ -92,6 +92,8 @@ class DocketClient:
 
     def head(self) -> Head:
         with self._lock:
+            if self._lock_fd < 0:
+                raise DocketError("closed", "the docket client is closed")
             return self._fetch_head()
 
     def _append(self, entry: Entry) -> Record:
@@ -131,13 +133,23 @@ class DocketClient:
             raise DocketError("state_invalid", f"cannot open {name}: {exc.strerror}") from exc
         finally:
             os.close(directory_fd)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != STATE_MODE
+            ):
+                raise DocketError("state_invalid", f"{name} must be a 0600 file owned by uid {os.geteuid()}")
+            try:
+                locked = try_lock(fd)
+            except OSError as exc:
+                raise DocketError("state_invalid", f"cannot lock {name}: {exc.strerror}") from exc
+            if not locked:
+                raise DocketError("writer_locked", f"writer {self._writer} is in use by another client on this state")
+        except BaseException:
             os.close(fd)
-            raise DocketError("state_invalid", f"{name} must be a regular file owned by uid {os.geteuid()}")
-        if not try_lock(fd):
-            os.close(fd)
-            raise DocketError("writer_locked", f"writer {self._writer} is in use by another client on this state")
+            raise
         return fd
 
     def _load_acked(self) -> Head | None:

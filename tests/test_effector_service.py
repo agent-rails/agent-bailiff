@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import shutil
@@ -123,6 +124,17 @@ def test_the_effector_config_refuses_unknown_and_missing_keys(root):
 def test_the_effector_refuses_to_start_when_its_rbac_cannot_be_verified(root):
     with pytest.raises(RbacDrift, match="the RBAC check failed"):
         run.start_effector(load_effector(effector_config(root, free_port())))
+
+
+def test_an_effector_that_fails_to_start_releases_its_docket_writer(root, monkeypatch):
+    monkeypatch.setattr(RbacGate, "verify", lambda self: None)
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        settings = load_effector(effector_config(root, taken.getsockname()[1]))
+        with pytest.raises(OSError):
+            run.start_effector(settings)
+    run.start_effector(dataclasses.replace(settings, port=free_port())).close()
 
 
 def test_a_started_effector_serves_its_catalog_on_localhost(root, monkeypatch):
