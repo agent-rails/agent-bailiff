@@ -2,6 +2,8 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import grpc
@@ -46,13 +48,14 @@ def private_dir(workdir):
 def running(workdir, private_dir):
     servers = []
 
-    def start(processor, *, gateway_uid=UID, socket_path=None, private=None):
+    def start(processor, *, gateway_uid=UID, socket_path=None, private=None, **limits):
         server = ProcessorServer(
             processor,
             socket_path or workdir / "s" / "decide.sock",
             private or private_dir,
             gateway_uid=gateway_uid,
             socket_gid=GID,
+            **limits,
         )
         server.start()
         servers.append(server)
@@ -63,14 +66,66 @@ def running(workdir, private_dir):
         server.close()
 
 
-def call(socket_path, method=CHECK_REQUEST, message=None, response=ext_mcp_pb2.McpRequestResult):
+def call(socket_path, method=CHECK_REQUEST, message=None, response=ext_mcp_pb2.McpRequestResult, timeout=5):
     with grpc.insecure_channel(f"unix:{socket_path}") as channel:
         stub = channel.unary_unary(
             method,
             request_serializer=type(message or ext_mcp_pb2.McpRequest()).SerializeToString,
             response_deserializer=response.FromString,
         )
-        return stub(message or ext_mcp_pb2.McpRequest(method="tools/call"), timeout=5)
+        return stub(message or ext_mcp_pb2.McpRequest(method="tools/call"), timeout=timeout)
+
+
+class BlockingProcessor(RecordingProcessor):
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def check_request(self, message):
+        result = super().check_request(message)
+        self.entered.set()
+        self.release.wait(10)
+        return result
+
+
+def call_in_background(socket_path):
+    def run():
+        try:
+            call(socket_path)
+        except grpc.RpcError:
+            pass
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def test_a_call_abandoned_while_queued_never_reaches_the_processor(running, workdir):
+    processor = BlockingProcessor()
+    running(processor, workers=1)
+    first = call_in_background(workdir / "s" / "decide.sock")
+    assert processor.entered.wait(5)
+    with pytest.raises(grpc.RpcError) as caught:
+        call(workdir / "s" / "decide.sock", timeout=0.5)
+    assert caught.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+    processor.release.set()
+    first.join(10)
+    time.sleep(0.5)
+    assert len(processor.messages) == 1
+
+
+def test_calls_past_the_concurrency_limit_are_shed(running, workdir):
+    processor = BlockingProcessor()
+    running(processor, workers=1, max_concurrent_rpcs=1)
+    first = call_in_background(workdir / "s" / "decide.sock")
+    assert processor.entered.wait(5)
+    with pytest.raises(grpc.RpcError) as caught:
+        call(workdir / "s" / "decide.sock")
+    assert caught.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+    processor.release.set()
+    first.join(10)
+    assert len(processor.messages) == 1
 
 
 def test_a_gateway_uid_peer_reaches_the_processor(running, workdir):
