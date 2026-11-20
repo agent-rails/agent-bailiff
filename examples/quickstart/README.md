@@ -150,9 +150,12 @@ $ docker compose run --rm -T agent after-revoke
 
 - The rule matches signed fields only: writer `decide.quickstart`, decision `refuse`, reason `out_of_scope`, and a configured tool. It sees only what decide recorded, and it decides nothing about intent.
 - It follows the verified docket with its own checkpoint (`rule-data`), saved after each batch it handled. A restart does not revoke again. A crash before the checkpoint is saved repeats every revoke in that batch on restart: one extra `revoke` record per task, no second effect, because the ledger revoke is idempotent.
+- The rule exits on any failed revoke (ledger busy, docket unreachable, or a revoke applied whose docket record was not acknowledged) and compose restarts it (`restart: on-failure`); the restart repeats the unsaved batch, which records any missing revoke. A record that fails every time shows as a restart loop in `docker compose ps`; while it loops, later refusals are not revoked.
+- The revoke is asynchronous. Between decide's refusal and the revoke, at least one 0.5 s poll, the task's in-scope calls are still allowed. A refusal the docket did not record never reaches the rule.
 - It signs as its own docket writer, `rule.quickstart`, so it never shares a sequence with the operator `control` command. It runs as decide's uid, like `control`; see H1.
 - Spans come from verified docket records, never from the call path. The exporter reads the docket read-only, as uid 10008 in the docket reader group, on an internal network that reaches only Jaeger. A slow or stopped exporter delays spans; it never delays or refuses a call. The gateway itself is not traced.
 - Export is not evidence. Jaeger is a view; the signed docket is the record, and `docket verify` checks it.
+- The Jaeger UI has no login. Spans carry no secrets or arguments, but they show each record's principal, agent key and tenant/task handles to anyone who can reach `127.0.0.1` on this host.
 - Jaeger marks each span with a "Negative duration detected" warning. Docket records are instants, so every span has zero duration; the warning is cosmetic.
 
 Remove the stack and its volumes, including any profile services:
@@ -191,7 +194,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - `list_issues` on `quickstart/payroll` stays allowed: the resource is `gitea/issues`, not a repository, so the scope cannot tell `demo` from `payroll`.
 - `issue_read` accepts any `method` value gitea-mcp offers. Decide does not inspect it; the read-only token scope is what keeps it read-only.
 - gitea-mcp's `tools/list` exposes 48 tools, writes included, and the gateway returns all of them. Only the three routed tools can be called; the decide processor refuses any other name with `unknown_tool` before a scope check.
-- The rule is not detection. It acts on one signed refusal pattern for one configured tool; misuse that decide allows, or refuses for another reason, does not trigger it.
+- The rule is not detection. It acts on one signed refusal pattern for one configured tool; misuse that decide allows, or refuses for another reason, does not trigger it. An agent probing the payroll repo with `list_issues` (`gitea.issues.list`) is refused but not revoked.
 - The `bootstrap` container can read the Gitea admin password from the `gitea-admin` volume, to create the agent user and token. The running `custodian` container has the same uid (10003) but does not mount that volume.
 - Evidence is scoped:
   - Not every refusal is recorded. An `unknown_tool` refusal writes no record, and a refusal on an unverifiable chain has no task handle.
