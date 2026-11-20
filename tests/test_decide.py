@@ -32,6 +32,7 @@ from agent_bailiff.decide import (
 )
 from agent_bailiff.decide.refusals import RefusalBudget
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record
+from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused, token_hash
 
@@ -122,14 +123,15 @@ class AckLostDocket:
 
 
 class FailFirstDocket:
-    def __init__(self, inner):
+    def __init__(self, inner, reason="sink_unreachable"):
         self.inner = inner
+        self.reason = reason
         self.failed = False
 
     def append(self, entry):
         if not self.failed:
             self.failed = True
-            raise ConnectionError("sink unavailable")
+            raise DocketError(self.reason)
         return self.inner.append(entry)
 
 
@@ -441,7 +443,7 @@ def test_padding_refusals_record_a_capped_marker_before_a_probe_is_hidden(make_d
 
 
 def test_other_tasks_filling_the_tenant_share_record_a_tenant_capped_marker(make_decider, docket_paths):
-    budget = RefusalBudget(limit=2, window_seconds=60, max_tasks_per_tenant=2, clock=FakeClock())
+    budget = RefusalBudget(limit=2, window_seconds=60, max_windows_per_tenant=2, clock=FakeClock())
     decider = make_decider(refusal_budget=budget)
     for n in range(3):
         root = make_root(task_id=f"filler-{n}")
@@ -460,6 +462,29 @@ def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_deci
     second = decider.check(make_request(resource="env/prod/api", nonce="n-2"), NOW)
     assert (first.entry_id, second.entry_id is not None) == (None, True)
     assert [entry.reason for entry in docket_entries(docket_paths)] == ["out_of_scope"]
+
+
+@pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed"])
+def test_a_refusal_whose_entry_may_have_been_written_uses_the_budget(
+    make_decider, docket_paths, client_options, reason
+):
+    docket = FailFirstDocket(DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options), reason)
+    decider = make_decider(docket=docket, refusal_budget=RefusalBudget(limit=1, window_seconds=60, clock=FakeClock()))
+    first = decider.check(make_request(resource="env/prod/api", nonce="n-1"), NOW)
+    second = decider.check(make_request(resource="env/prod/api", nonce="n-2"), NOW)
+    assert (first.entry_id, second.entry_id is not None) == (None, True)
+    assert [entry.reason for entry in docket_entries(docket_paths)] == ["refusals_capped"]
+
+
+def test_operational_refusals_record_their_own_marker_and_do_not_hide_an_agent_refusal(make_decider, docket_paths):
+    budget = RefusalBudget(limit=2, window_seconds=60, clock=FakeClock())
+    decider = make_decider(suspension=Suspension(True), refusal_budget=budget)
+    suspended = [decider.check(make_request(nonce=f"s-{n}"), NOW).reason for n in range(4)]
+    assert suspended == ["suspended"] * 4
+    probe = decider.check(make_request(resource="env/prod/api", nonce="probe"), NOW)
+    assert (probe.reason, probe.entry_id is not None) == ("out_of_scope", True)
+    reasons = [entry.reason for entry in docket_entries(docket_paths)]
+    assert reasons == ["suspended", "suspended", "operational_refusals_capped", "out_of_scope"]
 
 
 def test_policy_refusal_entry_names_the_rule(make_decider, docket_paths):

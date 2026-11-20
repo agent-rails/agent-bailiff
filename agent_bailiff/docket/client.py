@@ -28,6 +28,7 @@ DEFAULT_TIMEOUT = 5.0
 STATE_MODE = 0o600
 MAX_STATE_BYTES = 256
 CHAIN_REFUSALS = frozenset({"wrong_seq", "broken_prev"})
+UNACKNOWLEDGED = frozenset({"no_ack", "bad_ack", "state_write_failed"})
 WRITER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -149,7 +150,10 @@ class DocketClient:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 connection.settimeout(self._timeout)
-                connection.connect(str(self._socket_path))
+                try:
+                    connection.connect(str(self._socket_path))
+                except OSError as exc:
+                    raise DocketError("sink_unreachable", str(exc)) from exc
                 self._check_sink(connection)
                 try:
                     connection.sendall(encode_frame(payload))
