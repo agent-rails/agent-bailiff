@@ -338,9 +338,9 @@ def test_follow_waits_for_new_records(docket, checkpoint):
 def test_a_replaced_docket_is_refused(docket, checkpoint):
     fill(docket, 2)
     export(docket, checkpoint, FakeExporter())
-    content = docket.path.read_bytes()
-    docket.path.unlink()
-    docket.path.write_bytes(content)
+    replacement = docket.path.with_name("replacement.log")
+    replacement.write_bytes(docket.path.read_bytes())
+    os.replace(replacement, docket.path)
     with pytest.raises(CheckpointMismatch, match="not the file"):
         export(docket, checkpoint, FakeExporter())
 
