@@ -41,6 +41,7 @@ REFUSAL_SHAPE = (
     " && has(mcp.result.content[0].text) && mcp.result.content[0].text in "
     + "[" + ", ".join(f"'{reason}'" for reason in sorted(REFUSAL_REASONS)) + "]"
 )
+REQUEST_ONLY_PHASES = frozenset({"request", "off"})
 REFUSAL_GUARD = {
     "kind": "expression",
     "methods": {"tools/call": "response"},
@@ -192,7 +193,7 @@ def _check_refusal_guard(problems: list[str], processors: list[Any]) -> None:
         for processor in processors
         if not isinstance(processor, dict)
         or not isinstance(processor.get("methods"), dict)
-        or "response" in processor["methods"].values()
+        or any(phase not in REQUEST_ONLY_PHASES for phase in processor["methods"].values())
     ]
     if responding != [REFUSAL_GUARD]:
         problems.append(

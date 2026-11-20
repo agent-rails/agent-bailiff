@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from agent_bailiff.adapters.agentgateway.config_check import (
     GatewayExpectations,
     validate_gateway_config,
 )
+from agent_bailiff.client.client import REFUSAL_REASONS
 
 DECIDE_SOCKET = Path("/run/bailiff-decide/decide.sock")
 CUSTODIAN_SOCKET = Path("/run/bailiff-custodian/custodian.sock")
@@ -150,11 +152,29 @@ def test_an_allowlist_without_a_required_chain_header_is_refused(missing):
             },
         ),
         lambda processors: processors[1].update(methods={"*": "request", "tools/call": "response"}),
+        lambda processors: processors[0].update(methods={"tools/call": "full"}),
+        lambda processors: processors.insert(
+            1,
+            {
+                "kind": "expression",
+                "methods": {"tools/call": "full"},
+                "condition": "true",
+                "transform": "mcp.result",
+            },
+        ),
+        lambda processors: processors.insert(
+            1,
+            {"kind": "remote", "host": "unix:/run/other.sock", "methods": {"*": "full"}, "failureMode": "failClosed"},
+        ),
     ],
 )
 def test_a_missing_or_weakened_refusal_guard_is_refused(change):
     problems = problems_after(lambda config: change(processors(config)))
     assert any("refusal guard" in problem for problem in problems)
+
+
+def test_every_refusal_reason_is_a_plain_cel_string():
+    assert all(re.fullmatch("[a-z_]+", reason) for reason in REFUSAL_REASONS)
 
 
 def test_custodian_before_decide_is_refused():
