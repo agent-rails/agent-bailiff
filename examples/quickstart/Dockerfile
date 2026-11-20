@@ -1,4 +1,4 @@
-FROM python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86
+FROM python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86 AS quickstart
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
@@ -17,6 +17,7 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10007 -g 10007 -m 0755 /var/lib/bailiff/tasks \
     && install -d -o 10006 -g 10006 -m 0700 /var/lib/bailiff/agent \
     && install -d -o 10006 -g 10006 -m 0755 /var/lib/bailiff/agent-public \
+    && install -d -o 10008 -g 10008 -m 0700 /var/lib/bailiff/exporter \
     && install -d -o 10001 -g 20000 -m 0750 /run/bailiff/docket \
     && install -d -o 10002 -g 20002 -m 0750 /run/bailiff/decide \
     && install -d -o 10003 -g 20002 -m 0750 /run/bailiff/custodian \
@@ -25,3 +26,10 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10007 -g 10007 -m 0755 /pins/issuer
 USER 65532:65532
 ENTRYPOINT ["python"]
+
+FROM quickstart AS trace
+
+USER root
+COPY examples/quickstart/trace-requirements.txt /tmp/trace-requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/trace-requirements.txt
+USER 65532:65532

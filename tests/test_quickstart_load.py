@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import test_quickstart_stack
 from test_quickstart_stack import b
+from test_quickstart_trace import wait_for_export
 
 pytestmark = [
     *test_quickstart_stack.pytestmark,
@@ -17,6 +18,7 @@ pytestmark = [
     ),
 ]
 stack = test_quickstart_stack.stack
+PROFILES = ("trace",)
 
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 CLIENTS = (1, 4, 16, 32)
@@ -28,7 +30,13 @@ MAX_DOCKET_UNAVAILABLE_RATE = 0.01
 def measure(stack, clients):
     stack.compose("run", "--rm", "--no-deps", "task-issuer", "/app/quickstart/bootstrap.py", "issue-load")
     arguments = ["--clients", str(clients), "--calls", str(CALLS_PER_CLIENT)]
-    return json.loads(stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "load", *arguments))
+    level = json.loads(stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "load", *arguments))
+    export = wait_for_export(stack)
+    return {
+        **level,
+        "exporter_backlog_records": export["backlog"],
+        "exporter_catchup_seconds": round(export["seconds"], 1),
+    }
 
 
 def docker_version():
