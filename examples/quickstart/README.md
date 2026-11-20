@@ -196,7 +196,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - The rule is not detection. It acts on one signed refusal pattern for one configured tool; misuse that decide allows, or refuses for another reason, does not trigger it. An agent probing the payroll repo with `list_issues` (`gitea.issues.list`) is refused but not revoked.
 - The `bootstrap` container can read the Gitea admin password from the `gitea-admin` volume, to create the agent user and token. The running `custodian` container has the same uid (10003) but does not mount that volume.
 - Evidence is scoped:
-  - Not every refusal is recorded. An `unknown_tool` refusal, a refusal on an unverifiable chain (`chain_invalid`, including a call after a revoke) and any refusal past 16 per task per 60 s write no record.
+  - Not every refusal is recorded. An `unknown_tool` refusal, a refusal on an unverifiable chain (`chain_invalid`, including a call after a revoke) and any refusal past 16 of the same reason and tool per task per 60 s write no record. The first `out_of_scope` refusal of `gitea.contents.read` in a window is always recorded, so the rule sees it.
   - A `release` record means the custodian released the token, not that Gitea applied the call: `released, target outcome unknown`.
   - The docket owner (uid 10001) can truncate the docket. The reader verifies signatures and order of what is there, not that nothing was removed from the end.
 - Limits of this setup:
