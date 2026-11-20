@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -103,6 +105,9 @@ class Upstream(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}/mcp"
 
     def calls(self, method="tools/call"):
+        return [dict(headers) for headers in self.raw_calls(method)]
+
+    def raw_calls(self, method="tools/call"):
         with self.lock:
             return [headers for seen, headers in self.requests if seen == method]
 
@@ -118,7 +123,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         with self.server.lock:
-            headers = {key.lower(): value for key, value in self.headers.items()}
+            headers = [(key.lower(), value) for key, value in self.headers.items()]
             self.server.requests.append((body.get("method"), headers))
         if "id" not in body:
             self.send_response(202)
@@ -408,18 +413,62 @@ UPSTREAM_VISIBLE = {"accept", "content-type", "mcp-protocol-version", "tracepare
 GATEWAY_SET = {"host", "content-length", "accept-encoding", "mcp-method", "mcp-name"}
 
 
+HOSTILE_HEADERS = [
+    ("Sudo", b"root"),
+    ("sudo", b"again"),
+    ("x-forwarded-user", b"admin"),
+    ("X-Dup", b"1"),
+    ("x-dup", b"2"),
+    ("x-bin", b"\xff\xfe"),
+    ("tracestate", b"vendor=1"),
+    ("tracestate", b"vendor=2"),
+    ("content-type", b"text/evil"),
+]
+
+
+def send_raw(agent, message, pairs):
+    url = urllib.parse.urlsplit(agent.url)
+    connection = http.client.HTTPConnection(url.hostname, url.port, timeout=15)
+    try:
+        connection.putrequest("POST", url.path, skip_accept_encoding=True)
+        body = json.dumps({"jsonrpc": "2.0", "id": 99, **message}).encode()
+        base = [
+            ("content-type", b"application/json"),
+            ("accept", b"application/json, text/event-stream"),
+            ("mcp-protocol-version", b"2025-06-18"),
+            ("content-length", str(len(body)).encode()),
+        ]
+        for key, value in base + pairs:
+            connection.putheader(key, value)
+        connection.endheaders(body)
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize("method", ["tools/call", "tools/list"])
 def test_only_allowlisted_agent_headers_reach_the_upstream(stack, method):
     request = make_request()
-    headers = {**agent_headers(request), **EXTRA_AGENT_HEADERS, "tracestate": "vendor=1"}
+    chain = [(key, value.encode()) for key, value in agent_headers(request).items()]
     if method == "tools/call":
-        stack["agent"].call("deploy_service", request.args, headers)
+        message = {"method": method, "params": {"name": "deploy_service", "arguments": request.args}}
     else:
-        stack["agent"].post({"method": method}, headers)
-    [seen] = stack["upstream"].calls(method)
+        message = {"method": method}
+    assert send_raw(stack["agent"], message, chain + HOSTILE_HEADERS) == 200
+    [seen] = stack["upstream"].raw_calls(method)
     released = {"authorization"} if method == "tools/call" else set()
-    assert set(seen) <= UPSTREAM_VISIBLE | GATEWAY_SET | released, seen
-    assert seen["tracestate"] == "vendor=1"
+    assert {key for key, _ in seen} <= UPSTREAM_VISIBLE | GATEWAY_SET | released, seen
+    assert dict(seen)["content-type"] == "application/json"
+
+
+def test_check_config_refuses_a_stateful_gateway_the_gateway_itself_accepts(stack, binary, workdir):
+    config = copy.deepcopy(stack["config"])
+    config["mcp"]["statefulMode"] = "stateful"
+    path = workdir / "stateful.json"
+    path.write_text(json.dumps(config))
+    accepted = subprocess.run([str(binary), "--validate-only", "-f", str(path)], capture_output=True, text=True)
+    assert accepted.returncode == 0 and "valid" in accepted.stdout, accepted
+    assert any("statefulMode" in problem for problem in validate_gateway_config(config, stack["expected"]))
 
 
 def test_a_notification_reaches_the_upstream_without_agent_credentials(stack):

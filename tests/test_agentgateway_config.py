@@ -83,6 +83,17 @@ def test_the_reference_config_passes():
     assert validate_gateway_config(gateway_config(), EXPECTED) == ()
 
 
+@pytest.mark.parametrize("mode", [None, "stateful", "Stateless", 1])
+def test_a_gateway_not_in_stateless_mode_is_refused(mode):
+    def change(config):
+        if mode is None:
+            del config["mcp"]["statefulMode"]
+        else:
+            config["mcp"]["statefulMode"] = mode
+
+    assert any("statefulMode" in problem for problem in problems_after(change))
+
+
 @pytest.mark.parametrize("index", [1, 2])
 def test_fail_open_is_refused(index):
     problems = problems_after(lambda config: processors(config)[index].update(failureMode="failOpen"))

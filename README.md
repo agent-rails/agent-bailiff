@@ -84,7 +84,7 @@ python -m agent_bailiff.adapters.agentgateway check-config \
   --custodian-socket /run/bailiff/custodian/custodian.sock
 ```
 
-It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, the wrong processor order or a TCP processor target.
+It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order or a TCP processor target.
 
 Each component has its own commands, run as that component's uid:
 
