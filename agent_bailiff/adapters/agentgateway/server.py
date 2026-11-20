@@ -27,6 +27,7 @@ GRPC_SOCKET_NAME = "grpc.sock"
 PRIVATE_DIR_FORBIDDEN_BITS = 0o077
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_CONNECTIONS = 64
+DEFAULT_MAX_CONCURRENT_RPCS = 2 * DEFAULT_WORKERS
 ACCEPT_POLL_SECONDS = 0.2
 CHUNK_BYTES = 65536
 
@@ -52,6 +53,7 @@ class ProcessorServer:
         socket_gid: int | None = None,
         workers: int = DEFAULT_WORKERS,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_concurrent_rpcs: int = DEFAULT_MAX_CONCURRENT_RPCS,
     ) -> None:
         if isinstance(gateway_uid, bool) or not isinstance(gateway_uid, int) or gateway_uid < 0:
             raise ValueError("gateway_uid must be a non-negative integer")
@@ -63,6 +65,7 @@ class ProcessorServer:
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
         self._workers = workers
         self._max_connections = max_connections
+        self._max_concurrent_rpcs = max_concurrent_rpcs
         self._grpc: Any = None
         self._listener: socket.socket | None = None
         self._lock_fd: int | None = None
@@ -110,7 +113,7 @@ class ProcessorServer:
         if not try_lock(self._lock_fd):
             raise ProcessorLocked(f"{lock_path} is held by another processor")
         remove_stale_socket(self._grpc_path)
-        self._grpc = _grpc_server(self._processor, self._grpc_path, self._workers)
+        self._grpc = _grpc_server(self._processor, self._grpc_path, self._workers, self._max_concurrent_rpcs)
         remove_stale_socket(self._socket_path)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener = listener
@@ -201,8 +204,11 @@ class ProcessorServer:
             connection.close()
 
 
-def _grpc_server(processor: ExtMcpProcessor, path: Path, workers: int) -> Any:
-    server = grpc.server(ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ext-mcp"))
+def _grpc_server(processor: ExtMcpProcessor, path: Path, workers: int, max_concurrent_rpcs: int) -> Any:
+    server = grpc.server(
+        ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ext-mcp"),
+        maximum_concurrent_rpcs=max_concurrent_rpcs,
+    )
     handler = grpc.method_handlers_generic_handler(
         SERVICE,
         {
