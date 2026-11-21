@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-11-21T23:43:32+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "python": "3.13.15"
+  },
+  "records": 20000,
+  "segment_bytes": 1048576,
+  "sealed_segments": 21,
+  "sealed_records": 19786,
+  "append_records_per_second": 2833,
+  "archive_records_per_second": 5165
+}
