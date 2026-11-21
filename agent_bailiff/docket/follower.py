@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from agent_bailiff.docket.entry import Head
 from agent_bailiff.docket.private_dir import open_private_dir
-from agent_bailiff.docket.sink import DocketCorrupt, Head, KidIndex, Verification, VerifiedLine
+from agent_bailiff.docket.sink import DocketCorrupt, KidIndex, Verification, VerifiedLine
 from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 from agent_bailiff.signing import MAX_TOKEN_CHARS, token_hash
 
