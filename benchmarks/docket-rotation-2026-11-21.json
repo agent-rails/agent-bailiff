@@ -1,0 +1,15 @@
+{
+  "recorded_at": "2026-11-21T19:57:09+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "python": "3.13.15"
+  },
+  "cuts": 200,
+  "records_per_segment": 1,
+  "cut_ms": {
+    "p50": 1.814,
+    "p99": 4.207,
+    "max": 10.377
+  }
+}
