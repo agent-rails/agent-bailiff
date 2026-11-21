@@ -26,7 +26,7 @@ CALLS_PER_CLIENT = 20
 ACCEPTED = {"result", "refused: docket_unavailable"}
 MAX_DOCKET_UNAVAILABLE_RATE = 0.01
 LOGGED_SERVICES = ("decide", "custodian", "docket", "gateway")
-LOGGED_LEVELS = (" WARNING ", " ERROR ", "\twarn\t", "\terror\t")
+LOGGED_LEVELS = (" WARNING ", " ERROR ", "\twarn\t", "\terror\t", "Z Error: ", "Z Caused by:", "(os error ")
 MAX_LOGGED_LINES = 60
 
 
