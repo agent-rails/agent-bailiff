@@ -36,7 +36,9 @@ CUSTODIAN_KEYS = frozenset(
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
     | {"docket", "gateway"}
 )
-DOCKET_KEYS = frozenset({"docket", "socket", "socket_group", "reader_group", "allowed_uids", "writers"})
+DOCKET_KEYS = frozenset(
+    {"docket", "socket", "socket_group", "reader_group", "allowed_uids", "writers", "snapshot_every"}
+)
 EFFECTOR_KEYS = frozenset(
     {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
     | {"max_clearance_lifetime", "port", "kubernetes", "rbac", "ledger", "docket"}
@@ -215,6 +217,7 @@ class DocketSettings:
     reader_group: int | None
     allowed_uids: frozenset[int]
     writers: Writers
+    snapshot_every: int
 
 
 @dataclass(frozen=True)
@@ -372,6 +375,7 @@ def parse_docket(document: object) -> DocketSettings:
         reader_group=config.optional_os_id("reader_group"),
         allowed_uids=allowed,
         writers=_writers(config),
+        snapshot_every=config.integer("snapshot_every", 1),
     )
 
 

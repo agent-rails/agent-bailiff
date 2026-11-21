@@ -291,6 +291,7 @@ def test_docket_init_keeps_the_docket_private_without_a_reader_group(root, decid
     code, _, err = docket_init(root, directory, decide_pin, capsys)
     assert code == 0, err
     assert load_docket(directory / "config.json").reader_group is None
+    assert load_docket(directory / "config.json").snapshot_every == 10_000
     assert mode(directory) == (0o700, UID)
 
 
