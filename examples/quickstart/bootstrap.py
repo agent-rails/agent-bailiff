@@ -26,7 +26,7 @@ from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
 from agent_bailiff.service.init import InitError, read_pin
-from agent_bailiff.service.settings import load_control, load_custodian, load_decide, load_docket
+from agent_bailiff.service.settings import ConfigError, load_control, load_custodian, load_decide, load_docket
 
 DOCKET_UID = 10001
 DECIDE_UID = 10002
@@ -258,7 +258,11 @@ def init_docket() -> str:
     pins = [read_pin(pin_path(component)) for component in WRITERS]
     expected = {pin.component: {pin.kid} for pin in pins}
     if config.exists():
-        writers = {component: set(keys) for component, keys in load_docket(config).writers.items()}
+        try:
+            settings = load_docket(config)
+        except ConfigError as error:
+            raise BootstrapError(f"{config}: {error}; run docker compose down --volumes and start again") from None
+        writers = {component: set(keys) for component, keys in settings.writers.items()}
         if writers != expected:
             raise BootstrapError(f"{config} pins other writers than {PINS}; run docker compose down --volumes")
         return "kept"
