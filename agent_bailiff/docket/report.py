@@ -13,7 +13,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.entry import Entry, Head
 from agent_bailiff.docket.manifest import read_docket_manifest
-from agent_bailiff.docket.segments import BoundedReader, OpenedSegment, SegmentMismatch, open_segment
+from agent_bailiff.docket.segments import (
+    BoundedReader,
+    OpenedSegment,
+    SegmentMismatch,
+    open_segment,
+    read_listed_manifest,
+)
 from agent_bailiff.docket.sink import (
     SEGMENT_MISMATCH,
     ChainState,
@@ -68,7 +74,7 @@ def verify_records(
     check: SnapshotCheck | None = None,
 ) -> VerifyReport:
     index = build_kid_index(writers)
-    manifest = read_docket_manifest(path)
+    manifest = read_listed_manifest(path)
     segment = manifest.first_segment
     heads = {} if manifest.base is None else dict(manifest.base.end_heads)
     entries = 0 if manifest.base is None else manifest.base.entries

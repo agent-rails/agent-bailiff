@@ -21,6 +21,7 @@ from agent_bailiff.docket.manifest import (
     manifest_path,
     read_manifest,
     segment_path,
+    unknown_segment_files,
     write_manifest,
 )
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
@@ -300,17 +301,14 @@ def _reconcile(
     name = docket_path.name
     for leftover in (f"{name}.new", f"{manifest_path(docket_path).name}.tmp", f"{snapshot_path(docket_path).name}.tmp"):
         _unlink_if_present(leftover, directory_fd)
-    expected = {segment_path(docket_path, entry.segment).name for entry in manifest.segments}
-    present = {item for item in os.listdir(directory_fd) if item.startswith(f"{name}.seg-")}
-    removed = None if manifest.base is None else segment_path(docket_path, manifest.base.segment).name
-    if manifest.base is not None and removed in present:
+    present = set(os.listdir(directory_fd))
+    unknown = unknown_segment_files(docket_path, manifest, present)
+    if unknown:
+        raise DocketCorrupt(_segment_mismatch(f"segment files not in the manifest: {', '.join(unknown)}"))
+    if manifest.base is not None and segment_path(docket_path, manifest.base.segment).name in present:
         _finish_removal(
             docket_path, directory_fd, manifest.docket_id, manifest.base.segment, reader_gid, fsync, receipts
         )
-        present.discard(removed)
-    unknown = sorted(present - expected)
-    if unknown:
-        raise DocketCorrupt(_segment_mismatch(f"segment files not in the manifest: {', '.join(unknown)}"))
     if not manifest.segments:
         return
     *earlier, last = manifest.segments

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from agent_bailiff.docket.manifest import SegmentEntry, read_docket_manifest, segment_path
+from agent_bailiff.docket.manifest import (
+    Manifest,
+    SegmentEntry,
+    read_docket_manifest,
+    segment_path,
+    unknown_segment_files,
+)
 
 MAX_OPEN_ATTEMPTS = 3
 
@@ -40,6 +46,19 @@ class BoundedReader:
     def _remaining(self, size: int) -> int:
         left = max(self._end - self._stream.tell(), 0)
         return left if size < 0 else min(size, left)
+
+
+def read_listed_manifest(docket_path: Path) -> Manifest:
+    for _ in range(MAX_OPEN_ATTEMPTS):
+        manifest = read_docket_manifest(docket_path)
+        names = os.listdir(docket_path.parent)
+        if read_docket_manifest(docket_path).generation != manifest.generation:
+            continue
+        unknown = unknown_segment_files(docket_path, manifest, names)
+        if unknown:
+            raise SegmentMismatch(f"segment files not in the manifest of {docket_path}: {', '.join(unknown)}")
+        return manifest
+    raise SegmentMismatch(f"the manifest of {docket_path} changed on every directory listing; run again")
 
 
 def open_segment(docket_path: Path, segment: int) -> OpenedSegment | None:
