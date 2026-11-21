@@ -448,9 +448,20 @@ def test_verification_yields_each_record_with_its_line_and_end(paths, start_sink
     ends = [len(line) + 1 for line in lines(paths[0])]
     assert [item.line for item in verified] == [1, 2, 3]
     assert [item.record.token for item in verified] == [record.token for record in records]
+    assert [item.start for item in verified] == [0, ends[0], ends[0] + ends[1]]
     assert [item.end for item in verified] == [ends[0], ends[0] + ends[1], sum(ends)]
     assert verification.report == verify_docket(paths[0], WRITERS)
     assert verification.report.ok and verification.report.valid_bytes == sum(ends)
+
+
+def test_verification_from_an_offset_reports_absolute_starts(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    first = len(records[0].token) + 1
+    with open(paths[0], "rb") as docket:
+        docket.seek(first)
+        heads = {"decide": Head(1, records[0].hash)}
+        verified = list(Verification(docket, INDEX, heads=heads, entries=1, offset=first))
+    assert [(item.line, item.start) for item in verified] == [(2, first), (3, first + len(records[1].token) + 1)]
 
 
 def test_verification_stops_before_the_first_bad_line(paths, start_sink):

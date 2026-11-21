@@ -136,7 +136,7 @@ def export(docket, checkpoint, exporter, **options):
 
 
 def verified(record, line=1):
-    return VerifiedLine(line=line, record=record, end=len(record.token) + 1)
+    return VerifiedLine(line=line, record=record, start=0, end=len(record.token) + 1)
 
 
 def test_sdk_exports_a_span_with_the_given_ids(collector):

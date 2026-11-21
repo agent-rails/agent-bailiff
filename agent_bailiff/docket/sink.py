@@ -109,6 +109,7 @@ def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
 class VerifiedLine:
     line: int
     record: Record
+    start: int
     end: int
 
 
@@ -170,8 +171,9 @@ class Verification:
                 return
             heads[record.writer] = Head(seq=record.seq, hash=record.hash)
             count = line_number
+            start = offset
             offset += len(raw)
-            yield VerifiedLine(line_number, record, offset)
+            yield VerifiedLine(line_number, record, start, offset)
         self._report = VerifyReport(True, count, heads, valid_bytes=offset)
 
 
