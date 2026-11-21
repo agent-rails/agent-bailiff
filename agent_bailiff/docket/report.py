@@ -74,6 +74,8 @@ def verify_records(
     entries = 0 if manifest.base is None else manifest.base.entries
     while True:
         opened = open_segment(path, segment)
+        if opened is None and not path.exists() and read_docket_manifest(path).generation == 0:
+            raise FileNotFoundError(f"{path} does not exist")
         if opened is None:
             raise SegmentMismatch(f"segment {segment} of {path} cannot be opened; start the sink to finish a cut")
         with opened.stream:

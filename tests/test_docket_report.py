@@ -222,6 +222,11 @@ def test_torn_tail_after_a_cut_is_reported_as_torn_tail(docket):
     assert (report.ok, report.reason, report.entries) == (False, "torn_tail", 3)
 
 
+def test_a_missing_docket_that_was_never_cut_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        verify_docket(tmp_path / "docket.log", WRITERS)
+
+
 def test_a_record_of_an_unpinned_writer_fails(docket, pin_files, capsys):
     filled(docket)
     code, _, err = verify(docket, pin_files, "--json", capsys=capsys, writers=("decide",))
