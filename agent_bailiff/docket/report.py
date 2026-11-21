@@ -8,11 +8,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import BinaryIO
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from agent_bailiff.docket.archiver import ArchiveCopies, ArchivedCopy, encode_sidecar
 from agent_bailiff.docket.entry import Entry, Head
-from agent_bailiff.docket.manifest import read_docket_manifest
+from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, read_docket_manifest
 from agent_bailiff.docket.segments import (
     BoundedReader,
     OpenedSegment,
@@ -72,12 +74,20 @@ def verify_records(
     selected: RecordFilter,
     emit: Callable[[VerifiedLine], None],
     check: SnapshotCheck | None = None,
+    archive: Path | None = None,
 ) -> VerifyReport:
     index = build_kid_index(writers)
     manifest = read_listed_manifest(path)
     segment = manifest.first_segment
-    heads = {} if manifest.base is None else dict(manifest.base.end_heads)
-    entries = 0 if manifest.base is None else manifest.base.entries
+    heads: dict[str, Head] = {}
+    entries = 0
+    if manifest.base is not None and archive is None:
+        heads, entries = dict(manifest.base.end_heads), manifest.base.entries
+    if manifest.base is not None and archive is not None:
+        report = _verify_archive(archive, manifest, manifest.base, index, selected, emit)
+        if not report.ok:
+            return report
+        heads, entries = dict(report.heads), report.entries
     while True:
         opened = open_segment(path, segment)
         if opened is None and not path.exists() and read_docket_manifest(path).generation == 0:
@@ -93,6 +103,51 @@ def verify_records(
             return report
         heads, entries = dict(report.heads), report.entries
         segment += 1
+
+
+def _verify_archive(
+    archive: Path,
+    manifest: Manifest,
+    base: Base,
+    index: KidIndex,
+    selected: RecordFilter,
+    emit: Callable[[VerifiedLine], None],
+) -> VerifyReport:
+    heads: dict[str, Head] = {}
+    entries = 0
+    with ArchiveCopies.open(archive, manifest.docket_id) as copies:
+        for segment in range(1, base.segment + 1):
+            copy = copies.open_copy(segment)
+            with copy.stream:
+                report = _verify_archived(copy, manifest.docket_id, index, heads, entries, selected, emit)
+            if not report.ok:
+                return report
+            heads, entries = dict(report.heads), report.entries
+    if entries != base.entries or heads != dict(base.end_heads):
+        detail = f"the archive ends at {entries} records with other heads than the manifest base"
+        return VerifyReport(False, entries, heads, None, SEGMENT_MISMATCH, detail)
+    return VerifyReport(True, entries, heads)
+
+
+def _verify_archived(
+    copy: ArchivedCopy,
+    docket_id: str,
+    index: KidIndex,
+    heads: dict[str, Head],
+    entries: int,
+    selected: RecordFilter,
+    emit: Callable[[VerifiedLine], None],
+) -> VerifyReport:
+    report, digest, kids = _read_records(copy.stream, copy.size, index, heads, entries, selected, emit, None)
+    if not report.ok and report.reason != "torn_tail":
+        return report
+    derived = SegmentEntry(
+        copy.segment, digest, copy.size, entries + 1, report.entries - entries, dict(report.heads), kids
+    )
+    if report.ok and encode_sidecar(docket_id, derived) == copy.sidecar:
+        return report
+    detail = f"archived segment {copy.segment} does not match its sidecar"
+    return VerifyReport(False, report.entries, report.heads, None, SEGMENT_MISMATCH, detail, report.valid_bytes)
 
 
 class _Digesting:
@@ -120,23 +175,14 @@ def _verify_segment(
     emit: Callable[[VerifiedLine], None],
     check: SnapshotCheck | None,
 ) -> VerifyReport:
-    source = _Digesting(BoundedReader(opened.stream, opened.end))
-    verification = Verification(source, index, heads=heads, entries=entries)
-    kids: set[str] = set()
-    for verified in verification:
-        kids.add(verified.record.kid)
-        if check is not None:
-            check.observe(verified)
-        if selected.matches(verified.record.entry):
-            emit(verified)
-    report = verification.report
+    report, digest, kids = _read_records(opened.stream, opened.end, index, heads, entries, selected, emit, check)
     sealed = opened.sealed
     if sealed is None:
         return report
     if not report.ok and report.reason != "torn_tail":
         return report
     differences = [] if report.ok else ["ends with an incomplete line"]
-    if source.digest.hexdigest() != sealed.sha256:
+    if digest != sealed.sha256:
         differences.append("sha256")
     if report.entries != sealed.first_entry + sealed.entries - 1:
         differences.append("entries")
@@ -148,6 +194,28 @@ def _verify_segment(
         return report
     detail = f"segment {sealed.segment} does not match its manifest entry: {', '.join(differences)}"
     return VerifyReport(False, report.entries, report.heads, None, SEGMENT_MISMATCH, detail, report.valid_bytes)
+
+
+def _read_records(
+    stream: BinaryIO,
+    end: int,
+    index: KidIndex,
+    heads: dict[str, Head],
+    entries: int,
+    selected: RecordFilter,
+    emit: Callable[[VerifiedLine], None],
+    check: SnapshotCheck | None,
+) -> tuple[VerifyReport, str, frozenset[str]]:
+    source = _Digesting(BoundedReader(stream, end))
+    verification = Verification(source, index, heads=heads, entries=entries)
+    kids: set[str] = set()
+    for verified in verification:
+        kids.add(verified.record.kid)
+        if check is not None:
+            check.observe(verified)
+        if selected.matches(verified.record.entry):
+            emit(verified)
+    return verification.report, source.digest.hexdigest(), frozenset(kids)
 
 
 def read_docket_snapshot(path: Path, docket_path: Path) -> Snapshot:

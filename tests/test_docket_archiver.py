@@ -407,6 +407,84 @@ def test_cli_refuses_an_archive_on_the_docket_device(layout, pin_files, capsys):
     assert "docket's device" in err
 
 
+def verify_command(layout, pin_files, capsys, *arguments):
+    root, docket = layout
+    pins = [item for path in pin_files.values() for item in ("--pin", str(path))]
+    code = cli.main(["docket", "verify", "--docket", str(docket.path), *pins, "--json", *map(str, arguments)])
+    captured = capsys.readouterr()
+    return code, [json.loads(line)["line"] for line in captured.out.splitlines()], captured.err
+
+
+def archived_and_removed(layout):
+    manifest = two_segments(layout[1])
+    assert run(layout) == 2
+    return manifest, remove_oldest(layout[1], manifest)
+
+
+def test_verify_with_the_archive_reads_from_the_first_record(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    code, lines, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == 0, err
+    assert lines == [1, 2, 3, 4, 5, 6]
+    assert "6 records verified, 6 printed" in err
+
+
+def test_verify_without_the_archive_starts_at_the_base(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    code, lines, err = verify_command(layout, pin_files, capsys)
+    assert code == 0, err
+    assert lines == [5, 6]
+
+
+def test_verify_refuses_an_archived_copy_differing_from_its_sidecar(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    copy = copies(layout, manifest) / "seg-000000000001"
+    content = bytearray(copy.read_bytes())
+    content[-3] ^= 1
+    copy.write_bytes(bytes(content))
+    code, _, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert "fails verification" in err
+
+
+def test_verify_refuses_a_sidecar_differing_from_its_copy(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    sidecar = copies(layout, manifest) / "seg-000000000001.json"
+    sidecar.write_bytes(sidecar.read_bytes().replace(b'"entries":4', b'"entries":3'))
+    code, _, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert "archived segment 1 does not match its sidecar" in err
+
+
+def test_verify_refuses_an_archive_missing_a_removed_segment(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    (copies(layout, manifest) / "seg-000000000001").unlink()
+    code, _, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert "segment 1 has no archived copy" in err
+
+
+def test_verify_refuses_an_archived_copy_another_uid_could_write(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    os.chmod(copies(layout, manifest) / "seg-000000000001", 0o664)
+    code, _, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert "with mode 0640" in err
+
+
+def test_verify_refuses_an_archive_that_ends_away_from_the_base(layout, pin_files, capsys):
+    _, removed = archived_and_removed(layout)
+    base = removed.base
+    forged = {**base.end_heads, "decide": Head(base.end_heads["decide"].seq, "A" * 43)}
+    write_manifest(
+        manifest_path(layout[1].path),
+        Manifest(removed.docket_id, removed.generation + 1, Base(base.segment, base.entries, forged), removed.segments),
+    )
+    code, _, err = verify_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert "the archive ends at 4 records with other heads than the manifest base" in err
+
+
 class Clock:
     def __init__(self, now=NOW):
         self.now = now
