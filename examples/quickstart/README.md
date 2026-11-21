@@ -19,9 +19,10 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 | `exporter` | 10008 | `trace` profile: verified docket records to OTLP spans |
 | `jaeger` | 10009 | `trace` profile: trace UI on `127.0.0.1:16686` |
 | `agent` | 10006 | Scripted agent on the internal `edge` network only |
+| `gitea-mcp-spike` | image default | `spike` profile: a second gitea-mcp with a host port, for the spike test only |
 | `*-init`, `bootstrap`, `task-issuer`, `agent-key` | per component | One-shot setup |
 
-Every bailiff container is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. Only `gitea`, `gitea-mcp`, `bootstrap` and `gateway` have a network beyond `edge`. gitea-mcp also publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`), for the spike test; a call there bypasses the gateway and carries no token.
+Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. Only `gitea`, `gitea-mcp`, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too, so no container in the default stack can reach outside the host or publish a port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
 
 The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/issues`, budget 20, one hour. Three routes exist (`routes.json`): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include.
 
