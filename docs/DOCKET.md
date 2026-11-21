@@ -45,7 +45,7 @@ A docket config with `reader_group` set lets members of that group read the dock
 - Readers see every record: tools, resources, principals, tenants and argument digests, never the arguments themselves.
 - Readers cannot append, truncate or replace the docket. `docket verify` detects forged, altered, reordered or deleted records within each writer's chain; it cannot detect the sink uid truncating the newest records of a writer. The sink's start checks less; see Heads snapshot.
 - Without `reader_group` the docket stays 0600 and only the sink uid and root can read it.
-- To add `reader_group` to an existing docket: stop the sink, give the directory the group and mode 0750 and the docket the group and mode 0640, set `reader_group` in `config.json`, then start the sink. Removing it is the reverse, back to 0700 and 0600; the sink refuses to start on any mix.
+- To add `reader_group` to an existing docket: stop the sink, give the directory the group and mode 0750 and the docket and `<docket>.snapshot` the group and mode 0640, set `reader_group` in `config.json`, then start the sink. Removing it is the reverse, back to 0700 and 0600; the sink refuses to start on any mix, and a snapshot left at the old mode refuses start with `snapshot_mismatch`.
 
 ## docket verify
 
@@ -59,7 +59,7 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 - Records print as tab-separated columns, with control and non-ASCII characters escaped; `--json` prints one JSON object per record, including the signed `token`, so a record can be passed on as written. The summary goes to stderr.
 - A record with `performed` true is labelled `released, target outcome unknown`: the custodian released the credential, and the docket does not record what the target did with it.
 - Exit 0 when every record verifies. Exit 1 when a line fails: the records before it are printed, and stderr names the line and reason. Exit 1 too for an unreadable docket or pin.
-- `--snapshot PATH` also cross-checks a heads snapshot. The snapshot must be owned by the docket's owner with mode 0600, or 0640 and the docket's group when the docket is 0640. After every record verifies, the record count, the SHA-256 of the bytes before the snapshot offset, each writer's anchor and the key ids are rebuilt from the verified records and compared. Exit 1 if any differ, if the offset is not the end of a verified line, or if the snapshot is missing or invalid; stderr names the fields that differ. The records printed are the same with and without it.
+- `--snapshot PATH` also cross-checks a heads snapshot. The snapshot must be owned by the docket's owner with mode 0600, or 0640 and the docket's group when the docket is 0640. After every record verifies, the record count, the SHA-256 of the bytes before the snapshot offset, each writer's anchor and the key ids are rebuilt from the verified records and compared. Exit 1 if any differ, if the offset is not the end of a verified line, or if the snapshot is missing or invalid; stderr names the fields that differ. On a match, stderr also gives the number of records after the snapshot. Exit 0 does not mean the snapshot is recent: a snapshot that stopped being refreshed still matches. Alert on that count if it keeps growing past `snapshot_every`. The records printed are the same with and without it.
 - Verifying a docket while the sink is appending can report `torn_tail` for a line still being written. Run it again; if `torn_tail` stays, follow Torn tail repair.
 
 ## docket export
@@ -135,7 +135,8 @@ A crash during a write can leave an incomplete final line. `verify_docket` repor
 
 The sink refuses to start with `snapshot_mismatch` when the docket and its snapshot disagree. With the sink stopped:
 
-1. Run `docket verify --snapshot <docket>.snapshot`. If a docket line fails, the docket itself is damaged: treat it as an integrity incident, and if the reason is `torn_tail` follow Torn tail repair, which also deletes the snapshot.
-2. If every record verifies and the offset is past the end of the docket after a power loss, the disk lost bytes it had acknowledged (on macOS, see the `F_FULLFSYNC` note above). The records past the end were acknowledged to writers and are gone; treat it as an integrity incident.
-3. If every record verifies and the snapshot differs anyway, the snapshot or the docket was rewritten. Treat it as an integrity incident.
-4. Once the docket is confirmed as the intended one, move the snapshot aside, keep it for the investigation, and start the sink. It verifies every record and writes a new snapshot.
+1. If the reason names the snapshot's mode, owner or group, check whether `reader_group` was just added or removed. If so, give the snapshot the docket's group and mode (see Readers) or move it aside, and start the sink.
+2. Run `docket verify --snapshot <docket>.snapshot`. If a docket line fails, the docket itself is damaged: treat it as an integrity incident, and if the reason is `torn_tail` follow Torn tail repair, which also deletes the snapshot.
+3. If every record verifies and the offset is past the end of the docket after a power loss, the disk lost bytes it had acknowledged (on macOS, see the `F_FULLFSYNC` note above). The records past the end were acknowledged to writers and are gone; treat it as an integrity incident.
+4. If every record verifies and the snapshot differs anyway, the snapshot or the docket was rewritten. Treat it as an integrity incident.
+5. Once the docket is confirmed as the intended one, move the snapshot aside, keep it for the investigation, and start the sink. It verifies every record and writes a new snapshot.
