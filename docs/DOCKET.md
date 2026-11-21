@@ -128,6 +128,7 @@ It does not detect:
 - Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
 - Alert on the `docket refusing appends` log line and on free space approaching the floor. Free space; no restart is needed, appends resume on the next request.
 - The docket still grows without bound. The floor bounds the damage of a full disk; it does not remove records.
+- Measured on one host (`benchmarks/docket-floor-2026-11-21.json`, Apple silicon, APFS): `fstatvfs` took 0.81 µs per call against an append p50 of about 1 ms. Append p50 with the check was 1.03 ms and 0.95 ms with a constant result; one run each cannot separate that gap from noise.
 
 ## Torn tail repair
 
