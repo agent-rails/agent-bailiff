@@ -10,7 +10,7 @@ PINS = {
     "agent-warrant==0.3.0",
     "toolcall-authz==0.3.0",
     "cryptography==50.0.2",
-    "grpcio==1.85.1",
+    "grpcio==1.85.3",
     "protobuf==7.36.2",
 }
 PINNED_NAMES = ("agent-warrant", "toolcall-authz", "cryptography", "grpcio", "protobuf")
