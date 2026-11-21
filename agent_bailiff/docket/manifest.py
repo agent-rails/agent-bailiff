@@ -111,6 +111,19 @@ class Manifest:
             replace(self, generation=self.generation + 1, segments=(*self.segments, entry)).to_document()
         )
 
+    def removed_oldest(self) -> Manifest:
+        if not self.segments:
+            raise ManifestInvalid("the manifest has no sealed segment to remove")
+        oldest, *rest = self.segments
+        base = Base(oldest.segment, oldest.first_entry + oldest.entries - 1, oldest.end_heads)
+        return Manifest.from_document(
+            replace(self, generation=self.generation + 1, base=base, segments=tuple(rest)).to_document()
+        )
+
+    @property
+    def sealed_bytes(self) -> int:
+        return sum(entry.size for entry in self.segments)
+
     def to_document(self) -> dict[str, Any]:
         return {
             "version": MANIFEST_VERSION,

@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 
 from agent_bailiff.docket.manifest import Manifest, SegmentEntry
 from agent_bailiff.docket.receipt import Receipt
 
 MAX_CLOCK_AHEAD = 60
+MIN_RECEIPT_AGE = 3600
+MAX_RECEIPT_AGE = 7 * 86400
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Retention:
+    receipt_dir: Path
+    archiver_uid: int
+    retained_bytes: int
+    max_receipt_age: int
+
+    def __post_init__(self) -> None:
+        if not self.receipt_dir.is_absolute():
+            raise ValueError("receipt_dir must be an absolute path")
+        if type(self.archiver_uid) is not int or self.archiver_uid < 0:
+            raise ValueError("archiver_uid must be a non-negative integer")
+        if type(self.retained_bytes) is not int or self.retained_bytes < 1:
+            raise ValueError("retained_bytes must be a positive integer")
+        age = self.max_receipt_age
+        if type(age) is not int or not MIN_RECEIPT_AGE <= age <= MAX_RECEIPT_AGE:
+            raise ValueError(f"max_receipt_age must be an integer between {MIN_RECEIPT_AGE} and {MAX_RECEIPT_AGE}")
 
 
 def removable(
