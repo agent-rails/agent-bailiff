@@ -8,10 +8,12 @@ RUN OUT=/out sh /src/adapters/agentgateway/scripts/generate_proto.sh
 
 FROM python:3.13.18-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90 AS quickstart
 
+ARG REQUIREMENTS=deploy/kubernetes/webhook-requirements.txt
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
-COPY deploy/kubernetes/webhook-requirements.txt /tmp/requirements.txt
-RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt
+COPY ${REQUIREMENTS} /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
+    && python -m pip uninstall --yes pip
 COPY agent_bailiff /app/agent_bailiff
 COPY --from=proto /out /app/agent_bailiff/adapters/agentgateway/_proto
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"
@@ -36,10 +38,3 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10007 -g 10007 -m 0755 /pins/issuer
 USER 65532:65532
 ENTRYPOINT ["python"]
-
-FROM quickstart AS trace
-
-USER root
-COPY examples/quickstart/trace-requirements.txt /tmp/trace-requirements.txt
-RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/trace-requirements.txt
-USER 65532:65532

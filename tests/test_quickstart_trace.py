@@ -163,6 +163,10 @@ def test_the_exporter_runs_as_its_own_uid(stack):
     assert identity == {(b.EXPORTER_UID, b.EXPORTER_UID, frozenset({b.EXPORTER_UID, b.DOCKET_READERS_GID}))}
 
 
+def test_the_trace_image_ships_without_pip(stack):
+    assert test_quickstart_stack.pip_absent(stack, "exporter")
+
+
 def test_the_rule_runs_as_decide_with_docket_access(stack):
     identity = test_quickstart_stack.identity(stack.container("rule"))
     groups = frozenset({b.LEDGER_GID, b.DOCKET_WRITERS_GID, b.DOCKET_READERS_GID})
