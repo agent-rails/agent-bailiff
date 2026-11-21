@@ -138,6 +138,9 @@ def _parser() -> argparse.ArgumentParser:
             verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
             verify.add_argument("--json", action="store_true", help="print one JSON object per record")
             verify.add_argument("--snapshot", type=Path, help="also cross-check this heads snapshot against the docket")
+            verify.add_argument(
+                "--archive", type=Path, help="verify removed segments from this archive, from the first record"
+            )
             verify.set_defaults(handler=_verify_docket)
             export = component.add_parser(
                 "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
@@ -433,8 +436,8 @@ def _verify_docket(args: argparse.Namespace) -> int:
         check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
-        report = verify_records(args.docket, writers, selected, emit, check)
-    except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
+        report = verify_records(args.docket, writers, selected, emit, check, args.archive)
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
         where = "the docket" if report.line is None else f"line {report.line}"

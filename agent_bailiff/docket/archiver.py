@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
+from types import TracebackType
 from typing import Any, BinaryIO
 
 from agent_warrant.canonical import canonicalize
@@ -120,6 +121,66 @@ def open_uncached(name: str, dir_fd: int) -> int:
         os.close(fd)
         raise
     return fd
+
+
+@dataclass
+class ArchivedCopy:
+    segment: int
+    stream: BinaryIO
+    size: int
+    sidecar: bytes
+
+
+class ArchiveCopies:
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path = path
+        self._fd = fd
+        self._owner = os.fstat(fd).st_uid
+
+    @classmethod
+    def open(cls, archive_dir: Path, docket_id: str) -> ArchiveCopies:
+        path = archive_dir / docket_id
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            raise ArchiveMismatch(f"{path} does not exist; the archive holds no copies of this docket") from None
+        if stat.S_IMODE(os.fstat(fd).st_mode) != ARCHIVE_DIR_MODE:
+            os.close(fd)
+            raise ArchiveMismatch(f"{path} must have mode {ARCHIVE_DIR_MODE:04o}")
+        return cls(path, fd)
+
+    def open_copy(self, segment: int) -> ArchivedCopy:
+        sidecar_fd = self._open_owned(sidecar_name(segment), segment)
+        try:
+            sidecar = os.read(sidecar_fd, MAX_CHECKPOINT_BYTES)
+        finally:
+            os.close(sidecar_fd)
+        fd = self._open_owned(copy_name(segment), segment)
+        return ArchivedCopy(segment, os.fdopen(fd, "rb"), os.fstat(fd).st_size, sidecar)
+
+    def _open_owned(self, name: str, segment: int) -> int:
+        try:
+            fd = open_uncached(name, self._fd)
+        except FileNotFoundError:
+            raise ArchiveMismatch(f"segment {segment} has no archived copy in {self.path}") from None
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != self._owner or stat.S_IMODE(info.st_mode) != READER_MODE:
+            os.close(fd)
+            raise ArchiveMismatch(
+                f"{self.path / name} must be a regular file owned by uid {self._owner} with mode {READER_MODE:04o}"
+            )
+        return fd
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+    def __enter__(self) -> ArchiveCopies:
+        return self
+
+    def __exit__(
+        self, kind: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None
+    ) -> None:
+        self.close()
 
 
 class _Copying:
