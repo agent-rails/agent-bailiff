@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import stat
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +42,9 @@ DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
 DEFAULT_MAX_CONNECTIONS = 16
 DEFAULT_SNAPSHOT_EVERY = 10_000
+DEFAULT_FREE_SPACE_FLOOR = 256 << 20
+MIN_FREE_SPACE_FLOOR = 2 * MAX_FRAME_BYTES
+FLOOR_LOG_INTERVAL = 60.0
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
 
@@ -304,10 +308,15 @@ class DocketSink:
         max_lifetime: float = DEFAULT_MAX_LIFETIME,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
+        free_space_floor: int = DEFAULT_FREE_SPACE_FLOOR,
         fsync: Callable[[int], None] = os.fsync,
+        statvfs: Callable[[int], os.statvfs_result] = os.fstatvfs,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if type(snapshot_every) is not int or snapshot_every < 1:
             raise ValueError("snapshot_every must be an integer of at least 1")
+        if type(free_space_floor) is not int or free_space_floor < MIN_FREE_SPACE_FLOOR:
+            raise ValueError(f"free_space_floor must be an integer of at least {MIN_FREE_SPACE_FLOOR}")
         self._docket_path = docket_path
         self._socket_path = socket_path
         self._writers = writers
@@ -321,6 +330,10 @@ class DocketSink:
         self._max_lifetime = max_lifetime
         self._max_connections = max_connections
         self._fsync = fsync
+        self._statvfs = statvfs
+        self._clock = clock
+        self._free_space_floor = free_space_floor
+        self._floor_logged_at: float | None = None
         self._snapshot_path = snapshot_path(docket_path)
         self._snapshot_every = snapshot_every
         self._since_snapshot = 0
@@ -575,6 +588,9 @@ class DocketSink:
         if refusal is not None:
             return _refusal(refusal.reason)
         line = f"{token}\n".encode("ascii")
+        refusal_reason = self._check_floor(self._fd, len(line))
+        if refusal_reason is not None:
+            return _refusal(refusal_reason)
         self._failed = True
         try:
             if os.write(self._fd, line) != len(line):
@@ -587,6 +603,21 @@ class DocketSink:
         self._chain.add(self._chain.offset, record)
         self._count_toward_snapshot()
         return {"ok": True, "seq": record.seq, "hash": record.hash}
+
+    def _check_floor(self, fd: int, length: int) -> str | None:
+        try:
+            usage = self._statvfs(fd)
+        except OSError as exc:
+            logger.error("docket free-space check failed: %s", exc)
+            return "write_failed"
+        free = usage.f_bavail * usage.f_frsize
+        if free - length >= self._free_space_floor:
+            return None
+        now = self._clock()
+        if self._floor_logged_at is None or now - self._floor_logged_at >= FLOOR_LOG_INTERVAL:
+            self._floor_logged_at = now
+            logger.error("docket refusing appends: %d bytes free, floor is %d bytes", free, self._free_space_floor)
+        return "docket_full"
 
     def _count_toward_snapshot(self) -> None:
         self._since_snapshot += 1

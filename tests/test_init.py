@@ -292,6 +292,7 @@ def test_docket_init_keeps_the_docket_private_without_a_reader_group(root, decid
     assert code == 0, err
     assert load_docket(directory / "config.json").reader_group is None
     assert load_docket(directory / "config.json").snapshot_every == 10_000
+    assert load_docket(directory / "config.json").free_space_floor == 256 << 20
     assert mode(directory) == (0o700, UID)
 
 
