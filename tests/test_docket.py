@@ -2231,6 +2231,7 @@ def test_a_cut_that_fails_before_the_commit_is_retried_by_the_next_append(paths,
     first = token_of(1)
     second = token_of(2, first.hash)
     failing = threading.Event()
+    now = [0.0]
 
     def flaky_fsync(fd):
         if failing.is_set() and fd_kind(fd) == "file":
@@ -2252,13 +2253,47 @@ def test_a_cut_that_fails_before_the_commit_is_retried_by_the_next_append(paths,
             failing.clear()
         assert not segment_path(paths[0], 1).exists()
         assert manifest_path(paths[0]).exists() is False
+        now[0] = sink_module.CUT_RETRY_INTERVAL
         assert sink._append(second.token.encode())["ok"]
         await asyncio.sleep(0)
 
-    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync)
-    assert "cut of segment 1 aborted; the next append retries it" in caplog.text
+    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync, clock=lambda: now[0])
+    assert "cut of segment 1 aborted; the first append after 30 s retries it" in caplog.text
     assert segment_path(paths[0], 1).read_text().splitlines() == [first.token, second.token]
     assert verify_all(paths).entries == 2
+
+
+def test_an_aborted_cut_is_not_retried_within_the_retry_interval(paths, monkeypatch):
+    tokens = [token_of(1)]
+    for number in (2, 3):
+        tokens.append(token_of(number, tokens[-1].hash))
+    now = [0.0]
+    attempts = []
+    real_write_manifest = sink_module.write_manifest
+
+    def counted_write_manifest(*args, **kwargs):
+        attempts.append(now[0])
+        if len(attempts) == 1:
+            raise OSError(errno.ENOSPC, "injected no space")
+        return real_write_manifest(*args, **kwargs)
+
+    monkeypatch.setattr(sink_module, "write_manifest", counted_write_manifest)
+
+    async def scenario(sink):
+        assert sink._append(tokens[0].token.encode())["ok"]
+        await asyncio.sleep(0)
+        now[0] = sink_module.CUT_RETRY_INTERVAL - 1
+        assert sink._append(tokens[1].token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert not segment_path(paths[0], 1).exists()
+        now[0] = sink_module.CUT_RETRY_INTERVAL
+        assert sink._append(tokens[2].token.encode())["ok"]
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=1, clock=lambda: now[0])
+    assert attempts == [0.0, sink_module.CUT_RETRY_INTERVAL]
+    assert segment_path(paths[0], 1).read_text().splitlines() == [item.token for item in tokens]
+    assert verify_all(paths).entries == 3
 
 
 class Crash(BaseException):
