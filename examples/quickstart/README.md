@@ -17,7 +17,8 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 | `control` | 10002 | Operator revoke, run on demand |
 | `rule` | 10002 | `rule` profile: revokes a task on an out-of-scope refusal or a capped refusal budget |
 | `exporter` | 10008 | `trace` profile: verified docket records to OTLP spans |
-| `jaeger` | 10009 | `trace` profile: trace UI on `127.0.0.1:16686` |
+| `jaeger` | 10010 | `trace` profile: trace UI on `127.0.0.1:16686` |
+| `archiver` | 10009 | `archive` profile: `agent-bailiff docket archive`, sealed segments to tmpfs and receipts |
 | `agent` | 10006 | Scripted agent on the internal `edge` network only |
 | `gitea-mcp-spike` | image default | `spike` profile: a second gitea-mcp with a host port, for the spike test only |
 | `*-init`, `bootstrap`, `task-issuer`, `agent-key` | per component | One-shot setup |
@@ -159,6 +160,22 @@ $ docker compose run --rm -T agent after-revoke
 - Export is not evidence. Jaeger is a view; the signed docket is the record, and `docket verify` checks it.
 - The Jaeger UI has no login. Spans carry no secrets or arguments, but they show each record's principal, agent key and tenant/task handles to anyone who can reach `127.0.0.1` on this host.
 - Jaeger marks each span with a "Negative duration detected" warning. Docket records are instants, so every span has zero duration; the warning is cosmetic.
+
+## Archive
+
+The `archive` profile runs `agent-bailiff docket archive` as uid 10009 in the docket reader group, with no network. It reads the docket read-only, copies each sealed segment and writes a receipt for it to `docket-receipts`, which the docket reads before it removes a segment.
+
+```console
+$ docker compose --profile archive up --build --detach --wait
+$ docker compose run --rm -T reader --receipts /var/lib/bailiff/receipts
+...
+agent-bailiff docket verify: 9 records verified, 9 printed
+agent-bailiff docket verify: 0 retained segments match their receipts
+```
+
+- The archive and the archiver's checkpoint are on tmpfs, so they are lost when the container stops. Two named volumes share one device, and the archiver refuses an archive on the docket's device; tmpfs is the only other device compose gives without host setup. In production, mount separate storage at the archive path.
+- The quickstart cuts a segment at 256 MiB and keeps 16 GiB, so a demo run seals no segment and removes nothing. `tests/test_docket_rotation_e2e.py` covers cut, archive and removal.
+- Only the archiver can read the archive, so `docket verify --archive` and `docket export --archive` cannot run against it from the reader or exporter here.
 
 Remove the stack and its volumes, including any profile services:
 

@@ -353,6 +353,29 @@ services:
     volumes:
       - docket-data:/var/lib/bailiff/docket:ro
       - pins:/pins:ro
+      - docket-receipts:/var/lib/bailiff/receipts:ro
+
+  archiver:
+    <<: [*bailiff, *offline]
+    profiles: [archive]
+    user: "10009:10009"
+    group_add: ["20003"]
+    command: ["-m", "agent_bailiff.cli", "docket", "archive", "--docket", "/var/lib/bailiff/docket/docket.log",
+              "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
+              "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json",
+              "--archive", "/var/lib/bailiff/archive", "--receipts", "/var/lib/bailiff/receipts",
+              "--checkpoint", "/var/lib/bailiff/archiver/checkpoint.json"]
+    tmpfs:
+      - /tmp
+      - /var/lib/bailiff/archive:uid=10009,gid=10009,mode=0700
+      - /var/lib/bailiff/archiver:uid=10009,gid=10009,mode=0700
+    volumes:
+      - docket-data:/var/lib/bailiff/docket:ro
+      - pins:/pins:ro
+      - docket-receipts:/var/lib/bailiff/receipts
+    depends_on:
+      docket:
+        condition: service_healthy
 
   control:
     <<: [*bailiff, *offline]
@@ -369,7 +392,7 @@ services:
   jaeger:
     image: jaegertracing/jaeger:2.23.0@sha256:3823829974ccfc2485d2e48b165579091f32295022ae80ca49704e2f4834116e
     profiles: [trace]
-    user: "10009:10009"
+    user: "10010:10010"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

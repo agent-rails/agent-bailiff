@@ -44,6 +44,7 @@ VOLUMES = {
     "agent-data": "/var/lib/bailiff/agent",
     "agent-public": "/var/lib/bailiff/agent-public",
     "tasks": "/var/lib/bailiff/tasks",
+    "docket-receipts": "/var/lib/bailiff/receipts",
 }
 PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
@@ -58,6 +59,7 @@ PRIVATE_VOLUMES = (
     "docket-run",
     "decide-run",
     "custodian-run",
+    "docket-receipts",
 )
 
 DECIDE = (b.DECIDE_UID, b.LEDGER_GID)
@@ -126,6 +128,7 @@ EXPECTED_ENTRIES = {
     "agent-public/agent.pub": (b.AGENT_UID, b.AGENT_UID, 0o644, FILE),
     "tasks": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
     "tasks/task.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
+    "docket-receipts": (b.ARCHIVER_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
 }
 TRANSIENT_ENTRIES = {
     re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
