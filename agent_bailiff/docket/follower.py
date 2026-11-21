@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -36,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 class CheckpointMismatch(Exception):
     pass
+
+
+class _Tail(Enum):
+    READ = "read"
+    TORN = "torn"
+    MISSING = "missing"
 
 
 class FollowerLocked(Exception):
@@ -243,11 +250,15 @@ class DocketFollower:
     def _run_locked(self, stop: threading.Event, *, follow: bool) -> int:
         position = self._resume(load_checkpoint(self._checkpoint_path))
         torn_since: float | None = None
+        missing_since: float | None = None
         while not stop.is_set():
-            torn = self._pass(position, stop)
+            tail = self._pass(position, stop)
             if stop.is_set():
                 break
-            torn_since = self._watch_torn_tail(torn, torn_since, position)
+            torn_since = self._watch(tail is _Tail.TORN, torn_since, lambda held: _warn_torn(position, held))
+            missing_since = self._watch(
+                tail is _Tail.MISSING, missing_since, lambda held: _warn_missing(position, held)
+            )
             if not follow:
                 break
             stop.wait(self._poll_interval)
@@ -293,17 +304,17 @@ class DocketFollower:
         logger.warning("migrated the version 1 checkpoint %s to version %d", self._checkpoint_path, CHECKPOINT_VERSION)
         return position
 
-    def _pass(self, position: _Position, stop: threading.Event) -> bool:
+    def _pass(self, position: _Position, stop: threading.Event) -> _Tail:
         while True:
             opened = open_segment(self._docket_path, position.segment)
             if opened is None:
-                return False
+                return _Tail.MISSING
             with opened.stream:
                 self._check_identity(opened, position)
                 _check_position(opened.stream, position, opened.end)
                 torn = self._read(opened, position, stop)
             if stop.is_set() or opened.sealed is None:
-                return torn
+                return _Tail.TORN if torn else _Tail.READ
             _check_sealed_end(opened, opened.sealed, position, torn)
             position.next_segment()
 
@@ -345,20 +356,32 @@ class DocketFollower:
         save_checkpoint(self._checkpoint_path, _checkpoint(position))
         self._handled += len(batch)
 
-    def _watch_torn_tail(self, torn: bool, torn_since: float | None, position: _Position) -> float | None:
-        if not torn:
+    def _watch(self, stalled: bool, since: float | None, warn: Callable[[float], None]) -> float | None:
+        if not stalled:
             return None
         now = self._clock()
-        if torn_since is None:
+        if since is None:
             return now
-        if now - torn_since >= self._stall_after:
-            logger.warning(
-                "the line after %d has been incomplete for %.0fs; see Torn tail repair in docs/DOCKET.md",
-                position.entries,
-                now - torn_since,
-            )
+        if now - since >= self._stall_after:
+            warn(now - since)
             return now
-        return torn_since
+        return since
+
+
+def _warn_torn(position: _Position, held: float) -> None:
+    logger.warning(
+        "the line after %d has been incomplete for %.0fs; see Torn tail repair in docs/DOCKET.md",
+        position.entries,
+        held,
+    )
+
+
+def _warn_missing(position: _Position, held: float) -> None:
+    logger.warning(
+        "docket segment %d has been missing for %.0fs; start the sink to finish its cut",
+        position.segment,
+        held,
+    )
 
 
 def _check_position(stream: BinaryIO, position: _Position, size: int) -> None:
