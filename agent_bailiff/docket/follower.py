@@ -12,10 +12,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from agent_bailiff.docket.archiver import ArchiveCopies, ArchiveMismatch, copy_name, decode_sidecar
 from agent_bailiff.docket.entry import Head
 from agent_bailiff.docket.manifest import MAX_SEGMENT, SegmentEntry, read_docket_manifest
 from agent_bailiff.docket.private_dir import open_private_dir
-from agent_bailiff.docket.segments import BoundedReader, OpenedSegment, open_segment
+from agent_bailiff.docket.segments import BoundedReader, OpenedSegment, SegmentRemoved, open_segment
 from agent_bailiff.docket.sink import DocketCorrupt, KidIndex, Verification, VerifiedLine
 from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 from agent_bailiff.signing import MAX_TOKEN_CHARS, token_hash
@@ -224,9 +225,11 @@ class DocketFollower:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         stall_after: float = DEFAULT_STALL_AFTER,
         clock: Callable[[], float] = time.monotonic,
+        archive: Path | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch size must be at least 1")
+        self._archive = archive
         self._docket_path = docket_path
         self._index = index
         self._checkpoint_path = checkpoint_path
@@ -265,6 +268,8 @@ class DocketFollower:
         return self._handled
 
     def _resume(self, checkpoint: Checkpoint | LegacyCheckpoint | None) -> _Position:
+        if checkpoint is None and self._archive is not None:
+            return _Position()
         if checkpoint is None:
             manifest = read_docket_manifest(self._docket_path)
             seeds = {} if manifest.base is None else dict(manifest.base.end_heads)
@@ -306,7 +311,7 @@ class DocketFollower:
 
     def _pass(self, position: _Position, stop: threading.Event) -> _Tail:
         while True:
-            opened = open_segment(self._docket_path, position.segment)
+            opened = self._open(position)
             if opened is None:
                 return _Tail.MISSING
             with opened.stream:
@@ -317,6 +322,29 @@ class DocketFollower:
                 return _Tail.TORN if torn else _Tail.READ
             _check_sealed_end(opened, opened.sealed, position, torn)
             position.next_segment()
+
+    def _open(self, position: _Position) -> OpenedSegment | None:
+        try:
+            return open_segment(self._docket_path, position.segment)
+        except SegmentRemoved:
+            if self._archive is None:
+                raise
+        position.identity = None
+        return self._open_archived(self._archive, position.segment)
+
+    def _open_archived(self, archive: Path, segment: int) -> OpenedSegment:
+        docket_id = read_docket_manifest(self._docket_path).docket_id
+        with ArchiveCopies.open(archive, docket_id) as copies:
+            copy = copies.open_copy(segment)
+            path = copies.path / copy_name(segment)
+        try:
+            sealed = decode_sidecar(copy.sidecar, docket_id, segment)
+            if sealed.size != copy.size:
+                raise ArchiveMismatch(f"{path} has {copy.size} bytes, not the {sealed.size} of its sidecar")
+        except ArchiveMismatch:
+            copy.stream.close()
+            raise
+        return OpenedSegment(copy.stream, path, copy.size, sealed)
 
     def _check_identity(self, opened: OpenedSegment, position: _Position) -> None:
         info = os.fstat(opened.stream.fileno())

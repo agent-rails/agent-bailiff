@@ -21,8 +21,10 @@ from agent_bailiff.docket.archiver import (
     encode_sidecar,
 )
 from agent_bailiff.docket.entry import Head
+from agent_bailiff.docket.follower import DocketFollower
 from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.receipt import ReceiptDir
+from agent_bailiff.docket.segments import SegmentRemoved
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 
@@ -543,6 +545,74 @@ def test_verify_with_receipts_refuses_a_receipt_dir_others_can_write(layout, pin
     code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
     assert code == cli.EXIT_REFUSED
     assert "with mode 0750" in err
+
+
+class HandlerStopped(Exception):
+    pass
+
+
+def follow_archive(layout, **options):
+    root, docket = layout
+    checkpoint = root / "follower" / "checkpoint.json"
+    checkpoint.parent.mkdir(mode=0o700, exist_ok=True)
+    seen = []
+    follower = DocketFollower(
+        docket.path,
+        INDEX,
+        checkpoint,
+        lambda batch, stop: seen.extend(line.line for line in batch),
+        archive=root / "archive",
+        **options,
+    )
+    follower.run(threading.Event(), follow=False)
+    return seen
+
+
+def test_a_new_follower_with_the_archive_starts_at_the_first_record(layout):
+    archived_and_removed(layout)
+    assert follow_archive(layout) == [1, 2, 3, 4, 5, 6]
+
+
+def test_a_follower_behind_a_removed_segment_resumes_from_its_archived_copy(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    run(layout)
+
+    checkpoint_path = layout[0] / "follower" / "checkpoint.json"
+    checkpoint_path.parent.mkdir(mode=0o700)
+    seen = []
+
+    def first_batch_only(batch, stop):
+        if seen:
+            raise HandlerStopped
+        seen.extend(line.line for line in batch)
+
+    with pytest.raises(HandlerStopped):
+        DocketFollower(docket.path, INDEX, checkpoint_path, first_batch_only, batch_size=2).run(
+            threading.Event(), follow=False
+        )
+    remove_oldest(docket, manifest)
+    with pytest.raises(SegmentRemoved):
+        DocketFollower(docket.path, INDEX, checkpoint_path, lambda batch, stop: None).run(
+            threading.Event(), follow=False
+        )
+    assert follow_archive(layout) == [3, 4, 5, 6]
+
+
+def test_a_follower_refuses_a_sidecar_that_is_not_canonical(layout):
+    manifest, _ = archived_and_removed(layout)
+    sidecar = copies(layout, manifest) / "seg-000000000001.json"
+    sidecar.write_bytes(sidecar.read_bytes() + b" ")
+    with pytest.raises(ArchiveMismatch, match="canonical sidecar"):
+        follow_archive(layout)
+
+
+def test_a_follower_refuses_an_archived_copy_cut_short(layout):
+    manifest, _ = archived_and_removed(layout)
+    copy = copies(layout, manifest) / "seg-000000000001"
+    copy.write_bytes(copy.read_bytes()[:-1])
+    with pytest.raises(ArchiveMismatch, match="not the .* of its sidecar"):
+        follow_archive(layout)
 
 
 class Clock:

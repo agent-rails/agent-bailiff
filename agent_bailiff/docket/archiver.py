@@ -25,9 +25,11 @@ from agent_bailiff.docket.manifest import (
     MAX_SEGMENT,
     Heads,
     Manifest,
+    ManifestInvalid,
     SegmentEntry,
     heads_document,
     parse_heads,
+    parse_segment_entry,
     read_docket_manifest,
 )
 from agent_bailiff.docket.receipt import Receipt, ReceiptDir
@@ -108,6 +110,27 @@ def copy_name(segment: int) -> str:
 
 def encode_sidecar(docket_id: str, entry: SegmentEntry) -> bytes:
     return canonicalize({"version": SIDECAR_VERSION, "docket_id": docket_id, **entry.to_document()})
+
+
+def decode_sidecar(raw: bytes, docket_id: str, segment: int) -> SegmentEntry:
+    name = f"the sidecar of segment {segment}"
+    try:
+        document = parse_strict_json(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ArchiveMismatch(f"{name} is not valid JSON: {exc}") from None
+    if not isinstance(document, dict) or (type(document.get("version")), document.get("docket_id")) != (
+        int,
+        docket_id,
+    ):
+        raise ArchiveMismatch(f"{name} is not a sidecar of docket {docket_id}")
+    fields = {key: value for key, value in document.items() if key not in ("version", "docket_id")}
+    try:
+        entry = parse_segment_entry(fields, name)
+    except ManifestInvalid as exc:
+        raise ArchiveMismatch(str(exc)) from None
+    if entry.segment != segment or encode_sidecar(docket_id, entry) != raw:
+        raise ArchiveMismatch(f"{name} is not the canonical sidecar of that segment")
+    return entry
 
 
 def open_uncached(name: str, dir_fd: int) -> int:
