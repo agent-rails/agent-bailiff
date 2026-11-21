@@ -144,6 +144,27 @@ def test_a_committed_cut_before_its_rename_waits_for_the_next_pass(docket, check
     assert collect(docket, checkpoint) == [3, 4]
 
 
+def test_a_missing_sealed_segment_before_the_last_raises_segment_mismatch(docket, checkpoint):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    fill(docket, 3, 5)
+    cut(docket, manifest)
+    segment_path(docket.path, 1).unlink()
+    with pytest.raises(SegmentMismatch, match="missing"):
+        collect(docket, checkpoint)
+    assert not checkpoint.exists()
+
+
+def test_a_missing_last_sealed_segment_raises_when_the_active_does_not_match_it(docket, checkpoint):
+    fill(docket, 1, 3)
+    cut(docket)
+    fill(docket, 3, 4)
+    segment_path(docket.path, 1).unlink()
+    with pytest.raises(SegmentMismatch, match="missing"):
+        collect(docket, checkpoint)
+    assert not checkpoint.exists()
+
+
 def test_a_follower_behind_a_removed_segment_is_refused(docket, checkpoint):
     fill(docket, 1, 3)
     manifest = cut(docket)

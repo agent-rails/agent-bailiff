@@ -54,7 +54,11 @@ def open_segment(docket_path: Path, segment: int) -> OpenedSegment | None:
         try:
             stream = open(path, "rb")
         except FileNotFoundError:
-            return None
+            if read_docket_manifest(docket_path).generation != manifest.generation:
+                continue
+            if sealed is None or _renaming(docket_path, manifest.active_segment, sealed):
+                return None
+            raise SegmentMismatch(f"{path} is listed in its manifest but missing") from None
         if read_docket_manifest(docket_path).generation != manifest.generation:
             stream.close()
             continue
@@ -64,3 +68,12 @@ def open_segment(docket_path: Path, segment: int) -> OpenedSegment | None:
             raise SegmentMismatch(f"{path} is {size} bytes, not the {sealed.size} its manifest entry says")
         return OpenedSegment(stream, path, size, sealed)
     return None
+
+
+def _renaming(docket_path: Path, active_segment: int, sealed: SegmentEntry) -> bool:
+    if sealed.segment != active_segment - 1:
+        return False
+    try:
+        return os.stat(docket_path).st_size == sealed.size
+    except FileNotFoundError:
+        return True
