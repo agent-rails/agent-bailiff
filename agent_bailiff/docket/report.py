@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -9,11 +11,14 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.entry import Entry
-from agent_bailiff.docket.sink import Verification, VerifiedLine, VerifyReport, build_kid_index
+from agent_bailiff.docket.sink import ChainState, Verification, VerifiedLine, VerifyReport, build_kid_index
+from agent_bailiff.docket.snapshot import Snapshot, SnapshotInvalid, read_snapshot
 from agent_bailiff.keys import PublicKeyRecord
 
 RELEASED = "released, target outcome unknown"
 TABLE_COLUMNS = ("line", "at", "writer", "seq", "decision", "tool", "resource", "reason", "note")
+SNAPSHOT_FIELDS = ("entries", "prefix_sha256", "anchors", "kids")
+READER_MODE = 0o640
 
 
 @dataclass(frozen=True)
@@ -44,14 +49,48 @@ def verify_records(
     writers: dict[str, dict[str, Ed25519PublicKey]],
     selected: RecordFilter,
     emit: Callable[[VerifiedLine], None],
+    observe: Callable[[VerifiedLine], None] | None = None,
 ) -> VerifyReport:
     index = build_kid_index(writers)
     with open(path, "rb") as docket:
         verification = Verification(docket, index)
         for verified in verification:
+            if observe is not None:
+                observe(verified)
             if selected.matches(verified.record.entry):
                 emit(verified)
     return verification.report
+
+
+def read_docket_snapshot(path: Path, docket_path: Path) -> Snapshot:
+    info = os.stat(docket_path)
+    reader_gid = info.st_gid if stat.S_IMODE(info.st_mode) == READER_MODE else None
+    snapshot = read_snapshot(path, uid=info.st_uid, reader_gid=reader_gid)
+    if snapshot is None:
+        raise SnapshotInvalid(f"{path} does not exist")
+    return snapshot
+
+
+class SnapshotCheck:
+    def __init__(self, snapshot: Snapshot) -> None:
+        self.snapshot = snapshot
+        self._chain = ChainState()
+        self._seen: Snapshot | None = self._chain.snapshot() if snapshot.offset == 0 else None
+        self._passed = snapshot.offset == 0
+
+    def observe(self, verified: VerifiedLine) -> None:
+        if self._passed:
+            return
+        self._chain.add(verified.start, verified.record)
+        if self._chain.offset >= self.snapshot.offset:
+            self._passed = True
+            if self._chain.offset == self.snapshot.offset:
+                self._seen = self._chain.snapshot()
+
+    def differences(self) -> list[str]:
+        if self._seen is None:
+            return [f"offset {self.snapshot.offset} is not the end of a verified line"]
+        return [name for name in SNAPSHOT_FIELDS if getattr(self._seen, name) != getattr(self.snapshot, name)]
 
 
 def note(entry: Entry) -> str | None:

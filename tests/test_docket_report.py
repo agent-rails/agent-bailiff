@@ -16,7 +16,8 @@ from agent_bailiff import cli
 from agent_bailiff.docket import DocketSink, decode_record, encode_record
 from agent_bailiff.docket.entry import ENTRY_TYP, _entry_body
 from agent_bailiff.docket.report import RELEASED
-from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
+from agent_bailiff.docket.snapshot import Anchor, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
 from agent_bailiff.signing import sign
 
@@ -299,3 +300,124 @@ def test_a_group_member_cannot_read_a_docket_without_a_reader_group(workdir, pin
     docket = shared_docket(workdir, None)
     result = verify_as(OTHER_USER, docket, pin_files)
     assert result.returncode == cli.EXIT_REFUSED and "Permission denied" in result.stderr, result
+
+
+def snapshot_at(docket, lines=None):
+    chain = ChainState()
+    with open(docket.path, "rb") as stream:
+        for verified in Verification(stream, build_kid_index(WRITERS)):
+            if lines is not None and verified.line > lines:
+                break
+            chain.add(verified.start, verified.record)
+    return chain.snapshot()
+
+
+def sealed(docket, snapshot):
+    path = snapshot_path(docket.path)
+    write_snapshot(path, snapshot)
+    return path
+
+
+def test_verify_with_a_matching_snapshot_succeeds(docket, pin_files, capsys):
+    filled(docket)
+    plain = verify(docket, pin_files, capsys=capsys)
+    snapshot = snapshot_at(docket, lines=3)
+    path = sealed(docket, snapshot)
+    code, out, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == 0, err
+    assert out == plain[1]
+    assert f"snapshot at offset {snapshot.offset} matches the docket" in err
+
+
+def test_verify_without_the_flag_prints_no_snapshot_line(docket, pin_files, capsys):
+    filled(docket)
+    sealed(docket, snapshot_at(docket))
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == 0 and "snapshot" not in err
+
+
+def test_an_empty_snapshot_matches_any_docket(docket, pin_files, capsys):
+    path = sealed(docket, snapshot_at(docket))
+    filled(docket)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == 0, err
+    assert "snapshot at offset 0 matches" in err
+
+
+def other_anchor(snapshot):
+    anchor = snapshot.anchors["decide"]
+    return {**snapshot.anchors, "decide": Anchor(anchor.offset, anchor.seq, "A" * 43)}
+
+
+@pytest.mark.parametrize(
+    ("change", "difference"),
+    [
+        (lambda snapshot: replace(snapshot, prefix_sha256="0" * 64), "prefix_sha256"),
+        (lambda snapshot: replace(snapshot, entries=snapshot.entries + 1), "entries"),
+        (lambda snapshot: replace(snapshot, anchors=other_anchor(snapshot)), "anchors"),
+        (lambda snapshot: replace(snapshot, kids=snapshot.kids | {"rogue-1"}), "kids"),
+        (lambda snapshot: replace(snapshot, offset=snapshot.offset - 1), "is not the end of a verified line"),
+        (lambda snapshot: replace(snapshot, offset=snapshot.offset + 10_000), "is not the end of a verified line"),
+    ],
+)
+def test_verify_with_a_mismatched_snapshot_fails(docket, pin_files, capsys, change, difference):
+    filled(docket)
+    path = sealed(docket, change(snapshot_at(docket, lines=3)))
+    code, out, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert len(out) == 5
+    assert "does not match the docket" in err and difference in err
+
+
+def test_verify_with_a_snapshot_still_fails_on_a_corrupt_docket(docket, pin_files, capsys):
+    filled(docket)
+    path = sealed(docket, snapshot_at(docket))
+    with open(docket.path, "a") as stream:
+        stream.write("garbage\n")
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "line 5 fails verification: malformed" in err
+
+
+def test_verify_refuses_a_missing_snapshot(docket, pin_files, capsys):
+    filled(docket)
+    code, out, err = verify(docket, pin_files, "--snapshot", str(snapshot_path(docket.path)), capsys=capsys)
+    assert code == cli.EXIT_REFUSED and out == []
+    assert "does not exist" in err
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640])
+def test_verify_refuses_a_snapshot_with_another_mode_than_the_docket(docket, pin_files, capsys, mode):
+    filled(docket)
+    path = sealed(docket, snapshot_at(docket))
+    os.chmod(path, mode)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == cli.EXIT_REFUSED and "0600" in err
+
+
+def test_verify_takes_the_snapshot_group_from_a_shared_docket(docket, pin_files, capsys):
+    filled(docket)
+    path = snapshot_path(docket.path)
+    write_snapshot(path, snapshot_at(docket), reader_gid=os.getegid())
+    os.chown(docket.path, -1, os.getegid())
+    os.chmod(docket.path, 0o640)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == 0, err
+    os.chmod(path, 0o600)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == cli.EXIT_REFUSED and "0640" in err
+
+
+def test_verify_cross_checks_a_snapshot_the_sink_wrote(docket, pin_files, capsys):
+    socket_dir = docket.path.parent / "s"
+    sink = DocketSink(docket.path, socket_dir / "docket.sock", WRITERS, {os.getuid()})
+
+    async def run():
+        await sink.start()
+        await sink.close()
+
+    filled(docket)
+    asyncio.run(run())
+    code, _, err = verify(docket, pin_files, "--snapshot", str(snapshot_path(docket.path)), capsys=capsys)
+    assert code == 0, err
+    assert "matches the docket" in err
