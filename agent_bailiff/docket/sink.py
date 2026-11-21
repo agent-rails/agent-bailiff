@@ -14,6 +14,13 @@ from typing import Any, BinaryIO, Protocol
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.entry import Head, Record, decode_record
+from agent_bailiff.docket.manifest import (
+    Manifest,
+    ManifestInvalid,
+    manifest_path,
+    read_manifest,
+    segment_path,
+)
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
@@ -48,6 +55,7 @@ MIN_FREE_SPACE_FLOOR = 2 * MAX_FRAME_BYTES
 FLOOR_LOG_INTERVAL = 60.0
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
+SEGMENT_MISMATCH = "segment_mismatch"
 
 Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
 KidIndex = dict[str, tuple[str, Ed25519PublicKey]]
@@ -107,15 +115,11 @@ def verify_docket(path: Path, writers: Writers) -> VerifyReport:
         return _verify_stream(docket, build_kid_index(writers))
 
 
-def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
-    return _verify_chain(fd, index)[1]
-
-
-def _verify_chain(fd: int, index: KidIndex) -> tuple[ChainState, VerifyReport]:
-    chain = ChainState()
+def _verify_chain(fd: int, index: KidIndex, manifest: Manifest) -> tuple[ChainState, VerifyReport]:
+    chain = ChainState(segment=manifest.active_segment, entries=manifest.entries)
     with os.fdopen(os.dup(fd), "rb") as docket:
         docket.seek(0)
-        verification = Verification(docket, index)
+        verification = Verification(docket, index, heads=manifest.seeds, entries=manifest.entries)
         for verified in verification:
             chain.add(verified.start, verified.record)
     return chain, verification.report
@@ -249,10 +253,12 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
     lock_fd: int | None = None
     try:
         lock_fd = _lock_docket(docket_path, directory_fd)
+        manifest = _read_manifest(docket_path, directory_fd, reader_gid)
+        _reconcile(docket_path, directory_fd, manifest, reader_gid, os.fsync)
         fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         try:
             _check_docket_file(fd, docket_path, reader_gid)
-            chain, report = _verify_chain(fd, index)
+            chain, report = _verify_chain(fd, index, manifest)
             if report.ok:
                 return report
             if report.reason != "torn_tail":
@@ -263,7 +269,7 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
             os.ftruncate(fd, report.valid_bytes)
             os.fsync(fd)
             os.fsync(directory_fd)
-            repaired = _verify_fd(fd, index)
+            repaired = _verify_chain(fd, index, manifest)[1]
             if not repaired.ok:
                 raise DocketCorrupt(repaired)
             return repaired
@@ -273,6 +279,75 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
         if lock_fd is not None:
             os.close(lock_fd)
         os.close(directory_fd)
+
+
+def _read_manifest(docket_path: Path, directory_fd: int, reader_gid: int | None) -> Manifest:
+    try:
+        manifest = read_manifest(
+            manifest_path(docket_path), uid=os.geteuid(), reader_gid=reader_gid, dir_fd=directory_fd
+        )
+    except ManifestInvalid as exc:
+        raise DocketCorrupt(_segment_mismatch(str(exc))) from None
+    return Manifest.new() if manifest is None else manifest
+
+
+def _reconcile(
+    docket_path: Path, directory_fd: int, manifest: Manifest, reader_gid: int | None, fsync: Callable[[int], None]
+) -> None:
+    name = docket_path.name
+    for leftover in (f"{name}.new", f"{manifest_path(docket_path).name}.tmp", f"{snapshot_path(docket_path).name}.tmp"):
+        _unlink_if_present(leftover, directory_fd)
+    expected = {segment_path(docket_path, entry.segment).name for entry in manifest.segments}
+    present = {item for item in os.listdir(directory_fd) if item.startswith(f"{name}.seg-")}
+    unknown = sorted(present - expected)
+    if unknown:
+        raise DocketCorrupt(_segment_mismatch(f"segment files not in the manifest: {', '.join(unknown)}"))
+    if not manifest.segments:
+        return
+    *earlier, last = manifest.segments
+    for entry in earlier:
+        _check_segment(docket_path, directory_fd, entry.segment, entry.size, reader_gid)
+    last_name = segment_path(docket_path, last.segment).name
+    if last_name in present:
+        _check_segment(docket_path, directory_fd, last.segment, last.size, reader_gid)
+        return
+    if not _sealed_by(docket_path, directory_fd, last.size, last.sha256, reader_gid):
+        raise DocketCorrupt(_segment_mismatch(f"segment {last.segment} is missing and the docket is not it"))
+    logger.warning("finishing the cut of docket segment %d", last.segment)
+    os.rename(name, last_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    fsync(directory_fd)
+
+
+def _check_segment(docket_path: Path, directory_fd: int, segment: int, size: int, reader_gid: int | None) -> None:
+    path = segment_path(docket_path, segment)
+    try:
+        info = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise DocketCorrupt(_segment_mismatch(f"segment {segment} is missing")) from None
+    _check_docket_stat(info, path, reader_gid)
+    if info.st_size != size:
+        raise DocketCorrupt(_segment_mismatch(f"segment {segment} is {info.st_size} bytes, not {size}"))
+
+
+def _sealed_by(docket_path: Path, directory_fd: int, size: int, sha256: str, reader_gid: int | None) -> bool:
+    try:
+        fd = os.open(docket_path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return False
+    try:
+        _check_docket_file(fd, docket_path, reader_gid)
+        if os.fstat(fd).st_size != size:
+            return False
+        return _prefix_digest(fd, size).hexdigest() == sha256
+    finally:
+        os.close(fd)
+
+
+def _unlink_if_present(name: str, directory_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _write_side_file(path: Path, content: bytes) -> None:
@@ -346,6 +421,7 @@ class DocketSink:
         self._snapshot_every = snapshot_every
         self._since_snapshot = 0
         self._heads: dict[str, Head] = {}
+        self._manifest = Manifest.new()
         self._chain = ChainState()
         self._snapshots_enabled = True
         self._started = False
@@ -372,6 +448,8 @@ class DocketSink:
         directory_fd = open_private_dir(self._docket_path.parent)
         try:
             self._docket_lock_fd = _lock_docket(self._docket_path, directory_fd)
+            self._manifest = _read_manifest(self._docket_path, directory_fd, self._reader_gid)
+            _reconcile(self._docket_path, directory_fd, self._manifest, self._reader_gid, self._fsync)
         finally:
             os.close(directory_fd)
         self._fd = self._open_docket()
@@ -398,6 +476,9 @@ class DocketSink:
             snapshot = None
         except SnapshotInvalid as exc:
             raise DocketCorrupt(_mismatch(str(exc))) from None
+        if snapshot is not None and snapshot.offset == 0 and snapshot.segment == self._manifest.active_segment + 1:
+            logger.warning("snapshot of segment %d is from a cut that did not commit", snapshot.segment)
+            snapshot = None
         if snapshot is None:
             self._full_verify(fd)
             self._write_snapshot()
@@ -414,14 +495,24 @@ class DocketSink:
             os.close(directory_fd)
 
     def _full_verify(self, fd: int) -> None:
+        manifest = self._manifest
+        chain = ChainState(segment=manifest.active_segment, entries=manifest.entries)
         with _reader(fd, 0) as docket:
-            self._verify_tail(ChainState(), Verification(docket, self._index))
+            verification = Verification(docket, self._index, heads=manifest.seeds, entries=manifest.entries)
+            self._verify_tail(chain, verification)
 
     def _verify_from(self, fd: int, snapshot: Snapshot) -> None:
-        if snapshot.segment != self._chain.segment:
+        manifest = self._manifest
+        if snapshot.segment != manifest.active_segment:
             raise DocketCorrupt(
-                _mismatch(f"segment {snapshot.segment} is not the active segment {self._chain.segment}")
+                _mismatch(f"segment {snapshot.segment} is not the active segment {manifest.active_segment}")
             )
+        if snapshot.entries < manifest.entries or (snapshot.offset == 0 and snapshot.entries != manifest.entries):
+            raise DocketCorrupt(_mismatch(f"entries {snapshot.entries} do not follow the {manifest.entries} sealed"))
+        seeds = manifest.seeds
+        for writer, anchor in snapshot.anchors.items():
+            if writer in seeds and anchor.seq <= seeds[writer].seq:
+                raise DocketCorrupt(_mismatch(f"anchor of writer {writer} is not after its sealed head"))
         if snapshot.offset > os.fstat(fd).st_size:
             raise DocketCorrupt(_mismatch(f"offset {snapshot.offset} is past the end of the docket"))
         unpinned = sorted(snapshot.kids - self._index.keys())
@@ -432,7 +523,7 @@ class DocketSink:
             raise DocketCorrupt(_mismatch(f"SHA-256 of the {snapshot.offset} bytes before the offset differs"))
         for writer, anchor in snapshot.anchors.items():
             self._check_anchor(fd, writer, anchor, snapshot.offset)
-        heads = {writer: Head(anchor.seq, anchor.hash) for writer, anchor in snapshot.anchors.items()}
+        heads = {**seeds, **{writer: Head(anchor.seq, anchor.hash) for writer, anchor in snapshot.anchors.items()}}
         with _reader(fd, snapshot.offset) as docket:
             verification = Verification(
                 docket, self._index, heads=heads, entries=snapshot.entries, offset=snapshot.offset
@@ -671,6 +762,10 @@ def _mismatch(detail: str) -> VerifyReport:
     return VerifyReport(False, 0, reason=SNAPSHOT_MISMATCH, detail=detail)
 
 
+def _segment_mismatch(detail: str) -> VerifyReport:
+    return VerifyReport(False, 0, reason=SEGMENT_MISMATCH, detail=detail)
+
+
 def _reader(fd: int, offset: int) -> BinaryIO:
     docket = os.fdopen(os.dup(fd), "rb")
     docket.seek(offset)
@@ -694,7 +789,10 @@ def _refusal(reason: str) -> dict[str, Any]:
 
 
 def _check_docket_file(fd: int, path: Path, reader_gid: int | None) -> None:
-    info = os.fstat(fd)
+    _check_docket_stat(os.fstat(fd), path, reader_gid)
+
+
+def _check_docket_stat(info: os.stat_result, path: Path, reader_gid: int | None) -> None:
     owned = stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
     if reader_gid is None:
         if not owned or stat.S_IMODE(info.st_mode) != DOCKET_MODE:
