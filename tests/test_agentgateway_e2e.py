@@ -155,10 +155,15 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def free_port():
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+def free_ports(count):
+    probes = [socket.socket() for _ in range(count)]
+    try:
+        for probe in probes:
+            probe.bind(("127.0.0.1", 0))
+        return [probe.getsockname()[1] for probe in probes]
+    finally:
+        for probe in probes:
+            probe.close()
 
 
 class Gateway:
@@ -285,12 +290,12 @@ def stack(binary, workdir, private, make_decider, make_custodian):
     for server in servers.values():
         server.start()
     config = gateway_config(sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS))
+    admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
-        "adminAddr": f"127.0.0.1:{free_port()}",
-        "statsAddr": f"127.0.0.1:{free_port()}",
-        "readinessAddr": f"127.0.0.1:{free_port()}",
+        "adminAddr": f"127.0.0.1:{admin}",
+        "statsAddr": f"127.0.0.1:{stats}",
+        "readinessAddr": f"127.0.0.1:{readiness}",
     }
-    config["mcp"]["port"] = free_port()
     expected = GatewayExpectations(
         sockets["decide"], sockets["custodian"], ROUTES.services, frozenset({"Authorization"})
     )
@@ -626,3 +631,8 @@ def test_the_custodian_sees_agent_headers_without_agent_credentials(stack, monke
     [names] = seen
     assert set(EXTRA_AGENT_HEADERS) <= names
     assert not {"authorization", "proxy-authorization", "cookie"} & names
+
+
+def test_free_ports_are_distinct_within_one_call():
+    ports = free_ports(64)
+    assert len(set(ports)) == len(ports)

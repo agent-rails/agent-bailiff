@@ -198,21 +198,26 @@ json.dump(denied, sys.stdout)
 """
 
 
-def free_port():
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+def free_ports(count):
+    probes = [socket.socket() for _ in range(count)]
+    try:
+        for probe in probes:
+            probe.bind(("127.0.0.1", 0))
+        return [probe.getsockname()[1] for probe in probes]
+    finally:
+        for probe in probes:
+            probe.close()
 
 
 class Stack:
     def __init__(self, project, profiles=()):
         self.project = project
         self.profiles = tuple(profiles)
-        self.jaeger_port = free_port()
+        self.jaeger_port, gitea_mcp_port = free_ports(2)
         self.env = {
             **os.environ,
             "COMPOSE_PROJECT_NAME": project,
-            "GITEA_MCP_PORT": str(free_port()),
+            "GITEA_MCP_PORT": str(gitea_mcp_port),
             "JAEGER_PORT": str(self.jaeger_port),
         }
         self.volumes = {

@@ -10,7 +10,7 @@ import test_agentgateway_e2e
 import test_custodian
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_agentgateway_config import gateway_config
-from test_agentgateway_e2e import TRACE, Agent, Gateway, free_port, refused
+from test_agentgateway_e2e import TRACE, Agent, Gateway, free_ports, refused
 from test_custodian import docket_entries
 from test_decide import CUSTODIAN_ID, DECIDE_KEY, NOW, TENANT, make_request, make_root
 from test_effector import EFFECTOR_TOKEN, FakeTransport, RecordingDocket, Suspended, Verified
@@ -158,12 +158,12 @@ def build_stack(binary, workdir, private, make_decider, make_custodian, upstream
         server.start()
     config = gateway_config(sockets["decide"], sockets["custodian"], upstream_url, [RELEASE_HEADER])
     config["mcp"]["targets"][0]["name"] = SERVICE
+    admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
-        "adminAddr": f"127.0.0.1:{free_port()}",
-        "statsAddr": f"127.0.0.1:{free_port()}",
-        "readinessAddr": f"127.0.0.1:{free_port()}",
+        "adminAddr": f"127.0.0.1:{admin}",
+        "statsAddr": f"127.0.0.1:{stats}",
+        "readinessAddr": f"127.0.0.1:{readiness}",
     }
-    config["mcp"]["port"] = free_port()
     expected = GatewayExpectations(sockets["decide"], sockets["custodian"], ROUTES.services, frozenset())
     assert validate_gateway_config(config, expected) == ()
     return servers, Gateway(binary, config, workdir)
