@@ -54,3 +54,12 @@ def test_gitea_mcp_is_read_only_without_capabilities(config, name):
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in service["security_opt"]
+
+
+def test_every_service_caps_memory_and_pids(config):
+    uncapped = {
+        name
+        for name, service in config["services"].items()
+        if not (service.get("mem_limit") and service.get("pids_limit"))
+    }
+    assert uncapped == set()

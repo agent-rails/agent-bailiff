@@ -24,6 +24,8 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 
 Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. Only `gitea`, `gitea-mcp`, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too, so no container in the default stack can reach outside the host or publish a port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
 
+Every service has a memory and process limit (`mem_limit`, `pids_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
+
 The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/issues`, budget 20, one hour. Three routes exist (`routes.json`): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include.
 
 ## Run it
