@@ -1,0 +1,19 @@
+{
+  "recorded_at": "2026-11-21T14:33:06+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "python": "3.13.15"
+  },
+  "fstatvfs_ns_per_call": 810,
+  "fstatvfs_calls": 100000,
+  "appends": 1000,
+  "append_with_fstatvfs": {
+    "p50_ms": 1.031,
+    "p99_ms": 2.409
+  },
+  "append_with_constant_statvfs": {
+    "p50_ms": 0.95,
+    "p99_ms": 1.597
+  }
+}
