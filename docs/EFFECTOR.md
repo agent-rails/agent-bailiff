@@ -29,7 +29,7 @@ The same catalog produces the gateway routes and decide's resource for each call
    - the catalog digest matches;
    - decide's clearance verifies (pinned decide keys) and agrees with the release on op_id, tenant, task, tool, resource and argument digest;
    - the operation's tool equals the release's, the arguments match the catalog schema exactly, and the derived resource and argument digest equal the release's;
-   - the op_id has not been used within the release lifetime. This is effector-local; admission is stateless and accepts replay of the exact released change until expiry.
+   - the op_id has not been used within the release lifetime. This is effector-local; admission is stateless and accepts replay of the exact released change until the webhook's clock reaches the release's expiry.
 4. It records an `attempt` docket entry and makes no call until the entry is acknowledged. It checks suspension again.
 5. It makes one Kubernetes request built only from the catalog's fields and the checked arguments. The request impersonates `bailiff:<tenant>:<identity>`, with the op_id and trace id as user extras. It uses the effector's own token, read from a 0600 file on each call, over HTTPS with a pinned CA, with no redirects or proxies, a 10 s timeout and a 1 MiB response cap.
 6. It records the outcome and returns only the catalog's response fields, within the catalog's byte limit. A timeout, a 5xx, a client failure or an unacknowledged outcome entry returns `outcome_unknown`, never success.
