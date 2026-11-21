@@ -4,12 +4,14 @@ import fcntl
 import hashlib
 import logging
 import os
+import random
 import stat
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -21,6 +23,7 @@ from agent_bailiff.docket.manifest import (
     MAX_INTEGER,
     MAX_SEGMENT,
     Heads,
+    Manifest,
     SegmentEntry,
     heads_document,
     parse_heads,
@@ -39,6 +42,10 @@ MAX_CHECKPOINT_BYTES = 1 << 20
 ARCHIVE_DIR_MODE = 0o750
 READ_CHUNK = 1 << 20
 DEFAULT_POLL_INTERVAL = 10.0
+DEFAULT_REFRESH_INTERVAL = 900.0
+REFRESH_JITTER = 0.1
+REFRESH_BATCH = 8
+MAX_PRUNE = 64
 CHECKPOINT_KEYS = frozenset({"version", "docket_id", "segment", "entries", "heads"})
 
 logger = logging.getLogger(__name__)
@@ -151,7 +158,11 @@ class DocketArchiver:
         clock: Callable[[], float] = time.time,
         fsync: Callable[[int], None] = os.fsync,
         device_of: Callable[[Path], int] = lambda path: os.stat(path).st_dev,
+        refresh_interval: float = DEFAULT_REFRESH_INTERVAL,
+        jitter: Callable[[], float] = random.random,
     ) -> None:
+        if refresh_interval <= 0:
+            raise ValueError("the receipt refresh interval must be positive")
         self._docket_path = docket_path
         self._index = index
         self._archive_dir = archive_dir
@@ -166,6 +177,11 @@ class DocketArchiver:
         self._copies_fd: int | None = None
         self._receipts: ReceiptDir | None = None
         self._checkpoint: ArchiverCheckpoint | None = None
+        self._refresh_interval = refresh_interval
+        self._jitter = jitter
+        self._next_refresh = 0.0
+        self._refreshing: deque[int] = deque()
+        self._pruned_below: int | None = None
 
     def run(self, stop: threading.Event, *, follow: bool) -> int:
         lock_path = self._checkpoint_path.with_name(f"{self._checkpoint_path.name}.lock")
@@ -178,6 +194,8 @@ class DocketArchiver:
             while not stop.is_set():
                 if self._archive_next():
                     archived += 1
+                    continue
+                if self._refresh_next():
                     continue
                 if not follow:
                     break
@@ -312,6 +330,53 @@ class DocketArchiver:
         logger.info("archived docket segment %d (%d bytes, %d records)", entry.segment, entry.size, entry.entries)
         return True
 
+    def _refresh_next(self) -> bool:
+        now = self._clock()
+        if self._checkpoint is None or (not self._refreshing and now < self._next_refresh):
+            return False
+        manifest = read_docket_manifest(self._docket_path)
+        if not self._refreshing:
+            self._next_refresh = now + self._refresh_interval * (1 + REFRESH_JITTER * (2 * self._jitter() - 1))
+            self._prune(manifest)
+            archived = self._checkpoint.segment
+            self._refreshing.extend(entry.segment for entry in manifest.segments if entry.segment < archived)
+            if not self._refreshing:
+                return False
+        copies = self._copies(manifest.docket_id)
+        for _ in range(min(REFRESH_BATCH, len(self._refreshing))):
+            self._refresh(manifest.docket_id, manifest.sealed_entry(self._refreshing.popleft()), copies)
+        return True
+
+    def _refresh(self, docket_id: str, entry: SegmentEntry | None, copies: int) -> None:
+        if entry is None or self._receipts is None:
+            return
+        receipt = self._receipts.read(entry.segment)
+        if receipt is None:
+            return
+        try:
+            copied = _hash_copy(copy_name(entry.segment), copies)
+        except FileNotFoundError:
+            copied = None
+        expected = (docket_id, entry.size, entry.sha256, dict(entry.end_heads))
+        if copied != (entry.size, entry.sha256) or _receipt_fields(receipt) != expected:
+            self._receipts.remove(entry.segment, fsync=self._fsync)
+            logger.error(
+                "the archived copy of docket segment %d is missing or differs from its manifest entry; "
+                "its receipt was removed, so the segment is kept",
+                entry.segment,
+            )
+            return
+        self._receipts.write(replace(receipt, verified_at=int(self._clock())), fsync=self._fsync)
+
+    def _prune(self, manifest: Manifest) -> None:
+        if manifest.base is None or self._receipts is None:
+            return
+        tombstone = manifest.base.segment
+        start = self._pruned_below or max(1, tombstone - MAX_PRUNE)
+        for segment in range(start, tombstone):
+            self._receipts.remove(segment, fsync=self._fsync)
+        self._pruned_below = max(start, tombstone)
+
     def _rebuild(self, checkpoint: ArchiverCheckpoint, copies: int) -> None:
         segment = checkpoint.segment
         try:
@@ -405,6 +470,10 @@ def _require_equal(derived: SegmentEntry, entry: SegmentEntry) -> None:
 def _value(entry: SegmentEntry, name: str) -> Any:
     value = getattr(entry, name)
     return dict(value) if name == "end_heads" else value
+
+
+def _receipt_fields(receipt: Receipt) -> tuple[str, int, str, dict[str, Head]]:
+    return receipt.docket_id, receipt.size, receipt.sha256, dict(receipt.end_heads)
 
 
 def _advanced(checkpoint: ArchiverCheckpoint, entry: SegmentEntry) -> ArchiverCheckpoint:

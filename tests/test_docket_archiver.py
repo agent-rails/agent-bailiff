@@ -13,6 +13,7 @@ from test_docket_report import cut as cut_docket
 
 from agent_bailiff import cli
 from agent_bailiff.docket.archiver import (
+    REFRESH_BATCH,
     ArchiveMismatch,
     ArchiverCheckpoint,
     ArchiverLocked,
@@ -404,3 +405,133 @@ def test_cli_refuses_an_archive_on_the_docket_device(layout, pin_files, capsys):
     assert code == 1
     assert "docket archive refused" in err
     assert "docket's device" in err
+
+
+class Clock:
+    def __init__(self, now=NOW):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def remove_oldest(docket, manifest):
+    oldest, *rest = manifest.segments
+    removed = Manifest(
+        manifest.docket_id,
+        manifest.generation + 1,
+        Base(oldest.segment, oldest.first_entry + oldest.entries - 1, oldest.end_heads),
+        tuple(rest),
+    )
+    write_manifest(manifest_path(docket.path), removed)
+    segment_path(docket.path, oldest.segment).unlink()
+    return removed
+
+
+def test_each_run_rechecks_receipts_at_start(layout):
+    two_segments(layout[1])
+    clock = Clock()
+    assert run(layout, clock=clock) == 2
+    clock.now = NOW + 99
+    assert run(layout, clock=clock) == 0
+    assert receipt(layout, 1).verified_at == NOW + 99
+
+
+def test_refresh_waits_for_the_interval_within_one_run(layout):
+    two_segments(layout[1])
+    clock = Clock()
+    instance = archiver(layout, clock=clock, refresh_interval=100, jitter=lambda: 0.5)
+    instance._open()
+    try:
+        assert instance._archive_next() and instance._archive_next()
+        assert instance._refresh_next()
+        clock.now = NOW + 99
+        assert not instance._refresh_next()
+        assert receipt(layout, 2).verified_at == NOW
+        clock.now = NOW + 100
+        assert instance._refresh_next()
+        assert receipt(layout, 2).verified_at == NOW + 100
+    finally:
+        instance._close()
+
+
+@pytest.mark.parametrize(("draw", "delay"), [(0.0, 90), (0.5, 100), (0.999999, 110)])
+def test_refresh_jitter_stays_within_ten_percent(layout, draw, delay):
+    cut(filled(layout[1]))
+    clock = Clock()
+    instance = archiver(layout, clock=clock, refresh_interval=100, jitter=lambda: draw)
+    instance._open()
+    try:
+        instance._archive_next()
+        instance._refresh_next()
+        assert round(instance._next_refresh - NOW) == delay
+    finally:
+        instance._close()
+
+
+def test_refresh_handles_a_bounded_batch_per_step(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    for number in range(5, 5 + REFRESH_BATCH + 2):
+        docket.append("decide", make_entry(number))
+        manifest = cut(docket, manifest)
+    clock = Clock()
+    instance = archiver(layout, clock=clock)
+    instance._open()
+    try:
+        while instance._archive_next():
+            pass
+        clock.now = NOW + 1
+        assert instance._refresh_next()
+        refreshed = [receipt(layout, entry.segment).verified_at for entry in manifest.segments]
+        assert refreshed == [NOW + 1] * REFRESH_BATCH + [NOW] * 3
+        assert instance._refresh_next()
+        assert not instance._refresh_next()
+    finally:
+        instance._close()
+
+
+def test_refresh_removes_the_receipt_of_a_missing_copy(layout, caplog):
+    manifest = two_segments(layout[1])
+    assert run(layout) == 2
+    (copies(layout, manifest) / "seg-000000000001").unlink()
+    run(layout)
+    assert receipt(layout, 1) is None
+    assert receipt(layout, 2) is not None
+    assert "missing or differs from its manifest entry" in caplog.text
+
+
+def test_refresh_removes_the_receipt_of_a_changed_copy(layout):
+    manifest = two_segments(layout[1])
+    assert run(layout) == 2
+    copy = copies(layout, manifest) / "seg-000000000002"
+    os.chmod(copy, 0o600)
+    copy.write_bytes(copy.read_bytes()[:-1] + b" ")
+    run(layout)
+    assert receipt(layout, 2) is None
+    assert receipt(layout, 1) is not None
+
+
+def test_refresh_removes_a_receipt_differing_from_its_manifest_entry(layout):
+    two_segments(layout[1])
+    assert run(layout) == 2
+    with ReceiptDir.open(layout[0] / "receipts", archiver_uid=UID, reader_gid=GID) as receipts:
+        receipts.write(replace(receipts.read(1), end_heads={"decide": Head(1, "A" * 43)}))
+    run(layout)
+    assert receipt(layout, 1) is None
+
+
+def test_refresh_keeps_the_tombstone_and_removes_older_receipts(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    docket.append("decide", make_entry(7))
+    manifest = cut(docket, manifest)
+    assert run(layout) == 3
+    manifest = remove_oldest(docket, manifest)
+    run(layout)
+    assert [receipt(layout, segment) is not None for segment in (1, 2, 3)] == [True, True, True]
+    manifest = remove_oldest(docket, manifest)
+    run(layout)
+    assert [receipt(layout, segment) is not None for segment in (1, 2, 3)] == [False, True, True]
+    tombstone = receipt(layout, 2)
+    assert tombstone.verified_at == NOW
