@@ -25,6 +25,17 @@ x-once: &once
 x-offline: &offline
   network_mode: none
 
+x-gitea-mcp: &gitea-mcp
+  image: docker.gitea.com/gitea-mcp-server:1.13.0@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18
+  command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea:3000", "-port", "8080"]
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: [/tmp]
+  depends_on:
+    gitea:
+      condition: service_healthy
+
 services:
   gitea:
     image: gitea/gitea:1.25-rootless@sha256:be0b89adf2fc8657df508303d919c3be33e6413605882919f702177d62960c9a
@@ -44,14 +55,15 @@ services:
       retries: 30
 
   gitea-mcp:
-    image: docker.gitea.com/gitea-mcp-server:1.13.0@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18
-    command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea:3000", "-port", "8080"]
+    <<: *gitea-mcp
+    networks: [upstream]
+
+  gitea-mcp-spike:
+    <<: *gitea-mcp
+    profiles: [spike]
     ports:
       - "127.0.0.1:${GITEA_MCP_PORT:-18080}:8080"
-    networks: [upstream]
-    depends_on:
-      gitea:
-        condition: service_healthy
+    networks: [upstream, spike]
 
   gitea-secret:
     <<: [*bailiff, *once, *offline]
@@ -395,7 +407,9 @@ configs:
 networks:
   edge:
     internal: true
-  upstream: {}
+  upstream:
+    internal: true
+  spike: {}
   trace:
     internal: true
   trace-ui: {}

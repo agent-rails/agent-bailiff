@@ -52,7 +52,7 @@ jobs:
       - run: python -m pip check
       - run: sh adapters/agentgateway/scripts/generate_proto.sh
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
-      - run: docker compose up --detach --wait
+      - run: docker compose --profile spike up --detach --wait
       - run: |
           docker compose exec -T gitea gitea admin user create --username agentops \
             --password "$(openssl rand -hex 16)" --email agentops@example.invalid --must-change-password=false
@@ -74,4 +74,4 @@ jobs:
       - run: cat benchmarks/quickstart-*.json
       - run: "! grep -q skipped \"$RUNNER_TEMP/pytest.out\""
       - if: always()
-        run: docker compose down --volumes
+        run: docker compose --profile "*" down --volumes --remove-orphans
