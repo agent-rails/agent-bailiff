@@ -37,7 +37,7 @@ from run import (
     write_owned,
 )
 
-from agent_bailiff.docket.sink import verify_docket
+from agent_bailiff.docket.report import verify_docket
 from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
 from agent_bailiff.service.settings import load_docket
 

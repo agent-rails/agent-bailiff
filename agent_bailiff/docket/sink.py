@@ -115,11 +115,6 @@ def check_chain(heads: Mapping[str, Head], record: Record) -> Refused | None:
     return None
 
 
-def verify_docket(path: Path, writers: Writers) -> VerifyReport:
-    with open(path, "rb") as docket:
-        return _verify_stream(docket, build_kid_index(writers))
-
-
 def _verify_chain(fd: int, index: KidIndex, manifest: Manifest) -> tuple[ChainState, VerifyReport]:
     chain = ChainState(segment=manifest.active_segment, entries=manifest.entries)
     with os.fdopen(os.dup(fd), "rb") as docket:
@@ -128,13 +123,6 @@ def _verify_chain(fd: int, index: KidIndex, manifest: Manifest) -> tuple[ChainSt
         for verified in verification:
             chain.add(verified.start, verified.record)
     return chain, verification.report
-
-
-def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
-    verification = Verification(docket, index)
-    for _ in verification:
-        pass
-    return verification.report
 
 
 @dataclass(frozen=True)

@@ -8,7 +8,6 @@ from agent_bailiff.docket.sink import (
     VerifiedLine,
     VerifyReport,
     repair,
-    verify_docket,
 )
 
 __all__ = [
@@ -28,5 +27,4 @@ __all__ = [
     "decode_record",
     "encode_record",
     "repair",
-    "verify_docket",
 ]
