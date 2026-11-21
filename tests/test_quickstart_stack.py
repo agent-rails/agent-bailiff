@@ -105,6 +105,7 @@ EXPECTED_ENTRIES = {
     "docket-data/config.json": (b.DOCKET_UID, b.DOCKET_UID, 0o600, FILE),
     "docket-data/docket.log": (b.DOCKET_UID, b.DOCKET_READERS_GID, 0o640, FILE),
     "docket-data/docket.log.snapshot": (b.DOCKET_UID, b.DOCKET_READERS_GID, 0o640, FILE),
+    "docket-data/docket.log.lock": (b.DOCKET_UID, b.DOCKET_UID, 0o600, FILE),
     "ledger": (*DECIDE, 0o750, DIRECTORY),
     "ledger/ledger.db": (*DECIDE, 0o640, FILE),
     "ledger/ledger.db.suspension": (*DECIDE, 0o750, DIRECTORY),
