@@ -1,5 +1,6 @@
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -39,11 +40,13 @@ asyncio.run(main())
 """
 
 
-def socket_inode(path):
-    try:
-        return path.stat().st_ino
-    except FileNotFoundError:
-        return None
+def listening(path):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        try:
+            connection.connect(str(path))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return False
+    return True
 
 
 def active_bytes(paths):  # noqa: F811
@@ -54,7 +57,6 @@ def active_bytes(paths):  # noqa: F811
 
 
 def start_sink_process(paths):  # noqa: F811
-    stale = socket_inode(paths[1])
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join([str(TESTS), str(ROOT)])}
     process = subprocess.Popen(
         [sys.executable, "-c", SINK, str(paths[0]), str(paths[1]), str(SEGMENT_BYTES)],
@@ -65,7 +67,7 @@ def start_sink_process(paths):  # noqa: F811
         text=True,
     )
     deadline = time.monotonic() + 10
-    while socket_inode(paths[1]) in (None, stale):
+    while not listening(paths[1]):
         assert process.poll() is None, process.communicate()
         assert time.monotonic() < deadline, f"{paths[1]} did not appear"
         time.sleep(0.02)
