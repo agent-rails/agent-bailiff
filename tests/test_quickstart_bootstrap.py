@@ -1,3 +1,6 @@
+import json
+import os
+
 import pytest
 from test_quickstart_stack import b
 
@@ -15,3 +18,15 @@ def test_a_probe_that_is_denied_is_refused_with_its_status(status):
 def test_a_probe_that_is_neither_allowed_nor_refused_fails_bootstrap(status):
     with pytest.raises(b.BootstrapError, match=f"'create a repository' returned {status}"):
         b.probe_outcome("create a repository", status)
+
+
+def test_an_old_docket_config_fails_bootstrap_with_the_reset_hint(tmp_path, monkeypatch):
+    config = tmp_path / "docket" / "config.json"
+    config.parent.mkdir(mode=0o700)
+    config.write_text(json.dumps({"snapshot_every": 10_000}))
+    os.chmod(config, 0o600)
+    monkeypatch.setitem(b.DIRS, "docket", config.parent)
+    monkeypatch.setattr(b, "read_pin", lambda path: None)
+    monkeypatch.setattr(b, "WRITERS", ())
+    with pytest.raises(b.BootstrapError, match="missing .*free_space_floor.*run docker compose down --volumes"):
+        b.init_docket()
