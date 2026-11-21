@@ -175,6 +175,14 @@ def segment_path(docket_path: Path, segment: int) -> Path:
     return docket_path.with_name(f"{docket_path.name}.seg-{segment:012d}")
 
 
+def unknown_segment_files(docket_path: Path, manifest: Manifest, names: Iterable[str]) -> list[str]:
+    known = {segment_path(docket_path, entry.segment).name for entry in manifest.segments}
+    if manifest.base is not None:
+        known.add(segment_path(docket_path, manifest.base.segment).name)
+    prefix = f"{docket_path.name}.seg-"
+    return sorted(name for name in names if name.startswith(prefix) and name not in known)
+
+
 def read_manifest(path: Path, *, uid: int, reader_gid: int | None = None, dir_fd: int | None = None) -> Manifest | None:
     try:
         content = read_state_file(path, uid=uid, reader_gid=reader_gid, max_bytes=MAX_MANIFEST_BYTES, dir_fd=dir_fd)

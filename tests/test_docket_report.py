@@ -703,7 +703,27 @@ def test_a_cut_on_every_open_is_refused(docket, pin_files, capsys, monkeypatch):
     generations = iter(range(1, 100))
     monkeypatch.setattr(segments_module, "read_docket_manifest", lambda path: Manifest("0" * 32, next(generations)))
     code, _, err = verify(docket, pin_files, capsys=capsys)
-    assert code == cli.EXIT_REFUSED and "cannot be opened" in err
+    assert code == cli.EXIT_REFUSED and "changed on every directory listing" in err
+
+
+def test_verify_refuses_a_segment_file_not_in_the_manifest(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    cut(docket)
+    fill(docket, 3, 4)
+    segment_path(docket.path, 7).write_bytes(segment_path(docket.path, 1).read_bytes())
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == cli.EXIT_REFUSED and out == []
+    assert f"segment files not in the manifest of {docket.path}: {segment_path(docket.path, 7).name}" in err
+
+
+def test_verify_accepts_the_file_of_a_removal_not_yet_unlinked(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    write_manifest(manifest_path(docket.path), Manifest(manifest.docket_id, 2, Base(1, 2, manifest.seeds)))
+    fill(docket, 3, 5)
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [row["line"] for row in json_rows(out)] == [3, 4]
 
 
 def active_snapshot(docket, manifest, lines=None):
