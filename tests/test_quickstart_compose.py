@@ -63,3 +63,10 @@ def test_every_service_caps_memory_and_pids(config):
         if not (service.get("mem_limit") and service.get("pids_limit"))
     }
     assert uncapped == set()
+
+
+def test_no_service_swaps_past_its_memory_limit(config):
+    swapping = {
+        name for name, service in config["services"].items() if service.get("memswap_limit") != service.get("mem_limit")
+    }
+    assert swapping == set()
