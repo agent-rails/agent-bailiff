@@ -46,7 +46,7 @@ The sink appends to the active segment `<docket>`. Once an acknowledged append b
 - Order: fsync the docket, write the snapshot of the next segment (offset 0), replace `<docket>.manifest` with one that lists the sealed segment (its size, SHA-256, first entry number, entry count, every writer's head and key ids), rename `<docket>` to the segment name, then create, fsync and rename `<docket>.new` to `<docket>`. Each rename is followed by a directory fsync. The manifest replace is the commit.
 - A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the next append retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
 - A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
-- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. Each append after that retries the cut, at four to seven fsyncs instead of one, until segments are removed.
+- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. Each append after that retries the cut until segments are removed, at about three fsyncs more than an append that does not cut.
 
 ### Upgrade and downgrade
 
