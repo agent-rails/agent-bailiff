@@ -362,6 +362,7 @@ def other_anchor(snapshot):
 @pytest.mark.parametrize(
     ("change", "difference"),
     [
+        (lambda snapshot: replace(snapshot, segment=2), "segment"),
         (lambda snapshot: replace(snapshot, prefix_sha256="0" * 64), "prefix_sha256"),
         (lambda snapshot: replace(snapshot, entries=snapshot.entries + 1), "entries"),
         (lambda snapshot: replace(snapshot, anchors=other_anchor(snapshot)), "anchors"),
@@ -482,6 +483,7 @@ def forged_snapshot(docket, anchors):
     content = docket.path.read_bytes()
     lines = content.splitlines(keepends=True)
     return Snapshot(
+        segment=1,
         offset=len(content),
         entries=len(lines),
         prefix_sha256=hashlib.sha256(content).hexdigest(),
