@@ -15,6 +15,10 @@ class StateFileInvalid(ValueError):
     pass
 
 
+class DirectorySyncFailed(OSError):
+    pass
+
+
 def read_state_file(
     path: Path, *, uid: int, reader_gid: int | None, max_bytes: int, dir_fd: int | None = None
 ) -> bytes | None:
@@ -61,7 +65,10 @@ def replace_state_file(
         except BaseException:
             _unlink_if_present(temporary, directory_fd)
             raise
-        fsync(directory_fd)
+        try:
+            fsync(directory_fd)
+        except OSError as exc:
+            raise DirectorySyncFailed(exc.errno, f"{path} was replaced but its directory fsync failed") from exc
     finally:
         os.close(directory_fd)
 

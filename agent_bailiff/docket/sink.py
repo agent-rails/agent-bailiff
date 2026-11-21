@@ -17,9 +17,11 @@ from agent_bailiff.docket.entry import Head, Record, decode_record
 from agent_bailiff.docket.manifest import (
     Manifest,
     ManifestInvalid,
+    SegmentEntry,
     manifest_path,
     read_manifest,
     segment_path,
+    write_manifest,
 )
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
@@ -41,6 +43,7 @@ from agent_bailiff.docket.socket_dir import (
     try_lock,
     unlink_if_same,
 )
+from agent_bailiff.docket.state_file import DirectorySyncFailed
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused
 
 DOCKET_MODE = 0o600
@@ -52,6 +55,8 @@ DEFAULT_MAX_CONNECTIONS = 16
 DEFAULT_SNAPSHOT_EVERY = 10_000
 DEFAULT_FREE_SPACE_FLOOR = 256 << 20
 MIN_FREE_SPACE_FLOOR = 2 * MAX_FRAME_BYTES
+DEFAULT_SEGMENT_BYTES = 256 << 20
+MIN_SEGMENT_BYTES = 64 << 20
 FLOOR_LOG_INTERVAL = 60.0
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
@@ -392,6 +397,7 @@ class DocketSink:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
         free_space_floor: int = DEFAULT_FREE_SPACE_FLOOR,
+        segment_bytes: int = DEFAULT_SEGMENT_BYTES,
         fsync: Callable[[int], None] = os.fsync,
         statvfs: Callable[[int], os.statvfs_result] = os.fstatvfs,
         clock: Callable[[], float] = time.monotonic,
@@ -400,6 +406,8 @@ class DocketSink:
             raise ValueError("snapshot_every must be an integer of at least 1")
         if type(free_space_floor) is not int or free_space_floor < MIN_FREE_SPACE_FLOOR:
             raise ValueError(f"free_space_floor must be an integer of at least {MIN_FREE_SPACE_FLOOR}")
+        if type(segment_bytes) is not int or segment_bytes < 1:
+            raise ValueError("segment_bytes must be an integer of at least 1")
         self._docket_path = docket_path
         self._socket_path = socket_path
         self._writers = writers
@@ -416,6 +424,8 @@ class DocketSink:
         self._statvfs = statvfs
         self._clock = clock
         self._free_space_floor = free_space_floor
+        self._segment_bytes = segment_bytes
+        self._cut_pending = False
         self._floor_logged_at: float | None = None
         self._snapshot_path = snapshot_path(docket_path)
         self._snapshot_every = snapshot_every
@@ -717,6 +727,7 @@ class DocketSink:
         self._heads[record.writer] = Head(seq=record.seq, hash=record.hash)
         self._chain.add(self._chain.offset, record)
         self._count_toward_snapshot()
+        self._schedule_cut()
         return {"ok": True, "seq": record.seq, "hash": record.hash}
 
     def _check_capacity(self, fd: int) -> None:
@@ -756,6 +767,89 @@ class DocketSink:
             return
         self._since_snapshot = 0
         asyncio.get_running_loop().call_soon(self._write_snapshot)
+
+    def _schedule_cut(self) -> None:
+        if self._cut_pending or self._chain.offset < self._segment_bytes:
+            return
+        self._cut_pending = True
+        asyncio.get_running_loop().call_soon(self._cut)
+
+    def _cut(self) -> None:
+        self._cut_pending = False
+        if self._failed or self._fd is None or self._chain.offset < self._segment_bytes:
+            return
+        sealed = self._chain.snapshot()
+        size = os.fstat(self._fd).st_size
+        if size != sealed.offset:
+            self._failed = True
+            logger.error("docket is %d bytes, not the %d the sink wrote; appends stop", size, sealed.offset)
+            return
+        first_entry = self._manifest.entries + 1
+        entry = SegmentEntry(
+            sealed.segment,
+            sealed.prefix_sha256,
+            sealed.offset,
+            first_entry,
+            sealed.entries - first_entry + 1,
+            dict(self._heads),
+            sealed.kids,
+        )
+        self._failed = True
+        manifest = self._manifest.sealed(entry)
+        following = ChainState(segment=entry.segment + 1, entries=sealed.entries)
+        try:
+            self._fsync(self._fd)
+            write_snapshot(self._snapshot_path, following.snapshot(), reader_gid=self._reader_gid, fsync=self._fsync)
+        except (OSError, SnapshotInvalid):
+            self._abort_cut(entry.segment)
+            return
+        try:
+            write_manifest(manifest_path(self._docket_path), manifest, reader_gid=self._reader_gid, fsync=self._fsync)
+        except DirectorySyncFailed:
+            logger.exception("docket cut of segment %d may have committed; appends stop until restart", entry.segment)
+            return
+        except (OSError, ManifestInvalid):
+            self._abort_cut(entry.segment)
+            return
+        self._manifest = manifest
+        try:
+            fd = self._replace_active(entry.segment)
+        except OSError:
+            logger.exception("docket cut of segment %d committed but did not finish; appends stop", entry.segment)
+            return
+        os.close(self._fd)
+        self._fd = fd
+        self._chain = following
+        self._since_snapshot = 0
+        self._failed = False
+        logger.info("docket segment %d sealed at %d bytes", entry.segment, entry.size)
+
+    def _abort_cut(self, segment: int) -> None:
+        self._failed = False
+        logger.exception("docket cut of segment %d aborted; the next append retries it", segment)
+
+    def _replace_active(self, segment: int) -> int:
+        name = self._docket_path.name
+        new = f"{name}.new"
+        directory_fd = open_private_dir(self._docket_path.parent)
+        try:
+            os.rename(
+                name, segment_path(self._docket_path, segment).name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd
+            )
+            self._fsync(directory_fd)
+            flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            fd = os.open(new, flags, DOCKET_MODE, dir_fd=directory_fd)
+            self._share_with_readers(fd)
+            try:
+                self._fsync(fd)
+                os.rename(new, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                self._fsync(directory_fd)
+            except BaseException:
+                os.close(fd)
+                raise
+            return fd
+        finally:
+            os.close(directory_fd)
 
 
 def _mismatch(detail: str) -> VerifyReport:

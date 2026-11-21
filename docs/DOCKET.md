@@ -39,6 +39,15 @@ Start trusts the bytes before the snapshot offset if their SHA-256 matches. The 
 
 These were caught at every restart before; they are now caught only by `docket verify`. Run `docket verify --snapshot <docket>.snapshot` on a schedule, as a reader group member or the sink uid, and alert when it exits 1. The longest time a doctored prefix goes unnoticed is the interval between runs plus one run; pick the interval as the longest window you accept. Neither the sink nor the exporter re-verifies records before its own resume point.
 
+## Segments
+
+The sink appends to the active segment `<docket>`. Once an acknowledged append brings it to `segment_bytes` (required in the docket config; at least 64 MiB; `agent-bailiff init docket` writes 256 MiB), the sink seals it as `<docket>.seg-NNNNNNNNNNNN` after the current reply is sent. No append runs during a cut.
+
+- Order: fsync the docket, write the snapshot of the next segment (offset 0), replace `<docket>.manifest` with one that lists the sealed segment (its size, SHA-256, first entry number, entry count, every writer's head and key ids), rename `<docket>` to the segment name, then create, fsync and rename `<docket>.new` to `<docket>`. Each rename is followed by a directory fsync. The manifest replace is the commit.
+- A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the next append retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
+- A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
+- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts.
+
 ## Readers
 
 A docket config with `reader_group` set lets members of that group read the docket without running as the sink uid. `agent-bailiff init docket --reader-group <gid>` gives the docket directory that group and mode 0750; the sink creates a new docket with that group and mode 0640 and refuses to start on any other mode or group. The sink uid must be a member of the group, or init and the first start fail. `config.json` stays 0600, so readers never read the sink config; they take writer pins from their own copies of the writers' public key records.
