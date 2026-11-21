@@ -46,12 +46,42 @@ The sink appends to the active segment `<docket>`. Once an acknowledged append b
 - Order: fsync the docket, write the snapshot of the next segment (offset 0), replace `<docket>.manifest` with one that lists the sealed segment (its size, SHA-256, first entry number, entry count, every writer's head and key ids), rename `<docket>` to the segment name, then create, fsync and rename `<docket>.new` to `<docket>`. Each rename is followed by a directory fsync. The manifest replace is the commit.
 - A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the first append after 30 s retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
 - A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
-- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. The sink retries the cut at most once every 30 s until segments are removed, each retry costing about three fsyncs more than an append that does not cut.
+- Segments are removed only after an archive receipt; see Removal. Once the manifest reaches its 4 MiB cap every cut aborts, and the sink retries the cut at most once every 30 s, each retry costing about three fsyncs more than an append that does not cut. The config refuses a `retained_bytes` whose manifest could exceed the cap.
+
+### Removal
+
+The docket config's `retained_bytes` (at least `2 * segment_bytes`; `agent-bailiff init docket` writes 16 GiB), `receipt_dir`, `archiver_uid` and `max_receipt_age` (3600 to 604800 s; init writes 86400) set retention, and `reader_group` is required. Every 60 s, and once at start, the sink removes the oldest sealed segment while the sealed segments plus the active one hold more than `retained_bytes`, up to 64 segments per pass. It removes a segment only when `<receipt_dir>/seg-NNNNNNNNNNNN.json` names this docket and matches the segment's manifest entry (size, SHA-256, end heads), and its `verified_at` is at most `max_receipt_age` old and at most 60 s in the future.
+
+- Order: replace the manifest with one whose `base` records the removed segment (number, end entry, every writer's head), then unlink the segment file and fsync the directory. The manifest replace is the commit; `base` is the tombstone readers verify from.
+- A receipt that is missing, unreadable, mismatched or too old keeps the segment and is logged. While the docket is over `retained_bytes`, each pass logs `over its ... byte cap; the oldest segment waits for a fresh archive receipt`. Alert on it: the archiver is behind or stopped, and the docket grows until the free-space floor.
+- A failed manifest write keeps the segment and retries in 60 s. A failed directory fsync after the replace stops removals until restart. A failed unlink is retried before the next removal.
+- Start finishes a committed removal: if the segment named by `base` is still present, the sink unlinks it only when its receipt names this docket and its size; otherwise it refuses to start with `segment_mismatch` ("left the manifest"). Any `<docket>.seg-*` not in the manifest refuses start too.
+- The receipt directory is opened at start and must be owned by `archiver_uid` with group `reader_group` and mode 0750; the sink refuses to start otherwise. `agent-bailiff init docket --receipt-dir PATH --archiver-uid UID` writes both keys but does not create the directory; create it as the archiver uid before the first start.
+- Removal frees the segment on the host only. The records are then only in the archive; `docket verify` without `--archive` starts from `base`.
+
+### Archive
+
+```
+agent-bailiff docket archive --docket PATH --pin decide.pub.json --pin custodian.pub.json --archive DIR --receipts RECEIPT_DIR --checkpoint DIR/checkpoint.json [--once] [--poll-interval 10] [--refresh-interval 900]
+```
+
+Run it as `archiver_uid`, a member of the reader group, in its own process with a 0700 checkpoint directory. For each sealed segment in order it reads the segment uncached, verifies every record from the previous segment's heads, writes `DIR/<docket_id>/seg-NNNNNNNNNNNN` (0640) and its canonical sidecar `.json` (0750 directory), fsyncs them, reads the copy back against the manifest entry, writes the receipt and then its checkpoint. Without `--once` it follows the manifest every `--poll-interval` seconds until SIGTERM or SIGINT.
+
+- It refuses an archive directory on the docket's device (`is on the docket's device`). This means another file system, not another host: a second disk in the same machine passes. Put the archive on storage that a loss of the docket host does not take with it.
+- Every `--refresh-interval` seconds (±10%) it rehashes each archived copy still in the manifest and rewrites its receipt with a new `verified_at`; a copy that is missing or differs has its receipt removed, so that segment is kept. Keep the interval well under `max_receipt_age`, or receipts expire between refreshes and removal stops. It also removes receipts of segments below `base`.
+- Measured on one host (`benchmarks/docket-archiver-2026-11-21.json`, Apple silicon, APFS, 1 MiB segments): archiving ran at 5165 records/s against appends at 2833 records/s, both on one disk. The archiver bounds sustained ingest: if appends outrun it, removal stops and the docket grows to the floor. Alert on the cap log line above.
+- One archiver per checkpoint: it holds `<checkpoint>.lock`, and a second exits 1.
+- Exit 1 with "is for docket": the checkpoint belongs to another docket. Exit 1 with `ArchiveMismatch` on a copy or sidecar: the archive was changed; treat it as an integrity incident.
+- On Linux, uncached reads use `POSIX_FADV_DONTNEED`, which has no effect on NFS. Reading a docket on NFS fills the page cache.
+
+### Archiver checkpoint loss
+
+Without a checkpoint the archiver starts at segment 1. For segments already removed it re-derives each one's heads from its archived copy and checks it against the sidecar, then archives the retained segments again and rewrites their receipts. This needs the archive: if an archived copy below `base` is missing, it exits 1 with "was removed from the docket but has no archived copy", and nothing is removed until it runs again. If the archive is lost too, the removed records are gone; restore the archive from backup, or treat it as data loss.
 
 ### Upgrade and downgrade
 
-1. Stop the sink. Do not upgrade under a running sink.
-2. Install the release and add `segment_bytes` to the docket config: without it the config fails to load with `missing segment_bytes`. The quickstart bootstrap reports it with the same `docker compose down --volumes` hint as `free_space_floor`.
+1. Stop the sink and the archiver. Do not upgrade under a running sink.
+2. Install the release and add `segment_bytes`, `reader_group`, `receipt_dir` and `archiver_uid` to the docket config, and create the receipt directory (see Removal): without them the config fails to load with `missing ...`. The quickstart bootstrap reports it with the same `docker compose down --volumes` hint as `free_space_floor`.
 3. Start the sink. On a docket that has never been cut it reads a version 1 snapshot or none, verifies every record and writes a version 2 snapshot.
 
 From then on `<docket>.snapshot` is always present and version 2. An older release refuses it with `snapshot_mismatch` and does not start, so there is no downgrade. An older release also refuses a docket config that sets `segment_bytes`, as an unknown key. Never delete or move the snapshot and remove the key to get an older release to start: it would read only the active segment and let every writer start again at `seq` 1. The current release then refuses to start on that fork with `wrong_seq`. Moving the snapshot aside (see snapshot_mismatch at start) is safe only when the current release starts next.
@@ -68,7 +98,7 @@ A docket config with `reader_group` set lets members of that group read the dock
 ## docket verify
 
 ```
-agent-bailiff docket verify --docket PATH --pin decide.pub.json --pin custodian.pub.json [--trace ID] [--task ID] [--since UNIX_SECONDS] [--json] [--snapshot PATH]
+agent-bailiff docket verify --docket PATH --pin decide.pub.json --pin custodian.pub.json [--trace ID] [--task ID] [--since UNIX_SECONDS] [--json] [--snapshot PATH] [--archive DIR] [--receipts RECEIPT_DIR]
 ```
 
 Run it as a reader group member, the sink uid or root; it needs read access to the docket only, never the sink config. Each `--pin` is a writer's public key record; pass one per writer key, including retired keys whose records are still in the docket. Take pins from the writers' own key directories, not from a copy stored next to the docket, or whoever can replace the docket can replace the pins too.
@@ -79,13 +109,15 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 - A record with `performed` true is labelled `released, target outcome unknown`: the custodian released the credential, and the docket does not record what the target did with it.
 - Exit 0 when every record verifies. Exit 1 when a line fails: the records before it are printed, and stderr names the line and reason. Exit 1 too for an unreadable docket or pin.
 - `--snapshot PATH` also cross-checks a heads snapshot. The snapshot must be owned by the docket's owner with mode 0600, or 0640 and the docket's group when the docket is 0640. The snapshot covers the active segment only. After every record verifies, the record count, the SHA-256 of the bytes before the snapshot offset, each writer's anchor and the key ids are rebuilt from the verified records and compared. Exit 1 if any differ, if the snapshot names another segment than the active one, if the offset is not the end of a verified line, or if the snapshot is missing or invalid; stderr names the fields that differ. On a match, stderr also gives the number of records after the snapshot. Exit 0 does not mean the snapshot is recent: a snapshot that stopped being refreshed still matches. Alert on that count if it keeps growing past `snapshot_every`. The records printed are the same with and without it.
+- `--archive DIR` verifies the removed segments from the archive first, from line 1, then the retained ones, and checks that the last archived segment ends at the manifest's `base`. Each archived copy must match its sidecar. Line numbers are those of the whole docket.
+- `--receipts RECEIPT_DIR` also checks each retained segment against its receipt, if it has one, and the `base` against the receipt of the removed segment. stderr gives `N retained segments match their receipts` and `the base matches removed segment N`; any difference exits 1.
 - Verifying a docket while the sink is appending can report `torn_tail` for a line still being written. Run it again; if `torn_tail` stays, follow Torn tail repair.
 
 ## docket export
 
 ```
 pip install 'agent-bailiff[otel]'
-agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once] [--skip-line N]
+agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once] [--skip-line N] [--archive DIR]
 ```
 
 Run it as a reader group member in its own process, with its own uid and a 0700 checkpoint directory. It reads the docket and pins the same way `docket verify` does, verifies every record, and sends each one as an OTLP/HTTP span. It is off the call path: decide and the custodian never wait for it, and a stopped or failing exporter changes no decision. Without `--once` it follows the docket until SIGTERM or SIGINT.
@@ -104,6 +136,7 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 
 - At least once. After each batch the backend accepts, the exporter writes the checkpoint (mode 0600, written to a temporary file, fsynced, renamed, directory fsynced). A crash between acceptance and the checkpoint write sends that batch again on restart. Backends that do not deduplicate by span id may keep both copies.
 - The checkpoint holds the segment it last exported from, the byte offset in that segment, the count of exported records, each writer's head, the hash of the segment's first record and the hash and offset of the last exported one. Each pass the exporter reads the manifest, opens the segment, and starts again if the manifest generation changed meanwhile, so a cut never yields a gap or a duplicate. It refuses a segment shorter than the offset, or whose first or last exported record differs, then verifies forward from the saved heads. A sealed segment must end at the size and heads its manifest entry records. Sealed segment files are closed at the end of each pass. A version 1 checkpoint is migrated in place on first start: it must name the inode of `<docket>` or `<docket>.seg-000000000001`. It does not read the exported records between the first and last again, so a change to them by the sink uid or root is not detected on resume; `docket verify` checks every record. While following, it refuses a docket path that now names another file.
+- `--archive DIR` reads a segment from the archive once it is removed from the host. Each copy must match its sidecar and size. Without a checkpoint it starts at line 1 of the archive; without `--archive` a new checkpoint starts at the first retained segment.
 - One exporter per checkpoint: it holds an exclusive `flock` on `<checkpoint>.lock` while it runs, and a second exporter exits 1.
 - Each pass reads only up to the size the docket had at its start. Reading stops while a batch is exported, so a slow backend slows the exporter and nothing is dropped.
 - A failed batch is sent again. The SDK retries transient errors (429, 502, 503, 504 and connection errors) with backoff within `--timeout`; after `--max-failures` failed attempts of one batch the command exits 1 and the checkpoint stays at the last exported record.
@@ -121,7 +154,7 @@ The trace id comes from the caller's `traceparent` and is not authenticated: an 
 - The backend's message is cut to 200 characters and escaped before it is logged or printed. The HTTP reason phrase of an error status is logged by the OpenTelemetry exporter unescaped.
 - An incomplete last line is not an error: `--once` exports the records before it and exits 0, and following waits and warns. If the warning keeps repeating, follow Torn tail repair, then run a `--once` export again.
 - Exit 1 with `DocketCorrupt`: run `docket verify` to find the line and reason. Records before it were exported. This is a docket integrity incident, not an exporter fault.
-- Exit 1 with "was removed": the checkpoint names a segment no longer on the host. Export it from the archive, then move the checkpoint aside.
+- Exit 1 with "was removed": the checkpoint names a segment no longer on the host; the exporter fell behind removal. Start it again with `--archive DIR` as a user that can read the archive; it resumes from the checkpoint. Exit 1 with `ArchiveMismatch`: the archived copy or sidecar differs; treat it as an integrity incident.
 - Exit 1 with "not the file the checkpoint was written for", "replaced while following", "shorter than the checkpoint offset" or "differs from the checkpoint": the docket was replaced, truncated or rewritten after export. Treat it as a docket integrity incident and run `docket verify`. Once the docket is confirmed as the intended one, move the checkpoint aside and start the exporter; it exports every record again under the same span ids.
 - Exit 1 with "held by another follower": another exporter uses this checkpoint. Stop one; two exporters on one checkpoint would send every record twice.
 - Exit 1 on the checkpoint itself (mode, owner, fields): the checkpoint is 0600, owned by the exporter uid and version 2. Do not edit it; move it aside to export from the start.
@@ -149,7 +182,7 @@ It does not detect:
 - Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), the manifest (at most 4 MiB), the temporary copy of each written beside it during a cut (up to 4 MiB more each), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
 - Alert on the `docket refusing appends` log line and on free space approaching the floor. Free space; no restart is needed, appends resume on the next request.
 - Upgrade: a docket config without `free_space_floor` fails to load with `missing free_space_floor`; add the key. The quickstart bootstrap reports it with a hint to run `docker compose down --volumes`, which also deletes the quickstart docket.
-- The docket still grows without bound. The floor bounds the damage of a full disk; it does not remove records.
+- The floor does not remove records. Removal does, once segments are archived; a stopped archiver lets the docket grow until the floor (see Removal).
 - Measured on one host (`benchmarks/docket-floor-2026-11-21.json`, Apple silicon, APFS): `fstatvfs` took 0.81 µs per call against an append p50 of about 1 ms. Append p50 with the check was 1.03 ms and 0.95 ms with a constant result; one run each cannot separate that gap from noise.
 
 ## Torn tail repair
@@ -160,6 +193,8 @@ A crash during a write can leave an incomplete final line of the active segment.
 2. Run `docket verify --docket <docket> --pin ...` and confirm it fails with `torn_tail` on the last line.
 3. Run `repair(docket_path, side_path, writers)`, adding `reader_gid=<gid>` when the docket config sets `reader_group`. Under the docket lock it writes the incomplete line to `side_path` (created new, mode 0600), fsyncs it and its directory, truncates the docket to the last complete line, fsyncs the docket and its directory, and returns the verification of the result. It raises `DocketCorrupt` if any earlier line is invalid, and `DocketLocked` while a sink holds the docket.
 4. Keep the side file for investigation and start the sink.
+
+`repair` does not finish a removal. If a removal committed and the sink stopped before unlinking, `repair` refuses with `segment_mismatch` ("left the manifest"). Start the sink first: it finishes the removal before it checks the active segment, then refuses with `torn_tail`, and `repair` runs.
 
 Before it truncates, `repair` replaces the heads snapshot with one that ends at the last complete line, with the docket's mode and group. A crash between the two leaves that snapshot and the torn tail, and running `repair` again with a new side path finishes. It does not touch the snapshot when the docket verifies.
 

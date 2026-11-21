@@ -456,6 +456,28 @@ def test_restart_without_retention_refuses_a_removed_segment(paths, receipt_dir,
         repair(paths[0], workdir / "side", WRITERS, reader_gid=GID)
 
 
+def test_a_start_finishes_the_removal_before_it_refuses_a_torn_tail_so_repair_can_run(
+    paths, receipt_dir, monkeypatch, workdir
+):
+    size = three_segments(paths, receipt_dir)
+    write_receipts(paths, receipt_dir, segments={1})
+    real = sink_module.write_manifest
+    monkeypatch.setattr(sink_module, "write_manifest", faults()["manifest_after_replace"](real))
+
+    async def scenario(sink):
+        await settle(sink)
+
+    run(sink_of(paths, receipt_dir, 2 * size), scenario)
+    monkeypatch.setattr(sink_module, "write_manifest", real)
+    with open(paths[0], "ab") as docket:
+        docket.write(b"torn")
+    with pytest.raises(DocketCorrupt, match="torn_tail"):
+        run(sink_of(paths, receipt_dir, 2 * size), scenario)
+    assert not segment_path(paths[0], 1).exists()
+    assert repair(paths[0], workdir / "side", WRITERS, reader_gid=GID).ok
+    assert (workdir / "side").read_bytes() == b"torn"
+
+
 def test_low_free_space_within_the_cap_is_logged(paths, receipt_dir, caplog):
     three_segments(paths, receipt_dir)
     free = [1 << 40]
