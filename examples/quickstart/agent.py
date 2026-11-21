@@ -5,6 +5,7 @@ other outcome. It shows gateway enforcement, not model behaviour."""
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import statistics
@@ -16,6 +17,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -35,6 +37,15 @@ SERVICE = "gitea"
 ORG = "quickstart"
 INJECTED_TOOL = "get_file_contents"
 UNROUTED = {"service": SERVICE, "name": "issue_write", "tool": "gitea.issues.write", "resource": "gitea/issues"}
+RAW_LIMIT_BYTES = 4 * 1024 * 1024
+RAW_TIMEOUT_SECONDS = 30
+RAW_CASES: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("allowed", "list_issues", {"owner": ORG, "repo": "demo"}),
+    ("missing issue", "issue_read", {"method": "get", "owner": ORG, "repo": "demo", "issue_number": 999999}),
+    ("missing repo", "list_issues", {"owner": ORG, "repo": "missing"}),
+    ("injected", INJECTED_TOOL, {"owner": ORG, "repo": "payroll", "path": "salaries.csv"}),
+    ("unrouted", UNROUTED["name"], {"method": "create", "owner": ORG, "repo": "demo", "title": "written by the agent"}),
+)
 
 
 class ScenarioFailed(Exception):
@@ -210,6 +221,39 @@ def run_load(clients: int, calls: int) -> dict[str, Any]:
     }
 
 
+def raw_exchange(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
+    call.consume()
+    parts = urlsplit(GATEWAY_URL)
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream", **call.headers}
+    if client.protocol_version is not None:
+        headers["mcp-protocol-version"] = client.protocol_version
+    if client.session_id is not None:
+        headers["mcp-session-id"] = client.session_id
+    connection = http.client.HTTPConnection(parts.hostname or "", parts.port, timeout=RAW_TIMEOUT_SECONDS)
+    try:
+        connection.request("POST", parts.path, call.body, headers)
+        response = connection.getresponse()
+        body = response.read(RAW_LIMIT_BYTES + 1)
+    finally:
+        connection.close()
+    if len(body) > RAW_LIMIT_BYTES:
+        raise ScenarioFailed(f"call {call.request_id} returned more than {RAW_LIMIT_BYTES} bytes")
+    return {"status": response.status, "headers": response.getheaders(), "body": body.decode("latin-1")}
+
+
+def run_raw() -> dict[str, Any]:
+    client, task_id = open_client([UNROUTED])
+    try:
+        client.list_tools()
+        exchanges = [
+            {"case": case, **raw_exchange(client, client.prepare(SERVICE, name, arguments))}
+            for case, name, arguments in RAW_CASES
+        ]
+    finally:
+        client.close()
+    return {"task_id": task_id, "exchanges": exchanges}
+
+
 def report(task_id: str, checks: list[Check]) -> int:
     print(json.dumps({"task_id": task_id, "checks": [check.document() for check in checks]}, indent=2))
     return 0 if all(check.passed for check in checks) else 1
@@ -232,7 +276,7 @@ SCENARIO_STEPS: dict[str, Callable[[BailiffClient], list[Check]]] = {
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("step", choices=["key", *SCENARIO_STEPS, "load"])
+    parser.add_argument("step", choices=["key", *SCENARIO_STEPS, "load", "raw"])
     parser.add_argument("--clients", type=int, default=1)
     parser.add_argument("--calls", type=int, default=20)
     args = parser.parse_args(argv)
@@ -242,6 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.step == "load":
             print(json.dumps(run_load(args.clients, args.calls)))
+            return 0
+        if args.step == "raw":
+            print(json.dumps(run_raw()))
             return 0
         return run(SCENARIO_STEPS[args.step])
     except (ScenarioFailed, OSError, ValueError) as error:
