@@ -14,6 +14,7 @@ The docket is one file of newline-terminated signed records. Each record names i
 - One sink per docket and per socket: the sink holds an exclusive non-blocking `flock` on the docket and on `<socket>.lock` for its lifetime. A second sink fails with `DocketLocked`.
 - At start, under the lock, the sink checks the docket's parent directory (not a symlink, owned by the sink uid, not writable by group or others), the docket file (regular, owned by the sink uid, mode 0600; with `reader_group` set, mode 0640 and that group instead) and fsyncs the parent directory, then loads each writer's head through the same descriptor it appends to: from the heads snapshot when there is one, else by verifying every record (see Heads snapshot). A failed directory fsync makes the sink refuse every append.
 - An append is acknowledged only after the full line is written and fsynced. A failed write or fsync makes the sink refuse every later append until restart.
+- Free-space floor: before each write the sink reads the free space of the docket's file system (`fstatvfs`, blocks available to unprivileged users). If writing the record would leave less than `free_space_floor` bytes, the sink refuses it with `docket_full`. Nothing is written and the sink is not marked failed, so appends resume on their own once space returns. If the check itself fails, the append is refused with `write_failed`, also without marking the sink failed. While refusing, the sink logs one error per 60 s with the free bytes and the floor. See Disk full.
 - On close the sink removes the socket path only if it is still the socket it bound.
 - Connections: the peer uid is checked before a connection counts against `max_connections` (default 16). A connection past the limit gets the refusal `overloaded` and is closed; nothing is appended, so the writer knows the record was not written. Every allowed peer shares the limit: an allowed peer that holds 16 connections open makes the other writers' appends fail with `overloaded` until `idle_timeout` or `max_lifetime` closes them. The client does not retry: decide refuses the call as `docket_unavailable`, and the custodian does not release a credential. Only the uids in `allowed_uids` can do this. A connection is closed after `idle_timeout` without a frame, when a frame takes longer than `frame_timeout`, and at `max_lifetime`.
 - On macOS, `os.fsync` does not issue `F_FULLFSYNC`, so the drive may still hold acknowledged data in its cache.
@@ -119,6 +120,14 @@ It does not detect:
 - removal of another writer's records, or of records this writer never saw acknowledged;
 - a rollback that another instance of the same writer, using a different state directory, has already appended past the stored `seq`;
 - anything after the state file is lost or rewritten. The client requires the state directory to be owned by its own uid and not writable by group or others; if the client runs as the sink uid, the sink uid can rewrite the state file too.
+
+## Disk full
+
+`free_space_floor` (required in the docket config; at least two frames, 131074 bytes; `agent-bailiff init docket` writes 256 MiB) keeps the sink from filling its file system. Below it, decide refuses calls as `docket_unavailable` and the custodian does not release credentials: without disk there is no record, so there is no call. The floor turns what used to be a write failure that needed a restart into a refusal that clears by itself.
+
+- Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
+- Alert on the `docket refusing appends` log line and on free space approaching the floor. Free space; no restart is needed, appends resume on the next request.
+- The docket still grows without bound. The floor bounds the damage of a full disk; it does not remove records.
 
 ## Torn tail repair
 
