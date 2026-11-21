@@ -10,6 +10,8 @@ from agent_bailiff.docket.receipt import Receipt
 MAX_CLOCK_AHEAD = 60
 MIN_RECEIPT_AGE = 3600
 MAX_RECEIPT_AGE = 7 * 86400
+DEFAULT_RETAINED_BYTES = 16 << 30
+DEFAULT_MAX_RECEIPT_AGE = 86400
 
 logger = logging.getLogger(__name__)
 

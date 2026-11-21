@@ -14,6 +14,8 @@ from agent_bailiff.control.suspension import suspension_directory
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
+from agent_bailiff.docket.manifest import MAX_MANIFEST_BYTES, entry_bytes_bound
+from agent_bailiff.docket.retention import MAX_RECEIPT_AGE, MIN_RECEIPT_AGE, Retention
 from agent_bailiff.docket.sink import MIN_FREE_SPACE_FLOOR, MIN_SEGMENT_BYTES, Writers
 from agent_bailiff.effector.rbac import EffectorIdentity, check_inputs
 from agent_bailiff.keys import check_component, parse_pinned_keys
@@ -47,6 +49,10 @@ DOCKET_KEYS = frozenset(
         "snapshot_every",
         "free_space_floor",
         "segment_bytes",
+        "retained_bytes",
+        "receipt_dir",
+        "archiver_uid",
+        "max_receipt_age",
     }
 )
 EFFECTOR_KEYS = frozenset(
@@ -107,9 +113,6 @@ class Section:
 
     def os_id(self, name: str) -> int:
         return self.integer(name, 0, MAX_OS_ID)
-
-    def optional_os_id(self, name: str) -> int | None:
-        return None if self._document[name] is None else self.os_id(name)
 
     def wrap(self, name: str, problem: Exception) -> ConfigError:
         return ConfigError(f"{self._label}.{name}: {problem}")
@@ -224,12 +227,13 @@ class DocketSettings:
     docket: Path
     socket: Path
     socket_group: int
-    reader_group: int | None
+    reader_group: int
     allowed_uids: frozenset[int]
     writers: Writers
     snapshot_every: int
     free_space_floor: int
     segment_bytes: int
+    retention: Retention
 
 
 @dataclass(frozen=True)
@@ -380,17 +384,37 @@ def parse_custodian(document: object) -> CustodianSettings:
 def parse_docket(document: object) -> DocketSettings:
     config = Section(document, "docket", DOCKET_KEYS)
     allowed = frozenset(_non_empty_list(config, "allowed_uids", _os_id))
+    writers = _writers(config)
+    segment_bytes = config.integer("segment_bytes", MIN_SEGMENT_BYTES)
+    retained_bytes = config.integer("retained_bytes", 2 * segment_bytes)
+    _check_manifest_cap(writers, retained_bytes, segment_bytes)
     return DocketSettings(
         docket=config.path("docket"),
         socket=config.path("socket"),
         socket_group=config.os_id("socket_group"),
-        reader_group=config.optional_os_id("reader_group"),
+        reader_group=config.os_id("reader_group"),
         allowed_uids=allowed,
-        writers=_writers(config),
+        writers=writers,
         snapshot_every=config.integer("snapshot_every", 1),
         free_space_floor=config.integer("free_space_floor", MIN_FREE_SPACE_FLOOR),
-        segment_bytes=config.integer("segment_bytes", MIN_SEGMENT_BYTES),
+        segment_bytes=segment_bytes,
+        retention=Retention(
+            receipt_dir=config.path("receipt_dir"),
+            archiver_uid=config.os_id("archiver_uid"),
+            retained_bytes=retained_bytes,
+            max_receipt_age=config.integer("max_receipt_age", MIN_RECEIPT_AGE, MAX_RECEIPT_AGE),
+        ),
     )
+
+
+def _check_manifest_cap(writers: Writers, retained_bytes: int, segment_bytes: int) -> None:
+    segments = -(-retained_bytes // segment_bytes) + 2
+    largest = segments * entry_bytes_bound(writers)
+    if largest > MAX_MANIFEST_BYTES:
+        raise ConfigError(
+            f"docket.retained_bytes keeps up to {segments} segments of segment_bytes, a manifest of up to "
+            f"{largest} bytes, over the {MAX_MANIFEST_BYTES} byte limit; raise segment_bytes or lower retained_bytes"
+        )
 
 
 def parse_control(document: object) -> ControlSettings:

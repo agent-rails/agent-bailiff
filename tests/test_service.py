@@ -28,7 +28,9 @@ from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket import DocketClient, decode_record
 from agent_bailiff.docket.entry import Entry
+from agent_bailiff.docket.manifest import MAX_MANIFEST_BYTES, entry_bytes_bound
 from agent_bailiff.docket.protocol import MAX_FRAME_BYTES
+from agent_bailiff.docket.retention import Retention
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.keys import generate_signing_key, key_id
 from agent_bailiff.service import run
@@ -82,6 +84,10 @@ class Deployment:
         self.custodian = private(root / "custodian")
         self.control = private(root / "control")
         self.docket = private(root / "docket")
+        self.receipts = root / "receipts"
+        self.receipts.mkdir(mode=0o750)
+        os.chown(self.receipts, -1, GID)
+        os.chmod(self.receipts, 0o750)
         self.ledger_dir = root / "ledger"
         self.ledger_dir.mkdir(mode=0o750)
         os.chown(self.ledger_dir, -1, GID)
@@ -200,12 +206,16 @@ class Deployment:
             "docket": str(self.docket / "docket.log"),
             "socket": str(self.sockets["docket"]),
             "socket_group": GID,
-            "reader_group": None,
+            "reader_group": GID,
             "allowed_uids": [UID],
             "writers": {name: self.pins(name) for name in self.keys},
             "snapshot_every": 10_000,
             "free_space_floor": 256 << 20,
             "segment_bytes": 256 << 20,
+            "retained_bytes": 1 << 30,
+            "receipt_dir": str(self.receipts),
+            "archiver_uid": UID,
+            "max_receipt_age": 86400,
         }
 
     def control_document(self):
@@ -368,6 +378,7 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(reader_group="0"),
         lambda doc: doc.update(reader_group=True),
         lambda doc: doc.update(reader_group=-1),
+        lambda doc: doc.update(reader_group=None),
         lambda doc: doc.update(snapshot_every=0),
         lambda doc: doc.update(snapshot_every=True),
         lambda doc: doc.update(snapshot_every="10"),
@@ -382,11 +393,36 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(segment_bytes=True),
         lambda doc: doc.update(segment_bytes="268435456"),
         lambda doc: doc.update(segment_bytes=None),
+        lambda doc: doc.update(retained_bytes=(512 << 20) - 1),
+        lambda doc: doc.update(retained_bytes=True),
+        lambda doc: doc.update(retained_bytes=None),
+        lambda doc: doc.update(receipt_dir="receipts"),
+        lambda doc: doc.update(receipt_dir=None),
+        lambda doc: doc.update(archiver_uid=-1),
+        lambda doc: doc.update(archiver_uid=None),
+        lambda doc: doc.update(max_receipt_age=3599),
+        lambda doc: doc.update(max_receipt_age=7 * 86400 + 1),
+        lambda doc: doc.update(max_receipt_age=True),
+        lambda doc: doc.pop("max_receipt_age"),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):
     with pytest.raises(ConfigError):
         parse_docket(mutate(deployment.documents["docket"], change))
+
+
+def test_a_docket_config_carries_its_retention(deployment):
+    settings = parse_docket(deployment.documents["docket"])
+    assert settings.retention == Retention(deployment.receipts, UID, 1 << 30, 86400)
+
+
+def test_a_docket_config_whose_manifest_could_outgrow_its_limit_is_refused(deployment):
+    segments = MAX_MANIFEST_BYTES // entry_bytes_bound(parse_docket(deployment.documents["docket"]).writers)
+    retained = (segments - 1) * (64 << 20)
+    fits = mutate(deployment.documents["docket"], lambda doc: doc.update(segment_bytes=64 << 20))
+    assert parse_docket(mutate(fits, lambda doc: doc.update(retained_bytes=retained - (64 << 20))))
+    with pytest.raises(ConfigError, match="raise segment_bytes or lower retained_bytes"):
+        parse_docket(mutate(fits, lambda doc: doc.update(retained_bytes=retained)))
 
 
 def test_control_must_not_pin_its_own_writer(deployment):

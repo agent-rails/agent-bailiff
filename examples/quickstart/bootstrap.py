@@ -36,6 +36,7 @@ READER_UID = 10005
 AGENT_UID = 10006
 ISSUER_UID = 10007
 EXPORTER_UID = 10008
+ARCHIVER_UID = 10009
 DOCKET_WRITERS_GID = 20000
 LEDGER_GID = 20001
 GATEWAY_SOCKETS_GID = 20002
@@ -51,6 +52,7 @@ DIRS = {
 }
 SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "custodian")}
 LEDGER = DIRS["ledger"] / "ledger.db"
+RECEIPTS = STATE / "receipts"
 ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
 ISSUER_KEY = DIRS["issuer"] / "issuer.key"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
@@ -270,6 +272,7 @@ def init_docket() -> str:
         "init", "docket", "--dir", DIRS["docket"], "--socket", SOCKETS["docket"],
         "--socket-group", DOCKET_WRITERS_GID, "--reader-group", DOCKET_READERS_GID,
         "--allowed-uid", DECIDE_UID, "--allowed-uid", CUSTODIAN_UID,
+        "--receipt-dir", RECEIPTS, "--archiver-uid", ARCHIVER_UID,
     ]  # fmt: skip
     for component in WRITERS:
         arguments += ["--pin", pin_path(component)]

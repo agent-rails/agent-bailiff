@@ -31,6 +31,7 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10006 -g 10006 -m 0700 /var/lib/bailiff/agent \
     && install -d -o 10006 -g 10006 -m 0755 /var/lib/bailiff/agent-public \
     && install -d -o 10008 -g 10008 -m 0700 /var/lib/bailiff/exporter \
+    && install -d -o 10009 -g 20003 -m 0750 /var/lib/bailiff/receipts \
     && install -d -o 10001 -g 20000 -m 0750 /run/bailiff/docket \
     && install -d -o 10002 -g 20002 -m 0750 /run/bailiff/decide \
     && install -d -o 10003 -g 20002 -m 0750 /run/bailiff/custodian \

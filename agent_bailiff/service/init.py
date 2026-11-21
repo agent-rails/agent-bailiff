@@ -14,6 +14,7 @@ from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import CredentialStore
+from agent_bailiff.docket.retention import DEFAULT_MAX_RECEIPT_AGE, DEFAULT_RETAINED_BYTES
 from agent_bailiff.docket.sink import DEFAULT_FREE_SPACE_FLOOR, DEFAULT_SEGMENT_BYTES, DEFAULT_SNAPSHOT_EVERY
 from agent_bailiff.effector.catalog import shipped_catalog
 from agent_bailiff.keys import PublicKeyRecord, check_component, generate_signing_key
@@ -227,9 +228,11 @@ def init_docket(
     *,
     socket: Path,
     socket_group: int,
-    reader_group: int | None,
+    reader_group: int,
     allowed_uids: Iterable[int],
     pins: Iterable[PublicKeyRecord],
+    receipt_dir: Path,
+    archiver_uid: int,
 ) -> Path:
     _check_new(directory, (CONFIG, "docket.log", "docket.log.snapshot"))
     document = {
@@ -242,10 +245,13 @@ def init_docket(
         "snapshot_every": DEFAULT_SNAPSHOT_EVERY,
         "free_space_floor": DEFAULT_FREE_SPACE_FLOOR,
         "segment_bytes": DEFAULT_SEGMENT_BYTES,
+        "retained_bytes": DEFAULT_RETAINED_BYTES,
+        "receipt_dir": str(receipt_dir),
+        "archiver_uid": archiver_uid,
+        "max_receipt_age": DEFAULT_MAX_RECEIPT_AGE,
     }
     parse_docket(document)
-    if reader_group is not None:
-        _share_directory(directory, reader_group)
+    _share_directory(directory, reader_group)
     _write(directory / CONFIG, document)
     return directory / CONFIG
 
