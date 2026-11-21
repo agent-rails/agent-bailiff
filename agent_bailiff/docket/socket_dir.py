@@ -45,8 +45,9 @@ def try_lock(fd: int) -> bool:
     return True
 
 
-def open_lock_file(path: Path) -> int:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def open_lock_file(path: Path, *, dir_fd: int | None = None) -> int:
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = os.open(path if dir_fd is None else path.name, flags, 0o600, dir_fd=dir_fd)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
         os.close(fd)
