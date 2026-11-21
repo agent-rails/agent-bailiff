@@ -11,7 +11,7 @@ from typing import Any
 from agent_warrant.canonical import canonicalize, strict_decode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.docket.entry import Entry, Record, encode_record
+from agent_bailiff.docket.entry import Entry, Head, Record, encode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import (
@@ -22,7 +22,6 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     read_frame,
 )
-from agent_bailiff.docket.sink import Head
 from agent_bailiff.docket.socket_dir import try_lock
 
 DEFAULT_TIMEOUT = 5.0

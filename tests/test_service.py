@@ -205,6 +205,7 @@ class Deployment:
             "writers": {name: self.pins(name) for name in self.keys},
             "snapshot_every": 10_000,
             "free_space_floor": 256 << 20,
+            "segment_bytes": 256 << 20,
         }
 
     def control_document(self):
@@ -377,6 +378,10 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(free_space_floor=True),
         lambda doc: doc.update(free_space_floor="268435456"),
         lambda doc: doc.update(free_space_floor=None),
+        lambda doc: doc.update(segment_bytes=(64 << 20) - 1),
+        lambda doc: doc.update(segment_bytes=True),
+        lambda doc: doc.update(segment_bytes="268435456"),
+        lambda doc: doc.update(segment_bytes=None),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):
@@ -701,6 +706,16 @@ def test_free_space_floor_is_required(deployment):
         parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.pop("free_space_floor")))
 
 
+def test_segment_bytes_is_required(deployment):
+    with pytest.raises(ConfigError, match="missing segment_bytes"):
+        parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.pop("segment_bytes")))
+
+
+def test_segment_bytes_admits_64_mib(deployment):
+    settings = parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.update(segment_bytes=64 << 20)))
+    assert settings.segment_bytes == 64 << 20
+
+
 def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch):
     seen = {}
 
@@ -716,9 +731,13 @@ def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch)
 
     monkeypatch.setattr(run, "DocketSink", RecordingSink)
     settings = parse_docket(
-        mutate(deployment.documents["docket"], lambda doc: doc.update(snapshot_every=7, free_space_floor=1 << 30))
+        mutate(
+            deployment.documents["docket"],
+            lambda doc: doc.update(snapshot_every=7, free_space_floor=1 << 30, segment_bytes=1 << 27),
+        )
     )
     with pytest.raises(RuntimeError, match="stop after construction"):
         asyncio.run(run.serve_docket(settings, asyncio.Event()))
     assert seen["snapshot_every"] == 7
     assert seen["free_space_floor"] == 1 << 30
+    assert seen["segment_bytes"] == 1 << 27

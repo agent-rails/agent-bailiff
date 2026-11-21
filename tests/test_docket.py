@@ -2,6 +2,7 @@ import asyncio
 import errno
 import gc
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -35,8 +36,17 @@ from agent_bailiff.docket import (
     repair,
     verify_docket,
 )
+from agent_bailiff.docket import manifest as manifest_module
 from agent_bailiff.docket import sink as sink_module
 from agent_bailiff.docket.client import UNACKNOWLEDGED
+from agent_bailiff.docket.manifest import (
+    Manifest,
+    SegmentEntry,
+    manifest_path,
+    read_docket_manifest,
+    segment_path,
+    write_manifest,
+)
 from agent_bailiff.docket.protocol import (
     LENGTH,
     MAX_FRAME_BYTES,
@@ -46,7 +56,8 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     encode_response,
 )
-from agent_bailiff.docket.sink import ChainState, build_kid_index
+from agent_bailiff.docket.report import RecordFilter, verify_records
+from agent_bailiff.docket.sink import ChainState, build_kid_index, docket_lock_path
 from agent_bailiff.docket.snapshot import Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
 
@@ -725,6 +736,31 @@ def test_second_sink_on_the_same_socket_refuses_to_start(paths, start_sink, work
     assert decide_client(paths).append(make_entry(1)).seq == 1
 
 
+def test_the_docket_lock_holds_after_the_docket_is_renamed(paths, start_sink, workdir):
+    start_sink()
+    paths[0].rename(workdir / "moved.log")
+    second = DocketSink(paths[0], workdir / "t" / "other.sock", WRITERS, {os.getuid()})
+    with pytest.raises(DocketLocked):
+        asyncio.run(second.start())
+    assert not paths[0].exists()
+
+
+def test_the_docket_lock_is_private(paths, start_sink):
+    start_sink()
+    info = os.lstat(docket_lock_path(paths[0]))
+    assert stat.S_ISREG(info.st_mode)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+
+
+def test_a_symlinked_docket_lock_is_refused(paths, workdir):
+    docket_lock_path(paths[0]).symlink_to(workdir / "elsewhere.lock")
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(OSError):
+        asyncio.run(sink.start())
+    assert not (workdir / "elsewhere.lock").exists()
+    assert not paths[0].exists()
+
+
 def test_closing_a_sink_removes_its_socket(paths, start_sink):
     start_sink().stop()
     assert not paths[1].exists()
@@ -755,6 +791,7 @@ def test_sink_refuses_a_symlinked_docket_directory(paths, workdir):
     with pytest.raises(OSError):
         asyncio.run(sink.start())
     assert not (real / "docket.log").exists()
+    assert not (real / "docket.log.lock").exists()
 
 
 def fd_kind(fd):
@@ -1156,7 +1193,7 @@ def test_first_start_verifies_the_docket_and_writes_its_snapshot(paths, start_si
 
 def test_first_start_on_a_new_docket_writes_an_empty_snapshot(paths, start_sink):
     start_sink()
-    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == Snapshot(0, 0, hashlib.sha256().hexdigest())
+    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == Snapshot(1, 0, 0, hashlib.sha256().hexdigest())
 
 
 def test_snapshot_shares_the_docket_reader_group(paths, start_sink):
@@ -1751,30 +1788,63 @@ def test_close_after_a_failed_start_writes_no_snapshot(paths, start_sink):
     assert not snapshot_path(paths[0]).exists()
 
 
-def test_repair_that_truncates_drops_the_snapshot(paths, start_sink, workdir):
-    write_chain(paths, start_sink)
+def test_repair_that_truncates_replaces_the_snapshot(paths, start_sink, workdir):
+    write_chain(paths, start_sink, count=2)
+    stale = current_snapshot(paths)
+    write_chain(paths, start_sink, count=1)
+    seal(paths, stale)
     with open(paths[0], "a") as docket:
         docket.write("partial")
     repair(paths[0], workdir / "torn.tail", WRITERS)
-    assert not snapshot_path(paths[0]).exists()
-    start_sink().stop()
     assert current_snapshot(paths) == chain_snapshot(paths[0])
+    assert current_snapshot(paths).entries == 3
+    start_sink().stop()
 
 
-def test_repair_drops_the_snapshot_before_it_truncates(paths, start_sink, workdir, monkeypatch):
+def test_repair_writes_the_snapshot_of_the_valid_lines_before_it_truncates(paths, start_sink, workdir, monkeypatch):
     write_chain(paths, start_sink)
+    expected = chain_snapshot(paths[0])
     with open(paths[0], "a") as docket:
         docket.write("partial")
     seen = []
     original = os.ftruncate
 
     def recording_truncate(fd, length):
-        seen.append(snapshot_path(paths[0]).exists())
+        seen.append((length, current_snapshot(paths)))
         original(fd, length)
 
     monkeypatch.setattr(sink_module.os, "ftruncate", recording_truncate)
     repair(paths[0], workdir / "torn.tail", WRITERS)
-    assert seen == [False]
+    assert seen == [(expected.offset, expected)]
+
+
+def test_repair_interrupted_before_the_truncate_finishes_when_run_again(paths, start_sink, workdir, monkeypatch):
+    write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+
+    def crashing_truncate(fd, length):
+        raise OSError(errno.EIO, "injected crash before truncate")
+
+    monkeypatch.setattr(sink_module.os, "ftruncate", crashing_truncate)
+    with pytest.raises(OSError, match="injected"):
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+    monkeypatch.undo()
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "torn_tail"
+    assert repair(paths[0], workdir / "torn.tail.2", WRITERS).ok
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    start_sink().stop()
+
+
+def test_repair_keeps_the_snapshot_shared_with_the_reader_group(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    share(paths, READER_GID, 0o750, 0o640)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    repair(paths[0], workdir / "torn.tail", WRITERS, reader_gid=READER_GID)
+    assert file_mode(snapshot_path(paths[0])) == (0o640, READER_GID)
 
 
 def test_repair_of_a_whole_docket_keeps_the_snapshot(paths, start_sink, workdir):
@@ -1784,12 +1854,60 @@ def test_repair_of_a_whole_docket_keeps_the_snapshot(paths, start_sink, workdir)
     assert snapshot_path(paths[0]).read_bytes() == before
 
 
-def test_repair_without_a_snapshot_still_truncates(paths, start_sink, workdir):
+def test_repair_without_a_snapshot_truncates_and_writes_one(paths, start_sink, workdir):
     write_chain(paths, start_sink)
     snapshot_path(paths[0]).unlink()
     with open(paths[0], "a") as docket:
         docket.write("partial")
     assert repair(paths[0], workdir / "torn.tail", WRITERS).entries == 3
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+
+
+def legacy_snapshot(snapshot):
+    document = json.loads(snapshot.encode())
+    del document["segment"]
+    return {**document, "version": 1}
+
+
+@pytest.mark.parametrize("legacy", [legacy_snapshot, lambda _: {"version": 1}], ids=["whole", "version-only"])
+def test_a_version_1_snapshot_migrates_through_a_full_verify(paths, start_sink, caplog, monkeypatch, legacy):
+    write_two_writers(paths, start_sink)
+    path = snapshot_path(paths[0])
+    path.write_text(json.dumps(legacy(chain_snapshot(paths[0]))))
+    full = []
+    original = DocketSink._full_verify
+
+    def recording_full_verify(self, fd):
+        full.append(fd)
+        original(self, fd)
+
+    monkeypatch.setattr(DocketSink, "_full_verify", recording_full_verify)
+    handle = start_sink()
+    assert (handle.sink.heads["decide"].seq, handle.sink.heads["custodian"].seq) == (2, 1)
+    handle.stop()
+    assert len(full) == 1
+    assert "snapshot version 1 predates segments" in caplog.text
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    assert json.loads(path.read_bytes())["version"] == 2
+
+
+def test_a_version_1_snapshot_does_not_hide_a_corrupt_docket(paths, start_sink):
+    write_chain(paths, start_sink)
+    snapshot_path(paths[0]).write_text(json.dumps({"version": 1}))
+    with open(paths[0], "a") as docket:
+        docket.write("garbage\n")
+    with pytest.raises(DocketCorrupt):
+        start_sink()
+    assert json.loads(snapshot_path(paths[0]).read_bytes()) == {"version": 1}
+
+
+def test_start_refuses_a_snapshot_of_another_segment(paths, start_sink):
+    write_chain(paths, start_sink)
+    seal(paths, replace(chain_snapshot(paths[0]), segment=2))
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
+    assert "segment 2 is not the active segment 1" in error.value.report.detail
 
 
 def seal_first(paths, count):
@@ -1825,3 +1943,424 @@ def test_snapshot_start_of_10k_records_takes_under_half_a_full_start(paths):
         seal_first(paths, 8_000)
         sealed.append(timed_start(paths))
     assert min(sealed) / min(full) < 0.5
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def sealed_entry(docket_path, records):
+    content = docket_path.read_bytes()
+    last = records[-1]
+    return SegmentEntry(
+        1,
+        hashlib.sha256(content).hexdigest(),
+        len(content),
+        1,
+        len(records),
+        {"decide": Head(last.seq, last.hash)},
+        frozenset({"decide-1"}),
+    )
+
+
+def cut_first_segment(paths, records, *, commit=True, rename=True):
+    entry = sealed_entry(paths[0], records)
+    write_snapshot(snapshot_path(paths[0]), Snapshot(2, 0, len(records), EMPTY_SHA256))
+    if commit:
+        write_manifest(manifest_path(paths[0]), Manifest.new().sealed(entry))
+    if rename:
+        paths[0].rename(segment_path(paths[0], 1))
+
+
+def test_start_continues_the_chain_after_a_sealed_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    start_sink()
+    fourth = decide_client(paths).append(make_entry(4))
+    assert (fourth.seq, fourth.prev) == (4, records[-1].hash)
+    assert len(lines(paths[0])) == 1
+    assert current_snapshot(paths).segment == 2
+
+
+def test_a_writer_without_state_resumes_after_its_sealed_head(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    start_sink()
+    fresh = workdir / "fresh-state"
+    fresh.mkdir(mode=0o700)
+    client = decide_client(paths, state_dir=fresh)
+    assert client.head() == Head(3, records[-1].hash)
+    assert client.append(make_entry(4)).seq == 4
+
+
+def test_start_finishes_a_cut_that_committed_before_the_rename(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    sealed = paths[0].read_bytes()
+    cut_first_segment(paths, records, rename=False)
+    start_sink()
+    assert segment_path(paths[0], 1).read_bytes() == sealed
+    assert decide_client(paths).append(make_entry(4)).seq == 4
+    assert len(lines(paths[0])) == 1
+
+
+def test_start_ignores_the_snapshot_of_a_cut_that_did_not_commit(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records, commit=False, rename=False)
+    start_sink()
+    assert decide_client(paths).append(make_entry(4)).seq == 4
+    assert len(lines(paths[0])) == 4
+    assert not segment_path(paths[0], 1).exists()
+
+
+def test_start_removes_leftovers_of_an_interrupted_write(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    leftovers = [
+        paths[0].with_name(f"{paths[0].name}.new"),
+        manifest_path(paths[0]).with_name(f"{manifest_path(paths[0]).name}.tmp"),
+        snapshot_path(paths[0]).with_name(f"{snapshot_path(paths[0]).name}.tmp"),
+    ]
+    for leftover in leftovers:
+        leftover.write_bytes(b"partial")
+    start_sink()
+    assert not any(leftover.exists() for leftover in leftovers)
+
+
+def segment_refusal(start_sink):
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "segment_mismatch"
+    return error.value.report.detail
+
+
+def test_start_refuses_a_segment_file_without_a_manifest(paths, start_sink):
+    write_chain(paths, start_sink)
+    segment_path(paths[0], 1).write_bytes(b"stray")
+    assert "not in the manifest: docket.log.seg-000000000001" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_segment_file_the_manifest_does_not_list(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 2).write_bytes(b"stray")
+    assert "docket.log.seg-000000000002" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_sealed_segment_of_another_size(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    with open(segment_path(paths[0], 1), "ab") as segment:
+        segment.write(b"x")
+    assert "segment 1 is" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_missing_sealed_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 1).unlink()
+    assert "segment 1 is missing" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_docket_that_is_not_the_missing_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records, rename=False)
+    content = lines(paths[0])
+    paths[0].write_text("\n".join([content[0], content[2], content[1]]) + "\n")
+    assert "segment 1 is missing and the docket is not it" in segment_refusal(start_sink)
+
+
+def test_start_refuses_an_invalid_manifest(paths, start_sink):
+    write_chain(paths, start_sink)
+    manifest_path(paths[0]).write_bytes(b"garbage")
+    os.chmod(manifest_path(paths[0]), 0o600)
+    assert "not a valid manifest" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_snapshot_behind_the_manifest(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    write_snapshot(snapshot_path(paths[0]), Snapshot(2, 0, 2, EMPTY_SHA256))
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
+
+
+def test_start_refuses_an_active_segment_that_restarts_a_sealed_chain(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    snapshot_path(paths[0]).unlink()
+    shutil.copy(segment_path(paths[0], 1), paths[0])
+    os.chmod(paths[0], 0o600)
+    with pytest.raises(DocketCorrupt):
+        start_sink()
+
+
+def test_repair_of_the_active_segment_keeps_the_sealed_chain(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    handle = start_sink()
+    fourth = decide_client(paths).append(make_entry(4))
+    handle.stop()
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    report = repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert report.ok
+    assert report.heads["decide"] == Head(4, fourth.hash)
+    assert (workdir / "torn.tail").read_bytes() == b"partial"
+    assert current_snapshot(paths).segment == 2
+
+
+def test_repair_refuses_a_missing_sealed_segment(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 1).unlink()
+    with pytest.raises(DocketCorrupt) as error:
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert error.value.report.reason == "segment_mismatch"
+
+
+def test_sink_refuses_a_segment_size_below_one(paths):
+    for size in (0, -1, True, 1.0):
+        with pytest.raises(ValueError, match="segment_bytes"):
+            DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, segment_bytes=size)
+
+
+def current_manifest(paths):
+    return read_docket_manifest(paths[0])
+
+
+def verify_all(paths):
+    return verify_records(paths[0], WRITERS, RecordFilter(), lambda line: None)
+
+
+def test_an_append_past_segment_bytes_seals_the_segment(paths, start_sink):
+    handle = start_sink(segment_bytes=1)
+    client = decide_client(paths)
+    first = client.append(make_entry(1))
+    settle(handle)
+    sealed = segment_path(paths[0], 1).read_bytes()
+    assert sealed == f"{first.token}\n".encode()
+    assert paths[0].read_bytes() == b""
+    heads = {"decide": Head(1, first.hash)}
+    digest = hashlib.sha256(sealed).hexdigest()
+    assert current_manifest(paths).segments == (
+        SegmentEntry(1, digest, len(sealed), 1, 1, heads, frozenset({"decide-1"})),
+    )
+    assert current_snapshot(paths) == Snapshot(2, 0, 1, EMPTY_SHA256)
+    second = client.append(make_entry(2))
+    settle(handle)
+    assert (second.seq, second.prev) == (2, first.hash)
+    assert [entry.segment for entry in current_manifest(paths).segments] == [1, 2]
+    report = verify_all(paths)
+    assert (report.ok, report.entries, report.heads) == (True, 2, {"decide": Head(2, second.hash)})
+
+
+def test_a_segment_is_cut_only_once_it_reaches_segment_bytes(paths):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert not segment_path(paths[0], 1).exists()
+        assert sink._append(second.token.encode())["ok"]
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=len(first.token) + 2)
+    assert segment_path(paths[0], 1).read_text().splitlines() == [first.token, second.token]
+    assert current_manifest(paths).segments[0].entries == 2
+
+
+def test_a_sealed_segment_keeps_the_heads_of_writers_absent_from_it(paths, start_sink, workdir):
+    handle = start_sink(segment_bytes=1)
+    first = decide_client(paths).append(make_entry(1))
+    settle(handle)
+    custodian = make_client(paths, "custodian", "custodian-1", CUSTODIAN_KEY).append(make_entry(2))
+    settle(handle)
+    handle.stop()
+    assert current_manifest(paths).segments[1].end_heads == {
+        "decide": Head(1, first.hash),
+        "custodian": Head(1, custodian.hash),
+    }
+    start_sink(segment_bytes=1)
+    assert_refused(paths, first.token, "wrong_seq")
+    fresh = workdir / "fresh-state"
+    fresh.mkdir(mode=0o700)
+    assert decide_client(paths, state_dir=fresh).head() == Head(1, first.hash)
+
+
+def test_a_cut_pending_after_a_failed_write_does_nothing(paths):
+    fail = threading.Event()
+
+    def flaky_fsync(fd):
+        if fail.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        fail.set()
+        assert sink._append(token_of(2, first.hash).token.encode())["reason"] == "write_failed"
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync)
+    assert not segment_path(paths[0], 1).exists()
+    assert not manifest_path(paths[0]).exists()
+
+
+def test_a_docket_of_another_size_than_the_sink_wrote_stops_appends_at_the_cut(paths, caplog):
+    first = token_of(1)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        with open(paths[0], "ab") as docket:
+            docket.write(b"foreign")
+        await asyncio.sleep(0)
+        return sink._append(token_of(2, first.hash).token.encode())
+
+    assert run_in_sink(paths, scenario, segment_bytes=1)["reason"] == "sink_failed"
+    assert not segment_path(paths[0], 1).exists()
+    assert "not the" in caplog.text
+
+
+def no_space(*args, **kwargs):
+    raise OSError(errno.ENOSPC, "injected no space")
+
+
+@pytest.mark.parametrize("failure", ["manifest_cap", "manifest_no_space", "snapshot_no_space", "docket_fsync"])
+def test_a_cut_that_fails_before_the_commit_is_retried_by_the_next_append(paths, caplog, monkeypatch, failure):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+    failing = threading.Event()
+
+    def flaky_fsync(fd):
+        if failing.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        with monkeypatch.context() as patch:
+            if failure == "manifest_cap":
+                patch.setattr(manifest_module, "MAX_MANIFEST_BYTES", 10)
+            if failure == "manifest_no_space":
+                patch.setattr(sink_module, "write_manifest", no_space)
+            if failure == "snapshot_no_space":
+                patch.setattr(sink_module, "write_snapshot", no_space)
+            if failure == "docket_fsync":
+                failing.set()
+            await asyncio.sleep(0)
+            failing.clear()
+        assert not segment_path(paths[0], 1).exists()
+        assert manifest_path(paths[0]).exists() is False
+        assert sink._append(second.token.encode())["ok"]
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync)
+    assert "cut of segment 1 aborted; the next append retries it" in caplog.text
+    assert segment_path(paths[0], 1).read_text().splitlines() == [first.token, second.token]
+    assert verify_all(paths).entries == 2
+
+
+class Crash(BaseException):
+    pass
+
+
+class Faults:
+    SYSCALLS = ("open", "write", "fchmod", "fchown", "rename", "replace")
+
+    def __init__(self, target=None, error=Crash):
+        self.target = target
+        self.error = error
+        self.calls = []
+        self.armed = False
+
+    def hit(self, name):
+        if not self.armed:
+            return
+        self.calls.append(name)
+        if len(self.calls) == self.target:
+            self.armed = False
+            raise self.error(f"injected failure at {name} call {self.target}")
+
+    def install(self, monkeypatch):
+        for name in self.SYSCALLS:
+            monkeypatch.setattr(os, name, self.wrap(name, getattr(os, name)))
+
+    def wrap(self, name, function):
+        def wrapped(*args, **kwargs):
+            self.hit(name)
+            return function(*args, **kwargs)
+
+        return wrapped
+
+    def fsync(self, fd):
+        self.hit(f"fsync {fd_kind(fd)}")
+        os.fsync(fd)
+
+
+def cut_under(paths, faults, monkeypatch, **options):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert sink._append(second.token.encode())["ok"]
+        with monkeypatch.context() as patch:
+            faults.install(patch)
+            faults.armed = True
+            try:
+                sink._cut()
+            except Crash:
+                sink._failed = True
+            finally:
+                faults.armed = False
+        return sink._failed
+
+    return run_in_sink(paths, scenario, segment_bytes=1, fsync=faults.fsync, **options), second
+
+
+def resume_after(paths, second, **options):
+    third = token_of(3, second.hash)
+
+    async def scenario(sink):
+        return sink._append(third.token.encode())
+
+    assert run_in_sink(paths, scenario, segment_bytes=1, **options)["ok"]
+    report = verify_all(paths)
+    assert (report.ok, report.entries, report.heads) == (True, 3, {"decide": Head(3, third.hash)})
+    snapshot = read_snapshot(snapshot_path(paths[0]), uid=os.geteuid(), reader_gid=options.get("reader_gid"))
+    assert snapshot.segment == current_manifest(paths).active_segment
+
+
+def cut_syscalls(paths, monkeypatch, **options):
+    counting = Faults()
+    cut_under(paths, counting, monkeypatch, **options)
+    shutil.rmtree(paths[0].parent)
+    paths[0].parent.mkdir(mode=0o700)
+    return counting.calls
+
+
+@pytest.mark.parametrize("reader_gid", [None, READER_GID], ids=["private", "shared"])
+def test_a_crash_at_any_cut_syscall_leaves_a_docket_that_starts_without_a_fork(paths, monkeypatch, reader_gid):
+    calls = cut_syscalls(paths, monkeypatch, reader_gid=reader_gid)
+    assert calls.count("rename") == 2 and calls.count("replace") == 2
+    for target in range(1, len(calls) + 1):
+        crashed, second = cut_under(paths, Faults(target), monkeypatch, reader_gid=reader_gid)
+        assert crashed, calls[target - 1]
+        resume_after(paths, second, reader_gid=reader_gid)
+        shutil.rmtree(paths[0].parent)
+        paths[0].parent.mkdir(mode=0o700)
+
+
+def test_an_error_at_any_cut_syscall_aborts_before_the_commit_and_stops_appends_after_it(paths, monkeypatch):
+    calls = cut_syscalls(paths, monkeypatch)
+    commit = [index for index, name in enumerate(calls, 1) if name == "replace"][1]
+    for target in range(1, len(calls) + 1):
+        failed, second = cut_under(paths, Faults(target, error=lambda detail: OSError(5, detail)), monkeypatch)
+        assert failed == (target > commit), (target, calls[target - 1])
+        assert segment_path(paths[0], 2).exists() == (target > calls.index("rename", commit) + 1)
+        resume_after(paths, second)
+        shutil.rmtree(paths[0].parent)
+        paths[0].parent.mkdir(mode=0o700)

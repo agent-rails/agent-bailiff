@@ -8,12 +8,14 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.docket import snapshot as snapshot_module
+from agent_bailiff.docket.manifest import MAX_SEGMENT
 from agent_bailiff.docket.snapshot import (
     MAX_INTEGER,
     MAX_SNAPSHOT_BYTES,
     Anchor,
     Snapshot,
     SnapshotInvalid,
+    SnapshotLegacy,
     read_snapshot,
     snapshot_path,
     write_snapshot,
@@ -21,10 +23,12 @@ from agent_bailiff.docket.snapshot import (
 from agent_bailiff.keys import encode_public_key, key_id
 from agent_bailiff.service.settings import MAX_CONFIG_BYTES
 
-EMPTY = Snapshot(0, 0, hashlib.sha256(b"").hexdigest())
+EMPTY = Snapshot(1, 0, 0, hashlib.sha256(b"").hexdigest())
+SEGMENT_START = Snapshot(3, 0, 5, hashlib.sha256(b"").hexdigest())
 HASH_A = "A" * 43
 HASH_B = "b-_9" * 10 + "xyz"
 TWO_WRITERS = Snapshot(
+    segment=1,
     offset=900,
     entries=5,
     prefix_sha256="0" * 64,
@@ -39,7 +43,7 @@ def round_trip(snapshot):
     return Snapshot.from_document(json.loads(snapshot.encode()))
 
 
-@pytest.mark.parametrize("snapshot", [EMPTY, TWO_WRITERS], ids=["empty", "two-writers"])
+@pytest.mark.parametrize("snapshot", [EMPTY, SEGMENT_START, TWO_WRITERS], ids=["empty", "segment-start", "two-writers"])
 def test_snapshot_round_trips(snapshot):
     assert round_trip(snapshot) == snapshot
 
@@ -62,6 +66,7 @@ def test_snapshot_of_the_largest_writer_set_fits_the_cap():
     writers = largest_writer_set()
     offset = MAX_INTEGER
     snapshot = Snapshot(
+        segment=MAX_SEGMENT,
         offset=offset,
         entries=MAX_INTEGER,
         prefix_sha256="f" * 64,
@@ -89,7 +94,13 @@ def anchors_with(**changes):
         [],
         document(extra=1),
         {key: value for key, value in document().items() if key != "kids"},
-        document(version=2),
+        {key: value for key, value in document().items() if key != "segment"},
+        document(version=3),
+        document(version=0),
+        document(segment=0),
+        document(segment=MAX_SEGMENT + 1),
+        document(segment=True),
+        document(segment="1"),
         document(version=True),
         document(offset=True),
         document(offset=-1),
@@ -122,12 +133,31 @@ def anchors_with(**changes):
         document(kids=["custodian-1", "custodian-1"]),
         document(kids=[1]),
         {**json.loads(EMPTY.encode()), "kids": ["decide-1"]},
+        {**json.loads(EMPTY.encode()), "segment": 2},
+        {**json.loads(SEGMENT_START.encode()), "kids": ["decide-1"]},
+        {**json.loads(SEGMENT_START.encode()), "anchors": {"decide": {"offset": 0, "seq": 1, "hash": HASH_A}}},
         {**json.loads(EMPTY.encode()), "anchors": {"decide": {"offset": 0, "seq": 1, "hash": HASH_A}}},
     ],
 )
 def test_snapshot_refuses_an_invalid_document(bad):
     with pytest.raises(SnapshotInvalid):
         Snapshot.from_document(bad)
+
+
+def legacy_document():
+    value = {key: item for key, item in document().items() if key != "segment"}
+    return {**value, "version": 1}
+
+
+@pytest.mark.parametrize("legacy", [legacy_document(), {"version": 1}], ids=["whole", "version-only"])
+def test_a_version_1_snapshot_is_legacy(legacy):
+    with pytest.raises(SnapshotLegacy, match="version 1 predates segments"):
+        Snapshot.from_document(legacy)
+
+
+def test_a_snapshot_at_the_start_of_a_segment_keeps_the_global_entry_count():
+    assert (SEGMENT_START.segment, SEGMENT_START.offset, SEGMENT_START.entries) == (3, 0, 5)
+    assert (SEGMENT_START.anchors, SEGMENT_START.kids) == ({}, frozenset())
 
 
 def test_snapshot_path_is_next_to_the_docket(tmp_path):
@@ -208,11 +238,17 @@ def test_read_refuses_a_snapshot_over_the_cap(path):
 
 @pytest.mark.parametrize(
     "content",
-    [b"", b"garbage", b"\xff", b'{"version":1,"version":1}', b"NaN", json.dumps(document(version=2)).encode()],
+    [b"", b"garbage", b"\xff", b'{"version":2,"version":2}', b"NaN", json.dumps(document(version=3)).encode()],
 )
 def test_read_refuses_invalid_content(path, content):
     place(path, content)
     with pytest.raises(SnapshotInvalid, match="not a valid snapshot"):
+        read_snapshot(path, uid=UID)
+
+
+def test_read_of_a_version_1_snapshot_is_legacy(path):
+    place(path, json.dumps(legacy_document()).encode())
+    with pytest.raises(SnapshotLegacy, match=f"{path}: snapshot version 1"):
         read_snapshot(path, uid=UID)
 
 
