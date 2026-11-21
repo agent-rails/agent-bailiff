@@ -36,9 +36,17 @@ from agent_bailiff.docket import (
     repair,
     verify_docket,
 )
+from agent_bailiff.docket import manifest as manifest_module
 from agent_bailiff.docket import sink as sink_module
 from agent_bailiff.docket.client import UNACKNOWLEDGED
-from agent_bailiff.docket.manifest import Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
+from agent_bailiff.docket.manifest import (
+    Manifest,
+    SegmentEntry,
+    manifest_path,
+    read_docket_manifest,
+    segment_path,
+    write_manifest,
+)
 from agent_bailiff.docket.protocol import (
     LENGTH,
     MAX_FRAME_BYTES,
@@ -48,6 +56,7 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     encode_response,
 )
+from agent_bailiff.docket.report import RecordFilter, verify_records
 from agent_bailiff.docket.sink import ChainState, build_kid_index, docket_lock_path
 from agent_bailiff.docket.snapshot import Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
@@ -2107,3 +2116,251 @@ def test_repair_refuses_a_missing_sealed_segment(paths, start_sink, workdir):
     with pytest.raises(DocketCorrupt) as error:
         repair(paths[0], workdir / "torn.tail", WRITERS)
     assert error.value.report.reason == "segment_mismatch"
+
+
+def test_sink_refuses_a_segment_size_below_one(paths):
+    for size in (0, -1, True, 1.0):
+        with pytest.raises(ValueError, match="segment_bytes"):
+            DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, segment_bytes=size)
+
+
+def current_manifest(paths):
+    return read_docket_manifest(paths[0])
+
+
+def verify_all(paths):
+    return verify_records(paths[0], WRITERS, RecordFilter(), lambda line: None)
+
+
+def test_an_append_past_segment_bytes_seals_the_segment(paths, start_sink):
+    handle = start_sink(segment_bytes=1)
+    client = decide_client(paths)
+    first = client.append(make_entry(1))
+    settle(handle)
+    sealed = segment_path(paths[0], 1).read_bytes()
+    assert sealed == f"{first.token}\n".encode()
+    assert paths[0].read_bytes() == b""
+    heads = {"decide": Head(1, first.hash)}
+    digest = hashlib.sha256(sealed).hexdigest()
+    assert current_manifest(paths).segments == (
+        SegmentEntry(1, digest, len(sealed), 1, 1, heads, frozenset({"decide-1"})),
+    )
+    assert current_snapshot(paths) == Snapshot(2, 0, 1, EMPTY_SHA256)
+    second = client.append(make_entry(2))
+    settle(handle)
+    assert (second.seq, second.prev) == (2, first.hash)
+    assert [entry.segment for entry in current_manifest(paths).segments] == [1, 2]
+    report = verify_all(paths)
+    assert (report.ok, report.entries, report.heads) == (True, 2, {"decide": Head(2, second.hash)})
+
+
+def test_a_segment_is_cut_only_once_it_reaches_segment_bytes(paths):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert not segment_path(paths[0], 1).exists()
+        assert sink._append(second.token.encode())["ok"]
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=len(first.token) + 2)
+    assert segment_path(paths[0], 1).read_text().splitlines() == [first.token, second.token]
+    assert current_manifest(paths).segments[0].entries == 2
+
+
+def test_a_sealed_segment_keeps_the_heads_of_writers_absent_from_it(paths, start_sink, workdir):
+    handle = start_sink(segment_bytes=1)
+    first = decide_client(paths).append(make_entry(1))
+    settle(handle)
+    custodian = make_client(paths, "custodian", "custodian-1", CUSTODIAN_KEY).append(make_entry(2))
+    settle(handle)
+    handle.stop()
+    assert current_manifest(paths).segments[1].end_heads == {
+        "decide": Head(1, first.hash),
+        "custodian": Head(1, custodian.hash),
+    }
+    start_sink(segment_bytes=1)
+    assert_refused(paths, first.token, "wrong_seq")
+    fresh = workdir / "fresh-state"
+    fresh.mkdir(mode=0o700)
+    assert decide_client(paths, state_dir=fresh).head() == Head(1, first.hash)
+
+
+def test_a_cut_pending_after_a_failed_write_does_nothing(paths):
+    fail = threading.Event()
+
+    def flaky_fsync(fd):
+        if fail.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        fail.set()
+        assert sink._append(token_of(2, first.hash).token.encode())["reason"] == "write_failed"
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync)
+    assert not segment_path(paths[0], 1).exists()
+    assert not manifest_path(paths[0]).exists()
+
+
+def test_a_docket_of_another_size_than_the_sink_wrote_stops_appends_at_the_cut(paths, caplog):
+    first = token_of(1)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        with open(paths[0], "ab") as docket:
+            docket.write(b"foreign")
+        await asyncio.sleep(0)
+        return sink._append(token_of(2, first.hash).token.encode())
+
+    assert run_in_sink(paths, scenario, segment_bytes=1)["reason"] == "sink_failed"
+    assert not segment_path(paths[0], 1).exists()
+    assert "not the" in caplog.text
+
+
+def no_space(*args, **kwargs):
+    raise OSError(errno.ENOSPC, "injected no space")
+
+
+@pytest.mark.parametrize("failure", ["manifest_cap", "manifest_no_space", "snapshot_no_space", "docket_fsync"])
+def test_a_cut_that_fails_before_the_commit_is_retried_by_the_next_append(paths, caplog, monkeypatch, failure):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+    failing = threading.Event()
+
+    def flaky_fsync(fd):
+        if failing.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        with monkeypatch.context() as patch:
+            if failure == "manifest_cap":
+                patch.setattr(manifest_module, "MAX_MANIFEST_BYTES", 10)
+            if failure == "manifest_no_space":
+                patch.setattr(sink_module, "write_manifest", no_space)
+            if failure == "snapshot_no_space":
+                patch.setattr(sink_module, "write_snapshot", no_space)
+            if failure == "docket_fsync":
+                failing.set()
+            await asyncio.sleep(0)
+            failing.clear()
+        assert not segment_path(paths[0], 1).exists()
+        assert manifest_path(paths[0]).exists() is False
+        assert sink._append(second.token.encode())["ok"]
+        await asyncio.sleep(0)
+
+    run_in_sink(paths, scenario, segment_bytes=1, fsync=flaky_fsync)
+    assert "cut of segment 1 aborted; the next append retries it" in caplog.text
+    assert segment_path(paths[0], 1).read_text().splitlines() == [first.token, second.token]
+    assert verify_all(paths).entries == 2
+
+
+class Crash(BaseException):
+    pass
+
+
+class Faults:
+    SYSCALLS = ("open", "write", "fchmod", "fchown", "rename", "replace")
+
+    def __init__(self, target=None, error=Crash):
+        self.target = target
+        self.error = error
+        self.calls = []
+        self.armed = False
+
+    def hit(self, name):
+        if not self.armed:
+            return
+        self.calls.append(name)
+        if len(self.calls) == self.target:
+            self.armed = False
+            raise self.error(f"injected failure at {name} call {self.target}")
+
+    def install(self, monkeypatch):
+        for name in self.SYSCALLS:
+            monkeypatch.setattr(os, name, self.wrap(name, getattr(os, name)))
+
+    def wrap(self, name, function):
+        def wrapped(*args, **kwargs):
+            self.hit(name)
+            return function(*args, **kwargs)
+
+        return wrapped
+
+    def fsync(self, fd):
+        self.hit(f"fsync {fd_kind(fd)}")
+        os.fsync(fd)
+
+
+def cut_under(paths, faults, monkeypatch, **options):
+    first = token_of(1)
+    second = token_of(2, first.hash)
+
+    async def scenario(sink):
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert sink._append(second.token.encode())["ok"]
+        with monkeypatch.context() as patch:
+            faults.install(patch)
+            faults.armed = True
+            try:
+                sink._cut()
+            except Crash:
+                sink._failed = True
+            finally:
+                faults.armed = False
+        return sink._failed
+
+    return run_in_sink(paths, scenario, segment_bytes=1, fsync=faults.fsync, **options), second
+
+
+def resume_after(paths, second, **options):
+    third = token_of(3, second.hash)
+
+    async def scenario(sink):
+        return sink._append(third.token.encode())
+
+    assert run_in_sink(paths, scenario, segment_bytes=1, **options)["ok"]
+    report = verify_all(paths)
+    assert (report.ok, report.entries, report.heads) == (True, 3, {"decide": Head(3, third.hash)})
+    snapshot = read_snapshot(snapshot_path(paths[0]), uid=os.geteuid(), reader_gid=options.get("reader_gid"))
+    assert snapshot.segment == current_manifest(paths).active_segment
+
+
+def cut_syscalls(paths, monkeypatch, **options):
+    counting = Faults()
+    cut_under(paths, counting, monkeypatch, **options)
+    shutil.rmtree(paths[0].parent)
+    paths[0].parent.mkdir(mode=0o700)
+    return counting.calls
+
+
+@pytest.mark.parametrize("reader_gid", [None, READER_GID], ids=["private", "shared"])
+def test_a_crash_at_any_cut_syscall_leaves_a_docket_that_starts_without_a_fork(paths, monkeypatch, reader_gid):
+    calls = cut_syscalls(paths, monkeypatch, reader_gid=reader_gid)
+    assert calls.count("rename") == 2 and calls.count("replace") == 2
+    for target in range(1, len(calls) + 1):
+        crashed, second = cut_under(paths, Faults(target), monkeypatch, reader_gid=reader_gid)
+        assert crashed, calls[target - 1]
+        resume_after(paths, second, reader_gid=reader_gid)
+        shutil.rmtree(paths[0].parent)
+        paths[0].parent.mkdir(mode=0o700)
+
+
+def test_an_error_at_any_cut_syscall_aborts_before_the_commit_and_stops_appends_after_it(paths, monkeypatch):
+    calls = cut_syscalls(paths, monkeypatch)
+    commit = [index for index, name in enumerate(calls, 1) if name == "replace"][1]
+    for target in range(1, len(calls) + 1):
+        failed, second = cut_under(paths, Faults(target, error=lambda detail: OSError(5, detail)), monkeypatch)
+        assert failed == (target > commit), (target, calls[target - 1])
+        assert segment_path(paths[0], 2).exists() == (target > calls.index("rename", commit) + 1)
+        resume_after(paths, second)
+        shutil.rmtree(paths[0].parent)
+        paths[0].parent.mkdir(mode=0o700)
