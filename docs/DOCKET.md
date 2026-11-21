@@ -44,9 +44,9 @@ These were caught at every restart before; they are now caught only by `docket v
 The sink appends to the active segment `<docket>`. Once an acknowledged append brings it to `segment_bytes` (required in the docket config; at least 64 MiB; `agent-bailiff init docket` writes 256 MiB), the sink seals it as `<docket>.seg-NNNNNNNNNNNN` after the current reply is sent. No append runs during a cut.
 
 - Order: fsync the docket, write the snapshot of the next segment (offset 0), replace `<docket>.manifest` with one that lists the sealed segment (its size, SHA-256, first entry number, entry count, every writer's head and key ids), rename `<docket>` to the segment name, then create, fsync and rename `<docket>.new` to `<docket>`. Each rename is followed by a directory fsync. The manifest replace is the commit.
-- A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the next append retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
+- A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the first append after 30 s retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
 - A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
-- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. Each append after that retries the cut until segments are removed, at about three fsyncs more than an append that does not cut.
+- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. The sink retries the cut at most once every 30 s until segments are removed, each retry costing about three fsyncs more than an append that does not cut.
 
 ### Upgrade and downgrade
 

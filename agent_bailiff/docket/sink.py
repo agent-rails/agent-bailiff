@@ -58,6 +58,7 @@ MIN_FREE_SPACE_FLOOR = 2 * MAX_FRAME_BYTES
 DEFAULT_SEGMENT_BYTES = 256 << 20
 MIN_SEGMENT_BYTES = 64 << 20
 FLOOR_LOG_INTERVAL = 60.0
+CUT_RETRY_INTERVAL = 30.0
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
 SEGMENT_MISMATCH = "segment_mismatch"
@@ -414,6 +415,7 @@ class DocketSink:
         self._free_space_floor = free_space_floor
         self._segment_bytes = segment_bytes
         self._cut_pending = False
+        self._cut_retry_at: float | None = None
         self._floor_logged_at: float | None = None
         self._snapshot_path = snapshot_path(docket_path)
         self._snapshot_every = snapshot_every
@@ -759,6 +761,8 @@ class DocketSink:
     def _schedule_cut(self) -> None:
         if self._cut_pending or self._chain.offset < self._segment_bytes:
             return
+        if self._cut_retry_at is not None and self._clock() < self._cut_retry_at:
+            return
         self._cut_pending = True
         asyncio.get_running_loop().call_soon(self._cut)
 
@@ -810,11 +814,15 @@ class DocketSink:
         self._chain = following
         self._since_snapshot = 0
         self._failed = False
+        self._cut_retry_at = None
         logger.info("docket segment %d sealed at %d bytes", entry.segment, entry.size)
 
     def _abort_cut(self, segment: int) -> None:
         self._failed = False
-        logger.exception("docket cut of segment %d aborted; the next append retries it", segment)
+        self._cut_retry_at = self._clock() + CUT_RETRY_INTERVAL
+        logger.exception(
+            "docket cut of segment %d aborted; the first append after %d s retries it", segment, CUT_RETRY_INTERVAL
+        )
 
     def _replace_active(self, segment: int) -> int:
         name = self._docket_path.name
