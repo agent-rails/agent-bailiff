@@ -14,7 +14,8 @@ JAEGER_TIMEOUT_SECONDS = 60
 
 ALLOWED_LOG_SERVICES = {"gitea"}
 UPSTREAM_CASES = ("allowed", "missing issue", "missing repo")
-CONTROL = 3
+BASE64_ALIGNMENTS = 3
+CONTROL = 1 + BASE64_ALIGNMENTS
 CREDENTIAL_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
@@ -66,7 +67,12 @@ def plaintext_credential(stack):
 
 
 def needles(token):
-    return [token, base64.b64encode(token.encode()).decode(), base64.b64encode(f"token {token}".encode()).decode()]
+    return [token, *(aligned_base64(token.encode(), lead) for lead in range(BASE64_ALIGNMENTS))]
+
+
+def aligned_base64(secret, lead):
+    encoded = base64.b64encode(bytes(lead) + secret).decode()
+    return encoded[-(-8 * lead // 6) : 8 * (lead + len(secret)) // 6]
 
 
 def scan_agent(stack, patterns):
@@ -150,6 +156,7 @@ def test_no_response_to_the_agent_holds_the_credential(stack):
     stack.compose("stop", "gitea")
     failing = raw_exchanges(stack)
     assert raw_hits(failing, patterns) == {}, failing
+    assert "out_of_scope" in failing["injected"]["body"] and "unknown_tool" in failing["unrouted"]["body"], failing
     assert all('"isError":true' in failing[case]["body"] for case in UPSTREAM_CASES), failing
     logs = log_hits(stack, patterns[:CONTROL])
     assert set(logs) <= ALLOWED_LOG_SERVICES, logs
