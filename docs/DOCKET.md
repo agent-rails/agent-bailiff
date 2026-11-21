@@ -46,7 +46,7 @@ The sink appends to the active segment `<docket>`. Once an acknowledged append b
 - Order: fsync the docket, write the snapshot of the next segment (offset 0), replace `<docket>.manifest` with one that lists the sealed segment (its size, SHA-256, first entry number, entry count, every writer's head and key ids), rename `<docket>` to the segment name, then create, fsync and rename `<docket>.new` to `<docket>`. Each rename is followed by a directory fsync. The manifest replace is the commit.
 - A failure before the commit, including a manifest over its 4 MiB cap or `ENOSPC`, logs `aborted; the next append retries it` and appends go on into the same segment. A failure at or after the commit, or a docket whose size is not what the sink wrote, makes the sink refuse every append until restart. Start finishes a committed cut and ignores the snapshot of one that did not commit.
 - A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
-- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts.
+- Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts. Each append after that retries the cut, at four to seven fsyncs instead of one, until segments are removed.
 
 ### Upgrade and downgrade
 
@@ -54,7 +54,7 @@ The sink appends to the active segment `<docket>`. Once an acknowledged append b
 2. Install the release and add `segment_bytes` to the docket config: without it the config fails to load with `missing segment_bytes`. The quickstart bootstrap reports it with the same `docker compose down --volumes` hint as `free_space_floor`.
 3. Start the sink. On a docket that has never been cut it reads a version 1 snapshot or none, verifies every record and writes a version 2 snapshot.
 
-From then on `<docket>.snapshot` is always present and version 2. An older release refuses it with `snapshot_mismatch` and does not start, so there is no downgrade. Never delete or move the snapshot to get an older release to start: it would read only the active segment and let every writer start again at `seq` 1. Moving the snapshot aside (see snapshot_mismatch at start) is safe only when the current release starts next.
+From then on `<docket>.snapshot` is always present and version 2. An older release refuses it with `snapshot_mismatch` and does not start, so there is no downgrade. An older release also refuses a docket config that sets `segment_bytes`, as an unknown key. Never delete or move the snapshot and remove the key to get an older release to start: it would read only the active segment and let every writer start again at `seq` 1. The current release then refuses to start on that fork with `wrong_seq`. Moving the snapshot aside (see snapshot_mismatch at start) is safe only when the current release starts next.
 
 ## Readers
 
@@ -146,7 +146,7 @@ It does not detect:
 
 - The floor is a threshold checked before each write, not a guarantee. A write can still fail with `ENOSPC` when another process takes the space between the check and the write, or when a quota or reserved blocks limit the sink below what `f_bavail` reports. That failure is `write_failed`, and the sink refuses appends with `sink_failed` until restart, as before.
 - At start the sink refuses to start (exit 1) if the file system's total size is not larger than the floor plus one frame: such a sink could never accept an append. It checks total size, not free space, so a sink restarted while the disk is full still starts and resumes once space returns.
-- Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
+- Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), the manifest (at most 4 MiB), the temporary copy of each written beside it during a cut (up to 4 MiB more each), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
 - Alert on the `docket refusing appends` log line and on free space approaching the floor. Free space; no restart is needed, appends resume on the next request.
 - Upgrade: a docket config without `free_space_floor` fails to load with `missing free_space_floor`; add the key. The quickstart bootstrap reports it with a hint to run `docker compose down --volumes`, which also deletes the quickstart docket.
 - The docket still grows without bound. The floor bounds the damage of a full disk; it does not remove records.
