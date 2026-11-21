@@ -23,9 +23,11 @@ from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.report import (
     RecordFilter,
+    SnapshotCheck,
     json_row,
     pinned_writers,
     printable,
+    read_docket_snapshot,
     table_header,
     table_row,
     verify_records,
@@ -133,6 +135,7 @@ def _parser() -> argparse.ArgumentParser:
             verify.add_argument("--task", help="print only records of this task root")
             verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
             verify.add_argument("--json", action="store_true", help="print one JSON object per record")
+            verify.add_argument("--snapshot", type=Path, help="also cross-check this heads snapshot against the docket")
             verify.set_defaults(handler=_verify_docket)
             export = component.add_parser(
                 "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
@@ -392,9 +395,10 @@ def _verify_docket(args: argparse.Namespace) -> int:
 
     try:
         writers = pinned_writers(read_pin(path) for path in args.pin)
+        check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
-        report = verify_records(args.docket, writers, selected, emit)
+        report = verify_records(args.docket, writers, selected, emit, None if check is None else check.observe)
     except STARTUP_ERRORS + (InitError,) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
@@ -407,6 +411,16 @@ def _verify_docket(args: argparse.Namespace) -> int:
             print(f"{PROG} docket verify: {TORN_TAIL_HINT}", file=sys.stderr)
         return EXIT_REFUSED
     print(f"{PROG} docket verify: {report.entries} records verified, {shown} printed", file=sys.stderr)
+    if check is None:
+        return 0
+    differences = check.differences()
+    if differences:
+        print(
+            f"{PROG} docket verify: snapshot {args.snapshot} does not match the docket: {', '.join(differences)}",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+    print(f"{PROG} docket verify: snapshot at offset {check.snapshot.offset} matches the docket", file=sys.stderr)
     return 0
 
 
