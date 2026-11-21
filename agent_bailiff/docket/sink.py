@@ -40,6 +40,7 @@ DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
 DEFAULT_MAX_CONNECTIONS = 16
+DEFAULT_SNAPSHOT_EVERY = 10_000
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
 
@@ -294,8 +295,11 @@ class DocketSink:
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
         max_lifetime: float = DEFAULT_MAX_LIFETIME,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
         fsync: Callable[[int], None] = os.fsync,
     ) -> None:
+        if type(snapshot_every) is not int or snapshot_every < 1:
+            raise ValueError("snapshot_every must be an integer of at least 1")
         self._docket_path = docket_path
         self._socket_path = socket_path
         self._writers = writers
@@ -310,6 +314,8 @@ class DocketSink:
         self._max_connections = max_connections
         self._fsync = fsync
         self._snapshot_path = snapshot_path(docket_path)
+        self._snapshot_every = snapshot_every
+        self._since_snapshot = 0
         self._heads: dict[str, Head] = {}
         self._chain = ChainState()
         self._snapshots_enabled = True
@@ -463,6 +469,9 @@ class DocketSink:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._started:
+            self._started = False
+            self._write_snapshot()
         if self._socket_identity is not None:
             unlink_if_same(self._socket_path, self._socket_identity)
             self._socket_identity = None
@@ -567,7 +576,16 @@ class DocketSink:
             return _refusal("write_failed")
         self._failed = False
         self._heads[record.writer] = Head(seq=record.seq, hash=record.hash)
+        self._chain.add(self._chain.offset, record)
+        self._count_toward_snapshot()
         return {"ok": True, "seq": record.seq, "hash": record.hash}
+
+    def _count_toward_snapshot(self) -> None:
+        self._since_snapshot += 1
+        if self._since_snapshot < self._snapshot_every:
+            return
+        self._since_snapshot = 0
+        asyncio.get_running_loop().call_soon(self._write_snapshot)
 
 
 def _mismatch(detail: str) -> VerifyReport:
