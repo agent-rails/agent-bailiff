@@ -237,7 +237,7 @@ def test_a_version_1_checkpoint_of_another_file_is_refused(docket, checkpoint):
     collect(docket, checkpoint)
     legacy_checkpoint(checkpoint, docket)
     content = docket.path.read_bytes()
-    docket.path.unlink()
+    docket.path.rename(docket.path.with_name("held"))
     docket.path.write_bytes(content)
     os.chmod(docket.path, 0o600)
     with pytest.raises(CheckpointMismatch, match="not the file"):
