@@ -144,6 +144,22 @@ def test_a_committed_cut_before_its_rename_waits_for_the_next_pass(docket, check
     assert collect(docket, checkpoint) == [3, 4]
 
 
+def test_a_rename_that_finishes_after_a_failed_open_is_retried(docket, checkpoint, monkeypatch):
+    fill(docket, 1, 3)
+    manifest = cut(docket, rename=False)
+    real = segments_module.read_docket_manifest
+    calls = []
+
+    def sink_finishes_cut(path):
+        calls.append(path)
+        if len(calls) == 2:
+            finish_cut(docket, manifest)
+        return real(path)
+
+    monkeypatch.setattr(segments_module, "read_docket_manifest", sink_finishes_cut)
+    assert collect(docket, checkpoint) == [1, 2]
+
+
 def test_a_missing_sealed_segment_before_the_last_raises_segment_mismatch(docket, checkpoint):
     fill(docket, 1, 3)
     manifest = cut(docket)

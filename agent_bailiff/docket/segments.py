@@ -58,6 +58,8 @@ def open_segment(docket_path: Path, segment: int) -> OpenedSegment | None:
                 continue
             if sealed is None or _renaming(docket_path, manifest.active_segment, sealed):
                 return None
+            if path.exists():
+                continue
             raise SegmentMismatch(f"{path} is listed in its manifest but missing") from None
         if read_docket_manifest(docket_path).generation != manifest.generation:
             stream.close()
