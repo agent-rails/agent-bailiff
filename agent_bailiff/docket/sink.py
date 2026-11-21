@@ -21,6 +21,7 @@ from agent_bailiff.docket.snapshot import (
     Anchor,
     Snapshot,
     SnapshotInvalid,
+    SnapshotLegacy,
     read_snapshot,
     snapshot_path,
     write_snapshot,
@@ -107,9 +108,17 @@ def verify_docket(path: Path, writers: Writers) -> VerifyReport:
 
 
 def _verify_fd(fd: int, index: KidIndex) -> VerifyReport:
+    return _verify_chain(fd, index)[1]
+
+
+def _verify_chain(fd: int, index: KidIndex) -> tuple[ChainState, VerifyReport]:
+    chain = ChainState()
     with os.fdopen(os.dup(fd), "rb") as docket:
         docket.seek(0)
-        return _verify_stream(docket, index)
+        verification = Verification(docket, index)
+        for verified in verification:
+            chain.add(verified.start, verified.record)
+    return chain, verification.report
 
 
 def _verify_stream(docket: BinaryIO, index: KidIndex) -> VerifyReport:
@@ -196,12 +205,14 @@ class ChainState:
         self,
         digest: hashlib._Hash | None = None,
         *,
+        segment: int = 1,
         offset: int = 0,
         entries: int = 0,
         anchors: Mapping[str, Anchor] | None = None,
         kids: Iterable[str] = (),
     ) -> None:
         self._digest = hashlib.sha256() if digest is None else digest
+        self.segment = segment
         self.offset = offset
         self.entries = entries
         self.anchors = dict(anchors or {})
@@ -210,7 +221,12 @@ class ChainState:
     @classmethod
     def seeded(cls, digest: hashlib._Hash, snapshot: Snapshot) -> ChainState:
         return cls(
-            digest, offset=snapshot.offset, entries=snapshot.entries, anchors=snapshot.anchors, kids=snapshot.kids
+            digest,
+            segment=snapshot.segment,
+            offset=snapshot.offset,
+            entries=snapshot.entries,
+            anchors=snapshot.anchors,
+            kids=snapshot.kids,
         )
 
     def add(self, start: int, record: Record) -> None:
@@ -222,7 +238,9 @@ class ChainState:
         self.offset = start + len(line)
 
     def snapshot(self) -> Snapshot:
-        return Snapshot(self.offset, self.entries, self._digest.hexdigest(), dict(self.anchors), frozenset(self.kids))
+        return Snapshot(
+            self.segment, self.offset, self.entries, self._digest.hexdigest(), dict(self.anchors), frozenset(self.kids)
+        )
 
 
 def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: int | None = None) -> VerifyReport:
@@ -234,14 +252,14 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
         fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         try:
             _check_docket_file(fd, docket_path, reader_gid)
-            report = _verify_fd(fd, index)
+            chain, report = _verify_chain(fd, index)
             if report.ok:
                 return report
             if report.reason != "torn_tail":
                 raise DocketCorrupt(report)
             tail = os.pread(fd, os.fstat(fd).st_size - report.valid_bytes, report.valid_bytes)
             _write_side_file(side_path, tail)
-            _unlink_snapshot(docket_path, directory_fd)
+            write_snapshot(snapshot_path(docket_path), chain.snapshot(), reader_gid=reader_gid)
             os.ftruncate(fd, report.valid_bytes)
             os.fsync(fd)
             os.fsync(directory_fd)
@@ -255,13 +273,6 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
         if lock_fd is not None:
             os.close(lock_fd)
         os.close(directory_fd)
-
-
-def _unlink_snapshot(docket_path: Path, directory_fd: int) -> None:
-    try:
-        os.unlink(snapshot_path(docket_path).name, dir_fd=directory_fd)
-    except FileNotFoundError:
-        pass
 
 
 def _write_side_file(path: Path, content: bytes) -> None:
@@ -382,6 +393,9 @@ class DocketSink:
     def _load_heads(self, fd: int) -> None:
         try:
             snapshot = self._read_snapshot()
+        except SnapshotLegacy as exc:
+            logger.warning("%s; verifying the whole docket and writing a new snapshot", exc)
+            snapshot = None
         except SnapshotInvalid as exc:
             raise DocketCorrupt(_mismatch(str(exc))) from None
         if snapshot is None:
@@ -404,6 +418,10 @@ class DocketSink:
             self._verify_tail(ChainState(), Verification(docket, self._index))
 
     def _verify_from(self, fd: int, snapshot: Snapshot) -> None:
+        if snapshot.segment != self._chain.segment:
+            raise DocketCorrupt(
+                _mismatch(f"segment {snapshot.segment} is not the active segment {self._chain.segment}")
+            )
         if snapshot.offset > os.fstat(fd).st_size:
             raise DocketCorrupt(_mismatch(f"offset {snapshot.offset} is past the end of the docket"))
         unpinned = sorted(snapshot.kids - self._index.keys())

@@ -17,7 +17,7 @@ from agent_bailiff.keys import PublicKeyRecord
 
 RELEASED = "released, target outcome unknown"
 TABLE_COLUMNS = ("line", "at", "writer", "seq", "decision", "tool", "resource", "reason", "note")
-SNAPSHOT_FIELDS = ("entries", "prefix_sha256", "anchors", "kids")
+SNAPSHOT_FIELDS = ("segment", "entries", "prefix_sha256", "anchors", "kids")
 READER_MODE = 0o640
 
 

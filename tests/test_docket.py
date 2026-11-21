@@ -2,6 +2,7 @@ import asyncio
 import errno
 import gc
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -1182,7 +1183,7 @@ def test_first_start_verifies_the_docket_and_writes_its_snapshot(paths, start_si
 
 def test_first_start_on_a_new_docket_writes_an_empty_snapshot(paths, start_sink):
     start_sink()
-    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == Snapshot(0, 0, hashlib.sha256().hexdigest())
+    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == Snapshot(1, 0, 0, hashlib.sha256().hexdigest())
 
 
 def test_snapshot_shares_the_docket_reader_group(paths, start_sink):
@@ -1777,30 +1778,63 @@ def test_close_after_a_failed_start_writes_no_snapshot(paths, start_sink):
     assert not snapshot_path(paths[0]).exists()
 
 
-def test_repair_that_truncates_drops_the_snapshot(paths, start_sink, workdir):
-    write_chain(paths, start_sink)
+def test_repair_that_truncates_replaces_the_snapshot(paths, start_sink, workdir):
+    write_chain(paths, start_sink, count=2)
+    stale = current_snapshot(paths)
+    write_chain(paths, start_sink, count=1)
+    seal(paths, stale)
     with open(paths[0], "a") as docket:
         docket.write("partial")
     repair(paths[0], workdir / "torn.tail", WRITERS)
-    assert not snapshot_path(paths[0]).exists()
-    start_sink().stop()
     assert current_snapshot(paths) == chain_snapshot(paths[0])
+    assert current_snapshot(paths).entries == 3
+    start_sink().stop()
 
 
-def test_repair_drops_the_snapshot_before_it_truncates(paths, start_sink, workdir, monkeypatch):
+def test_repair_writes_the_snapshot_of_the_valid_lines_before_it_truncates(paths, start_sink, workdir, monkeypatch):
     write_chain(paths, start_sink)
+    expected = chain_snapshot(paths[0])
     with open(paths[0], "a") as docket:
         docket.write("partial")
     seen = []
     original = os.ftruncate
 
     def recording_truncate(fd, length):
-        seen.append(snapshot_path(paths[0]).exists())
+        seen.append((length, current_snapshot(paths)))
         original(fd, length)
 
     monkeypatch.setattr(sink_module.os, "ftruncate", recording_truncate)
     repair(paths[0], workdir / "torn.tail", WRITERS)
-    assert seen == [False]
+    assert seen == [(expected.offset, expected)]
+
+
+def test_repair_interrupted_before_the_truncate_finishes_when_run_again(paths, start_sink, workdir, monkeypatch):
+    write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+
+    def crashing_truncate(fd, length):
+        raise OSError(errno.EIO, "injected crash before truncate")
+
+    monkeypatch.setattr(sink_module.os, "ftruncate", crashing_truncate)
+    with pytest.raises(OSError, match="injected"):
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+    monkeypatch.undo()
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "torn_tail"
+    assert repair(paths[0], workdir / "torn.tail.2", WRITERS).ok
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    start_sink().stop()
+
+
+def test_repair_keeps_the_snapshot_shared_with_the_reader_group(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    share(paths, READER_GID, 0o750, 0o640)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    repair(paths[0], workdir / "torn.tail", WRITERS, reader_gid=READER_GID)
+    assert file_mode(snapshot_path(paths[0])) == (0o640, READER_GID)
 
 
 def test_repair_of_a_whole_docket_keeps_the_snapshot(paths, start_sink, workdir):
@@ -1810,12 +1844,60 @@ def test_repair_of_a_whole_docket_keeps_the_snapshot(paths, start_sink, workdir)
     assert snapshot_path(paths[0]).read_bytes() == before
 
 
-def test_repair_without_a_snapshot_still_truncates(paths, start_sink, workdir):
+def test_repair_without_a_snapshot_truncates_and_writes_one(paths, start_sink, workdir):
     write_chain(paths, start_sink)
     snapshot_path(paths[0]).unlink()
     with open(paths[0], "a") as docket:
         docket.write("partial")
     assert repair(paths[0], workdir / "torn.tail", WRITERS).entries == 3
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+
+
+def legacy_snapshot(snapshot):
+    document = json.loads(snapshot.encode())
+    del document["segment"]
+    return {**document, "version": 1}
+
+
+@pytest.mark.parametrize("legacy", [legacy_snapshot, lambda _: {"version": 1}], ids=["whole", "version-only"])
+def test_a_version_1_snapshot_migrates_through_a_full_verify(paths, start_sink, caplog, monkeypatch, legacy):
+    write_two_writers(paths, start_sink)
+    path = snapshot_path(paths[0])
+    path.write_text(json.dumps(legacy(chain_snapshot(paths[0]))))
+    full = []
+    original = DocketSink._full_verify
+
+    def recording_full_verify(self, fd):
+        full.append(fd)
+        original(self, fd)
+
+    monkeypatch.setattr(DocketSink, "_full_verify", recording_full_verify)
+    handle = start_sink()
+    assert (handle.sink.heads["decide"].seq, handle.sink.heads["custodian"].seq) == (2, 1)
+    handle.stop()
+    assert len(full) == 1
+    assert "snapshot version 1 predates segments" in caplog.text
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    assert json.loads(path.read_bytes())["version"] == 2
+
+
+def test_a_version_1_snapshot_does_not_hide_a_corrupt_docket(paths, start_sink):
+    write_chain(paths, start_sink)
+    snapshot_path(paths[0]).write_text(json.dumps({"version": 1}))
+    with open(paths[0], "a") as docket:
+        docket.write("garbage\n")
+    with pytest.raises(DocketCorrupt):
+        start_sink()
+    assert json.loads(snapshot_path(paths[0]).read_bytes()) == {"version": 1}
+
+
+def test_start_refuses_a_snapshot_of_another_segment(paths, start_sink):
+    write_chain(paths, start_sink)
+    seal(paths, replace(chain_snapshot(paths[0]), segment=2))
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
+    assert "segment 2 is not the active segment 1" in error.value.report.detail
 
 
 def seal_first(paths, count):
