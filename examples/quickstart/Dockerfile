@@ -13,7 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
 COPY ${REQUIREMENTS} /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt \
-    && python -m pip uninstall --yes pip
+    && python -m pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY agent_bailiff /app/agent_bailiff
 COPY --from=proto /out /app/agent_bailiff/adapters/agentgateway/_proto
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"

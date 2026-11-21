@@ -320,7 +320,11 @@ def test_the_agent_mounts_no_bailiff_state(stack):
 
 
 def pip_absent(stack, service, *arguments):
-    probe = "import importlib.util; print(importlib.util.find_spec('pip') is None)"
+    probe = (
+        "import glob, importlib.util, sys; "
+        "print(all(importlib.util.find_spec(name) is None for name in ('pip', 'ensurepip')) "
+        "and not glob.glob(f'{sys.prefix}/lib/**/*.whl', recursive=True))"
+    )
     run = [*arguments, "run", "--rm", "--no-deps", "--entrypoint", "python", service, "-c", probe]
     return stack.compose(*run).strip() == "True"
 
