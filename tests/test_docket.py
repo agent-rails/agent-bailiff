@@ -46,7 +46,7 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     encode_response,
 )
-from agent_bailiff.docket.sink import ChainState, build_kid_index
+from agent_bailiff.docket.sink import ChainState, build_kid_index, docket_lock_path
 from agent_bailiff.docket.snapshot import Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
 
@@ -725,6 +725,31 @@ def test_second_sink_on_the_same_socket_refuses_to_start(paths, start_sink, work
     assert decide_client(paths).append(make_entry(1)).seq == 1
 
 
+def test_the_docket_lock_holds_after_the_docket_is_renamed(paths, start_sink, workdir):
+    start_sink()
+    paths[0].rename(workdir / "moved.log")
+    second = DocketSink(paths[0], workdir / "t" / "other.sock", WRITERS, {os.getuid()})
+    with pytest.raises(DocketLocked):
+        asyncio.run(second.start())
+    assert not paths[0].exists()
+
+
+def test_the_docket_lock_is_private(paths, start_sink):
+    start_sink()
+    info = os.lstat(docket_lock_path(paths[0]))
+    assert stat.S_ISREG(info.st_mode)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+
+
+def test_a_symlinked_docket_lock_is_refused(paths, workdir):
+    docket_lock_path(paths[0]).symlink_to(workdir / "elsewhere.lock")
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(OSError):
+        asyncio.run(sink.start())
+    assert not (workdir / "elsewhere.lock").exists()
+    assert not paths[0].exists()
+
+
 def test_closing_a_sink_removes_its_socket(paths, start_sink):
     start_sink().stop()
     assert not paths[1].exists()
@@ -755,6 +780,7 @@ def test_sink_refuses_a_symlinked_docket_directory(paths, workdir):
     with pytest.raises(OSError):
         asyncio.run(sink.start())
     assert not (real / "docket.log").exists()
+    assert not (real / "docket.log.lock").exists()
 
 
 def fd_kind(fd):

@@ -234,10 +234,11 @@ class ChainState:
 def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: int | None = None) -> VerifyReport:
     index = build_kid_index(writers)
     directory_fd = open_private_dir(docket_path.parent)
+    lock_fd: int | None = None
     try:
+        lock_fd = _lock_docket(docket_path, directory_fd)
         fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         try:
-            _lock(fd, docket_path)
             _check_docket_file(fd, docket_path, reader_gid)
             report = _verify_fd(fd, index)
             if report.ok:
@@ -257,6 +258,8 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
         finally:
             os.close(fd)
     finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
         os.close(directory_fd)
 
 
@@ -342,6 +345,7 @@ class DocketSink:
         self._snapshots_enabled = True
         self._started = False
         self._fd: int | None = None
+        self._docket_lock_fd: int | None = None
         self._socket_lock_fd: int | None = None
         self._socket_identity: tuple[int, int] | None = None
         self._server: asyncio.Server | None = None
@@ -360,8 +364,12 @@ class DocketSink:
             raise
 
     async def _start(self) -> None:
+        directory_fd = open_private_dir(self._docket_path.parent)
+        try:
+            self._docket_lock_fd = _lock_docket(self._docket_path, directory_fd)
+        finally:
+            os.close(directory_fd)
         self._fd = self._open_docket()
-        _lock(self._fd, self._docket_path)
         _check_docket_file(self._fd, self._docket_path, self._reader_gid)
         self._check_capacity(self._fd)
         self._load_heads(self._fd)
@@ -503,6 +511,9 @@ class DocketSink:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
+        if self._docket_lock_fd is not None:
+            os.close(self._docket_lock_fd)
+            self._docket_lock_fd = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -681,6 +692,21 @@ def _check_docket_file(fd: int, path: Path, reader_gid: int | None) -> None:
         raise PermissionError(
             f"{path} must be a regular file owned by uid {os.geteuid()}, group {reader_gid}, with mode 0640"
         )
+
+
+def docket_lock_path(docket_path: Path) -> Path:
+    return docket_path.with_name(f"{docket_path.name}.lock")
+
+
+def _lock_docket(docket_path: Path, directory_fd: int) -> int:
+    path = docket_lock_path(docket_path)
+    fd = open_lock_file(path, dir_fd=directory_fd)
+    try:
+        _lock(fd, path)
+    except DocketLocked:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _lock(fd: int, path: Path) -> None:
