@@ -242,6 +242,7 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
                 raise DocketCorrupt(report)
             tail = os.pread(fd, os.fstat(fd).st_size - report.valid_bytes, report.valid_bytes)
             _write_side_file(side_path, tail)
+            _unlink_snapshot(docket_path, directory_fd)
             os.ftruncate(fd, report.valid_bytes)
             os.fsync(fd)
             os.fsync(directory_fd)
@@ -253,6 +254,13 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
             os.close(fd)
     finally:
         os.close(directory_fd)
+
+
+def _unlink_snapshot(docket_path: Path, directory_fd: int) -> None:
+    try:
+        os.unlink(snapshot_path(docket_path).name, dir_fd=directory_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _write_side_file(path: Path, content: bytes) -> None:
