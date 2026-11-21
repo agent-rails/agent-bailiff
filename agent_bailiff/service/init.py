@@ -14,6 +14,7 @@ from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import CredentialStore
+from agent_bailiff.docket.sink import DEFAULT_SNAPSHOT_EVERY
 from agent_bailiff.effector.catalog import shipped_catalog
 from agent_bailiff.keys import PublicKeyRecord, check_component, generate_signing_key
 from agent_bailiff.service.ledger import create_writer
@@ -230,7 +231,7 @@ def init_docket(
     allowed_uids: Iterable[int],
     pins: Iterable[PublicKeyRecord],
 ) -> Path:
-    _check_new(directory, (CONFIG, "docket.log"))
+    _check_new(directory, (CONFIG, "docket.log", "docket.log.snapshot"))
     document = {
         "docket": str(directory / "docket.log"),
         "socket": str(socket),
@@ -238,6 +239,7 @@ def init_docket(
         "reader_group": reader_group,
         "allowed_uids": sorted(set(allowed_uids)),
         "writers": _writers(pins),
+        "snapshot_every": DEFAULT_SNAPSHOT_EVERY,
     }
     parse_docket(document)
     if reader_group is not None:

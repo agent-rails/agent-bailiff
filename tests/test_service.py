@@ -202,6 +202,7 @@ class Deployment:
             "reader_group": None,
             "allowed_uids": [UID],
             "writers": {name: self.pins(name) for name in self.keys},
+            "snapshot_every": 10_000,
         }
 
     def control_document(self):
@@ -364,6 +365,12 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(reader_group="0"),
         lambda doc: doc.update(reader_group=True),
         lambda doc: doc.update(reader_group=-1),
+        lambda doc: doc.update(snapshot_every=0),
+        lambda doc: doc.update(snapshot_every=True),
+        lambda doc: doc.update(snapshot_every="10"),
+        lambda doc: doc.update(snapshot_every=1.5),
+        lambda doc: doc.update(snapshot_every=None),
+        lambda doc: doc.pop("snapshot_every"),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):
@@ -676,3 +683,28 @@ def test_a_suspend_after_decide_passed_stops_the_running_custodian(stack, live, 
     assert released.error.reason == "release_refused", released
     refusals = [record.entry for _, record in deployment.records() if record.entry.hop == "custodian"]
     assert [(entry.decision, entry.reason) for entry in refusals] == [("release", "ok"), ("refuse", "suspended")]
+
+
+def test_snapshot_every_is_required(deployment):
+    with pytest.raises(ConfigError, match="missing snapshot_every"):
+        parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.pop("snapshot_every")))
+
+
+def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch):
+    seen = {}
+
+    class RecordingSink:
+        def __init__(self, *args, **options):
+            seen.update(options)
+
+        async def start(self):
+            raise RuntimeError("stop after construction")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(run, "DocketSink", RecordingSink)
+    settings = parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.update(snapshot_every=7)))
+    with pytest.raises(RuntimeError, match="stop after construction"):
+        asyncio.run(run.serve_docket(settings, asyncio.Event()))
+    assert seen["snapshot_every"] == 7
