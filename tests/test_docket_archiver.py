@@ -1,0 +1,406 @@
+import functools
+import hashlib
+import json
+import os
+import stat
+import threading
+from dataclasses import replace
+
+import pytest
+from test_docket import make_entry
+from test_docket_report import PINS, WRITERS, Docket, filled
+from test_docket_report import cut as cut_docket
+
+from agent_bailiff import cli
+from agent_bailiff.docket.archiver import (
+    ArchiveMismatch,
+    ArchiverCheckpoint,
+    ArchiverLocked,
+    DocketArchiver,
+    encode_sidecar,
+)
+from agent_bailiff.docket.entry import Head
+from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
+from agent_bailiff.docket.receipt import ReceiptDir
+from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
+
+NOW = 1795262400
+UID = os.geteuid()
+GID = os.getegid()
+INDEX = build_kid_index(WRITERS)
+
+
+def cut(docket, manifest=None):
+    sealed = cut_docket(docket, manifest)
+    os.chmod(docket.path, 0o640)
+    return sealed
+
+
+def other_device(path):
+    return -1
+
+
+@pytest.fixture
+def layout(tmp_path):
+    state = tmp_path / "state"
+    archive = tmp_path / "archive"
+    receipts = tmp_path / "receipts"
+    for path, mode in ((state, 0o700), (archive, 0o750), (receipts, 0o750)):
+        path.mkdir()
+        os.chown(path, -1, GID)
+        os.chmod(path, mode)
+    docket_path = tmp_path / "docket" / "docket.log"
+    docket_path.parent.mkdir()
+    docket_path.touch(mode=0o640)
+    os.chown(docket_path, -1, GID)
+    os.chmod(docket_path, 0o640)
+    return tmp_path, Docket(docket_path)
+
+
+@pytest.fixture
+def pin_files(tmp_path):
+    paths = {}
+    for name, pin in PINS.items():
+        paths[name] = tmp_path / f"{name}.pub.json"
+        paths[name].write_text(json.dumps(pin.to_document()))
+        os.chmod(paths[name], 0o644)
+    return paths
+
+
+def archiver(layout, **options):
+    root, docket = layout
+    options.setdefault("device_of", other_device)
+    options.setdefault("clock", lambda: NOW)
+    return DocketArchiver(
+        docket.path,
+        INDEX,
+        root / "archive",
+        root / "receipts",
+        root / "state" / "archiver.json",
+        **options,
+    )
+
+
+def run(layout, **options):
+    return archiver(layout, **options).run(threading.Event(), follow=False)
+
+
+def copies(layout, manifest):
+    return layout[0] / "archive" / manifest.docket_id
+
+
+def receipt(layout, segment):
+    with ReceiptDir.open(layout[0] / "receipts", archiver_uid=UID, reader_gid=GID) as receipts:
+        return receipts.read(segment)
+
+
+def checkpoint(layout):
+    return ArchiverCheckpoint.from_document(json.loads((layout[0] / "state" / "archiver.json").read_bytes()))
+
+
+def two_segments(docket):
+    first = cut(filled(docket))
+    docket.append("decide", make_entry(5))
+    second = cut(docket, first)
+    docket.append("decide", make_entry(6))
+    return second
+
+
+def test_archives_every_sealed_segment_with_a_sidecar_receipt_and_checkpoint(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    assert run(layout) == 2
+    directory = copies(layout, manifest)
+    assert sorted(os.listdir(directory)) == [
+        "seg-000000000001",
+        "seg-000000000001.json",
+        "seg-000000000002",
+        "seg-000000000002.json",
+    ]
+    for entry in manifest.segments:
+        copy = directory / f"seg-{entry.segment:012d}"
+        assert copy.read_bytes() == segment_path(docket.path, entry.segment).read_bytes()
+        info = os.lstat(copy)
+        assert (stat.S_IMODE(info.st_mode), info.st_gid) == (0o640, GID)
+        sidecar = directory / f"seg-{entry.segment:012d}.json"
+        assert sidecar.read_bytes() == encode_sidecar(manifest.docket_id, entry)
+        made = receipt(layout, entry.segment)
+        assert (made.sha256, made.size, made.end_heads, made.verified_at) == (
+            entry.sha256,
+            entry.size,
+            entry.end_heads,
+            NOW,
+        )
+    assert stat.S_IMODE(os.lstat(directory).st_mode) == 0o750
+    last = manifest.segments[-1]
+    assert checkpoint(layout) == ArchiverCheckpoint(manifest.docket_id, 3, 5, dict(last.end_heads))
+
+
+def test_is_idle_without_a_manifest(layout):
+    filled(layout[1])
+    assert run(layout) == 0
+    assert not (layout[0] / "state" / "archiver.json").exists()
+
+
+def test_is_idle_until_the_next_segment_is_sealed(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    assert run(layout) == 1
+    docket.append("decide", make_entry(5))
+    assert run(layout) == 0
+    cut(docket, manifest)
+    assert run(layout) == 1
+    assert checkpoint(layout).segment == 3
+
+
+def test_refuses_an_archive_on_the_docket_device(layout):
+    cut(filled(layout[1]))
+    with pytest.raises(PermissionError, match="docket's device"):
+        run(layout, device_of=lambda path: os.stat(layout[0] / "archive").st_dev)
+
+
+def test_refuses_a_symlinked_archive_dir(layout, tmp_path):
+    cut(filled(layout[1]))
+    (tmp_path / "archive").rename(tmp_path / "real")
+    (tmp_path / "archive").symlink_to(tmp_path / "real")
+    with pytest.raises(OSError):
+        run(layout)
+
+
+def test_refuses_a_docket_without_a_reader_group(layout):
+    cut(filled(layout[1]))
+    os.chmod(layout[1].path, 0o600)
+    with pytest.raises(PermissionError, match="reader_group"):
+        run(layout)
+
+
+def test_refuses_to_run_beside_another_archiver(layout):
+    cut(filled(layout[1]))
+    lock_fd = open_lock_file(layout[0] / "state" / "archiver.json.lock")
+    try:
+        assert try_lock(lock_fd)
+        with pytest.raises(ArchiverLocked):
+            run(layout)
+    finally:
+        os.close(lock_fd)
+
+
+def test_a_segment_differing_from_its_manifest_entry_gets_no_copy_or_receipt(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    entry = replace(manifest.segments[0], kids=frozenset({"other"}))
+    tampered = Manifest(manifest.docket_id, manifest.generation + 1, None, (entry,))
+    write_manifest(manifest_path(docket.path), tampered)
+    with pytest.raises(ArchiveMismatch, match="kids"):
+        run(layout)
+    assert os.listdir(copies(layout, manifest)) == []
+    assert receipt(layout, 1) is None
+    assert not (layout[0] / "state" / "archiver.json").exists()
+
+
+def test_a_segment_failing_verification_gets_no_copy_or_receipt(layout):
+    _, docket = layout
+    cut(filled(docket))
+    sealed = segment_path(docket.path, 1)
+    content = bytearray(sealed.read_bytes())
+    content[10] ^= 1
+    sealed.write_bytes(bytes(content))
+    with pytest.raises(ArchiveMismatch, match="fails verification"):
+        run(layout)
+    assert receipt(layout, 1) is None
+
+
+def test_a_matching_existing_copy_is_reused(layout, caplog):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    directory = copies(layout, manifest)
+    directory.mkdir(mode=0o750)
+    (directory / "seg-000000000001").write_bytes(segment_path(docket.path, 1).read_bytes())
+    assert run(layout) == 1
+    assert "reusing the archived copy of segment 1" in caplog.text
+    assert receipt(layout, 1) is not None
+
+
+def test_a_differing_existing_copy_is_refused(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    directory = copies(layout, manifest)
+    directory.mkdir(mode=0o750)
+    (directory / "seg-000000000001").write_bytes(b"other\n")
+    with pytest.raises(ArchiveMismatch, match="other content"):
+        run(layout)
+    assert (directory / "seg-000000000001").read_bytes() == b"other\n"
+    assert receipt(layout, 1) is None
+
+
+def test_a_differing_existing_sidecar_is_refused(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    directory = copies(layout, manifest)
+    directory.mkdir(mode=0o750)
+    (directory / "seg-000000000001.json").write_bytes(b"{}")
+    with pytest.raises(ArchiveMismatch, match="sidecar"):
+        run(layout)
+    assert receipt(layout, 1) is None
+
+
+def test_unfinished_copies_are_removed_at_start(layout, caplog):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    directory = copies(layout, manifest)
+    directory.mkdir(mode=0o750)
+    (directory / "seg-000000000001.tmp").write_bytes(b"partial")
+    (directory / "seg-000000000007.json.tmp").write_bytes(b"partial")
+    assert run(layout) == 1
+    assert sorted(os.listdir(directory)) == ["seg-000000000001", "seg-000000000001.json"]
+    assert "removed the unfinished archive copy" in caplog.text
+
+
+def test_a_failed_directory_sync_writes_no_receipt_or_checkpoint(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and os.fstat(fd).st_ino == os.stat(copies(layout, manifest)).st_ino:
+            raise OSError(5, "Input/output error")
+        os.fsync(fd)
+
+    with pytest.raises(OSError, match="Input/output"):
+        run(layout, fsync=fsync)
+    assert receipt(layout, 1) is None
+    assert not (layout[0] / "state" / "archiver.json").exists()
+    assert run(layout) == 1
+    assert receipt(layout, 1) is not None
+
+
+def test_refuses_a_checkpoint_for_another_docket(layout):
+    _, docket = layout
+    cut(filled(docket))
+    assert run(layout) == 1
+    write_manifest(manifest_path(docket.path), Manifest("f" * 32, 1))
+    with pytest.raises(ArchiveMismatch, match="checkpoint is for docket"):
+        run(layout)
+
+
+def test_rebuilds_heads_from_the_archive_for_a_removed_segment(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    assert run(layout) == 2
+    first, second = manifest.segments
+    write_manifest(
+        manifest_path(docket.path),
+        Manifest(manifest.docket_id, manifest.generation + 1, Base(1, first.entries, first.end_heads), (second,)),
+    )
+    segment_path(docket.path, 1).unlink()
+    (layout[0] / "state" / "archiver.json").unlink()
+    assert run(layout) == 2
+    assert checkpoint(layout) == ArchiverCheckpoint(manifest.docket_id, 3, 5, dict(second.end_heads))
+
+
+def test_a_removed_segment_without_an_archived_copy_is_refused(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    first, second = manifest.segments
+    write_manifest(
+        manifest_path(docket.path),
+        Manifest(manifest.docket_id, manifest.generation + 1, Base(1, first.entries, first.end_heads), (second,)),
+    )
+    with pytest.raises(ArchiveMismatch, match="no archived copy"):
+        run(layout)
+
+
+def test_a_rebuild_refuses_a_copy_differing_from_its_sidecar(layout):
+    _, docket = layout
+    manifest = two_segments(docket)
+    assert run(layout) == 2
+    first, second = manifest.segments
+    write_manifest(
+        manifest_path(docket.path),
+        Manifest(manifest.docket_id, manifest.generation + 1, Base(1, first.entries, first.end_heads), (second,)),
+    )
+    sidecar = copies(layout, manifest) / "seg-000000000001.json"
+    os.chmod(sidecar, 0o600)
+    sidecar.write_bytes(b"{}")
+    (layout[0] / "state" / "archiver.json").unlink()
+    with pytest.raises(ArchiveMismatch, match="sidecar"):
+        run(layout)
+
+
+def test_follow_stops_when_asked(layout):
+    _, docket = layout
+    cut(filled(docket))
+    stop = threading.Event()
+    instance = archiver(layout, poll_interval=0.01)
+    thread = threading.Thread(target=lambda: instance.run(stop, follow=True))
+    thread.start()
+    stop.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        [],
+        {"version": 2, "docket_id": "0" * 32, "segment": 1, "entries": 0, "heads": {}},
+        {"version": 1, "docket_id": "0" * 32, "segment": 0, "entries": 0, "heads": {}},
+        {"version": 1, "docket_id": "0" * 32, "segment": 1, "entries": 2, "heads": {}},
+        {"version": 1, "docket_id": "X" * 32, "segment": 1, "entries": 0, "heads": {}},
+        {"version": 1, "docket_id": "0" * 32, "segment": 1, "entries": 0, "heads": {}, "extra": 1},
+    ],
+)
+def test_checkpoint_refuses_an_invalid_document(document):
+    with pytest.raises(ValueError):
+        ArchiverCheckpoint.from_document(document)
+
+
+def test_checkpoint_round_trips():
+    original = ArchiverCheckpoint("0" * 32, 3, 4, {"decide": Head(4, "A" * 43)})
+    assert ArchiverCheckpoint.from_document(json.loads(original.encode())) == original
+
+
+def test_copy_digest_matches_the_receipt(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    run(layout)
+    copy = (copies(layout, manifest) / "seg-000000000001").read_bytes()
+    assert hashlib.sha256(copy).hexdigest() == receipt(layout, 1).sha256
+
+
+def archive_command(layout, pin_files, capsys):
+    root, docket = layout
+    pins = [item for path in pin_files.values() for item in ("--pin", str(path))]
+    code = cli.main(
+        [
+            "docket",
+            "archive",
+            "--docket",
+            str(docket.path),
+            *pins,
+            "--archive",
+            str(root / "archive"),
+            "--receipts",
+            str(root / "receipts"),
+            "--checkpoint",
+            str(root / "state" / "archiver.json"),
+            "--once",
+        ]
+    )
+    return code, capsys.readouterr().err
+
+
+def test_cli_archives_every_sealed_segment(layout, pin_files, capsys, monkeypatch):
+    two_segments(layout[1])
+    monkeypatch.setattr(cli, "DocketArchiver", functools.partial(DocketArchiver, device_of=other_device))
+    code, err = archive_command(layout, pin_files, capsys)
+    assert code == 0, err
+    assert "2 segments archived" in err
+
+
+def test_cli_refuses_an_archive_on_the_docket_device(layout, pin_files, capsys):
+    cut(filled(layout[1]))
+    code, err = archive_command(layout, pin_files, capsys)
+    assert code == 1
+    assert "docket archive refused" in err
+    assert "docket's device" in err

@@ -20,6 +20,7 @@ from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
+from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, DocketArchiver
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.report import (
     RecordFilter,
@@ -162,6 +163,25 @@ def _parser() -> argparse.ArgumentParser:
                 help="export the next line, which must be this one, as a skipped marker span instead of its record",
             )
             export.set_defaults(handler=_export_docket)
+            archive = component.add_parser(
+                "archive", help="copy sealed segments to separate storage and write a receipt for each"
+            )
+            archive.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            archive.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            archive.add_argument(
+                "--archive", type=Path, required=True, help="archive directory on another device, owned by this uid"
+            )
+            archive.add_argument(
+                "--receipts", type=Path, required=True, help="receipt directory, this uid and reader_group, 0750"
+            )
+            archive.add_argument(
+                "--checkpoint", type=Path, required=True, help="checkpoint file in the archiver's own 0700 directory"
+            )
+            archive.add_argument("--poll-interval", type=float, default=10.0, help="seconds between manifest reads")
+            archive.add_argument("--once", action="store_true", help="archive every sealed segment, then exit")
+            archive.set_defaults(handler=_archive_docket)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -462,6 +482,20 @@ def _export_docket(args: argparse.Namespace) -> int:
     finally:
         span_exporter.shutdown()
     print(f"{PROG} docket export: {exported} records exported", file=sys.stderr)
+    return 0
+
+
+def _archive_docket(args: argparse.Namespace) -> int:
+    stop = _stop_on_signals()
+    try:
+        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        archiver = DocketArchiver(
+            args.docket, index, args.archive, args.receipts, args.checkpoint, poll_interval=args.poll_interval
+        )
+        archived = archiver.run(stop, follow=not args.once)
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, ArchiverLocked, SegmentMismatch) as exc:
+        return _refused("docket archive", exc)
+    print(f"{PROG} docket archive: {archived} segments archived", file=sys.stderr)
     return 0
 
 
