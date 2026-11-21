@@ -10,6 +10,8 @@ x-bailiff: &bailiff
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   tmpfs: [/tmp]
+  mem_limit: 256m
+  pids_limit: 128
 
 x-trace: &trace
   <<: *bailiff
@@ -25,6 +27,10 @@ x-once: &once
 x-offline: &offline
   network_mode: none
 
+x-gitea-limits: &gitea-limits
+  mem_limit: 768m
+  pids_limit: 256
+
 x-gitea-mcp: &gitea-mcp
   image: docker.gitea.com/gitea-mcp-server:1.13.0@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18
   command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea:3000", "-port", "8080"]
@@ -32,12 +38,15 @@ x-gitea-mcp: &gitea-mcp
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   tmpfs: [/tmp]
+  mem_limit: 128m
+  pids_limit: 64
   depends_on:
     gitea:
       condition: service_healthy
 
 services:
   gitea:
+    <<: *gitea-limits
     image: gitea/gitea:1.25-rootless@sha256:be0b89adf2fc8657df508303d919c3be33e6413605882919f702177d62960c9a
     environment:
       GITEA__database__DB_TYPE: sqlite3
@@ -74,7 +83,7 @@ services:
       - gitea-admin:/var/lib/bailiff/gitea-admin
 
   gitea-admin:
-    <<: *once
+    <<: [*once, *gitea-limits]
     image: gitea/gitea:1.25-rootless@sha256:be0b89adf2fc8657df508303d919c3be33e6413605882919f702177d62960c9a
     user: "1000:1000"
     group_add: ["20004"]
@@ -293,6 +302,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
     command: ["-f", "/etc/bailiff/gateway.json"]
     configs:
       - source: gateway
@@ -356,6 +367,8 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
+    mem_limit: 256m
+    pids_limit: 128
     ports:
       - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
     networks: [trace, trace-ui]
