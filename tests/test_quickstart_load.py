@@ -25,6 +25,9 @@ CLIENTS = (1, 4, 16, 32)
 CALLS_PER_CLIENT = 20
 ACCEPTED = {"result", "refused: docket_unavailable"}
 MAX_DOCKET_UNAVAILABLE_RATE = 0.01
+LOGGED_SERVICES = ("decide", "custodian", "docket", "gateway")
+LOGGED_LEVELS = (" WARNING ", " ERROR ", "\twarn\t", "\terror\t")
+MAX_LOGGED_LINES = 60
 
 
 def measure(stack, clients):
@@ -39,6 +42,12 @@ def measure(stack, clients):
     }
 
 
+def service_problems(stack):
+    output = stack.compose("logs", "--no-color", "--timestamps", *LOGGED_SERVICES)
+    lines = [line for line in output.splitlines() if any(level in line for level in LOGGED_LEVELS)]
+    return "\n".join(lines[-MAX_LOGGED_LINES:])
+
+
 def docker_version():
     return subprocess.run(
         ["docker", "version", "--format", "{{.Server.Version}}"], capture_output=True, text=True, check=True
@@ -50,8 +59,8 @@ def test_quickstart_load(stack):
     levels = [measure(stack, clients) for clients in CLIENTS]
     for level in levels:
         assert level["calls"] == level["clients"] * CALLS_PER_CLIENT
-        assert set(level["outcomes"]) <= ACCEPTED, level
-        assert level["docket_unavailable_rate"] <= MAX_DOCKET_UNAVAILABLE_RATE, level
+        assert set(level["outcomes"]) <= ACCEPTED, f"{level}\n{service_problems(stack)}"
+        assert level["docket_unavailable_rate"] <= MAX_DOCKET_UNAVAILABLE_RATE, f"{level}\n{service_problems(stack)}"
     now = datetime.now(UTC)
     baseline = {
         "recorded_at": now.isoformat(timespec="seconds"),
