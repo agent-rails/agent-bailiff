@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -10,8 +11,18 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from agent_bailiff.docket.entry import Entry
-from agent_bailiff.docket.sink import ChainState, Verification, VerifiedLine, VerifyReport, build_kid_index
+from agent_bailiff.docket.entry import Entry, Head
+from agent_bailiff.docket.manifest import read_docket_manifest
+from agent_bailiff.docket.segments import BoundedReader, OpenedSegment, SegmentMismatch, open_segment
+from agent_bailiff.docket.sink import (
+    SEGMENT_MISMATCH,
+    ChainState,
+    KidIndex,
+    Verification,
+    VerifiedLine,
+    VerifyReport,
+    build_kid_index,
+)
 from agent_bailiff.docket.snapshot import Snapshot, SnapshotInvalid, read_snapshot
 from agent_bailiff.keys import PublicKeyRecord
 
@@ -49,17 +60,81 @@ def verify_records(
     writers: dict[str, dict[str, Ed25519PublicKey]],
     selected: RecordFilter,
     emit: Callable[[VerifiedLine], None],
-    observe: Callable[[VerifiedLine], None] | None = None,
+    check: SnapshotCheck | None = None,
 ) -> VerifyReport:
     index = build_kid_index(writers)
-    with open(path, "rb") as docket:
-        verification = Verification(docket, index)
-        for verified in verification:
-            if observe is not None:
-                observe(verified)
-            if selected.matches(verified.record.entry):
-                emit(verified)
-    return verification.report
+    manifest = read_docket_manifest(path)
+    segment = manifest.first_segment
+    heads = {} if manifest.base is None else dict(manifest.base.end_heads)
+    entries = 0 if manifest.base is None else manifest.base.entries
+    while True:
+        opened = open_segment(path, segment)
+        if opened is None:
+            raise SegmentMismatch(f"segment {segment} of {path} cannot be opened; start the sink to finish a cut")
+        with opened.stream:
+            active_check = check if opened.sealed is None else None
+            if active_check is not None:
+                active_check.begin(segment, entries)
+            report = _verify_segment(opened, index, heads, entries, selected, emit, active_check)
+        if not report.ok or opened.sealed is None:
+            return report
+        heads, entries = dict(report.heads), report.entries
+        segment += 1
+
+
+class _Digesting:
+    def __init__(self, source: BoundedReader) -> None:
+        self._source = source
+        self.digest = hashlib.sha256()
+
+    def readline(self, size: int = -1, /) -> bytes:
+        raw = self._source.readline(size)
+        self.digest.update(raw)
+        return raw
+
+    def read(self, size: int = -1, /) -> bytes:
+        raw = self._source.read(size)
+        self.digest.update(raw)
+        return raw
+
+
+def _verify_segment(
+    opened: OpenedSegment,
+    index: KidIndex,
+    heads: dict[str, Head],
+    entries: int,
+    selected: RecordFilter,
+    emit: Callable[[VerifiedLine], None],
+    check: SnapshotCheck | None,
+) -> VerifyReport:
+    source = _Digesting(BoundedReader(opened.stream, opened.end))
+    verification = Verification(source, index, heads=heads, entries=entries)
+    kids: set[str] = set()
+    for verified in verification:
+        kids.add(verified.record.kid)
+        if check is not None:
+            check.observe(verified)
+        if selected.matches(verified.record.entry):
+            emit(verified)
+    report = verification.report
+    sealed = opened.sealed
+    if sealed is None:
+        return report
+    if not report.ok and report.reason != "torn_tail":
+        return report
+    differences = [] if report.ok else ["ends with an incomplete line"]
+    if source.digest.hexdigest() != sealed.sha256:
+        differences.append("sha256")
+    if report.entries != sealed.first_entry + sealed.entries - 1:
+        differences.append("entries")
+    if report.heads != dict(sealed.end_heads):
+        differences.append("end_heads")
+    if kids != sealed.kids:
+        differences.append("kids")
+    if not differences:
+        return report
+    detail = f"segment {sealed.segment} does not match its manifest entry: {', '.join(differences)}"
+    return VerifyReport(False, report.entries, report.heads, None, SEGMENT_MISMATCH, detail, report.valid_bytes)
 
 
 def read_docket_snapshot(path: Path, docket_path: Path) -> Snapshot:
@@ -75,8 +150,13 @@ class SnapshotCheck:
     def __init__(self, snapshot: Snapshot) -> None:
         self.snapshot = snapshot
         self._chain = ChainState()
-        self._seen: Snapshot | None = self._chain.snapshot() if snapshot.offset == 0 else None
-        self._passed = snapshot.offset == 0
+        self._seen: Snapshot | None = None
+        self._passed = False
+
+    def begin(self, segment: int, entries: int) -> None:
+        self._chain = ChainState(segment=segment, entries=entries)
+        self._seen = self._chain.snapshot() if self.snapshot.offset == 0 else None
+        self._passed = self.snapshot.offset == 0
 
     def observe(self, verified: VerifiedLine) -> None:
         if self._passed:
@@ -91,6 +171,8 @@ class SnapshotCheck:
         return entries - self.snapshot.entries
 
     def differences(self) -> list[str]:
+        if self.snapshot.segment != self._chain.segment:
+            return ["segment"]
         if self._seen is None:
             return [f"offset {self.snapshot.offset} is not the end of a verified line"]
         return [name for name in SNAPSHOT_FIELDS if getattr(self._seen, name) != getattr(self.snapshot, name)]

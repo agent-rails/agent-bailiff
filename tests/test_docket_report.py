@@ -15,7 +15,9 @@ from test_docket import RunningSink, make_entry
 
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record, encode_record
-from agent_bailiff.docket.entry import ENTRY_TYP, _entry_body
+from agent_bailiff.docket import segments as segments_module
+from agent_bailiff.docket.entry import ENTRY_TYP, Head, _entry_body
+from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
 from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
@@ -71,6 +73,35 @@ def docket(workdir):
     path = workdir / "docket.log"
     path.touch(mode=0o600)
     return Docket(path)
+
+
+def sealed_entry(docket, manifest):
+    content = docket.path.read_bytes()
+    before = manifest.entries
+    records = docket.records[before:]
+    return SegmentEntry(
+        manifest.active_segment,
+        hashlib.sha256(content).hexdigest(),
+        len(content),
+        before + 1,
+        len(records),
+        {writer: Head(*head) for writer, head in docket.heads.items()},
+        frozenset(record.kid for record in records),
+    )
+
+
+def cut(docket, manifest=None, *, rename=True):
+    previous = manifest or Manifest.new()
+    sealed = previous.sealed(sealed_entry(docket, previous))
+    write_manifest(manifest_path(docket.path), sealed)
+    if rename:
+        finish_cut(docket, sealed)
+    return sealed
+
+
+def finish_cut(docket, manifest):
+    docket.path.rename(segment_path(docket.path, manifest.segments[-1].segment))
+    docket.path.touch(mode=0o600)
 
 
 def filled(docket):
@@ -535,3 +566,159 @@ def test_residual_an_omitted_anchor_lets_a_fresh_client_fork_until_verify(docket
     code, _, err = verify(docket, pin_files, capsys=capsys)
     assert code == cli.EXIT_REFUSED
     assert "line 5 fails verification: wrong_seq" in err
+
+
+def fill(docket, start, stop):
+    for number in range(start, stop):
+        docket.append("decide", make_entry(number))
+
+
+def test_verify_reads_every_segment_in_order(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    fill(docket, 3, 5)
+    cut(docket, manifest)
+    fill(docket, 5, 6)
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [row["line"] for row in json_rows(out)] == [1, 2, 3, 4, 5]
+    assert "5 records verified, 5 printed" in err
+
+
+def test_verify_starts_from_the_base_after_removed_segments(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    write_manifest(manifest_path(docket.path), Manifest(manifest.docket_id, 2, Base(1, 2, manifest.seeds)))
+    segment_path(docket.path, 1).unlink()
+    fill(docket, 3, 5)
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [row["line"] for row in json_rows(out)] == [3, 4]
+
+
+def test_a_bad_record_in_a_sealed_segment_fails_at_its_global_line(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    fill(docket, 3, 5)
+    with open(docket.path, "a") as stream:
+        stream.write("garbage\n")
+    cut(docket, manifest)
+    code, out, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert len(out) == 5
+    assert "line 5 fails verification: malformed" in err
+
+
+def forged_entry(docket, change):
+    manifest = cut(docket)
+    entry = manifest.segments[0]
+    forged = Manifest(manifest.docket_id, manifest.generation, segments=(replace(entry, **change(entry)),))
+    write_manifest(manifest_path(docket.path), forged)
+
+
+@pytest.mark.parametrize(
+    ("change", "difference"),
+    [
+        (lambda entry: {"sha256": "0" * 64}, "sha256"),
+        (lambda entry: {"end_heads": {"decide": Head(2, "A" * 43)}}, "end_heads"),
+        (lambda entry: {"kids": frozenset({"rogue-1"})}, "kids"),
+        (lambda entry: {"entries": 3, "end_heads": {"decide": Head(3, "A" * 43)}}, "entries"),
+    ],
+)
+def test_a_sealed_segment_that_differs_from_its_manifest_entry_fails(docket, pin_files, capsys, change, difference):
+    fill(docket, 1, 3)
+    forged_entry(docket, change)
+    fill(docket, 3, 4)
+    code, out, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert len(out) == 3
+    assert "the docket fails verification: segment_mismatch segment 1 does not match its manifest entry" in err
+    assert difference in err
+
+
+def test_a_sealed_segment_with_an_incomplete_line_fails_without_the_repair_hint(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    with open(docket.path, "a") as stream:
+        stream.write("partial")
+    cut(docket)
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "segment 1 does not match its manifest entry: ends with an incomplete line" in err
+    assert "repair" not in err
+
+
+def test_a_sealed_segment_of_another_size_is_refused(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    cut(docket)
+    with open(segment_path(docket.path, 1), "ab") as stream:
+        stream.write(b"x")
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == cli.EXIT_REFUSED and out == []
+    assert "bytes, not the" in err
+
+
+def test_a_committed_cut_before_its_rename_is_refused_with_a_hint(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    cut(docket, rename=False)
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "segment 1 of" in err and "start the sink" in err
+
+
+def test_a_cut_between_the_manifest_reads_is_retried(docket, pin_files, capsys, monkeypatch):
+    fill(docket, 1, 3)
+    cut(docket)
+    fill(docket, 3, 4)
+    real = segments_module.read_docket_manifest
+    calls = []
+
+    def stale_first(path):
+        calls.append(path)
+        return Manifest.new() if len(calls) == 1 else real(path)
+
+    monkeypatch.setattr(segments_module, "read_docket_manifest", stale_first)
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [row["line"] for row in json_rows(out)] == [1, 2, 3]
+
+
+def test_a_cut_on_every_open_is_refused(docket, pin_files, capsys, monkeypatch):
+    fill(docket, 1, 3)
+    generations = iter(range(1, 100))
+    monkeypatch.setattr(segments_module, "read_docket_manifest", lambda path: Manifest("0" * 32, next(generations)))
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED and "cannot be opened" in err
+
+
+def active_snapshot(docket, manifest, lines=None):
+    chain = ChainState(segment=manifest.active_segment, entries=manifest.entries)
+    index = build_kid_index(WRITERS)
+    with open(docket.path, "rb") as stream:
+        verification = Verification(stream, index, heads=manifest.seeds, entries=manifest.entries)
+        for verified in verification:
+            if lines is not None and verified.line > lines:
+                break
+            chain.add(verified.start, verified.record)
+    return chain.snapshot()
+
+
+@pytest.mark.parametrize("lines", [2, 3], ids=["at-the-cut", "inside-the-active-segment"])
+def test_a_snapshot_of_the_active_segment_matches_after_a_cut(docket, pin_files, capsys, lines):
+    fill(docket, 1, 3)
+    manifest = cut(docket)
+    fill(docket, 3, 5)
+    snapshot = active_snapshot(docket, manifest, lines)
+    path = sealed(docket, snapshot)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == 0, err
+    assert f"snapshot at offset {snapshot.offset} matches the docket, {4 - lines} records after it" in err
+
+
+def test_a_snapshot_of_a_sealed_segment_does_not_match_after_a_cut(docket, pin_files, capsys):
+    fill(docket, 1, 3)
+    path = sealed(docket, snapshot_at(docket))
+    cut(docket)
+    fill(docket, 3, 4)
+    code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "does not match the docket: segment" in err

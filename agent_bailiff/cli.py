@@ -32,6 +32,7 @@ from agent_bailiff.docket.report import (
     table_row,
     verify_records,
 )
+from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
@@ -398,12 +399,13 @@ def _verify_docket(args: argparse.Namespace) -> int:
         check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
-        report = verify_records(args.docket, writers, selected, emit, None if check is None else check.observe)
-    except STARTUP_ERRORS + (InitError,) as exc:
+        report = verify_records(args.docket, writers, selected, emit, check)
+    except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
+        where = "the docket" if report.line is None else f"line {report.line}"
         print(
-            f"{PROG} docket verify: line {report.line} fails verification: {report.reason} {printable(report.detail)}; "
+            f"{PROG} docket verify: {where} fails verification: {report.reason} {printable(report.detail)}; "
             f"{report.entries} records before it verified, {shown} printed",
             file=sys.stderr,
         )
@@ -432,7 +434,7 @@ def _export_docket(args: argparse.Namespace) -> int:
     try:
         from opentelemetry.sdk.trace.export import SpanExporter
 
-        from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, SegmentRemoved
+        from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked
         from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, OtlpHttpExporter
     except ImportError:
         return _refused("docket export", ImportError("needs the otel extra: pip install 'agent-bailiff[otel]'"))
@@ -455,7 +457,7 @@ def _export_docket(args: argparse.Namespace) -> int:
             skip_line=args.skip_line,
         )
         exported = exporter.run(stop, follow=not args.once)
-    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed, FollowerLocked, SegmentRemoved) as exc:
+    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed, FollowerLocked, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket export", exc)
     finally:
         span_exporter.shutdown()
