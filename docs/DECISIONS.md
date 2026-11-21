@@ -115,7 +115,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Decision:** Kubernetes admission requires a signed, 10-second custodian release for each catalog write. The webhook uses the same pure release-and-clearance verifier as the effector, pins both signing key sets, and compares the full admitted operation and old-to-new object change. The webhook is stateless: a captured, still-live release may be replayed and may undo a later write; suspension does not invalidate a release already issued. The verifier's skew limit applies only to the issue time: a release is accepted from that many seconds before its issue time until its expiry, on the verifier's clock. A stolen effector token alone cannot create a valid release. Rollback changes the webhook to Audit mode; deleting its registration is not a safe rollback.
 
-**Why:** admission can verify signatures and the exact object change without requiring API-server flags or a state store in the write path. The remaining replay and suspension window is explicitly accepted to keep admission stateless; on the verifier's clock it lasts no longer than the release lifetime plus the skew limit, and a verifier clock behind the custodian's lengthens it in real time by the lag.
+**Why:** admission can verify signatures and the exact object change without requiring API-server flags or a state store in the write path. The remaining replay and suspension window is explicitly accepted to keep admission stateless; on the verifier's clock it lasts no longer than the release lifetime plus the skew limit, and a verifier clock behind the custodian's moves it later in real time by the lag without lengthening it.
 
 ## D18. Traces from the verified docket, off the call path
 
