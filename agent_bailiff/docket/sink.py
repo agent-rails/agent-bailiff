@@ -363,6 +363,7 @@ class DocketSink:
         self._fd = self._open_docket()
         _lock(self._fd, self._docket_path)
         _check_docket_file(self._fd, self._docket_path, self._reader_gid)
+        self._check_capacity(self._fd)
         self._load_heads(self._fd)
         prepare_socket_dir(self._socket_path.parent, self._socket_gid)
         lock_path = self._socket_path.with_name(f"{self._socket_path.name}.lock")
@@ -603,6 +604,15 @@ class DocketSink:
         self._chain.add(self._chain.offset, record)
         self._count_toward_snapshot()
         return {"ok": True, "seq": record.seq, "hash": record.hash}
+
+    def _check_capacity(self, fd: int) -> None:
+        usage = self._statvfs(fd)
+        capacity = usage.f_blocks * usage.f_frsize
+        if capacity <= self._free_space_floor + self._max_frame_bytes:
+            raise ValueError(
+                f"free_space_floor {self._free_space_floor} leaves no room for a record "
+                f"on a file system of {capacity} bytes"
+            )
 
     def _check_floor(self, fd: int, length: int) -> str | None:
         try:

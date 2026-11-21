@@ -1474,6 +1474,18 @@ def test_a_write_failure_after_the_floor_check_still_stops_appends(paths, start_
     assert refusal(client, make_entry(1)) == "sink_failed"
 
 
+def test_sink_refuses_to_start_when_the_floor_leaves_no_room(paths, start_sink):
+    disk = FakeDisk(free=0, capacity=FLOOR + MAX_FRAME_BYTES)
+    with pytest.raises(ValueError, match="leaves no room"):
+        start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+
+
+def test_sink_starts_below_the_floor_when_the_file_system_can_hold_it(paths, start_sink):
+    disk = FakeDisk(free=0, capacity=FLOOR + MAX_FRAME_BYTES + 1)
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    assert refusal(decide_client(paths), make_entry(1)) == "docket_full"
+
+
 def floor_logs(caplog):
     return [record.message for record in caplog.records if record.name == sink_module.__name__]
 
