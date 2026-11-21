@@ -123,11 +123,13 @@ It does not detect:
 
 ## Disk full
 
-`free_space_floor` (required in the docket config; at least two frames, 131074 bytes; `agent-bailiff init docket` writes 256 MiB) keeps the sink from filling its file system. Below it, decide refuses calls as `docket_unavailable` and the custodian does not release credentials: without disk there is no record, so there is no call. The floor turns what used to be a write failure that needed a restart into a refusal that clears by itself.
+`free_space_floor` (required in the docket config; at least two frames, 131074 bytes; `agent-bailiff init docket` writes 256 MiB) keeps the sink from filling its file system. Below it, decide refuses calls as `docket_unavailable` and the custodian does not release credentials: without disk there is no record, so there is no call. When the floor is reached first, appends resume once space returns, with no restart.
 
+- The floor is a threshold checked before each write, not a guarantee. A write can still fail with `ENOSPC` when another process takes the space between the check and the write, or when a quota or reserved blocks limit the sink below what `f_bavail` reports. That failure is `write_failed`, and the sink refuses appends with `sink_failed` until restart, as before.
 - At start the sink refuses to start (exit 1) if the file system's total size is not larger than the floor plus one frame: such a sink could never accept an append. It checks total size, not free space, so a sink restarted while the disk is full still starts and resumes once space returns.
 - Size the floor to cover what else writes to the same file system until an operator responds: the snapshot (at most 4 MiB), logs and anything sharing the volume. The floor is not a reserve for the docket; the sink stops writing at it.
 - Alert on the `docket refusing appends` log line and on free space approaching the floor. Free space; no restart is needed, appends resume on the next request.
+- Upgrade: a docket config without `free_space_floor` fails to load with `missing free_space_floor`; add the key. The quickstart bootstrap reports it with a hint to run `docker compose down --volumes`, which also deletes the quickstart docket.
 - The docket still grows without bound. The floor bounds the damage of a full disk; it does not remove records.
 - Measured on one host (`benchmarks/docket-floor-2026-11-21.json`, Apple silicon, APFS): `fstatvfs` took 0.81 µs per call against an append p50 of about 1 ms. Append p50 with the check was 1.03 ms and 0.95 ms with a constant result; one run each cannot separate that gap from noise.
 
