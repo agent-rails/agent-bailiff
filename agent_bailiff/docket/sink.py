@@ -13,7 +13,7 @@ from typing import Any, BinaryIO, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from agent_bailiff.docket.entry import Record, decode_record
+from agent_bailiff.docket.entry import Head, Record, decode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
@@ -52,12 +52,6 @@ Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
 KidIndex = dict[str, tuple[str, Ed25519PublicKey]]
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Head:
-    seq: int
-    hash: str | None
 
 
 @dataclass(frozen=True)

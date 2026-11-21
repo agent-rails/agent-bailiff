@@ -14,6 +14,12 @@ CREDENTIAL_TIERS = frozenset({"target-bound", "gateway-bound", "exposed", "effec
 
 
 @dataclass(frozen=True)
+class Head:
+    seq: int
+    hash: str | None
+
+
+@dataclass(frozen=True)
 class Entry:
     entry_id: str
     trace_id: str
