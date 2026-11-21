@@ -1,23 +1,22 @@
-import hashlib
 import json
 import os
 import threading
 
 import pytest
 from test_docket import make_entry
-from test_docket_report import WRITERS, Docket
+from test_docket_report import WRITERS, Docket, cut, finish_cut
 
-from agent_bailiff.docket import follower as follower_module
+from agent_bailiff.docket import segments as segments_module
 from agent_bailiff.docket.entry import Head
 from agent_bailiff.docket.follower import (
     CheckpointMismatch,
     DocketFollower,
     LegacyCheckpoint,
-    SegmentRemoved,
     load_checkpoint,
     save_checkpoint,
 )
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
+from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import build_kid_index
 
 INDEX = build_kid_index(WRITERS)
@@ -88,35 +87,6 @@ def fill(docket, start, stop):
         docket.append("decide", make_entry(number))
 
 
-def sealed_entry(docket, manifest):
-    content = docket.path.read_bytes()
-    before = manifest.entries
-    records = docket.records[before:]
-    return SegmentEntry(
-        manifest.active_segment,
-        hashlib.sha256(content).hexdigest(),
-        len(content),
-        before + 1,
-        len(records),
-        {writer: Head(*head) for writer, head in docket.heads.items()},
-        frozenset(record.kid for record in records),
-    )
-
-
-def cut(docket, manifest=None, *, rename=True):
-    previous = manifest or Manifest.new()
-    sealed = previous.sealed(sealed_entry(docket, previous))
-    write_manifest(manifest_path(docket.path), sealed)
-    if rename:
-        finish_cut(docket, sealed)
-    return sealed
-
-
-def finish_cut(docket, manifest):
-    docket.path.rename(segment_path(docket.path, manifest.segments[-1].segment))
-    docket.path.touch(mode=0o600)
-
-
 def test_a_follower_crosses_a_cut_without_a_gap_or_a_duplicate(docket, checkpoint):
     fill(docket, 1, 4)
     assert collect(docket, checkpoint, batch_size=2) == [1, 2, 3]
@@ -152,14 +122,14 @@ def test_a_cut_between_the_manifest_reads_is_retried(docket, checkpoint, monkeyp
     fill(docket, 1, 3)
     cut(docket)
     fill(docket, 3, 4)
-    real = follower_module.read_docket_manifest
+    real = segments_module.read_docket_manifest
     calls = []
 
     def stale_first(path):
         calls.append(path)
         return Manifest.new() if len(calls) == 1 else real(path)
 
-    monkeypatch.setattr(follower_module, "read_docket_manifest", stale_first)
+    monkeypatch.setattr(segments_module, "read_docket_manifest", stale_first)
     assert collect(docket, checkpoint) == [1, 2, 3]
 
 
@@ -210,7 +180,7 @@ def test_a_sealed_segment_of_another_size_is_refused(docket, checkpoint):
     cut(docket)
     with open(segment_path(docket.path, 1), "ab") as stream:
         stream.write(b"x")
-    with pytest.raises(CheckpointMismatch, match="bytes, not the"):
+    with pytest.raises(SegmentMismatch, match="bytes, not the"):
         collect(docket, checkpoint)
 
 

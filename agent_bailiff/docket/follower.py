@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from agent_bailiff.docket.entry import Head
-from agent_bailiff.docket.manifest import MAX_SEGMENT, SegmentEntry, read_docket_manifest, segment_path
+from agent_bailiff.docket.manifest import MAX_SEGMENT, SegmentEntry, read_docket_manifest
 from agent_bailiff.docket.private_dir import open_private_dir
+from agent_bailiff.docket.segments import BoundedReader, OpenedSegment, open_segment
 from agent_bailiff.docket.sink import DocketCorrupt, KidIndex, Verification, VerifiedLine
 from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 from agent_bailiff.signing import MAX_TOKEN_CHARS, token_hash
@@ -23,7 +24,6 @@ CHECKPOINT_VERSION = 2
 LEGACY_CHECKPOINT_VERSION = 1
 CHECKPOINT_MODE = 0o600
 MAX_CHECKPOINT_BYTES = 1 << 20
-MAX_OPEN_ATTEMPTS = 3
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_POLL_INTERVAL = 1.0
 DEFAULT_STALL_AFTER = 30.0
@@ -39,10 +39,6 @@ class CheckpointMismatch(Exception):
 
 
 class FollowerLocked(Exception):
-    pass
-
-
-class SegmentRemoved(Exception):
     pass
 
 
@@ -189,22 +185,6 @@ def save_checkpoint(path: Path, checkpoint: Checkpoint | LegacyCheckpoint) -> No
         os.close(directory_fd)
 
 
-class _Bounded:
-    def __init__(self, docket: BinaryIO, end: int) -> None:
-        self._docket = docket
-        self._end = end
-
-    def readline(self, size: int = -1, /) -> bytes:
-        return self._docket.readline(self._remaining(size))
-
-    def read(self, size: int = -1, /) -> bytes:
-        return self._docket.read(self._remaining(size))
-
-    def _remaining(self, size: int) -> int:
-        left = max(self._end - self._docket.tell(), 0)
-        return left if size < 0 else min(size, left)
-
-
 @dataclass
 class _Position:
     segment: int = 1
@@ -223,14 +203,6 @@ class _Position:
         self.last_start = 0
         self.last_hash = None
         self.identity = None
-
-
-@dataclass
-class _Opened:
-    stream: BinaryIO
-    path: Path
-    end: int
-    sealed: SegmentEntry | None
 
 
 class DocketFollower:
@@ -309,7 +281,7 @@ class DocketFollower:
             last_hash=legacy.last_hash,
             heads=dict(legacy.heads),
         )
-        opened = self._open(1)
+        opened = open_segment(self._docket_path, 1)
         if opened is None:
             raise CheckpointMismatch("segment 1 of the docket is not readable to migrate the version 1 checkpoint")
         with opened.stream:
@@ -323,7 +295,7 @@ class DocketFollower:
 
     def _pass(self, position: _Position, stop: threading.Event) -> bool:
         while True:
-            opened = self._open(position.segment)
+            opened = open_segment(self._docket_path, position.segment)
             if opened is None:
                 return False
             with opened.stream:
@@ -335,41 +307,18 @@ class DocketFollower:
             _check_sealed_end(opened, opened.sealed, position, torn)
             position.next_segment()
 
-    def _open(self, segment: int) -> _Opened | None:
-        for _ in range(MAX_OPEN_ATTEMPTS):
-            manifest = read_docket_manifest(self._docket_path)
-            if segment < manifest.first_segment:
-                raise SegmentRemoved(f"segment {segment} of {self._docket_path} was removed; see docs/DOCKET.md")
-            if segment > manifest.active_segment:
-                raise CheckpointMismatch(f"segment {segment} is after the active segment {manifest.active_segment}")
-            sealed = manifest.sealed_entry(segment)
-            path = self._docket_path if sealed is None else segment_path(self._docket_path, segment)
-            try:
-                stream = open(path, "rb")
-            except FileNotFoundError:
-                return None
-            if read_docket_manifest(self._docket_path).generation != manifest.generation:
-                stream.close()
-                continue
-            size = os.fstat(stream.fileno()).st_size
-            if sealed is not None and size != sealed.size:
-                stream.close()
-                raise CheckpointMismatch(f"{path} is {size} bytes, not the {sealed.size} its manifest entry says")
-            return _Opened(stream, path, size, sealed)
-        return None
-
-    def _check_identity(self, opened: _Opened, position: _Position) -> None:
+    def _check_identity(self, opened: OpenedSegment, position: _Position) -> None:
         info = os.fstat(opened.stream.fileno())
         identity = (info.st_dev, info.st_ino)
         if position.identity is not None and identity != position.identity:
             raise CheckpointMismatch(f"{opened.path} was replaced while following")
         position.identity = identity
 
-    def _read(self, opened: _Opened, position: _Position, stop: threading.Event) -> bool:
+    def _read(self, opened: OpenedSegment, position: _Position, stop: threading.Event) -> bool:
         stream = opened.stream
         stream.seek(position.offset)
         verification = Verification(
-            _Bounded(stream, opened.end),
+            BoundedReader(stream, opened.end),
             self._index,
             heads=position.heads,
             entries=position.entries,
@@ -425,7 +374,7 @@ def _check_position(stream: BinaryIO, position: _Position, size: int) -> None:
         raise CheckpointMismatch("the docket's last checkpointed record differs from the checkpoint")
 
 
-def _check_sealed_end(opened: _Opened, sealed: SegmentEntry, position: _Position, torn: bool) -> None:
+def _check_sealed_end(opened: OpenedSegment, sealed: SegmentEntry, position: _Position, torn: bool) -> None:
     if torn or position.offset != opened.end:
         raise CheckpointMismatch(f"{opened.path} ends with an incomplete line")
     if position.entries != sealed.first_entry + sealed.entries - 1 or position.heads != dict(sealed.end_heads):
