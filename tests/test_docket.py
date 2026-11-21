@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import gc
+import hashlib
 import os
 import shutil
 import socket
@@ -34,6 +35,7 @@ from agent_bailiff.docket import (
     repair,
     verify_docket,
 )
+from agent_bailiff.docket import sink as sink_module
 from agent_bailiff.docket.protocol import (
     LENGTH,
     MAX_FRAME_BYTES,
@@ -43,7 +45,8 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     encode_response,
 )
-from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.docket.sink import ChainState, build_kid_index
+from agent_bailiff.docket.snapshot import Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
 
 AT = 1_700_000_000
@@ -324,12 +327,13 @@ def test_fsync_failure_gives_no_ack_and_stops_appends(paths, start_sink):
 
 
 def test_ack_waits_for_fsync(paths, start_sink):
+    armed = threading.Event()
     entered = threading.Event()
     release = threading.Event()
     synced = []
 
     def slow_fsync(fd):
-        if fd_kind(fd) == "dir":
+        if not armed.is_set() or fd_kind(fd) == "dir":
             return
         entered.set()
         assert release.wait(5)
@@ -337,6 +341,7 @@ def test_ack_waits_for_fsync(paths, start_sink):
         synced.append(fd)
 
     start_sink(fsync=slow_fsync)
+    armed.set()
     results = []
     worker = threading.Thread(target=lambda: results.append(decide_client(paths).append(make_entry(1))))
     worker.start()
@@ -764,7 +769,7 @@ def test_docket_directory_is_synced_before_the_first_ack(paths, start_sink):
 
     start_sink(fsync=recording_fsync)
     decide_client(paths).append(make_entry(1))
-    assert synced == ["dir", "file"]
+    assert synced == ["dir", "file", "file", "dir", "file"]
 
 
 def test_docket_directory_sync_failure_latches(paths, start_sink):
@@ -1100,3 +1105,232 @@ def test_stopping_a_sink_right_after_a_refused_client_leaves_no_open_transport(p
             gc.collect()
         leaked.extend(str(item.message) for item in caught if "unclosed transport" in str(item.message))
     assert leaked == []
+
+
+def chain_snapshot(docket_path):
+    chain = ChainState()
+    with open(docket_path, "rb") as docket:
+        verification = Verification(docket, INDEX)
+        for verified in verification:
+            chain.add(verified.start, verified.record)
+    assert verification.report.ok
+    return chain.snapshot()
+
+
+def seal(paths, snapshot=None):
+    write_snapshot(snapshot_path(paths[0]), snapshot or chain_snapshot(paths[0]))
+
+
+def write_two_writers(paths, start_sink):
+    handle = start_sink()
+    decide = decide_client(paths)
+    custodian = make_client(paths, "custodian", "custodian-1", CUSTODIAN_KEY)
+    decide.append(make_entry(1))
+    custodian.append(make_entry(2, hop="custodian", component="custodian"))
+    decide.append(make_entry(3))
+    decide.close()
+    custodian.close()
+    handle.stop()
+
+
+def test_first_start_verifies_the_docket_and_writes_its_snapshot(paths, start_sink):
+    write_two_writers(paths, start_sink)
+    snapshot_path(paths[0]).unlink()
+    start_sink().stop()
+    snapshot = read_snapshot(snapshot_path(paths[0]), uid=os.geteuid())
+    assert snapshot == chain_snapshot(paths[0])
+    assert (snapshot.offset, snapshot.entries) == (paths[0].stat().st_size, 3)
+    assert snapshot.kids == {"decide-1", "custodian-1"}
+
+
+def test_first_start_on_a_new_docket_writes_an_empty_snapshot(paths, start_sink):
+    start_sink()
+    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == Snapshot(0, 0, hashlib.sha256().hexdigest())
+
+
+def test_snapshot_shares_the_docket_reader_group(paths, start_sink):
+    start_sink(reader_gid=READER_GID)
+    assert file_mode(snapshot_path(paths[0])) == (0o640, READER_GID)
+
+
+def test_start_from_a_snapshot_gives_the_heads_of_a_full_verify(paths, start_sink):
+    write_two_writers(paths, start_sink)
+    seal(paths)
+    handle = start_sink()
+    assert handle.sink.heads == verify_docket(paths[0], WRITERS).heads
+    assert decide_client(paths).append(make_entry(4)).seq == 3
+
+
+def test_start_from_a_snapshot_decodes_only_the_anchors_and_the_tail(paths, start_sink, monkeypatch):
+    write_chain(paths, start_sink, count=5)
+    sealed = chain_snapshot(paths[0])
+    seal(paths, sealed)
+    handle = start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(6))
+    client.append(make_entry(7))
+    client.close()
+    handle.stop()
+    decoded = []
+    original = sink_module.decode_record
+
+    def counting_decode(token, index):
+        decoded.append(token)
+        return original(token, index)
+
+    monkeypatch.setattr(sink_module, "decode_record", counting_decode)
+    start_sink()
+    assert decoded == lines(paths[0])[4:]
+    assert read_snapshot(snapshot_path(paths[0]), uid=os.geteuid()) == sealed
+
+
+def refuse_start(paths, start_sink):
+    before = snapshot_path(paths[0]).read_bytes()
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
+    assert snapshot_path(paths[0]).read_bytes() == before
+    return error.value
+
+
+def sealed_chain(paths, start_sink):
+    write_chain(paths, start_sink)
+    snapshot = chain_snapshot(paths[0])
+    seal(paths, snapshot)
+    return snapshot
+
+
+def test_start_refuses_a_snapshot_past_the_end_of_the_docket(paths, start_sink):
+    sealed_chain(paths, start_sink)
+    roll_back_to(paths, 2)
+    assert "past the end" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_a_changed_prefix(paths, start_sink):
+    sealed_chain(paths, start_sink)
+    content = paths[0].read_bytes()
+    paths[0].write_bytes(content[:10] + bytes([content[10] ^ 1]) + content[11:])
+    assert "SHA-256" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_a_snapshot_with_another_prefix_hash(paths, start_sink):
+    snapshot = sealed_chain(paths, start_sink)
+    seal(paths, replace(snapshot, prefix_sha256="0" * 64))
+    assert "SHA-256" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_a_snapshot_with_an_unpinned_kid(paths, start_sink):
+    snapshot = sealed_chain(paths, start_sink)
+    seal(paths, replace(snapshot, kids=snapshot.kids | {"rogue-1"}))
+    assert "rogue-1" in str(refuse_start(paths, start_sink))
+
+
+def anchored(snapshot, **changes):
+    return replace(snapshot, anchors={"decide": replace(snapshot.anchors["decide"], **changes)})
+
+
+@pytest.mark.parametrize(
+    ("changes", "detail"),
+    [
+        ({"offset": 1}, "anchor of writer decide: malformed"),
+        ({"offset": 0}, "is not its record at seq 3"),
+        ({"seq": 2}, "is not its record at seq 2"),
+        ({"hash": "A" * 43}, "is not its record at seq 3"),
+    ],
+)
+def test_start_refuses_an_anchor_that_is_not_the_writer_head(paths, start_sink, changes, detail):
+    snapshot = sealed_chain(paths, start_sink)
+    seal(paths, anchored(snapshot, **changes))
+    assert detail in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_an_anchor_of_another_writer(paths, start_sink):
+    write_two_writers(paths, start_sink)
+    snapshot = chain_snapshot(paths[0])
+    custodian = snapshot.anchors["custodian"]
+    seal(paths, anchored(snapshot, offset=custodian.offset, seq=custodian.seq, hash=custodian.hash))
+    assert "is not its record" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_an_anchor_line_that_crosses_the_offset(paths, start_sink):
+    snapshot = sealed_chain(paths, start_sink)
+    content = paths[0].read_bytes()
+    anchor = snapshot.anchors["decide"]
+    offset = anchor.offset + 5
+    seal(
+        paths,
+        replace(snapshot, offset=offset, prefix_sha256=hashlib.sha256(content[:offset]).hexdigest()),
+    )
+    assert "not a whole line" in str(refuse_start(paths, start_sink))
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640])
+def test_start_refuses_a_snapshot_file_with_the_wrong_mode(paths, start_sink, mode):
+    sealed_chain(paths, start_sink)
+    os.chmod(snapshot_path(paths[0]), mode)
+    assert "0600" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_a_snapshot_that_is_not_json(paths, start_sink):
+    sealed_chain(paths, start_sink)
+    snapshot_path(paths[0]).write_bytes(b"{")
+    assert "not a valid snapshot" in str(refuse_start(paths, start_sink))
+
+
+def test_start_refuses_a_symlinked_snapshot(paths, start_sink, workdir):
+    sealed_chain(paths, start_sink)
+    target = workdir / "elsewhere"
+    snapshot_path(paths[0]).rename(target)
+    snapshot_path(paths[0]).symlink_to(target)
+    with pytest.raises(DocketCorrupt, match="cannot be opened"):
+        start_sink()
+
+
+@pytest.mark.parametrize(("tail", "reason"), [(b"partial", "torn_tail"), (b"garbage\n", "malformed")])
+def test_start_from_a_snapshot_reports_a_bad_tail_line_as_before(paths, start_sink, tail, reason):
+    sealed_chain(paths, start_sink)
+    size = paths[0].stat().st_size
+    with open(paths[0], "ab") as docket:
+        docket.write(tail)
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    report = error.value.report
+    assert (report.line, report.reason, report.entries, report.valid_bytes) == (4, reason, 3, size)
+    assert report == verify_docket(paths[0], WRITERS)
+
+
+def test_failed_full_start_writes_no_snapshot(paths, start_sink):
+    write_chain(paths, start_sink)
+    snapshot_path(paths[0]).unlink()
+    with open(paths[0], "a") as docket:
+        docket.write("garbage\n")
+    with pytest.raises(DocketCorrupt):
+        start_sink()
+    assert not snapshot_path(paths[0]).exists()
+
+
+def test_locked_docket_is_refused_before_its_snapshot_is_read(paths, start_sink):
+    start_sink()
+    os.chmod(snapshot_path(paths[0]), 0o644)
+    with pytest.raises(DocketLocked):
+        asyncio.run(DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}).start())
+
+
+def test_docket_fsync_failure_at_start_skips_the_snapshot(paths, start_sink):
+    def failing_file_fsync(fd):
+        if fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    start_sink(fsync=failing_file_fsync)
+    assert not snapshot_path(paths[0]).exists()
+
+
+def test_directory_fsync_failure_at_start_skips_the_snapshot(paths, start_sink):
+    def failing_dir_fsync(fd):
+        if fd_kind(fd) == "dir":
+            raise OSError(5, "injected directory fsync failure")
+        os.fsync(fd)
+
+    start_sink(fsync=failing_dir_fsync)
+    assert not snapshot_path(paths[0]).exists()

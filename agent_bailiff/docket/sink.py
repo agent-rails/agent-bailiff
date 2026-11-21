@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import os
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -14,6 +16,14 @@ from agent_bailiff.docket.entry import Record, decode_record
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
+from agent_bailiff.docket.snapshot import (
+    Anchor,
+    Snapshot,
+    SnapshotInvalid,
+    read_snapshot,
+    snapshot_path,
+    write_snapshot,
+)
 from agent_bailiff.docket.socket_dir import (
     SOCKET_MODE,
     open_lock_file,
@@ -30,9 +40,13 @@ DEFAULT_FRAME_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 5.0
 DEFAULT_MAX_LIFETIME = 60.0
 DEFAULT_MAX_CONNECTIONS = 16
+PREFIX_READ_BYTES = 1 << 20
+SNAPSHOT_MISMATCH = "snapshot_mismatch"
 
 Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
 KidIndex = dict[str, tuple[str, Ed25519PublicKey]]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -58,7 +72,8 @@ class DocketLocked(Exception):
 
 class DocketCorrupt(Exception):
     def __init__(self, report: VerifyReport) -> None:
-        super().__init__(f"docket fails verification at line {report.line}: {report.reason} {report.detail}".strip())
+        where = "" if report.line is None else f" at line {report.line}"
+        super().__init__(f"docket fails verification{where}: {report.reason} {report.detail}".strip())
         self.report = report
 
 
@@ -177,6 +192,40 @@ class Verification:
         self._report = VerifyReport(True, count, heads, valid_bytes=offset)
 
 
+class ChainState:
+    def __init__(
+        self,
+        digest: hashlib._Hash | None = None,
+        *,
+        offset: int = 0,
+        entries: int = 0,
+        anchors: Mapping[str, Anchor] | None = None,
+        kids: Iterable[str] = (),
+    ) -> None:
+        self._digest = hashlib.sha256() if digest is None else digest
+        self.offset = offset
+        self.entries = entries
+        self.anchors = dict(anchors or {})
+        self.kids = set(kids)
+
+    @classmethod
+    def seeded(cls, digest: hashlib._Hash, snapshot: Snapshot) -> ChainState:
+        return cls(
+            digest, offset=snapshot.offset, entries=snapshot.entries, anchors=snapshot.anchors, kids=snapshot.kids
+        )
+
+    def add(self, start: int, record: Record) -> None:
+        line = f"{record.token}\n".encode("ascii")
+        self._digest.update(line)
+        self.anchors[record.writer] = Anchor(start, record.seq, record.hash)
+        self.kids.add(record.kid)
+        self.entries += 1
+        self.offset = start + len(line)
+
+    def snapshot(self) -> Snapshot:
+        return Snapshot(self.offset, self.entries, self._digest.hexdigest(), dict(self.anchors), frozenset(self.kids))
+
+
 def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: int | None = None) -> VerifyReport:
     index = build_kid_index(writers)
     directory_fd = open_private_dir(docket_path.parent)
@@ -260,7 +309,11 @@ class DocketSink:
         self._max_lifetime = max_lifetime
         self._max_connections = max_connections
         self._fsync = fsync
+        self._snapshot_path = snapshot_path(docket_path)
         self._heads: dict[str, Head] = {}
+        self._chain = ChainState()
+        self._snapshots_enabled = True
+        self._started = False
         self._fd: int | None = None
         self._socket_lock_fd: int | None = None
         self._socket_identity: tuple[int, int] | None = None
@@ -283,10 +336,7 @@ class DocketSink:
         self._fd = self._open_docket()
         _lock(self._fd, self._docket_path)
         _check_docket_file(self._fd, self._docket_path, self._reader_gid)
-        report = _verify_fd(self._fd, self._index)
-        if not report.ok:
-            raise DocketCorrupt(report)
-        self._heads = dict(report.heads)
+        self._load_heads(self._fd)
         prepare_socket_dir(self._socket_path.parent, self._socket_gid)
         lock_path = self._socket_path.with_name(f"{self._socket_path.name}.lock")
         self._socket_lock_fd = open_lock_file(lock_path)
@@ -297,6 +347,88 @@ class DocketSink:
         self._socket_identity = (info.st_dev, info.st_ino)
         os.chown(self._socket_path, -1, self._socket_gid)
         os.chmod(self._socket_path, SOCKET_MODE)
+        self._started = True
+
+    def _load_heads(self, fd: int) -> None:
+        try:
+            snapshot = self._read_snapshot()
+        except SnapshotInvalid as exc:
+            raise DocketCorrupt(_mismatch(str(exc))) from None
+        if snapshot is None:
+            self._full_verify(fd)
+            self._write_snapshot()
+            return
+        self._verify_from(fd, snapshot)
+
+    def _read_snapshot(self) -> Snapshot | None:
+        directory_fd = open_private_dir(self._snapshot_path.parent)
+        try:
+            return read_snapshot(
+                self._snapshot_path, uid=os.geteuid(), reader_gid=self._reader_gid, dir_fd=directory_fd
+            )
+        finally:
+            os.close(directory_fd)
+
+    def _full_verify(self, fd: int) -> None:
+        with _reader(fd, 0) as docket:
+            self._verify_tail(ChainState(), Verification(docket, self._index))
+
+    def _verify_from(self, fd: int, snapshot: Snapshot) -> None:
+        if snapshot.offset > os.fstat(fd).st_size:
+            raise DocketCorrupt(_mismatch(f"offset {snapshot.offset} is past the end of the docket"))
+        unpinned = sorted(snapshot.kids - self._index.keys())
+        if unpinned:
+            raise DocketCorrupt(_mismatch(f"key ids seen before the offset are not pinned: {', '.join(unpinned)}"))
+        digest = _prefix_digest(fd, snapshot.offset)
+        if digest.hexdigest() != snapshot.prefix_sha256:
+            raise DocketCorrupt(_mismatch(f"SHA-256 of the {snapshot.offset} bytes before the offset differs"))
+        for writer, anchor in snapshot.anchors.items():
+            self._check_anchor(fd, writer, anchor, snapshot.offset)
+        heads = {writer: Head(anchor.seq, anchor.hash) for writer, anchor in snapshot.anchors.items()}
+        with _reader(fd, snapshot.offset) as docket:
+            verification = Verification(
+                docket, self._index, heads=heads, entries=snapshot.entries, offset=snapshot.offset
+            )
+            self._verify_tail(ChainState.seeded(digest, snapshot), verification)
+
+    def _check_anchor(self, fd: int, writer: str, anchor: Anchor, limit: int) -> None:
+        raw = os.pread(fd, MAX_TOKEN_CHARS + 2, anchor.offset)
+        end = raw.find(b"\n")
+        if end < 0 or anchor.offset + end + 1 > limit:
+            raise DocketCorrupt(_mismatch(f"anchor of writer {writer} is not a whole line before the offset"))
+        try:
+            record = decode_record(raw[:end].decode("ascii"), self._index)
+        except UnicodeDecodeError:
+            raise DocketCorrupt(_mismatch(f"anchor of writer {writer} is not ASCII")) from None
+        if isinstance(record, Refused):
+            raise DocketCorrupt(_mismatch(f"anchor of writer {writer}: {record.reason} {record.detail}"))
+        if (record.writer, record.seq, record.hash) != (writer, anchor.seq, anchor.hash):
+            raise DocketCorrupt(_mismatch(f"anchor of writer {writer} is not its record at seq {anchor.seq}"))
+
+    def _verify_tail(self, chain: ChainState, verification: Verification) -> None:
+        for verified in verification:
+            chain.add(verified.start, verified.record)
+        report = verification.report
+        if not report.ok:
+            raise DocketCorrupt(report)
+        self._heads = dict(report.heads)
+        self._chain = chain
+
+    def _write_snapshot(self) -> None:
+        if self._failed or self._fd is None or not self._snapshots_enabled:
+            return
+        try:
+            self._fsync(self._fd)
+        except OSError:
+            logger.exception("docket fsync before the snapshot failed; the old snapshot is kept")
+            return
+        try:
+            write_snapshot(self._snapshot_path, self._chain.snapshot(), reader_gid=self._reader_gid, fsync=self._fsync)
+        except OSError:
+            logger.exception("docket snapshot write failed; the old snapshot is kept")
+        except Exception:
+            self._snapshots_enabled = False
+            logger.exception("docket snapshot write failed unexpectedly; snapshots are off until restart")
 
     def _open_docket(self) -> int:
         directory_fd = open_private_dir(self._docket_path.parent)
@@ -436,6 +568,28 @@ class DocketSink:
         self._failed = False
         self._heads[record.writer] = Head(seq=record.seq, hash=record.hash)
         return {"ok": True, "seq": record.seq, "hash": record.hash}
+
+
+def _mismatch(detail: str) -> VerifyReport:
+    return VerifyReport(False, 0, reason=SNAPSHOT_MISMATCH, detail=detail)
+
+
+def _reader(fd: int, offset: int) -> BinaryIO:
+    docket = os.fdopen(os.dup(fd), "rb")
+    docket.seek(offset)
+    return docket
+
+
+def _prefix_digest(fd: int, length: int) -> hashlib._Hash:
+    digest = hashlib.sha256()
+    position = 0
+    while position < length:
+        chunk = os.pread(fd, min(PREFIX_READ_BYTES, length - position), position)
+        if not chunk:
+            raise DocketCorrupt(_mismatch(f"docket ends at {position}, before the offset {length}"))
+        digest.update(chunk)
+        position += len(chunk)
+    return digest
 
 
 def _refusal(reason: str) -> dict[str, Any]:
