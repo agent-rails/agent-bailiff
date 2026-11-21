@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -10,14 +11,14 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from test_docket import make_entry
+from test_docket import RunningSink, make_entry
 
 from agent_bailiff import cli
-from agent_bailiff.docket import DocketSink, decode_record, encode_record
+from agent_bailiff.docket import DocketClient, DocketSink, decode_record, encode_record
 from agent_bailiff.docket.entry import ENTRY_TYP, _entry_body
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
-from agent_bailiff.docket.snapshot import Anchor, snapshot_path, write_snapshot
+from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
 from agent_bailiff.signing import sign
 
@@ -264,10 +265,10 @@ def shared_docket(workdir, reader_gid):
     return filled(Docket(path))
 
 
-def verify_as(user, docket, pin_files):
+def verify_as(user, docket, pin_files, *arguments):
     pins = [str(item) for name in PINS for item in ("--pin", pin_files[name])]
     command = [sys.executable, "-I", "-m", "agent_bailiff.cli", "docket", "verify", "--docket", str(docket.path)]
-    return run_as(user, *command, *pins, "--json")
+    return run_as(user, *command, *pins, "--json", *arguments)
 
 
 linux_cross_uid = [
@@ -283,6 +284,15 @@ def test_a_reader_group_member_verifies_the_docket_as_its_own_uid(workdir, pin_f
     result = verify_as(OTHER_USER, docket, pin_files)
     assert result.returncode == 0, result
     assert [json.loads(line)["token"] for line in result.stdout.splitlines()] == [r.token for r in docket.records]
+
+
+@linux_cross_uid[0]
+@linux_cross_uid[1]
+def test_a_reader_group_member_cross_checks_the_snapshot_as_its_own_uid(workdir, pin_files):
+    docket = shared_docket(workdir, os.getegid())
+    result = verify_as(OTHER_USER, docket, pin_files, "--snapshot", str(snapshot_path(docket.path)))
+    assert result.returncode == 0, result
+    assert "matches the docket" in result.stderr
 
 
 @linux_cross_uid[0]
@@ -421,3 +431,105 @@ def test_verify_cross_checks_a_snapshot_the_sink_wrote(docket, pin_files, capsys
     code, _, err = verify(docket, pin_files, "--snapshot", str(snapshot_path(docket.path)), capsys=capsys)
     assert code == 0, err
     assert "matches the docket" in err
+
+
+def sink_paths(docket):
+    return docket.path, docket.path.parent / "s" / "docket.sock"
+
+
+def start_sink(docket, **options):
+    docket_path, socket_path = sink_paths(docket)
+    return RunningSink(DocketSink(docket_path, socket_path, WRITERS, {os.getuid()}, **options))
+
+
+def client(docket, writer, state="state"):
+    directory = docket.path.parent / state
+    directory.mkdir(mode=0o700, exist_ok=True)
+    socket_path = sink_paths(docket)[1]
+    return DocketClient(socket_path, writer, PINS[writer].kid, KEYS[writer], sink_uid=os.getuid(), state_dir=directory)
+
+
+def check_snapshot(docket, pin_files, capsys):
+    return verify(docket, pin_files, "--snapshot", str(snapshot_path(docket.path)), capsys=capsys)
+
+
+def test_two_writers_across_restarts_keep_a_snapshot_verify_accepts(docket, pin_files, capsys):
+    number = 0
+    for _ in range(3):
+        handle = start_sink(docket, snapshot_every=2)
+        writers = {name: client(docket, name) for name in ("decide", "custodian")}
+        for _ in range(3):
+            for name, writer in writers.items():
+                number += 1
+                writer.append(make_entry(number, hop=name, component=name))
+        for writer in writers.values():
+            writer.close()
+        handle.stop()
+        code, _, err = check_snapshot(docket, pin_files, capsys)
+        assert code == 0, err
+        assert read_snapshot(snapshot_path(docket.path), uid=os.getuid()).entries == number
+    handle = start_sink(docket)
+    heads = handle.sink.heads
+    handle.stop()
+    snapshot_path(docket.path).unlink()
+    handle = start_sink(docket)
+    assert handle.sink.heads == heads
+    handle.stop()
+    assert {name: head.seq for name, head in heads.items()} == {"decide": 9, "custodian": 9}
+
+
+def forged_snapshot(docket, anchors):
+    content = docket.path.read_bytes()
+    lines = content.splitlines(keepends=True)
+    return Snapshot(
+        offset=len(content),
+        entries=len(lines),
+        prefix_sha256=hashlib.sha256(content).hexdigest(),
+        anchors=anchors,
+        kids=frozenset(pin.kid for pin in PINS.values()),
+    )
+
+
+def line_starts(docket):
+    starts, position = [], 0
+    for line in docket.path.read_bytes().splitlines(keepends=True):
+        starts.append(position)
+        position += len(line)
+    return starts
+
+
+def test_residual_sink_uid_deleting_a_record_under_a_rebuilt_snapshot_starts(docket, pin_files, capsys):
+    filled(docket)
+    content = docket.path.read_text().splitlines(keepends=True)
+    docket.path.write_text("".join(content[:2] + content[3:]))
+    starts = line_starts(docket)
+    decide, custodian = docket.records[3], docket.records[1]
+    anchors = {
+        "decide": Anchor(starts[2], decide.seq, decide.hash),
+        "custodian": Anchor(starts[1], custodian.seq, custodian.hash),
+    }
+    write_snapshot(snapshot_path(docket.path), forged_snapshot(docket, anchors))
+    handle = start_sink(docket)
+    assert handle.sink.heads["decide"].seq == 3
+    handle.stop()
+    code, _, err = check_snapshot(docket, pin_files, capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "line 3 fails verification: wrong_seq" in err
+
+
+def test_residual_an_omitted_anchor_lets_a_fresh_client_fork_until_verify(docket, pin_files, capsys):
+    filled(docket)
+    starts = line_starts(docket)
+    decide = docket.records[3]
+    write_snapshot(
+        snapshot_path(docket.path), forged_snapshot(docket, {"decide": Anchor(starts[3], decide.seq, decide.hash)})
+    )
+    handle = start_sink(docket)
+    forked = client(docket, "custodian", state="fresh-state").append(
+        make_entry(9, hop="custodian", component="custodian")
+    )
+    assert forked.seq == 1
+    handle.stop()
+    code, _, err = verify(docket, pin_files, capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "line 5 fails verification: wrong_seq" in err

@@ -1617,3 +1617,38 @@ def test_repair_without_a_snapshot_still_truncates(paths, start_sink, workdir):
     with open(paths[0], "a") as docket:
         docket.write("partial")
     assert repair(paths[0], workdir / "torn.tail", WRITERS).entries == 3
+
+
+def seal_first(paths, count):
+    chain = ChainState()
+    with open(paths[0], "rb") as docket:
+        for verified in Verification(docket, INDEX):
+            if verified.line > count:
+                break
+            chain.add(verified.start, verified.record)
+    write_snapshot(snapshot_path(paths[0]), chain.snapshot())
+
+
+def timed_start(paths):
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+
+    async def run():
+        began = time.perf_counter()
+        await sink.start()
+        elapsed = time.perf_counter() - began
+        await sink.close()
+        return elapsed
+
+    return asyncio.run(run())
+
+
+def test_snapshot_start_of_10k_records_takes_under_half_a_full_start(paths):
+    write_records(paths[0], 10_000)
+    os.chmod(paths[0], 0o600)
+    full, sealed = [], []
+    for _ in range(2):
+        snapshot_path(paths[0]).unlink(missing_ok=True)
+        full.append(timed_start(paths))
+        seal_first(paths, 8_000)
+        sealed.append(timed_start(paths))
+    assert min(sealed) / min(full) < 0.5
