@@ -63,7 +63,7 @@ These are known and accepted for the current release:
 
 - **The upstream MCP server is trusted.** It receives the credential in the request. For `gateway-bound` credentials, the operation binding holds only at this layer.
 - **Root is trusted.** Root can read keys, the credential store and the docket.
-- **The docket is tamper-evident, not tamper-proof.** The sink uid or root can truncate or delete it. Signatures do not detect removed records; see [DOCKET.md](DOCKET.md) for writer-side rollback detection and its limits.
+- **The docket is tamper-evident, not tamper-proof.** The sink uid or root can truncate or delete it. Signatures do not detect removed records; see [DOCKET.md](DOCKET.md) for writer-side rollback detection and its limits. The sink starts from a heads snapshot and checks only the SHA-256 of the records before it, so the sink uid or root can rewrite those records and the snapshot together and the sink still starts; a scheduled `docket verify --snapshot` with an alert on exit 1 is required to detect it, within the interval between runs.
 - **A credential that has already been released lives until the upstream stops using it, and a completed effect is not undone.** A release that has passed the custodian's suspension check completes.
 - **A compromised decide controls the ledger.** As the ledger owner it can drop revocations or alter reservations. The custodian's reservation check catches bugs, not a hostile decide. Its independent checks are the chain, leaf proof, binding table, claims and rate limit.
 - **Control trusts pinned signers for bindings.** It revokes the root and link bindings named in a record signed by a pinned decide or custodian key, so a compromised signer can name any binding.
