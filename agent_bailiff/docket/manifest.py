@@ -261,6 +261,12 @@ def _segments(document: object, base: Base | None) -> tuple[SegmentEntry, ...]:
 
 
 def _segment(document: object, name: str, previous: Heads) -> SegmentEntry:
+    entry = parse_segment_entry(document, name)
+    _check_advance(previous, entry.end_heads, entry.entries, name)
+    return entry
+
+
+def parse_segment_entry(document: object, name: str) -> SegmentEntry:
     if not isinstance(document, dict) or set(document) != SEGMENT_KEYS:
         raise ManifestInvalid(f"{name} must be an object with exactly {', '.join(sorted(SEGMENT_KEYS))}")
     segment = _integer(document["segment"], f"{name}.segment", 1, MAX_SEGMENT)
@@ -271,7 +277,6 @@ def _segment(document: object, name: str, previous: Heads) -> SegmentEntry:
     first_entry = _integer(document["first_entry"], f"{name}.first_entry", 1)
     entries = _integer(document["entries"], f"{name}.entries", 1)
     end_heads = parse_heads(document["end_heads"], f"{name}.end_heads")
-    _check_advance(previous, end_heads, entries, name)
     kids = _kids(document["kids"], f"{name}.kids")
     if len(kids) > entries:
         raise ManifestInvalid(f"{name}.kids has more key ids than entries")

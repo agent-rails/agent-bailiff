@@ -169,6 +169,9 @@ def _parser() -> argparse.ArgumentParser:
                 type=int,
                 help="export the next line, which must be this one, as a skipped marker span instead of its record",
             )
+            export.add_argument(
+                "--archive", type=Path, help="read removed segments from this archive; a new checkpoint starts at 1"
+            )
             export.set_defaults(handler=_export_docket)
             archive = component.add_parser(
                 "archive", help="copy sealed segments to separate storage and write a receipt for each"
@@ -514,9 +517,17 @@ def _export_docket(args: argparse.Namespace) -> int:
             max_failures=args.max_failures,
             poll_interval=args.poll_interval,
             skip_line=args.skip_line,
+            archive=args.archive,
         )
         exported = exporter.run(stop, follow=not args.once)
-    except STARTUP_ERRORS + (CheckpointMismatch, ExportFailed, FollowerLocked, SegmentMismatch, SegmentRemoved) as exc:
+    except STARTUP_ERRORS + (
+        ArchiveMismatch,
+        CheckpointMismatch,
+        ExportFailed,
+        FollowerLocked,
+        SegmentMismatch,
+        SegmentRemoved,
+    ) as exc:
         return _refused("docket export", exc)
     finally:
         span_exporter.shutdown()

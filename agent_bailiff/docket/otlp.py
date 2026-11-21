@@ -223,6 +223,7 @@ class DocketExporter:
         stall_after: float = DEFAULT_STALL_AFTER,
         clock: Callable[[], float] = time.monotonic,
         skip_line: int | None = None,
+        archive: Path | None = None,
     ) -> None:
         if max_failures < 1:
             raise ValueError("max failures must be at least 1")
@@ -240,6 +241,7 @@ class DocketExporter:
             poll_interval=poll_interval,
             stall_after=stall_after,
             clock=clock,
+            archive=archive,
         )
 
     def run(self, stop: threading.Event, *, follow: bool) -> int:
