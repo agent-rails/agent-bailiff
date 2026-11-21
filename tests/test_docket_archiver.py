@@ -485,6 +485,66 @@ def test_verify_refuses_an_archive_that_ends_away_from_the_base(layout, pin_file
     assert "the archive ends at 4 records with other heads than the manifest base" in err
 
 
+def receipts_flag(layout):
+    return ("--receipts", layout[0] / "receipts")
+
+
+def test_verify_with_receipts_matches_the_seeds(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == 0, err
+    assert "1 retained segments match their receipts and the base matches removed segment 1" in err
+
+
+def test_verify_with_receipts_before_any_removal(layout, pin_files, capsys):
+    two_segments(layout[1])
+    run(layout)
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == 0, err
+    assert "2 retained segments match their receipts\n" in err
+
+
+def test_verify_with_receipts_refuses_a_base_the_tombstone_disagrees_with(layout, pin_files, capsys):
+    _, removed = archived_and_removed(layout)
+    base, (kept,) = removed.base, removed.segments
+    quiet = Head(base.end_heads["custodian"].seq, "A" * 43)
+    forged_base = Base(base.segment, base.entries, {**base.end_heads, "custodian": quiet})
+    forged_kept = replace(kept, end_heads={**kept.end_heads, "custodian": quiet})
+    write_manifest(
+        manifest_path(layout[1].path),
+        Manifest(removed.docket_id, removed.generation + 1, forged_base, (forged_kept,)),
+    )
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == cli.EXIT_REFUSED
+    assert "6 records verified" in err
+    assert "segment 2 differs from its receipt; the base differs from the receipt of removed segment 1" in err
+
+
+def test_verify_with_receipts_refuses_a_missing_tombstone(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    (layout[0] / "receipts" / "seg-000000000001.receipt").unlink()
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == cli.EXIT_REFUSED
+    assert "removed segment 1 has no receipt" in err
+
+
+def test_verify_with_receipts_refuses_a_retained_segment_its_receipt_disagrees_with(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    with ReceiptDir.open(layout[0] / "receipts", archiver_uid=UID, reader_gid=GID) as receipts:
+        receipts.write(replace(receipts.read(2), sha256="0" * 64))
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == cli.EXIT_REFUSED
+    assert "segment 2 differs from its receipt" in err
+
+
+def test_verify_with_receipts_refuses_a_receipt_dir_others_can_write(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    os.chmod(layout[0] / "receipts", 0o770)
+    code, _, err = verify_command(layout, pin_files, capsys, *receipts_flag(layout))
+    assert code == cli.EXIT_REFUSED
+    assert "with mode 0750" in err
+
+
 class Clock:
     def __init__(self, now=NOW):
         self.now = now

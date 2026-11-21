@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from agent_bailiff.docket.archiver import ArchiveCopies, ArchivedCopy, encode_sidecar
 from agent_bailiff.docket.entry import Entry, Head
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, read_docket_manifest
+from agent_bailiff.docket.receipt import Receipt, ReceiptDir
 from agent_bailiff.docket.segments import (
     BoundedReader,
     OpenedSegment,
@@ -75,9 +76,12 @@ def verify_records(
     emit: Callable[[VerifiedLine], None],
     check: SnapshotCheck | None = None,
     archive: Path | None = None,
+    seeds: SeedCheck | None = None,
 ) -> VerifyReport:
     index = build_kid_index(writers)
     manifest = read_listed_manifest(path)
+    if seeds is not None:
+        seeds.compare(path, manifest)
     segment = manifest.first_segment
     heads: dict[str, Head] = {}
     entries = 0
@@ -257,6 +261,40 @@ class SnapshotCheck:
         if self._seen is None:
             return [f"offset {self.snapshot.offset} is not the end of a verified line"]
         return [name for name in SNAPSHOT_FIELDS if getattr(self._seen, name) != getattr(self.snapshot, name)]
+
+
+class SeedCheck:
+    def __init__(self, receipt_dir: Path) -> None:
+        self.receipt_dir = receipt_dir
+        self.checked = 0
+        self.base: int | None = None
+        self.differences: list[str] = []
+
+    def compare(self, docket_path: Path, manifest: Manifest) -> None:
+        owner = os.lstat(self.receipt_dir).st_uid
+        reader_gid = os.stat(docket_path).st_gid
+        with ReceiptDir.open(self.receipt_dir, archiver_uid=owner, reader_gid=reader_gid) as receipts:
+            for entry in manifest.segments:
+                receipt = receipts.read(entry.segment)
+                if receipt is None:
+                    continue
+                self.checked += 1
+                if _receipt_fields(receipt) != (manifest.docket_id, entry.sha256, entry.size, dict(entry.end_heads)):
+                    self.differences.append(f"segment {entry.segment} differs from its receipt")
+            if manifest.base is not None:
+                self._compare_base(receipts, manifest.docket_id, manifest.base)
+
+    def _compare_base(self, receipts: ReceiptDir, docket_id: str, base: Base) -> None:
+        self.base = base.segment
+        tombstone = receipts.read(base.segment)
+        if tombstone is None:
+            self.differences.append(f"removed segment {base.segment} has no receipt")
+        elif (tombstone.docket_id, dict(tombstone.end_heads)) != (docket_id, dict(base.end_heads)):
+            self.differences.append(f"the base differs from the receipt of removed segment {base.segment}")
+
+
+def _receipt_fields(receipt: Receipt) -> tuple[str, str, int, dict[str, Head]]:
+    return receipt.docket_id, receipt.sha256, receipt.size, dict(receipt.end_heads)
 
 
 def note(entry: Entry) -> str | None:

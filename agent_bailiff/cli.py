@@ -24,6 +24,7 @@ from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, Docke
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.report import (
     RecordFilter,
+    SeedCheck,
     SnapshotCheck,
     json_row,
     pinned_writers,
@@ -140,6 +141,9 @@ def _parser() -> argparse.ArgumentParser:
             verify.add_argument("--snapshot", type=Path, help="also cross-check this heads snapshot against the docket")
             verify.add_argument(
                 "--archive", type=Path, help="verify removed segments from this archive, from the first record"
+            )
+            verify.add_argument(
+                "--receipts", type=Path, help="also cross-check the manifest seeds against this receipt directory"
             )
             verify.set_defaults(handler=_verify_docket)
             export = component.add_parser(
@@ -436,7 +440,8 @@ def _verify_docket(args: argparse.Namespace) -> int:
         check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
-        report = verify_records(args.docket, writers, selected, emit, check, args.archive)
+        seeds = None if args.receipts is None else SeedCheck(args.receipts)
+        report = verify_records(args.docket, writers, selected, emit, check, args.archive, seeds)
     except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
@@ -450,6 +455,8 @@ def _verify_docket(args: argparse.Namespace) -> int:
             print(f"{PROG} docket verify: {TORN_TAIL_HINT}", file=sys.stderr)
         return EXIT_REFUSED
     print(f"{PROG} docket verify: {report.entries} records verified, {shown} printed", file=sys.stderr)
+    if seeds is not None and not _seeds_match(args.receipts, seeds):
+        return EXIT_REFUSED
     if check is None:
         return 0
     differences = check.differences()
@@ -465,6 +472,21 @@ def _verify_docket(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _seeds_match(receipts: Path, seeds: SeedCheck) -> bool:
+    if seeds.differences:
+        print(
+            f"{PROG} docket verify: receipts {receipts} do not match the manifest: {'; '.join(seeds.differences)}",
+            file=sys.stderr,
+        )
+        return False
+    base = "" if seeds.base is None else f" and the base matches removed segment {seeds.base}"
+    print(
+        f"{PROG} docket verify: {seeds.checked} retained segments match their receipts{base}",
+        file=sys.stderr,
+    )
+    return True
 
 
 def _export_docket(args: argparse.Namespace) -> int:
