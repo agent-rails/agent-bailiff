@@ -21,6 +21,7 @@ from agent_bailiff.docket.sink import (
     Verification,
     VerifiedLine,
     VerifyReport,
+    Writers,
     build_kid_index,
 )
 from agent_bailiff.docket.snapshot import Snapshot, SnapshotInvalid, read_snapshot
@@ -55,9 +56,13 @@ def pinned_writers(pins: Iterable[PublicKeyRecord]) -> dict[str, dict[str, Ed255
     return writers
 
 
+def verify_docket(path: Path, writers: Writers) -> VerifyReport:
+    return verify_records(path, writers, RecordFilter(), lambda _line: None)
+
+
 def verify_records(
     path: Path,
-    writers: dict[str, dict[str, Ed25519PublicKey]],
+    writers: Writers,
     selected: RecordFilter,
     emit: Callable[[VerifiedLine], None],
     check: SnapshotCheck | None = None,

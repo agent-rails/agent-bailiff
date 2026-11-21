@@ -18,7 +18,7 @@ from agent_bailiff.docket import DocketClient, DocketSink, decode_record, encode
 from agent_bailiff.docket import segments as segments_module
 from agent_bailiff.docket.entry import ENTRY_TYP, Head, _entry_body
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
-from agent_bailiff.docket.report import RELEASED
+from agent_bailiff.docket.report import RELEASED, verify_docket
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
 from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
@@ -209,6 +209,17 @@ def test_a_torn_tail_fails_and_points_to_repair(docket, pin_files, capsys):
     assert code == cli.EXIT_REFUSED
     assert len(out) == 4
     assert "line 5 fails verification: torn_tail" in err and "Torn tail repair" in err
+
+
+def test_torn_tail_after_a_cut_is_reported_as_torn_tail(docket):
+    docket.append("decide", make_entry(1))
+    docket.append("decide", make_entry(2))
+    cut(docket)
+    docket.append("decide", make_entry(3))
+    with open(docket.path, "a") as stream:
+        stream.write("partial")
+    report = verify_docket(docket.path, WRITERS)
+    assert (report.ok, report.reason, report.entries) == (False, "torn_tail", 3)
 
 
 def test_a_record_of_an_unpinned_writer_fails(docket, pin_files, capsys):

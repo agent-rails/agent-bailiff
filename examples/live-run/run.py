@@ -26,7 +26,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from agent_bailiff.adapters.agentgateway.config_check import REFUSAL_GUARD
 from agent_bailiff.docket.entry import decode_record
-from agent_bailiff.docket.sink import build_kid_index, verify_docket
+from agent_bailiff.docket.report import verify_docket
+from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.service.settings import load_docket
 
 HERE = Path(__file__).resolve().parent

@@ -34,7 +34,6 @@ from agent_bailiff.docket import (
     decode_record,
     encode_record,
     repair,
-    verify_docket,
 )
 from agent_bailiff.docket import manifest as manifest_module
 from agent_bailiff.docket import sink as sink_module
@@ -56,7 +55,7 @@ from agent_bailiff.docket.protocol import (
     encode_frame,
     encode_response,
 )
-from agent_bailiff.docket.report import RecordFilter, verify_records
+from agent_bailiff.docket.report import RecordFilter, verify_docket, verify_records
 from agent_bailiff.docket.sink import ChainState, build_kid_index, docket_lock_path
 from agent_bailiff.docket.snapshot import Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.signing import MAX_TOKEN_CHARS, Refused, sign
