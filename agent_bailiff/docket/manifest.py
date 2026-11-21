@@ -41,7 +41,7 @@ class Base:
     end_heads: Heads
 
     def to_document(self) -> dict[str, Any]:
-        return {"segment": self.segment, "entries": self.entries, "end_heads": _heads_document(self.end_heads)}
+        return {"segment": self.segment, "entries": self.entries, "end_heads": heads_document(self.end_heads)}
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class SegmentEntry:
             "size": self.size,
             "first_entry": self.first_entry,
             "entries": self.entries,
-            "end_heads": _heads_document(self.end_heads),
+            "end_heads": heads_document(self.end_heads),
             "kids": sorted(self.kids),
         }
 
@@ -199,7 +199,7 @@ def _base(document: object) -> Base | None:
         raise ManifestInvalid(f"base must be null or an object with exactly {', '.join(sorted(BASE_KEYS))}")
     segment = _integer(document["segment"], "base.segment", 1, MAX_SEGMENT)
     entries = _integer(document["entries"], "base.entries", 1)
-    end_heads = _heads(document["end_heads"], "base.end_heads")
+    end_heads = parse_heads(document["end_heads"], "base.end_heads")
     if sum(head.seq for head in end_heads.values()) != entries:
         raise ManifestInvalid("base.entries must equal the sum of base.end_heads seq")
     return Base(segment, entries, end_heads)
@@ -235,7 +235,7 @@ def _segment(document: object, name: str, previous: Heads) -> SegmentEntry:
     size = _integer(document["size"], f"{name}.size", 1)
     first_entry = _integer(document["first_entry"], f"{name}.first_entry", 1)
     entries = _integer(document["entries"], f"{name}.entries", 1)
-    end_heads = _heads(document["end_heads"], f"{name}.end_heads")
+    end_heads = parse_heads(document["end_heads"], f"{name}.end_heads")
     _check_advance(previous, end_heads, entries, name)
     kids = _kids(document["kids"], f"{name}.kids")
     if len(kids) > entries:
@@ -258,7 +258,7 @@ def _check_advance(previous: Heads, end_heads: Heads, entries: int, name: str) -
         raise ManifestInvalid(f"{name}.entries must equal the seq advance of its end_heads")
 
 
-def _heads(document: object, name: str) -> dict[str, Head]:
+def parse_heads(document: object, name: str) -> dict[str, Head]:
     if not isinstance(document, dict) or not document:
         raise ManifestInvalid(f"{name} must be a non-empty object of writer names to heads")
     heads: dict[str, Head] = {}
@@ -275,7 +275,7 @@ def _heads(document: object, name: str) -> dict[str, Head]:
     return heads
 
 
-def _heads_document(heads: Heads) -> dict[str, Any]:
+def heads_document(heads: Heads) -> dict[str, Any]:
     return {writer: {"seq": head.seq, "hash": head.hash} for writer, head in heads.items()}
 
 

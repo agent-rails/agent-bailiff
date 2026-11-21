@@ -47,9 +47,10 @@ def replace_state_file(
     *,
     reader_gid: int | None,
     fsync: Callable[[int], None] = os.fsync,
+    dir_fd: int | None = None,
 ) -> None:
     temporary = f"{path.name}.tmp"
-    directory_fd = open_private_dir(path.parent)
+    directory_fd = open_private_dir(path.parent) if dir_fd is None else dir_fd
     try:
         _unlink_if_present(temporary, directory_fd)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -70,7 +71,8 @@ def replace_state_file(
         except OSError as exc:
             raise DirectorySyncFailed(exc.errno, f"{path} was replaced but its directory fsync failed") from exc
     finally:
-        os.close(directory_fd)
+        if dir_fd is None:
+            os.close(directory_fd)
 
 
 def _check_file(fd: int, path: Path, uid: int, reader_gid: int | None) -> None:
