@@ -1163,6 +1163,21 @@ def test_snapshot_shares_the_docket_reader_group(paths, start_sink):
     assert file_mode(snapshot_path(paths[0])) == (0o640, READER_GID)
 
 
+def share(paths, gid, directory_mode, file_mode):
+    for path, mode in ((paths[0].parent, directory_mode), (paths[0], file_mode), (snapshot_path(paths[0]), file_mode)):
+        os.chown(path, -1, gid)
+        os.chmod(path, mode)
+
+
+def test_reader_group_can_be_added_and_removed_as_documented(paths, start_sink):
+    write_chain(paths, start_sink, count=2)
+    share(paths, READER_GID, 0o750, 0o640)
+    start_sink(reader_gid=READER_GID).stop()
+    share(paths, READER_GID, 0o700, 0o600)
+    handle = start_sink()
+    assert handle.sink.heads == verify_docket(paths[0], WRITERS).heads
+
+
 def test_start_from_a_snapshot_gives_the_heads_of_a_full_verify(paths, start_sink):
     write_two_writers(paths, start_sink)
     seal(paths)
@@ -1488,7 +1503,7 @@ def test_snapshot_write_oserror_keeps_snapshots_on(paths, caplog, monkeypatch):
         return current_snapshot(paths)
 
     assert run_in_sink(paths, scenario, snapshot_every=1).entries == 2
-    assert "the old snapshot is kept" in caplog.text
+    assert "the snapshot on disk is the old or the new one" in caplog.text
 
 
 def test_unexpected_snapshot_error_turns_snapshots_off_until_restart(paths, caplog, monkeypatch):

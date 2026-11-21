@@ -87,6 +87,9 @@ class SnapshotCheck:
             if self._chain.offset == self.snapshot.offset:
                 self._seen = self._chain.snapshot()
 
+    def records_after(self, entries: int) -> int:
+        return entries - self.snapshot.entries
+
     def differences(self) -> list[str]:
         if self._seen is None:
             return [f"offset {self.snapshot.offset} is not the end of a verified line"]
