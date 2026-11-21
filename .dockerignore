@@ -7,8 +7,10 @@ docs
 examples
 *.egg-info
 __pycache__
+agent_bailiff/adapters/agentgateway/_proto
 !examples/quickstart/bootstrap.py
 !examples/quickstart/agent.py
 !examples/quickstart/rule.py
 !examples/quickstart/routes.json
 !examples/quickstart/trace-requirements.txt
+!examples/quickstart/proto-requirements.txt

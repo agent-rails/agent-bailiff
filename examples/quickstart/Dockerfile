@@ -1,3 +1,11 @@
+FROM python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86 AS proto
+
+COPY examples/quickstart/proto-requirements.txt /tmp/proto-requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/proto-requirements.txt
+COPY adapters/agentgateway/proto/ext_mcp.proto /src/adapters/agentgateway/proto/
+COPY adapters/agentgateway/scripts/generate_proto.sh /src/adapters/agentgateway/scripts/
+RUN OUT=/out sh /src/adapters/agentgateway/scripts/generate_proto.sh
+
 FROM python:3.13.9-slim@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86 AS quickstart
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
@@ -5,6 +13,7 @@ WORKDIR /app
 COPY deploy/kubernetes/webhook-requirements.txt /tmp/requirements.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt
 COPY agent_bailiff /app/agent_bailiff
+COPY --from=proto /out /app/agent_bailiff/adapters/agentgateway/_proto
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"
 COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/rule.py \
     examples/quickstart/routes.json /app/quickstart/

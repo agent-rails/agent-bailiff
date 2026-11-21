@@ -8,10 +8,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "adapters" / "agentgateway" / "scripts" / "generate_proto.sh"
 PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
+PROTO_LOCK = ROOT / "examples" / "quickstart" / "proto-requirements.txt"
+CI_LOCK = ROOT / "requirements-ci.txt"
 
 
 def pinned_sha256():
     return re.search(r"^SHA256=([0-9a-f]{64})$", SCRIPT.read_text(), re.MULTILINE).group(1)
+
+
+def pins(lock):
+    return dict(re.findall(r"^([a-z0-9_.-]+)==([^ \\]+)", lock.read_text(), re.MULTILINE))
 
 
 def copy_layout(tmp_path):
@@ -60,3 +66,10 @@ def test_the_script_refuses_a_changed_proto(tmp_path):
     assert result.returncode == 1
     assert "does not match" in result.stderr
     assert (out / "kept").exists()
+
+
+def test_the_image_build_uses_the_ci_protoc_toolchain():
+    build = pins(PROTO_LOCK)
+    assert "grpcio-tools" in build
+    ci = pins(CI_LOCK)
+    assert {name: ci.get(name) for name in build} == build
