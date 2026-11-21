@@ -10,6 +10,10 @@ updates:
       - /deploy/kubernetes
     schedule:
       interval: weekly
+    groups:
+      python-base:
+        group-by: dependency-name
+        patterns: ["python"]
   - package-ecosystem: docker-compose
     directory: /examples/quickstart
     schedule:
