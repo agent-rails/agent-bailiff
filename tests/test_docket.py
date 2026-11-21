@@ -1576,3 +1576,44 @@ def test_close_after_a_failed_start_writes_no_snapshot(paths, start_sink):
         asyncio.run(sink.start())
     asyncio.run(sink.close())
     assert not snapshot_path(paths[0]).exists()
+
+
+def test_repair_that_truncates_drops_the_snapshot(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert not snapshot_path(paths[0]).exists()
+    start_sink().stop()
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+
+
+def test_repair_drops_the_snapshot_before_it_truncates(paths, start_sink, workdir, monkeypatch):
+    write_chain(paths, start_sink)
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    seen = []
+    original = os.ftruncate
+
+    def recording_truncate(fd, length):
+        seen.append(snapshot_path(paths[0]).exists())
+        original(fd, length)
+
+    monkeypatch.setattr(sink_module.os, "ftruncate", recording_truncate)
+    repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert seen == [False]
+
+
+def test_repair_of_a_whole_docket_keeps_the_snapshot(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    before = snapshot_path(paths[0]).read_bytes()
+    assert repair(paths[0], workdir / "torn.tail", WRITERS).ok
+    assert snapshot_path(paths[0]).read_bytes() == before
+
+
+def test_repair_without_a_snapshot_still_truncates(paths, start_sink, workdir):
+    write_chain(paths, start_sink)
+    snapshot_path(paths[0]).unlink()
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    assert repair(paths[0], workdir / "torn.tail", WRITERS).entries == 3
