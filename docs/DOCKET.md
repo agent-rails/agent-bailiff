@@ -48,6 +48,14 @@ The sink appends to the active segment `<docket>`. Once an acknowledged append b
 - A sealed segment's heads are every writer's head, so a writer absent from a segment still resumes after its sealed `seq`.
 - Segments are not removed yet: the docket still grows without bound, and once the manifest reaches its cap every cut aborts.
 
+### Upgrade and downgrade
+
+1. Stop the sink. Do not upgrade under a running sink.
+2. Install the release and add `segment_bytes` to the docket config: without it the config fails to load with `missing segment_bytes`. The quickstart bootstrap reports it with the same `docker compose down --volumes` hint as `free_space_floor`.
+3. Start the sink. On a docket that has never been cut it reads a version 1 snapshot or none, verifies every record and writes a version 2 snapshot.
+
+From then on `<docket>.snapshot` is always present and version 2. An older release refuses it with `snapshot_mismatch` and does not start, so there is no downgrade. Never delete or move the snapshot to get an older release to start: it would read only the active segment and let every writer start again at `seq` 1. Moving the snapshot aside (see snapshot_mismatch at start) is safe only when the current release starts next.
+
 ## Readers
 
 A docket config with `reader_group` set lets members of that group read the docket without running as the sink uid. `agent-bailiff init docket --reader-group <gid>` gives the docket directory that group and mode 0750; the sink creates a new docket with that group and mode 0640 and refuses to start on any other mode or group. The sink uid must be a member of the group, or init and the first start fail. `config.json` stays 0600, so readers never read the sink config; they take writer pins from their own copies of the writers' public key records.
@@ -55,7 +63,7 @@ A docket config with `reader_group` set lets members of that group read the dock
 - Readers see every record: tools, resources, principals, tenants and argument digests, never the arguments themselves.
 - Readers cannot append, truncate or replace the docket. `docket verify` detects forged, altered, reordered or deleted records within each writer's chain; it cannot detect the sink uid truncating the newest records of a writer. The sink's start checks less; see Heads snapshot.
 - Without `reader_group` the docket stays 0600 and only the sink uid and root can read it.
-- To add `reader_group` to an existing docket: stop the sink, give the directory the group and mode 0750 and the docket and `<docket>.snapshot` the group and mode 0640, set `reader_group` in `config.json`, then start the sink. Removing it is the reverse, back to 0700 and 0600; the sink refuses to start on any mix, and a snapshot left at the old mode refuses start with `snapshot_mismatch`.
+- To add `reader_group` to an existing docket: stop the sink, give the directory the group and mode 0750 and the docket, `<docket>.snapshot`, `<docket>.manifest` and every `<docket>.seg-*` the group and mode 0640, set `reader_group` in `config.json`, then start the sink. Removing it is the reverse, back to 0700 and 0600; the sink refuses to start on any mix, and a snapshot left at the old mode refuses start with `snapshot_mismatch`.
 
 ## docket verify
 
@@ -163,4 +171,4 @@ The sink refuses to start with `snapshot_mismatch` when the docket and its snaps
 2. Run `docket verify --snapshot <docket>.snapshot`. If a docket line fails, the docket itself is damaged: treat it as an integrity incident, and if the reason is `torn_tail` follow Torn tail repair, which also replaces the snapshot.
 3. If every record verifies and the offset is past the end of the docket after a power loss, the disk lost bytes it had acknowledged (on macOS, see the `F_FULLFSYNC` note above). The records past the end were acknowledged to writers and are gone; treat it as an integrity incident.
 4. If every record verifies and the snapshot differs anyway, the snapshot or the docket was rewritten. Treat it as an integrity incident.
-5. Once the docket is confirmed as the intended one, move the snapshot aside, keep it for the investigation, and start the sink. It verifies every record and writes a new snapshot.
+5. Once the docket is confirmed as the intended one, move the snapshot aside, keep it for the investigation, and start the sink of the current release. It verifies every record and writes a new snapshot.
