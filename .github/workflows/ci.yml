@@ -22,7 +22,7 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements-ci.txt
       - run: python -m pip install --no-deps --no-build-isolation -e .
       - run: python -m pip check
-      - run: sh adapters/agentgateway/scripts/fetch_proto.sh
+      - run: sh adapters/agentgateway/scripts/generate_proto.sh
       - run: ruff check
       - run: ruff format --check
       - run: mypy
@@ -50,7 +50,7 @@ jobs:
       - run: python -m pip install --require-hashes -r requirements-ci.txt
       - run: python -m pip install --no-deps --no-build-isolation -e .
       - run: python -m pip check
-      - run: sh adapters/agentgateway/scripts/fetch_proto.sh
+      - run: sh adapters/agentgateway/scripts/generate_proto.sh
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
       - run: docker compose up --detach --wait
       - run: |
