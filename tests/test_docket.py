@@ -864,9 +864,19 @@ def test_client_refuses_a_sink_with_the_wrong_uid(paths, start_sink):
     assert paths[0].read_bytes() == b""
 
 
-def roll_back_to(paths, count):
+def roll_back_to(paths, count, *, keep_snapshot=False):
     content = lines(paths[0])
     paths[0].write_text("".join(f"{line}\n" for line in content[:count]))
+    if not keep_snapshot:
+        snapshot_path(paths[0]).unlink()
+
+
+def test_rollback_under_a_newer_snapshot_refuses_start(paths, start_sink):
+    write_chain(paths, start_sink)
+    roll_back_to(paths, 2, keep_snapshot=True)
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
 
 
 def test_restarted_client_detects_a_rolled_back_sink(paths, start_sink):
@@ -1171,6 +1181,7 @@ def test_start_from_a_snapshot_decodes_only_the_anchors_and_the_tail(paths, star
     client.append(make_entry(7))
     client.close()
     handle.stop()
+    seal(paths, sealed)
     decoded = []
     original = sink_module.decode_record
 
@@ -1202,7 +1213,7 @@ def sealed_chain(paths, start_sink):
 
 def test_start_refuses_a_snapshot_past_the_end_of_the_docket(paths, start_sink):
     sealed_chain(paths, start_sink)
-    roll_back_to(paths, 2)
+    roll_back_to(paths, 2, keep_snapshot=True)
     assert "past the end" in str(refuse_start(paths, start_sink))
 
 
@@ -1333,4 +1344,235 @@ def test_directory_fsync_failure_at_start_skips_the_snapshot(paths, start_sink):
         os.fsync(fd)
 
     start_sink(fsync=failing_dir_fsync)
+    assert not snapshot_path(paths[0]).exists()
+
+
+def test_sink_refuses_a_snapshot_cadence_below_one(paths):
+    for every in (0, -1, True, 1.0):
+        with pytest.raises(ValueError, match="snapshot_every"):
+            DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, snapshot_every=every)
+
+
+def current_snapshot(paths):
+    return read_snapshot(snapshot_path(paths[0]), uid=os.geteuid())
+
+
+def settle(handle):
+    asyncio.run_coroutine_threadsafe(asyncio.sleep(0), handle.loop).result(5)
+
+
+def test_snapshot_is_refreshed_every_snapshot_every_appends(paths, start_sink):
+    handle = start_sink(snapshot_every=2)
+    empty = current_snapshot(paths)
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    settle(handle)
+    assert current_snapshot(paths) == empty
+    client.append(make_entry(2))
+    settle(handle)
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    client.append(make_entry(3))
+    settle(handle)
+    assert current_snapshot(paths).entries == 2
+    client.append(make_entry(4))
+    settle(handle)
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+    assert current_snapshot(paths).entries == 4
+
+
+def token_of(number, prev=None):
+    return encode_record(DECIDE_KEY, "decide-1", "decide", number, prev, make_entry(number))
+
+
+def run_in_sink(paths, scenario, **options):
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, **options)
+
+    async def run():
+        await sink.start()
+        try:
+            return await scenario(sink)
+        finally:
+            await sink.close()
+
+    return asyncio.run(run())
+
+
+def test_snapshot_is_written_after_the_append_returns(paths):
+    async def scenario(sink):
+        empty = current_snapshot(paths)
+        assert sink._append(token_of(1).token.encode())["ok"]
+        assert current_snapshot(paths) == empty
+        await asyncio.sleep(0)
+        return current_snapshot(paths)
+
+    snapshot = run_in_sink(paths, scenario, snapshot_every=1)
+    assert snapshot == chain_snapshot(paths[0])
+
+
+def test_snapshot_offset_is_the_sink_count_not_the_file_size(paths):
+    async def scenario(sink):
+        assert sink._append(token_of(1).token.encode())["ok"]
+        with open(paths[0], "ab") as docket:
+            docket.write(b"foreign")
+        await asyncio.sleep(0)
+        return current_snapshot(paths)
+
+    snapshot = run_in_sink(paths, scenario, snapshot_every=1)
+    assert snapshot.offset == paths[0].stat().st_size - len(b"foreign")
+    assert snapshot.entries == 1
+
+
+def test_append_failure_before_the_callback_skips_the_snapshot(paths):
+    fail = threading.Event()
+
+    def flaky_fsync(fd):
+        if fail.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        empty = current_snapshot(paths)
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        fail.set()
+        assert sink._append(token_of(2, first.hash).token.encode())["reason"] == "write_failed"
+        await asyncio.sleep(0)
+        return empty
+
+    empty = run_in_sink(paths, scenario, snapshot_every=1, fsync=flaky_fsync)
+    assert current_snapshot(paths) == empty
+
+
+def test_docket_fsync_failure_before_a_snapshot_keeps_the_old_one(paths, caplog):
+    fail = threading.Event()
+
+    def flaky_fsync(fd):
+        if fail.is_set() and fd_kind(fd) == "file":
+            fail.clear()
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        empty = current_snapshot(paths)
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        fail.set()
+        await asyncio.sleep(0)
+        assert current_snapshot(paths) == empty
+        assert sink._append(token_of(2, first.hash).token.encode())["ok"]
+        await asyncio.sleep(0)
+        return current_snapshot(paths)
+
+    assert run_in_sink(paths, scenario, snapshot_every=1, fsync=flaky_fsync).entries == 2
+    assert "fsync before the snapshot failed" in caplog.text
+
+
+def test_snapshot_write_oserror_keeps_snapshots_on(paths, caplog, monkeypatch):
+    original = sink_module.write_snapshot
+    failures = [OSError(28, "injected no space")]
+
+    def flaky_write(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        original(*args, **kwargs)
+
+    async def scenario(sink):
+        monkeypatch.setattr(sink_module, "write_snapshot", flaky_write)
+        empty = current_snapshot(paths)
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert current_snapshot(paths) == empty
+        assert sink._append(token_of(2, first.hash).token.encode())["ok"]
+        await asyncio.sleep(0)
+        return current_snapshot(paths)
+
+    assert run_in_sink(paths, scenario, snapshot_every=1).entries == 2
+    assert "the old snapshot is kept" in caplog.text
+
+
+def test_unexpected_snapshot_error_turns_snapshots_off_until_restart(paths, caplog, monkeypatch):
+    calls = []
+
+    def broken_write(*args, **kwargs):
+        calls.append(args)
+        raise ValueError("injected bug")
+
+    async def scenario(sink):
+        monkeypatch.setattr(sink_module, "write_snapshot", broken_write)
+        empty = current_snapshot(paths)
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        await asyncio.sleep(0)
+        assert sink._append(token_of(2, first.hash).token.encode())["ok"]
+        await asyncio.sleep(0)
+        return empty
+
+    empty = run_in_sink(paths, scenario, snapshot_every=1)
+    assert len(calls) == 1
+    assert current_snapshot(paths) == empty
+    assert "snapshots are off until restart" in caplog.text
+
+
+def test_clean_close_writes_the_snapshot(paths, start_sink):
+    handle = start_sink()
+    client = decide_client(paths)
+    client.append(make_entry(1))
+    client.append(make_entry(2))
+    client.close()
+    assert current_snapshot(paths).entries == 0
+    handle.stop()
+    assert current_snapshot(paths) == chain_snapshot(paths[0])
+
+
+def test_close_writes_the_snapshot_after_connections_finish(paths, monkeypatch):
+    order = []
+    original = sink_module.write_snapshot
+
+    def recording_write(*args, **kwargs):
+        order.append("snapshot")
+        original(*args, **kwargs)
+
+    async def scenario(sink):
+        monkeypatch.setattr(sink_module, "write_snapshot", recording_write)
+        server = sink._server
+        original_wait = server.wait_closed
+
+        async def recording_wait():
+            await original_wait()
+            order.append("wait_closed")
+
+        monkeypatch.setattr(server, "wait_closed", recording_wait)
+
+    run_in_sink(paths, scenario)
+    assert order == ["wait_closed", "snapshot"]
+
+
+def test_close_of_a_failed_sink_writes_no_snapshot(paths):
+    fail = threading.Event()
+
+    def flaky_fsync(fd):
+        if fail.is_set() and fd_kind(fd) == "file":
+            raise OSError(5, "injected fsync failure")
+        os.fsync(fd)
+
+    async def scenario(sink):
+        first = token_of(1)
+        assert sink._append(first.token.encode())["ok"]
+        fail.set()
+        assert sink._append(token_of(2, first.hash).token.encode())["reason"] == "write_failed"
+
+    run_in_sink(paths, scenario, fsync=flaky_fsync)
+    assert current_snapshot(paths).entries == 0
+
+
+def test_close_after_a_failed_start_writes_no_snapshot(paths, start_sink):
+    write_chain(paths, start_sink)
+    snapshot_path(paths[0]).unlink()
+    with open(paths[0], "a") as docket:
+        docket.write("garbage\n")
+    sink = DocketSink(paths[0], paths[1], WRITERS, {os.getuid()})
+    with pytest.raises(DocketCorrupt):
+        asyncio.run(sink.start())
+    asyncio.run(sink.close())
     assert not snapshot_path(paths[0]).exists()
