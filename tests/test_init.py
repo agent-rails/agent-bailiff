@@ -21,6 +21,7 @@ from test_service import (
 )
 
 from agent_bailiff import cli
+from agent_bailiff.docket.retention import Retention
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, load_signing_key
 from agent_bailiff.service import run
 from agent_bailiff.service.settings import load_control, load_custodian, load_decide, load_docket
@@ -119,10 +120,19 @@ def init_all(root, ledger_dir, capsys):
         "--pin", decide_pin,
         "--pin", custodian_pin,
         "--pin", control_pin,
+        *retention(root),
         capsys=capsys,
     )  # fmt: skip
     assert (code, out) == (0, ""), err
     return sockets, {"decide": decide_pin, "custodian": custodian_pin, "control": control_pin}
+
+
+def retention(root):
+    receipts = root / "receipts"
+    receipts.mkdir(mode=0o750, exist_ok=True)
+    os.chown(receipts, -1, GID)
+    os.chmod(receipts, 0o750)
+    return ["--reader-group", GID, "--receipt-dir", receipts, "--archiver-uid", UID]
 
 
 def mode(path):
@@ -265,6 +275,7 @@ def test_docket_init_writes_a_config_that_loads(root, decide_pin, capsys):
         "--allowed-uid", UID,
         "--allowed-uid", UID,
         "--pin", decide_pin,
+        *retention(root),
         capsys=capsys,
     )  # fmt: skip
     assert code == 0, err
@@ -281,20 +292,39 @@ def docket_init(root, directory, decide_pin, capsys, *extra):
         "--socket-group", GID,
         "--allowed-uid", UID,
         "--pin", decide_pin,
+        *retention(root),
         *extra,
         capsys=capsys,
     )  # fmt: skip
 
 
-def test_docket_init_keeps_the_docket_private_without_a_reader_group(root, decide_pin, capsys):
+def test_docket_init_writes_the_default_limits_and_retention(root, decide_pin, capsys):
     directory = private(root / "docket")
     code, _, err = docket_init(root, directory, decide_pin, capsys)
     assert code == 0, err
-    assert load_docket(directory / "config.json").reader_group is None
-    assert load_docket(directory / "config.json").snapshot_every == 10_000
-    assert load_docket(directory / "config.json").free_space_floor == 256 << 20
-    assert load_docket(directory / "config.json").segment_bytes == 256 << 20
-    assert mode(directory) == (0o700, UID)
+    settings = load_docket(directory / "config.json")
+    limits = (settings.snapshot_every, settings.free_space_floor, settings.segment_bytes)
+    assert limits == (10_000, 256 << 20, 256 << 20)
+    assert settings.retention == Retention(root / "receipts", UID, 16 << 30, 86400)
+
+
+@pytest.mark.parametrize("missing", ["--reader-group", "--receipt-dir", "--archiver-uid"])
+def test_docket_init_requires_the_retention_arguments(root, decide_pin, capsys, missing):
+    directory = private(root / "docket")
+    arguments = retention(root)
+    del arguments[arguments.index(missing) : arguments.index(missing) + 2]
+    with pytest.raises(SystemExit):
+        init(
+            "docket",
+            "--dir", directory,
+            "--socket", root / "s" / "docket.sock",
+            "--socket-group", GID,
+            "--allowed-uid", UID,
+            "--pin", decide_pin,
+            *arguments,
+            capsys=capsys,
+        )  # fmt: skip
+    assert os.listdir(directory) == []
 
 
 def test_docket_init_shares_the_docket_directory_with_a_reader_group(root, decide_pin, capsys):

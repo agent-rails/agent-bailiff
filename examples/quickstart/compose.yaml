@@ -225,6 +225,7 @@ services:
     volumes:
       - docket-data:/var/lib/bailiff/docket
       - docket-run:/run/bailiff/docket
+      - docket-receipts:/var/lib/bailiff/receipts:ro
     healthcheck: &socket-health
       test: ["CMD", "python", "-c", "import stat, os, sys; sys.exit(not stat.S_ISSOCK(os.lstat(sys.argv[1]).st_mode))", "/run/bailiff/docket/docket.sock"]
       interval: 1s
@@ -447,6 +448,7 @@ volumes:
   docket-data: {}
   ledger: {}
   docket-run: {}
+  docket-receipts: {}
   decide-run: {}
   custodian-run: {}
   agent-data: {}

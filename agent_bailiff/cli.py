@@ -247,7 +247,11 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     docket = components.add_parser("docket")
     docket.add_argument("--socket", type=Path, required=True)
     docket.add_argument("--socket-group", type=int, required=True)
-    docket.add_argument("--reader-group", type=int, help="group that may read the docket (file 0640, dir 0750)")
+    docket.add_argument(
+        "--reader-group", type=int, required=True, help="group that may read the docket (file 0640, dir 0750)"
+    )
+    docket.add_argument("--receipt-dir", type=Path, required=True, help="the archiver's receipt directory")
+    docket.add_argument("--archiver-uid", type=int, required=True, help="the uid that writes archive receipts")
     docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
     for parser in (control, docket):
         parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
@@ -285,6 +289,8 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             reader_group=args.reader_group,
             allowed_uids=args.allowed_uid,
             pins=pins,
+            receipt_dir=args.receipt_dir,
+            archiver_uid=args.archiver_uid,
         )
         return None
     docket = {"socket": args.docket_socket, "sink_uid": args.docket_uid}

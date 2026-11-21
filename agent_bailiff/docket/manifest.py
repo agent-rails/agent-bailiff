@@ -4,7 +4,7 @@ import os
 import re
 import secrets
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -149,6 +149,20 @@ class Manifest:
         base = _base(document["base"])
         segments = _segments(document["segments"], base)
         return cls(docket_id, generation, base, segments)
+
+
+def entry_bytes_bound(writers: Mapping[str, Iterable[str]]) -> int:
+    head = Head(MAX_INTEGER, "A" * 43)
+    entry = SegmentEntry(
+        MAX_SEGMENT,
+        "0" * 64,
+        MAX_INTEGER,
+        MAX_INTEGER,
+        MAX_INTEGER,
+        {writer: head for writer in writers},
+        frozenset(kid for kids in writers.values() for kid in kids),
+    )
+    return len(canonicalize(entry.to_document())) + 1
 
 
 def manifest_path(docket_path: Path) -> Path:
