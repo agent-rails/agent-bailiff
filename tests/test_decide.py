@@ -467,8 +467,11 @@ def test_other_tasks_filling_the_tenant_share_record_a_tenant_capped_marker(make
     assert "out_of_scope" not in reasons
 
 
-def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(make_decider, docket_paths, client_options):
-    docket = FailFirstDocket(DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options))
+@pytest.mark.parametrize("reason", ["sink_unreachable", "docket_full", "space_check_failed"])
+def test_a_refusal_whose_entry_was_not_written_does_not_use_the_budget(
+    make_decider, docket_paths, client_options, reason
+):
+    docket = FailFirstDocket(DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options), reason)
     decider = make_decider(docket=docket, refusal_budget=RefusalBudget(limit=1, window_seconds=60, clock=FakeClock()))
     first = decider.check(make_request(resource="env/prod/api", nonce="n-1"), NOW)
     second = decider.check(make_request(resource="env/prod/api", nonce="n-2"), NOW)

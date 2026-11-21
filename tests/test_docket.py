@@ -36,6 +36,7 @@ from agent_bailiff.docket import (
     verify_docket,
 )
 from agent_bailiff.docket import sink as sink_module
+from agent_bailiff.docket.client import UNACKNOWLEDGED
 from agent_bailiff.docket.protocol import (
     LENGTH,
     MAX_FRAME_BYTES,
@@ -1375,18 +1376,25 @@ def test_sink_refuses_a_free_space_floor_below_two_frames(paths):
 
 
 class FakeDisk:
-    def __init__(self, free):
+    def __init__(self, free, capacity=1 << 40):
         self.free = free
+        self.capacity = capacity
         self.error = None
 
     def statvfs(self, fd):
         if self.error is not None:
             raise self.error
         real = os.fstatvfs(fd)
-        return os.statvfs_result((real.f_bsize, 1, 0, 0, self.free, 0, 0, 0, 0, real.f_namemax))
+        return os.statvfs_result((real.f_bsize, 1, self.capacity, 0, self.free, 0, 0, 0, 0, real.f_namemax))
 
 
 FLOOR = 2 * MAX_FRAME_BYTES
+
+
+def refusal(client, entry):
+    with pytest.raises(DocketError) as error:
+        client.append(entry)
+    return error.value.reason
 
 
 def test_append_below_the_free_space_floor_is_refused_without_writing(paths, start_sink):
@@ -1396,9 +1404,8 @@ def test_append_below_the_free_space_floor_is_refused_without_writing(paths, sta
     first = client.append(make_entry(1))
     size = paths[0].stat().st_size
     disk.free = FLOOR
-    with pytest.raises(DocketError) as error:
-        client.append(make_entry(2))
-    assert error.value.reason == "docket_full"
+    assert refusal(client, make_entry(2)) == "docket_full"
+    assert "docket_full" not in UNACKNOWLEDGED
     assert paths[0].stat().st_size == size
     assert handle.sink.heads == {"decide": Head(seq=first.seq, hash=first.hash)}
 
@@ -1407,47 +1414,104 @@ def test_append_resumes_once_space_returns(paths, start_sink):
     disk = FakeDisk(free=FLOOR)
     start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
     client = decide_client(paths)
-    with pytest.raises(DocketError) as error:
-        client.append(make_entry(1))
-    assert error.value.reason == "docket_full"
+    assert refusal(client, make_entry(1)) == "docket_full"
     disk.free = 10 * FLOOR
     assert client.append(make_entry(1)).seq == 1
     assert len(lines(paths[0])) == 1
 
 
-def test_floor_counts_the_record_being_written(paths, start_sink):
-    disk = FakeDisk(free=FLOOR + 1)
-    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
-    with pytest.raises(DocketError) as error:
-        decide_client(paths).append(make_entry(1))
-    assert error.value.reason == "docket_full"
-    assert lines(paths[0]) == []
+def test_floor_admits_a_record_that_leaves_exactly_the_floor(paths, start_sink, workdir):
+    start_sink(statvfs=FakeDisk(free=10 * FLOOR).statvfs, free_space_floor=FLOOR)
+    first = decide_client(paths)
+    first.append(make_entry(1))
+    first.close()
+    length = paths[0].stat().st_size
+    other = (workdir / "other" / "docket.log", workdir / "other" / "s" / "docket.sock")
+    other[0].parent.mkdir(mode=0o700)
+    for free, admitted in ((FLOOR + length - 1, False), (FLOOR + length, True)):
+        disk = FakeDisk(free=free)
+        handle = RunningSink(
+            DocketSink(other[0], other[1], WRITERS, {os.getuid()}, statvfs=disk.statvfs, free_space_floor=FLOOR)
+        )
+        client = decide_client(other)
+        try:
+            if admitted:
+                client.append(make_entry(1))
+            else:
+                assert refusal(client, make_entry(1)) == "docket_full"
+        finally:
+            client.close()
+            handle.stop()
+    assert other[0].read_bytes() == paths[0].read_bytes()
 
 
-def test_free_space_check_failure_refuses_without_sticking(paths, start_sink):
+def test_free_space_check_failure_is_a_not_written_refusal(paths, start_sink):
     disk = FakeDisk(free=10 * FLOOR)
-    disk.error = OSError(errno.EIO, "injected statvfs failure")
     start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    disk.error = OSError(errno.EIO, "injected statvfs failure")
     client = decide_client(paths)
-    with pytest.raises(DocketError) as error:
-        client.append(make_entry(1))
-    assert error.value.reason == "write_failed"
+    assert refusal(client, make_entry(1)) == "space_check_failed"
+    assert "space_check_failed" not in UNACKNOWLEDGED
+    assert lines(paths[0]) == []
     disk.error = None
     assert client.append(make_entry(1)).seq == 1
 
 
-def test_docket_full_is_logged_once_per_interval(paths, start_sink, caplog):
+def test_a_write_failure_after_the_floor_check_still_stops_appends(paths, start_sink):
+    def full_fsync(fd):
+        if fd_kind(fd) == "file":
+            raise OSError(errno.ENOSPC, "injected ENOSPC")
+
+    armed = []
+    start_sink(
+        statvfs=FakeDisk(free=10 * FLOOR).statvfs,
+        free_space_floor=FLOOR,
+        fsync=lambda fd: full_fsync(fd) if armed else os.fsync(fd),
+    )
+    armed.append(True)
+    client = decide_client(paths)
+    assert refusal(client, make_entry(1)) == "write_failed"
+    assert refusal(client, make_entry(1)) == "sink_failed"
+
+
+def floor_logs(caplog):
+    return [record.message for record in caplog.records if record.name == sink_module.__name__]
+
+
+def test_floor_refusals_are_logged_once_per_interval(paths, start_sink, caplog):
+    disk = FakeDisk(free=FLOOR)
+    now = [0.0]
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR, clock=lambda: now[0])
+    disk.error = OSError(errno.EIO, "injected statvfs failure")
+    client = decide_client(paths)
+    for at in (0.0, 10.0, 20.0, 60.0):
+        now[0] = at
+        if at == 20.0:
+            disk.error = None
+        refusal(client, make_entry(1))
+    assert floor_logs(caplog) == [
+        "docket free-space check failed: [Errno 5] injected statvfs failure",
+        f"docket refusing appends: {FLOOR} bytes free, floor is {FLOOR} bytes",
+    ]
+
+
+def test_recovery_is_logged_and_a_new_incident_is_logged_at_once(paths, start_sink, caplog):
     disk = FakeDisk(free=FLOOR)
     now = [0.0]
     start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR, clock=lambda: now[0])
     client = decide_client(paths)
-    for at in (0.0, 30.0, 60.0):
-        now[0] = at
-        with pytest.raises(DocketError):
-            client.append(make_entry(1))
-    assert [record.message for record in caplog.records].count(
-        f"docket refusing appends: {FLOOR} bytes free, floor is {FLOOR} bytes"
-    ) == 2
+    refusal(client, make_entry(1))
+    disk.free = 10 * FLOOR
+    now[0] = 5.0
+    client.append(make_entry(1))
+    disk.free = FLOOR
+    now[0] = 10.0
+    refusal(client, make_entry(2))
+    assert floor_logs(caplog) == [
+        f"docket refusing appends: {FLOOR} bytes free, floor is {FLOOR} bytes",
+        f"docket appends resumed: {10 * FLOOR} bytes free",
+        f"docket refusing appends: {FLOOR} bytes free, floor is {FLOOR} bytes",
+    ]
 
 
 def current_snapshot(paths):
