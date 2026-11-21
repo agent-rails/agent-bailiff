@@ -38,6 +38,7 @@ from agent_bailiff.docket import (
 )
 from agent_bailiff.docket import sink as sink_module
 from agent_bailiff.docket.client import UNACKNOWLEDGED
+from agent_bailiff.docket.manifest import Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.protocol import (
     LENGTH,
     MAX_FRAME_BYTES,
@@ -1933,3 +1934,176 @@ def test_snapshot_start_of_10k_records_takes_under_half_a_full_start(paths):
         seal_first(paths, 8_000)
         sealed.append(timed_start(paths))
     assert min(sealed) / min(full) < 0.5
+
+
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def sealed_entry(docket_path, records):
+    content = docket_path.read_bytes()
+    last = records[-1]
+    return SegmentEntry(
+        1,
+        hashlib.sha256(content).hexdigest(),
+        len(content),
+        1,
+        len(records),
+        {"decide": Head(last.seq, last.hash)},
+        frozenset({"decide-1"}),
+    )
+
+
+def cut_first_segment(paths, records, *, commit=True, rename=True):
+    entry = sealed_entry(paths[0], records)
+    write_snapshot(snapshot_path(paths[0]), Snapshot(2, 0, len(records), EMPTY_SHA256))
+    if commit:
+        write_manifest(manifest_path(paths[0]), Manifest.new().sealed(entry))
+    if rename:
+        paths[0].rename(segment_path(paths[0], 1))
+
+
+def test_start_continues_the_chain_after_a_sealed_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    start_sink()
+    fourth = decide_client(paths).append(make_entry(4))
+    assert (fourth.seq, fourth.prev) == (4, records[-1].hash)
+    assert len(lines(paths[0])) == 1
+    assert current_snapshot(paths).segment == 2
+
+
+def test_a_writer_without_state_resumes_after_its_sealed_head(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    start_sink()
+    fresh = workdir / "fresh-state"
+    fresh.mkdir(mode=0o700)
+    client = decide_client(paths, state_dir=fresh)
+    assert client.head() == Head(3, records[-1].hash)
+    assert client.append(make_entry(4)).seq == 4
+
+
+def test_start_finishes_a_cut_that_committed_before_the_rename(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    sealed = paths[0].read_bytes()
+    cut_first_segment(paths, records, rename=False)
+    start_sink()
+    assert segment_path(paths[0], 1).read_bytes() == sealed
+    assert decide_client(paths).append(make_entry(4)).seq == 4
+    assert len(lines(paths[0])) == 1
+
+
+def test_start_ignores_the_snapshot_of_a_cut_that_did_not_commit(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records, commit=False, rename=False)
+    start_sink()
+    assert decide_client(paths).append(make_entry(4)).seq == 4
+    assert len(lines(paths[0])) == 4
+    assert not segment_path(paths[0], 1).exists()
+
+
+def test_start_removes_leftovers_of_an_interrupted_write(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    leftovers = [
+        paths[0].with_name(f"{paths[0].name}.new"),
+        manifest_path(paths[0]).with_name(f"{manifest_path(paths[0]).name}.tmp"),
+        snapshot_path(paths[0]).with_name(f"{snapshot_path(paths[0]).name}.tmp"),
+    ]
+    for leftover in leftovers:
+        leftover.write_bytes(b"partial")
+    start_sink()
+    assert not any(leftover.exists() for leftover in leftovers)
+
+
+def segment_refusal(start_sink):
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "segment_mismatch"
+    return error.value.report.detail
+
+
+def test_start_refuses_a_segment_file_without_a_manifest(paths, start_sink):
+    write_chain(paths, start_sink)
+    segment_path(paths[0], 1).write_bytes(b"stray")
+    assert "not in the manifest: docket.log.seg-000000000001" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_segment_file_the_manifest_does_not_list(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 2).write_bytes(b"stray")
+    assert "docket.log.seg-000000000002" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_sealed_segment_of_another_size(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    with open(segment_path(paths[0], 1), "ab") as segment:
+        segment.write(b"x")
+    assert "segment 1 is" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_missing_sealed_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 1).unlink()
+    assert "segment 1 is missing" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_docket_that_is_not_the_missing_segment(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records, rename=False)
+    content = lines(paths[0])
+    paths[0].write_text("\n".join([content[0], content[2], content[1]]) + "\n")
+    assert "segment 1 is missing and the docket is not it" in segment_refusal(start_sink)
+
+
+def test_start_refuses_an_invalid_manifest(paths, start_sink):
+    write_chain(paths, start_sink)
+    manifest_path(paths[0]).write_bytes(b"garbage")
+    os.chmod(manifest_path(paths[0]), 0o600)
+    assert "not a valid manifest" in segment_refusal(start_sink)
+
+
+def test_start_refuses_a_snapshot_behind_the_manifest(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    write_snapshot(snapshot_path(paths[0]), Snapshot(2, 0, 2, EMPTY_SHA256))
+    with pytest.raises(DocketCorrupt) as error:
+        start_sink()
+    assert error.value.report.reason == "snapshot_mismatch"
+
+
+def test_start_refuses_an_active_segment_that_restarts_a_sealed_chain(paths, start_sink):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    snapshot_path(paths[0]).unlink()
+    shutil.copy(segment_path(paths[0], 1), paths[0])
+    os.chmod(paths[0], 0o600)
+    with pytest.raises(DocketCorrupt):
+        start_sink()
+
+
+def test_repair_of_the_active_segment_keeps_the_sealed_chain(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    handle = start_sink()
+    fourth = decide_client(paths).append(make_entry(4))
+    handle.stop()
+    with open(paths[0], "a") as docket:
+        docket.write("partial")
+    report = repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert report.ok
+    assert report.heads["decide"] == Head(4, fourth.hash)
+    assert (workdir / "torn.tail").read_bytes() == b"partial"
+    assert current_snapshot(paths).segment == 2
+
+
+def test_repair_refuses_a_missing_sealed_segment(paths, start_sink, workdir):
+    records = write_chain(paths, start_sink)
+    cut_first_segment(paths, records)
+    segment_path(paths[0], 1).unlink()
+    with pytest.raises(DocketCorrupt) as error:
+        repair(paths[0], workdir / "torn.tail", WRITERS)
+    assert error.value.report.reason == "segment_mismatch"
