@@ -203,6 +203,7 @@ async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
         socket_gid=settings.socket_group,
         reader_gid=settings.reader_group,
         snapshot_every=settings.snapshot_every,
+        free_space_floor=settings.free_space_floor,
     )
     await sink.start()
     try:

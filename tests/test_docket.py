@@ -1368,6 +1368,88 @@ def test_sink_refuses_a_snapshot_cadence_below_one(paths):
             DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, snapshot_every=every)
 
 
+def test_sink_refuses_a_free_space_floor_below_two_frames(paths):
+    for floor in (0, 2 * MAX_FRAME_BYTES - 1, True, float(2 * MAX_FRAME_BYTES)):
+        with pytest.raises(ValueError, match="free_space_floor"):
+            DocketSink(paths[0], paths[1], WRITERS, {os.getuid()}, free_space_floor=floor)
+
+
+class FakeDisk:
+    def __init__(self, free):
+        self.free = free
+        self.error = None
+
+    def statvfs(self, fd):
+        if self.error is not None:
+            raise self.error
+        real = os.fstatvfs(fd)
+        return os.statvfs_result((real.f_bsize, 1, 0, 0, self.free, 0, 0, 0, 0, real.f_namemax))
+
+
+FLOOR = 2 * MAX_FRAME_BYTES
+
+
+def test_append_below_the_free_space_floor_is_refused_without_writing(paths, start_sink):
+    disk = FakeDisk(free=10 * FLOOR)
+    handle = start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    client = decide_client(paths)
+    first = client.append(make_entry(1))
+    size = paths[0].stat().st_size
+    disk.free = FLOOR
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(2))
+    assert error.value.reason == "docket_full"
+    assert paths[0].stat().st_size == size
+    assert handle.sink.heads == {"decide": Head(seq=first.seq, hash=first.hash)}
+
+
+def test_append_resumes_once_space_returns(paths, start_sink):
+    disk = FakeDisk(free=FLOOR)
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    client = decide_client(paths)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    assert error.value.reason == "docket_full"
+    disk.free = 10 * FLOOR
+    assert client.append(make_entry(1)).seq == 1
+    assert len(lines(paths[0])) == 1
+
+
+def test_floor_counts_the_record_being_written(paths, start_sink):
+    disk = FakeDisk(free=FLOOR + 1)
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    with pytest.raises(DocketError) as error:
+        decide_client(paths).append(make_entry(1))
+    assert error.value.reason == "docket_full"
+    assert lines(paths[0]) == []
+
+
+def test_free_space_check_failure_refuses_without_sticking(paths, start_sink):
+    disk = FakeDisk(free=10 * FLOOR)
+    disk.error = OSError(errno.EIO, "injected statvfs failure")
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR)
+    client = decide_client(paths)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    assert error.value.reason == "write_failed"
+    disk.error = None
+    assert client.append(make_entry(1)).seq == 1
+
+
+def test_docket_full_is_logged_once_per_interval(paths, start_sink, caplog):
+    disk = FakeDisk(free=FLOOR)
+    now = [0.0]
+    start_sink(statvfs=disk.statvfs, free_space_floor=FLOOR, clock=lambda: now[0])
+    client = decide_client(paths)
+    for at in (0.0, 30.0, 60.0):
+        now[0] = at
+        with pytest.raises(DocketError):
+            client.append(make_entry(1))
+    assert [record.message for record in caplog.records].count(
+        f"docket refusing appends: {FLOOR} bytes free, floor is {FLOOR} bytes"
+    ) == 2
+
+
 def current_snapshot(paths):
     return read_snapshot(snapshot_path(paths[0]), uid=os.geteuid())
 

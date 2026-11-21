@@ -28,6 +28,7 @@ from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket import DocketClient, decode_record
 from agent_bailiff.docket.entry import Entry
+from agent_bailiff.docket.protocol import MAX_FRAME_BYTES
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.keys import generate_signing_key, key_id
 from agent_bailiff.service import run
@@ -203,6 +204,7 @@ class Deployment:
             "allowed_uids": [UID],
             "writers": {name: self.pins(name) for name in self.keys},
             "snapshot_every": 10_000,
+            "free_space_floor": 256 << 20,
         }
 
     def control_document(self):
@@ -371,6 +373,10 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(snapshot_every=1.5),
         lambda doc: doc.update(snapshot_every=None),
         lambda doc: doc.pop("snapshot_every"),
+        lambda doc: doc.update(free_space_floor=2 * MAX_FRAME_BYTES - 1),
+        lambda doc: doc.update(free_space_floor=True),
+        lambda doc: doc.update(free_space_floor="268435456"),
+        lambda doc: doc.update(free_space_floor=None),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):
@@ -690,6 +696,11 @@ def test_snapshot_every_is_required(deployment):
         parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.pop("snapshot_every")))
 
 
+def test_free_space_floor_is_required(deployment):
+    with pytest.raises(ConfigError, match="missing free_space_floor"):
+        parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.pop("free_space_floor")))
+
+
 def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch):
     seen = {}
 
@@ -704,7 +715,10 @@ def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch)
             pass
 
     monkeypatch.setattr(run, "DocketSink", RecordingSink)
-    settings = parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.update(snapshot_every=7)))
+    settings = parse_docket(
+        mutate(deployment.documents["docket"], lambda doc: doc.update(snapshot_every=7, free_space_floor=1 << 30))
+    )
     with pytest.raises(RuntimeError, match="stop after construction"):
         asyncio.run(run.serve_docket(settings, asyncio.Event()))
     assert seen["snapshot_every"] == 7
+    assert seen["free_space_floor"] == 1 << 30

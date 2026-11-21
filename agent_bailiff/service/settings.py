@@ -14,7 +14,7 @@ from agent_bailiff.control.suspension import suspension_directory
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
-from agent_bailiff.docket.sink import Writers
+from agent_bailiff.docket.sink import MIN_FREE_SPACE_FLOOR, Writers
 from agent_bailiff.effector.rbac import EffectorIdentity, check_inputs
 from agent_bailiff.keys import check_component, parse_pinned_keys
 from agent_bailiff.strict_json import parse_strict_json
@@ -37,7 +37,16 @@ CUSTODIAN_KEYS = frozenset(
     | {"docket", "gateway"}
 )
 DOCKET_KEYS = frozenset(
-    {"docket", "socket", "socket_group", "reader_group", "allowed_uids", "writers", "snapshot_every"}
+    {
+        "docket",
+        "socket",
+        "socket_group",
+        "reader_group",
+        "allowed_uids",
+        "writers",
+        "snapshot_every",
+        "free_space_floor",
+    }
 )
 EFFECTOR_KEYS = frozenset(
     {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
@@ -218,6 +227,7 @@ class DocketSettings:
     allowed_uids: frozenset[int]
     writers: Writers
     snapshot_every: int
+    free_space_floor: int
 
 
 @dataclass(frozen=True)
@@ -376,6 +386,7 @@ def parse_docket(document: object) -> DocketSettings:
         allowed_uids=allowed,
         writers=_writers(config),
         snapshot_every=config.integer("snapshot_every", 1),
+        free_space_floor=config.integer("free_space_floor", MIN_FREE_SPACE_FLOOR),
     )
 
 
