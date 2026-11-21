@@ -144,6 +144,31 @@ def test_a_committed_cut_before_its_rename_waits_for_the_next_pass(docket, check
     assert collect(docket, checkpoint) == [3, 4]
 
 
+def stalled_follow(docket, checkpoint, caplog):
+    stop = threading.Event()
+    ticks = iter([0.0, 10.0, 31.0])
+
+    def clock():
+        moment = next(ticks, None)
+        if moment is None:
+            stop.set()
+            return 31.0
+        return moment
+
+    follower = DocketFollower(docket.path, INDEX, checkpoint, lambda batch, stop: None, poll_interval=0, clock=clock)
+    with caplog.at_level("WARNING", logger="agent_bailiff.docket.follower"):
+        follower.run(stop, follow=True)
+    return [record.getMessage() for record in caplog.records]
+
+
+def test_a_follower_warns_after_repeated_empty_passes(docket, checkpoint, caplog):
+    fill(docket, 1, 3)
+    cut(docket, rename=False)
+    assert stalled_follow(docket, checkpoint, caplog) == [
+        "docket segment 1 has been missing for 31s; start the sink to finish its cut"
+    ]
+
+
 def test_a_rename_that_finishes_after_a_failed_open_is_retried(docket, checkpoint, monkeypatch):
     fill(docket, 1, 3)
     manifest = cut(docket, rename=False)
