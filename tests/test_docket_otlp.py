@@ -24,7 +24,9 @@ from test_docket_report import PINS, WRITERS, Docket
 
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketCorrupt
+from agent_bailiff.docket.entry import Head
 from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, load_checkpoint
+from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, OtlpHttpExporter, span_id_for, to_span
 from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import VerifiedLine, build_kid_index
@@ -341,10 +343,12 @@ def test_follow_waits_for_new_records(docket, checkpoint):
 def test_a_replaced_docket_is_refused(docket, checkpoint):
     fill(docket, 2)
     export(docket, checkpoint, FakeExporter())
-    replacement = docket.path.with_name("replacement.log")
-    replacement.write_bytes(docket.path.read_bytes())
-    os.replace(replacement, docket.path)
-    with pytest.raises(CheckpointMismatch, match="not the file"):
+    other = Docket(docket.path.with_name("replacement.log"))
+    other.append("custodian", make_entry(1, hop="custodian", component="custodian"))
+    other.append("custodian", make_entry(2, hop="custodian", component="custodian"))
+    other.append("custodian", make_entry(3, hop="custodian", component="custodian"))
+    os.replace(other.path, docket.path)
+    with pytest.raises(CheckpointMismatch, match="first record"):
         export(docket, checkpoint, FakeExporter())
 
 
@@ -377,7 +381,10 @@ def test_a_checkpoint_with_a_loose_mode_is_refused(docket, checkpoint):
 @pytest.mark.parametrize(
     "change",
     [
-        {"version": 2},
+        {"version": 3},
+        {"version": 1},
+        {"segment": 0},
+        {"segment": True},
         {"extra": 1},
         {"offset": -1},
         {"entries": 0},
@@ -659,3 +666,18 @@ def test_a_second_exporter_on_the_same_checkpoint_is_refused(docket, checkpoint)
     assert export(docket, checkpoint, FakeExporter(during=second)) == 1
     assert attempts == [True]
     assert export(docket, checkpoint, FakeExporter()) == 0
+
+
+def test_cli_refuses_a_checkpoint_behind_a_removed_segment(docket, checkpoint, workdir, collector, capsys):
+    fill(docket, 2)
+    export(docket, checkpoint, FakeExporter())
+    heads = {writer: Head(*head) for writer, head in docket.heads.items()}
+    docket.path.rename(segment_path(docket.path, 1))
+    docket.path.touch(mode=0o600)
+    write_manifest(manifest_path(docket.path), Manifest("0" * 32, 2, Base(1, 2, heads)))
+    pin = workdir / "decide.pub.json"
+    pin.write_text(json.dumps(PINS["decide"].to_document()))
+    arguments = ["docket", "export", "--docket", str(docket.path), "--pin", str(pin)]
+    arguments += ["--checkpoint", str(checkpoint), "--otlp", collector.endpoint, "--once"]
+    assert cli.main(arguments) == 1
+    assert "segment 1 of" in capsys.readouterr().err
