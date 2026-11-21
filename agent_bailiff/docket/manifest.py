@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 from agent_warrant.canonical import canonicalize
 
 from agent_bailiff.docket.entry import Head
-from agent_bailiff.docket.state_file import StateFileInvalid, read_state_file, replace_state_file
+from agent_bailiff.docket.state_file import READER_MODE, StateFileInvalid, read_state_file, replace_state_file
 from agent_bailiff.strict_json import parse_strict_json
 
 MANIFEST_VERSION = 1
@@ -83,6 +84,16 @@ class Manifest:
         return 1 if self.base is None else self.base.segment + 1
 
     @property
+    def first_segment(self) -> int:
+        return 1 if self.base is None else self.base.segment + 1
+
+    def sealed_entry(self, segment: int) -> SegmentEntry | None:
+        position = segment - self.first_segment
+        if 0 <= position < len(self.segments):
+            return self.segments[position]
+        return None
+
+    @property
     def entries(self) -> int:
         if self.segments:
             last = self.segments[-1]
@@ -148,6 +159,18 @@ def read_manifest(path: Path, *, uid: int, reader_gid: int | None = None, dir_fd
         return Manifest.from_document(parse_strict_json(content))
     except (ValueError, UnicodeDecodeError) as exc:
         raise ManifestInvalid(f"{path} is not a valid manifest: {exc}") from None
+
+
+def read_docket_manifest(docket_path: Path) -> Manifest:
+    path = manifest_path(docket_path)
+    owner = os.stat(docket_path.parent).st_uid
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return Manifest.new()
+    reader_gid = info.st_gid if stat.S_IMODE(info.st_mode) == READER_MODE else None
+    manifest = read_manifest(path, uid=owner, reader_gid=reader_gid)
+    return Manifest.new() if manifest is None else manifest
 
 
 def write_manifest(
