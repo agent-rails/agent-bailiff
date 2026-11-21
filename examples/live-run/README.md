@@ -50,7 +50,7 @@ The three runs cost $0.089 in model usage together. Per-run output is written to
 
 ## Run it
 
-Requires the agentgateway v1.7.0 binary (`adapters/agentgateway/scripts/fetch_gateway.sh`), the generated proto stubs (`adapters/agentgateway/scripts/fetch_proto.sh`), and Claude Code signed in.
+Requires the agentgateway v1.7.0 binary (`adapters/agentgateway/scripts/fetch_gateway.sh`), the generated proto stubs (`adapters/agentgateway/scripts/generate_proto.sh`), and Claude Code signed in.
 
 ```sh
 .venv/bin/python examples/live-run/run.py --out live-run.json
