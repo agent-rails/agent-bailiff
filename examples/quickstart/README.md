@@ -207,6 +207,6 @@ $ docker compose --profile "*" down --volumes --remove-orphans
   - H3: containers share the host kernel. Isolation is as strong as separate host users, no stronger.
   - H5: the agent is a script. This shows what the gateway enforces, not how a model behaves under injection.
   - H6: an allowed tool used for harm inside its scope is not stopped (OWASP ASI02, LLM06).
-  - H7: tracing is optional (`trace` profile), built after the fact from verified docket records, and off the call path. It is not evidence; the docket is. Span delivery is at least once: a restart after a failed export can send a span again.
+  - H7: tracing is optional (`trace` profile), built after the fact from verified docket records, and off the call path. It is not evidence; the docket is. Span delivery is at least once: a restart after a failed export can send a span again. The trace id is the one in the agent's `traceparent` header, which the leaf proof does not bind, so the agent chooses which trace its records join, including another task's. The gateway forwards `traceparent` and `tracestate` to the upstream as the agent sent them.
   - H8: the task root comes from a local issuer key, not a human login. A later login flow uses device code; the password grant is forbidden (RFC 9700 section 2.4).
 - The gateway config is `gateway.json`, not `gateway.yaml`: `check-config` reads JSON only, and `gateway-check` verifies that same file against the routes and bindings before the gateway starts.
