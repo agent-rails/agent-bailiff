@@ -180,7 +180,15 @@ def _parser() -> argparse.ArgumentParser:
                 "--checkpoint", type=Path, required=True, help="checkpoint file in the archiver's own 0700 directory"
             )
             archive.add_argument("--poll-interval", type=float, default=10.0, help="seconds between manifest reads")
-            archive.add_argument("--once", action="store_true", help="archive every sealed segment, then exit")
+            archive.add_argument(
+                "--refresh-interval",
+                type=float,
+                default=900.0,
+                help="seconds, give or take 10%%, between rechecks of archived copies; keep under max_receipt_age",
+            )
+            archive.add_argument(
+                "--once", action="store_true", help="archive every sealed segment and recheck receipts, then exit"
+            )
             archive.set_defaults(handler=_archive_docket)
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
@@ -490,7 +498,13 @@ def _archive_docket(args: argparse.Namespace) -> int:
     try:
         index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
         archiver = DocketArchiver(
-            args.docket, index, args.archive, args.receipts, args.checkpoint, poll_interval=args.poll_interval
+            args.docket,
+            index,
+            args.archive,
+            args.receipts,
+            args.checkpoint,
+            poll_interval=args.poll_interval,
+            refresh_interval=args.refresh_interval,
         )
         archived = archiver.run(stop, follow=not args.once)
     except STARTUP_ERRORS + (InitError, ArchiveMismatch, ArchiverLocked, SegmentMismatch) as exc:
