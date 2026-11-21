@@ -6,7 +6,7 @@ import pytest
 import test_agentgateway_e2e
 import test_custodian
 from test_agentgateway_config import gateway_config
-from test_agentgateway_e2e import AGENT_TOKEN, BINARY, Agent, Gateway, agent_headers, free_port, refused
+from test_agentgateway_e2e import AGENT_TOKEN, BINARY, Agent, Gateway, agent_headers, free_ports, refused
 from test_custodian import NOW, docket_entries
 from test_decide import CUSTODIAN_ID, TENANT, make_request, make_root
 
@@ -83,11 +83,11 @@ def stack(binary, workdir, private, state, token, make_decider, make_custodian):
         server.start()
     config = gateway_config(sockets["decide"], sockets["custodian"], GITEA_MCP_URL, ["Authorization"])
     config["mcp"]["targets"][0]["name"] = "gitea"
-    config["mcp"]["port"] = free_port()
+    admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
-        "adminAddr": f"127.0.0.1:{free_port()}",
-        "statsAddr": f"127.0.0.1:{free_port()}",
-        "readinessAddr": f"127.0.0.1:{free_port()}",
+        "adminAddr": f"127.0.0.1:{admin}",
+        "statsAddr": f"127.0.0.1:{stats}",
+        "readinessAddr": f"127.0.0.1:{readiness}",
     }
     expected = GatewayExpectations(
         sockets["decide"], sockets["custodian"], ROUTES.services, frozenset({"Authorization"})
