@@ -608,16 +608,23 @@ class DocketSink:
         try:
             usage = self._statvfs(fd)
         except OSError as exc:
-            logger.error("docket free-space check failed: %s", exc)
-            return "write_failed"
+            self._log_refusal("docket free-space check failed: %s", exc)
+            return "space_check_failed"
         free = usage.f_bavail * usage.f_frsize
-        if free - length >= self._free_space_floor:
-            return None
+        if free - length < self._free_space_floor:
+            self._log_refusal("docket refusing appends: %d bytes free, floor is %d bytes", free, self._free_space_floor)
+            return "docket_full"
+        if self._floor_logged_at is not None:
+            self._floor_logged_at = None
+            logger.warning("docket appends resumed: %d bytes free", free)
+        return None
+
+    def _log_refusal(self, message: str, *args: object) -> None:
         now = self._clock()
-        if self._floor_logged_at is None or now - self._floor_logged_at >= FLOOR_LOG_INTERVAL:
-            self._floor_logged_at = now
-            logger.error("docket refusing appends: %d bytes free, floor is %d bytes", free, self._free_space_floor)
-        return "docket_full"
+        if self._floor_logged_at is not None and now - self._floor_logged_at < FLOOR_LOG_INTERVAL:
+            return
+        self._floor_logged_at = now
+        logger.error(message, *args)
 
     def _count_toward_snapshot(self) -> None:
         self._since_snapshot += 1
