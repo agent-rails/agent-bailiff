@@ -13,6 +13,7 @@ PROFILES = ("trace",)
 JAEGER_TIMEOUT_SECONDS = 60
 
 ALLOWED_LOG_SERVICES = {"gitea"}
+UPSTREAM_CASES = ("allowed", "missing issue", "missing repo")
 CONTROL = 3
 CREDENTIAL_SCRIPT = """
 import sys
@@ -112,6 +113,16 @@ def jaeger_hits(stack, patterns):
     return [index for index, needle in enumerate(patterns) if needle in traces]
 
 
+def raw_exchanges(stack):
+    output = stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "raw")
+    return {exchange["case"]: exchange for exchange in json.loads(output)["exchanges"]}
+
+
+def raw_hits(exchanges, patterns):
+    texts = {case: json.dumps(exchange) for case, exchange in exchanges.items()}
+    return {case: found for case, text in texts.items() if (found := [i for i, p in enumerate(patterns) if p in text])}
+
+
 def only_control(hits):
     return {index for _, index in hits} == {CONTROL}
 
@@ -129,3 +140,16 @@ def test_no_surface_holds_the_credential(stack):
     assert logs["bootstrap"] == [CONTROL]
     entry_id = verified_rows(stack, report["task_id"])[0]["entry"]["entry_id"]
     assert jaeger_hits(stack, [*patterns[:CONTROL], entry_id]) == [CONTROL]
+
+
+def test_no_response_to_the_agent_holds_the_credential(stack):
+    patterns = [*needles(plaintext_credential(stack)), "Triage the open issues"]
+    served = raw_exchanges(stack)
+    assert raw_hits(served, patterns) == {"allowed": [CONTROL]}, served
+    assert "status 404" in served["missing issue"]["body"] and "out_of_scope" in served["injected"]["body"], served
+    stack.compose("stop", "gitea")
+    failing = raw_exchanges(stack)
+    assert raw_hits(failing, patterns) == {}, failing
+    assert all('"isError":true' in failing[case]["body"] for case in UPSTREAM_CASES), failing
+    logs = log_hits(stack, patterns[:CONTROL])
+    assert set(logs) <= ALLOWED_LOG_SERVICES, logs
