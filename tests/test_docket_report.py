@@ -336,7 +336,7 @@ def test_verify_with_a_matching_snapshot_succeeds(docket, pin_files, capsys):
     code, out, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
     assert code == 0, err
     assert out == plain[1]
-    assert f"snapshot at offset {snapshot.offset} matches the docket" in err
+    assert f"snapshot at offset {snapshot.offset} matches the docket, 1 records after it" in err
 
 
 def test_verify_without_the_flag_prints_no_snapshot_line(docket, pin_files, capsys):
@@ -351,7 +351,7 @@ def test_an_empty_snapshot_matches_any_docket(docket, pin_files, capsys):
     filled(docket)
     code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
     assert code == 0, err
-    assert "snapshot at offset 0 matches" in err
+    assert "snapshot at offset 0 matches the docket, 4 records after it" in err
 
 
 def other_anchor(snapshot):

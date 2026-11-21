@@ -420,7 +420,11 @@ def _verify_docket(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_REFUSED
-    print(f"{PROG} docket verify: snapshot at offset {check.snapshot.offset} matches the docket", file=sys.stderr)
+    print(
+        f"{PROG} docket verify: snapshot at offset {check.snapshot.offset} matches the docket, "
+        f"{check.records_after(report.entries)} records after it",
+        file=sys.stderr,
+    )
     return 0
 
 

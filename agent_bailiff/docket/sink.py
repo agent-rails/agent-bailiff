@@ -439,7 +439,7 @@ class DocketSink:
         try:
             write_snapshot(self._snapshot_path, self._chain.snapshot(), reader_gid=self._reader_gid, fsync=self._fsync)
         except OSError:
-            logger.exception("docket snapshot write failed; the old snapshot is kept")
+            logger.exception("docket snapshot write failed; the snapshot on disk is the old or the new one")
         except Exception:
             self._snapshots_enabled = False
             logger.exception("docket snapshot write failed unexpectedly; snapshots are off until restart")
