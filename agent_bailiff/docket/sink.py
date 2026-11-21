@@ -26,6 +26,8 @@ from agent_bailiff.docket.manifest import (
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import LENGTH, MAX_FRAME_BYTES, OP_APPEND, OP_HEAD, encode_response
+from agent_bailiff.docket.receipt import ReceiptDir, ReceiptInvalid
+from agent_bailiff.docket.retention import Retention, removable
 from agent_bailiff.docket.snapshot import (
     Anchor,
     Snapshot,
@@ -59,6 +61,8 @@ DEFAULT_SEGMENT_BYTES = 256 << 20
 MIN_SEGMENT_BYTES = 64 << 20
 FLOOR_LOG_INTERVAL = 60.0
 CUT_RETRY_INTERVAL = 30.0
+REMOVAL_INTERVAL = 60.0
+MAX_REMOVALS = 64
 PREFIX_READ_BYTES = 1 << 20
 SNAPSHOT_MISMATCH = "snapshot_mismatch"
 SEGMENT_MISMATCH = "segment_mismatch"
@@ -248,7 +252,7 @@ def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: 
     try:
         lock_fd = _lock_docket(docket_path, directory_fd)
         manifest = _read_manifest(docket_path, directory_fd, reader_gid)
-        _reconcile(docket_path, directory_fd, manifest, reader_gid, os.fsync)
+        _reconcile(docket_path, directory_fd, manifest, reader_gid, os.fsync, None)
         fd = os.open(docket_path.name, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         try:
             _check_docket_file(fd, docket_path, reader_gid)
@@ -286,13 +290,24 @@ def _read_manifest(docket_path: Path, directory_fd: int, reader_gid: int | None)
 
 
 def _reconcile(
-    docket_path: Path, directory_fd: int, manifest: Manifest, reader_gid: int | None, fsync: Callable[[int], None]
+    docket_path: Path,
+    directory_fd: int,
+    manifest: Manifest,
+    reader_gid: int | None,
+    fsync: Callable[[int], None],
+    receipts: ReceiptDir | None,
 ) -> None:
     name = docket_path.name
     for leftover in (f"{name}.new", f"{manifest_path(docket_path).name}.tmp", f"{snapshot_path(docket_path).name}.tmp"):
         _unlink_if_present(leftover, directory_fd)
     expected = {segment_path(docket_path, entry.segment).name for entry in manifest.segments}
     present = {item for item in os.listdir(directory_fd) if item.startswith(f"{name}.seg-")}
+    removed = None if manifest.base is None else segment_path(docket_path, manifest.base.segment).name
+    if manifest.base is not None and removed in present:
+        _finish_removal(
+            docket_path, directory_fd, manifest.docket_id, manifest.base.segment, reader_gid, fsync, receipts
+        )
+        present.discard(removed)
     unknown = sorted(present - expected)
     if unknown:
         raise DocketCorrupt(_segment_mismatch(f"segment files not in the manifest: {', '.join(unknown)}"))
@@ -309,6 +324,31 @@ def _reconcile(
         raise DocketCorrupt(_segment_mismatch(f"segment {last.segment} is missing and the docket is not it"))
     logger.warning("finishing the cut of docket segment %d", last.segment)
     os.rename(name, last_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+    fsync(directory_fd)
+
+
+def _finish_removal(
+    docket_path: Path,
+    directory_fd: int,
+    docket_id: str,
+    segment: int,
+    reader_gid: int | None,
+    fsync: Callable[[int], None],
+    receipts: ReceiptDir | None,
+) -> None:
+    path = segment_path(docket_path, segment)
+    info = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+    _check_docket_stat(info, path, reader_gid)
+    try:
+        tombstone = None if receipts is None else receipts.read(segment)
+    except ReceiptInvalid as exc:
+        raise DocketCorrupt(_segment_mismatch(f"segment {segment} left the manifest but its receipt: {exc}")) from None
+    if tombstone is None or tombstone.docket_id != docket_id or tombstone.size != info.st_size:
+        raise DocketCorrupt(
+            _segment_mismatch(f"segment {segment} left the manifest but its file does not match its receipt")
+        )
+    logger.warning("finishing the removal of docket segment %d", segment)
+    os.unlink(path.name, dir_fd=directory_fd)
     fsync(directory_fd)
 
 
@@ -387,9 +427,11 @@ class DocketSink:
         snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
         free_space_floor: int = DEFAULT_FREE_SPACE_FLOOR,
         segment_bytes: int = DEFAULT_SEGMENT_BYTES,
+        retention: Retention | None = None,
         fsync: Callable[[int], None] = os.fsync,
         statvfs: Callable[[int], os.statvfs_result] = os.fstatvfs,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         if type(snapshot_every) is not int or snapshot_every < 1:
             raise ValueError("snapshot_every must be an integer of at least 1")
@@ -397,6 +439,10 @@ class DocketSink:
             raise ValueError(f"free_space_floor must be an integer of at least {MIN_FREE_SPACE_FLOOR}")
         if type(segment_bytes) is not int or segment_bytes < 1:
             raise ValueError("segment_bytes must be an integer of at least 1")
+        if retention is not None and reader_gid is None:
+            raise ValueError("retention needs a reader_gid for its receipt directory")
+        if retention is not None and retention.retained_bytes < 2 * segment_bytes:
+            raise ValueError("retained_bytes must be at least twice segment_bytes")
         self._docket_path = docket_path
         self._socket_path = socket_path
         self._writers = writers
@@ -414,6 +460,13 @@ class DocketSink:
         self._clock = clock
         self._free_space_floor = free_space_floor
         self._segment_bytes = segment_bytes
+        self._retention = retention
+        self._wall_clock = wall_clock
+        self._receipts: ReceiptDir | None = None
+        self._removal_timer: asyncio.TimerHandle | None = None
+        self._removal: asyncio.Task[None] | None = None
+        self._unremoved: int | None = None
+        self._removals_stopped = False
         self._cut_pending = False
         self._cut_retry_at: float | None = None
         self._floor_logged_at: float | None = None
@@ -449,7 +502,11 @@ class DocketSink:
         try:
             self._docket_lock_fd = _lock_docket(self._docket_path, directory_fd)
             self._manifest = _read_manifest(self._docket_path, directory_fd, self._reader_gid)
-            _reconcile(self._docket_path, directory_fd, self._manifest, self._reader_gid, self._fsync)
+            if self._retention is not None and self._reader_gid is not None:
+                self._receipts = ReceiptDir.open(
+                    self._retention.receipt_dir, archiver_uid=self._retention.archiver_uid, reader_gid=self._reader_gid
+                )
+            _reconcile(self._docket_path, directory_fd, self._manifest, self._reader_gid, self._fsync, self._receipts)
         finally:
             os.close(directory_fd)
         self._fd = self._open_docket()
@@ -467,6 +524,9 @@ class DocketSink:
         os.chown(self._socket_path, -1, self._socket_gid)
         os.chmod(self._socket_path, SOCKET_MODE)
         self._started = True
+        if self._receipts is not None:
+            self._start_removal()
+            self._arm_removal()
 
     def _load_heads(self, fd: int) -> None:
         try:
@@ -602,6 +662,15 @@ class DocketSink:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        if self._removal_timer is not None:
+            self._removal_timer.cancel()
+            self._removal_timer = None
+        if self._removal is not None:
+            await self._removal
+            self._removal = None
+        if self._receipts is not None:
+            self._receipts.close()
+            self._receipts = None
         if self._started:
             self._started = False
             self._write_snapshot()
@@ -816,6 +885,7 @@ class DocketSink:
         self._failed = False
         self._cut_retry_at = None
         logger.info("docket segment %d sealed at %d bytes", entry.segment, entry.size)
+        self._start_removal()
 
     def _abort_cut(self, segment: int) -> None:
         self._failed = False
@@ -823,6 +893,119 @@ class DocketSink:
         logger.exception(
             "docket cut of segment %d aborted; the first append after %d s retries it", segment, CUT_RETRY_INTERVAL
         )
+
+    def _arm_removal(self) -> None:
+        self._removal_timer = asyncio.get_running_loop().call_later(REMOVAL_INTERVAL, self._on_removal_timer)
+
+    def _on_removal_timer(self) -> None:
+        self._start_removal()
+        self._arm_removal()
+
+    def _start_removal(self) -> None:
+        if self._receipts is None or (self._removal is not None and not self._removal.done()):
+            return
+        self._removal = asyncio.get_running_loop().create_task(self._remove_due())
+
+    async def _remove_due(self) -> None:
+        if self._receipts is None or self._retention is None or self._removals_stopped:
+            return
+        for _ in range(MAX_REMOVALS):
+            if not await self._remove_oldest(self._receipts, self._retention):
+                break
+        self._report_retention(self._retention)
+
+    async def _remove_oldest(self, receipts: ReceiptDir, retention: Retention) -> bool:
+        if self._unremoved is not None and not await self._unlink_removed(self._unremoved):
+            return False
+        oldest = self._manifest.segments[0] if self._manifest.segments else None
+        if oldest is None or self._retained_bytes() <= retention.retained_bytes:
+            return False
+        try:
+            receipt = await asyncio.to_thread(receipts.read, oldest.segment)
+        except (OSError, ReceiptInvalid) as exc:
+            logger.error("receipt for docket segment %d cannot be read (%s); the segment is kept", oldest.segment, exc)
+            return False
+        if self._failed or self._fd is None:
+            return False
+        entry = removable(
+            self._manifest,
+            receipt,
+            retained_bytes=self._retained_bytes(),
+            cap=retention.retained_bytes,
+            now=int(self._wall_clock()),
+            max_age=retention.max_receipt_age,
+        )
+        if entry is None:
+            return False
+        manifest = self._manifest.removed_oldest()
+        try:
+            write_manifest(manifest_path(self._docket_path), manifest, reader_gid=self._reader_gid, fsync=self._fsync)
+        except DirectorySyncFailed:
+            self._manifest = manifest
+            self._removals_stopped = True
+            logger.exception(
+                "docket removal of segment %d may not be durable; removals stop until restart", entry.segment
+            )
+            return False
+        except (OSError, ManifestInvalid):
+            logger.exception(
+                "docket removal of segment %d failed; it is retried in %d s", entry.segment, REMOVAL_INTERVAL
+            )
+            return False
+        self._manifest = manifest
+        self._unremoved = entry.segment
+        return await self._unlink_removed(entry.segment)
+
+    async def _unlink_removed(self, segment: int) -> bool:
+        try:
+            await asyncio.to_thread(self._unlink_segment, segment)
+        except OSError:
+            logger.exception(
+                "docket segment %d left the manifest but its file was not removed; it is retried in %d s",
+                segment,
+                REMOVAL_INTERVAL,
+            )
+            return False
+        self._unremoved = None
+        logger.info("docket segment %d removed", segment)
+        return True
+
+    def _unlink_segment(self, segment: int) -> None:
+        directory_fd = open_private_dir(self._docket_path.parent)
+        try:
+            _unlink_if_present(segment_path(self._docket_path, segment).name, directory_fd)
+            self._fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _retained_bytes(self) -> int:
+        return self._manifest.sealed_bytes + self._chain.offset
+
+    def _report_retention(self, retention: Retention) -> None:
+        retained = self._retained_bytes()
+        if retained > retention.retained_bytes:
+            logger.error(
+                "docket retains %d bytes, over its %d byte cap; the oldest segment waits for a fresh archive receipt",
+                retained,
+                retention.retained_bytes,
+            )
+            return
+        if self._fd is None:
+            return
+        try:
+            usage = self._statvfs(self._fd)
+        except OSError:
+            logger.exception("docket free-space check after removal failed")
+            return
+        free = usage.f_bavail * usage.f_frsize
+        if free < self._free_space_floor:
+            logger.error(
+                "docket file system has %d bytes free, under the %d byte floor, while the docket retains %d bytes "
+                "within its cap; an open reader or another file holds the space",
+                free,
+                self._free_space_floor,
+                retained,
+            )
 
     def _replace_active(self, segment: int) -> int:
         name = self._docket_path.name
