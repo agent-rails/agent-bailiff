@@ -319,6 +319,16 @@ def test_the_agent_mounts_no_bailiff_state(stack):
     assert "network_mode" not in agent
 
 
+def pip_absent(stack, service, *arguments):
+    probe = "import importlib.util; print(importlib.util.find_spec('pip') is None)"
+    run = [*arguments, "run", "--rm", "--no-deps", "--entrypoint", "python", service, "-c", probe]
+    return stack.compose(*run).strip() == "True"
+
+
+def test_the_image_ships_without_pip(stack):
+    assert pip_absent(stack, "agent", "--profile", "agent")
+
+
 def test_bootstrap_rerun_idempotent(stack):
     before = stack.probe(SNAPSHOT_SCRIPT)
     outputs = {service: stack.compose("run", "--rm", "--no-deps", service) for service in ONE_SHOTS}

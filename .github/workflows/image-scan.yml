@@ -29,7 +29,7 @@ jobs:
       - name: Build images
         run: |
           docker build --file examples/quickstart/Dockerfile --target quickstart --tag agent-bailiff-quickstart:scan .
-          docker build --file examples/quickstart/Dockerfile --target trace --tag agent-bailiff-quickstart-trace:scan .
+          docker build --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt --tag agent-bailiff-quickstart-trace:scan .
           docker build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:scan .
       - name: Scan images
         run: |

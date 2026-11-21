@@ -19,7 +19,9 @@ x-trace: &trace
   build:
     context: ../..
     dockerfile: examples/quickstart/Dockerfile
-    target: trace
+    target: quickstart
+    args:
+      REQUIREMENTS: examples/quickstart/trace-requirements.txt
 
 x-once: &once
   restart: "no"
