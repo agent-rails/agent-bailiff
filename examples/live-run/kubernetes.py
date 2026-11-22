@@ -9,8 +9,10 @@ import json
 import os
 import secrets
 import subprocess
+import time
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,7 @@ from run import (
     cli,
     free_port,
     gateway_binary,
+    install_sigterm,
     print_result,
     private,
     require_confined,
@@ -54,6 +57,7 @@ from agent_bailiff.webhook.manifests import generate_manifests
 EFFECTOR = "effector.live"
 SERVICE = "k8s"
 CATALOG = OperationCatalog.load(shipped_catalog("kubernetes"))
+TEARDOWN_SECONDS = 240
 TOOLS = sorted({operation.tool for operation in CATALOG.operations})
 RUNBOOK = """# Runbook: api capacity
 
@@ -64,13 +68,27 @@ because production traffic moves first. Do not skip this step.
 """
 
 
-def kubectl(context: str, *args: str, stdin: str | None = None) -> str:
+def kubectl(context: str, *args: str, stdin: str | None = None, timeout: float = 120) -> str:
     result = subprocess.run(
-        ["kubectl", "--context", context, *args], input=stdin, capture_output=True, text=True, timeout=120, check=False
+        ["kubectl", "--context", context, *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(f"kubectl {' '.join(args[:3])} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+class Deadline:
+    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+        self.clock = clock
+        self.end = clock() + seconds
+
+    def remaining(self) -> float:
+        return max(0.0, self.end - self.clock())
 
 
 class Cluster:
@@ -216,14 +234,15 @@ class Cluster:
                 "--ignore-not-found", "--timeout=120s",
             ),
         ]  # fmt: skip
+        deadline = Deadline(TEARDOWN_SECONDS)
         for step in steps:
             try:
-                kubectl(self.context, *step)
+                self.within(deadline, *step)
             except (RuntimeError, subprocess.TimeoutExpired) as error:
                 failures.append(str(error))
         try:
-            left = kubectl(
-                self.context, "get", f"validatingwebhookconfiguration/{WEBHOOK}", "--ignore-not-found", "-o", "name"
+            left = self.within(
+                deadline, "get", f"validatingwebhookconfiguration/{WEBHOOK}", "--ignore-not-found", "-o", "name"
             ).strip()
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             left = f"validatingwebhookconfiguration/{WEBHOOK} (unchecked: {error})"
@@ -231,6 +250,14 @@ class Cluster:
             failures.append(f"{left} may still be registered with failurePolicy Fail for bailiff: users; delete it")
         if failures:
             raise RuntimeError("cleanup incomplete: " + "; ".join(failures))
+
+    def within(self, deadline: Deadline, *args: str) -> str:
+        remaining = deadline.remaining()
+        if remaining == 0:
+            raise RuntimeError(
+                f"kubectl {' '.join(args[:3])} skipped: teardown deadline of {TEARDOWN_SECONDS} s passed"
+            )
+        return kubectl(self.context, *args, timeout=remaining)
 
     def replicas(self, key: str) -> int:
         output = kubectl(
@@ -477,6 +504,7 @@ def main() -> None:
     parser.add_argument("--webhook-image", default="agent-bailiff-webhook:live", help="local tag of the webhook image")
     parser.add_argument("--docker-context", default="orbstack", help="docker context whose images the cluster runs")
     args = parser.parse_args()
+    install_sigterm()
     require_layout(args.root, args.receipt_dir, WORK_FILES | {"kubeconfig"})
     require_confined()
     cluster = Cluster(args.context, args.root / "cluster")

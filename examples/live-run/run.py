@@ -113,6 +113,13 @@ def require_confined(status: Path = Path("/proc/self/status")) -> None:
         raise RuntimeError("the harness must run with no effective capabilities and no_new_privs set")
 
 
+def install_sigterm() -> None:
+    def stop(signum: int, frame: object) -> None:
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, stop)
+
+
 def minimal_environment() -> dict[str, str]:
     return {key: os.environ[key] for key in CLAUDE_ENVIRONMENT_KEYS if key in os.environ}
 
@@ -638,6 +645,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_layout_arguments(parser)
     args = parser.parse_args()
+    install_sigterm()
     require_layout(args.root, args.receipt_dir, WORK_FILES)
     require_confined()
     deployment = Deployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)

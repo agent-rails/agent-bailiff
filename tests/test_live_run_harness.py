@@ -1,11 +1,15 @@
 import json
 import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "live-run"))
+LIVE_RUN = Path(__file__).resolve().parent.parent / "examples" / "live-run"
+sys.path.insert(0, str(LIVE_RUN))
+import kubernetes  # noqa: E402
 import run  # noqa: E402
 
 
@@ -200,3 +204,65 @@ def test_an_empty_token_file_is_refused(tmp_path):
     token.write_text("\n")
     with pytest.raises(RuntimeError, match="is empty"):
         run.run_claude("p", {"mcp_config": tmp_path, "workspace": tmp_path, "claude_token": token}, "m")
+
+
+SIGTERM_CHILD = """import sys, time
+import run
+run.install_sigterm()
+try:
+    print("ready", flush=True)
+    time.sleep(30)
+finally:
+    open(sys.argv[1], "w").write("finally ran")
+"""
+
+
+def test_sigterm_runs_the_finally_block(tmp_path):
+    marker = tmp_path / "marker"
+    child = subprocess.Popen(
+        [sys.executable, "-c", SIGTERM_CHILD, str(marker)], cwd=LIVE_RUN, stdout=subprocess.PIPE, text=True
+    )
+    assert child.stdout.readline() == "ready\n"
+    child.send_signal(signal.SIGTERM)
+    assert child.wait(10) == 143
+    assert marker.read_text() == "finally ran"
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_the_deadline_gives_each_call_the_remaining_time():
+    clock = Clock()
+    deadline = kubernetes.Deadline(240, clock)
+    clock.now = 100
+    assert deadline.remaining() == 140
+    clock.now = 300
+    assert deadline.remaining() == 0
+
+
+def test_teardown_continues_past_an_expired_deadline_and_names_every_step(tmp_path, monkeypatch):
+    clock = Clock()
+    timeouts = []
+
+    def slow_kubectl(context, *args, stdin=None, timeout=120):
+        timeouts.append(timeout)
+        clock.now += 200
+        return ""
+
+    monkeypatch.setattr(kubernetes, "kubectl", slow_kubectl)
+    deadline = kubernetes.Deadline
+    monkeypatch.setattr(kubernetes, "Deadline", lambda seconds: deadline(seconds, clock))
+    cluster = object.__new__(kubernetes.Cluster)
+    cluster.context, cluster.created = "orbstack", True
+    cluster.namespaces = {key: f"bl-x-{key}" for key in ("sys", "hook", "staging", "prod")}
+    cluster.manifests = cluster.webhook_manifests = tmp_path / "absent.json"
+    with pytest.raises(RuntimeError, match="cleanup incomplete") as raised:
+        cluster.down()
+    assert timeouts == [240, 40]
+    assert "skipped: teardown deadline" in str(raised.value)
+    assert "unchecked" in str(raised.value)
