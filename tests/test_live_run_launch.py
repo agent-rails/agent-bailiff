@@ -225,3 +225,11 @@ def test_the_result_file_is_private_and_never_overwritten(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         launch.write_result(path, {"run_id": "r2"})
+
+
+@pytest.mark.parametrize(("platform", "expected"), [(None, []), ("linux/amd64", ["--platform", "linux/amd64"])])
+def test_an_image_is_built_for_the_platform_asked_or_natively(monkeypatch, platform, expected):
+    calls = []
+    monkeypatch.setattr(launch.subprocess, "run", lambda command, **options: calls.append(command))
+    assert launch.build_image("orbstack", "Dockerfile", "t:1", platform) == "t:1"
+    assert calls == [["docker", "--context", "orbstack", "build", *expected, "-f", "Dockerfile", "-t", "t:1", "."]]

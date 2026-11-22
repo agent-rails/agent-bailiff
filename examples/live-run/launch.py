@@ -40,9 +40,10 @@ class RunSpec:
     webhook_image: str | None = None
 
 
-def build_image(docker_context: str, dockerfile: str, tag: str) -> str:
+def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | None = None) -> str:
+    target = ["--platform", platform] if platform else []
     subprocess.run(
-        ["docker", "--context", docker_context, "build", "--platform", "linux/amd64", "-f", dockerfile, "-t", tag, "."],
+        ["docker", "--context", docker_context, "build", *target, "-f", dockerfile, "-t", tag, "."],
         cwd=REPO,
         check=True,
         timeout=1800,
@@ -183,7 +184,7 @@ def main() -> None:
         build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
         webhook = resolve_digest(args.docker_context, WEBHOOK_TAG)
     image = resolve_digest(
-        args.docker_context, build_image(args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG)
+        args.docker_context, build_image(args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64")
     )
     spec = RunSpec(
         script=args.script,
@@ -195,11 +196,9 @@ def main() -> None:
         docker_context=args.docker_context,
         webhook_image=webhook,
     )
-    process = subprocess.Popen(
-        container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+    process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
-        stdout, stderr = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
+        stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
     except subprocess.TimeoutExpired:
         subprocess.run(
             ["docker", "--context", spec.docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{spec.run_id}"],
@@ -208,9 +207,8 @@ def main() -> None:
         )
         process.wait(30)
         raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
-    sys.stderr.write(stderr.decode(errors="replace"))
     if process.returncode != 0:
-        if kubernetes and b"the cluster is locked" in stderr:
+        if kubernetes:
             print(report_lock(args.context, args.docker_context), file=sys.stderr)
         raise SystemExit(process.returncode)
     write_result(spec.out, read_result(stdout.decode(), spec.run_id))
