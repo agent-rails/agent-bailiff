@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import os
 import urllib.parse
 
@@ -18,7 +19,7 @@ from agent_bailiff.effector.drift import (
     RbacGate,
     grants,
 )
-from agent_bailiff.effector.kubernetes import KubernetesUnavailable
+from agent_bailiff.effector.kubernetes import KubernetesUnavailable, Throttled
 from agent_bailiff.effector.platform import DANGEROUS_ACTIONS, VERSION_PATH
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
@@ -133,6 +134,7 @@ class FakeApi:
         self.service = {"spec": {"selector": {"app.kubernetes.io/name": webhook.NAME, webhook.MODE_LABEL: "enforce"}}}
         self.version = {"gitVersion": "v1.36.5"}
         self.throttled = 0
+        self.retry_after = None
         self.closed = False
 
     def close(self):
@@ -142,7 +144,7 @@ class FakeApi:
         self.requests.append((method, path, headers["Authorization"]))
         if self.throttled:
             self.throttled -= 1
-            return 429, b""
+            raise Throttled(self.retry_after)
         url = urllib.parse.urlsplit(path)
         query = dict(urllib.parse.parse_qsl(url.query))
         if url.path == VERSION_PATH:
@@ -760,9 +762,48 @@ def test_a_throttled_request_is_retried_with_bounded_backoff(api, audit):
 
 def test_a_request_throttled_past_the_retries_fails_the_check(api, audit):
     api.throttled = 6
-    with pytest.raises(KubernetesUnavailable):
+    with pytest.raises(KubernetesUnavailable, match="GET /version was throttled 6 times"):
         audit.check()
     assert len(SLEEPS) == 5
+
+
+@pytest.mark.parametrize(("retry_after", "low"), [(0.0, 0.0), (3.0, 3.0), (60.0, 8.0)])
+def test_a_throttled_request_waits_the_retry_after_with_jitter_up_to_the_cap(api, audit, retry_after, low):
+    api.throttled = 2
+    api.retry_after = retry_after
+    assert audit.check() == []
+    assert len(SLEEPS) == 2 and all(low <= delay <= low + 0.5 for delay in SLEEPS)
+
+
+def test_the_audit_counts_its_requests_and_throttles_for_each_check(api, audit):
+    api.throttled = 2
+    audit.check()
+    assert audit.traffic() == (len(api.requests), 2)
+    api.requests.clear()
+    audit.check()
+    assert audit.traffic() == (len(api.requests), 0)
+
+
+def test_dangerous_action_reviews_do_not_grow_with_the_cluster_namespaces(api, gke_audit):
+    gke_audit.check()
+    few = len(api.self_reviews)
+    api.self_reviews.clear()
+    api.namespaces += [f"team-{index}" for index in range(1000)]
+    assert gke_audit.check() == []
+    assert len(api.self_reviews) == few
+
+
+@pytest.mark.parametrize(("seconds", "alarm"), [(0, False), (60, False), (61, True)])
+def test_the_gate_logs_each_check_cost_and_alarms_past_half_the_window(api, audit, caplog, seconds, alarm):
+    times = iter([1000, 1000 + seconds])
+    gate = RbacGate(audit, lambda: next(times), interval=60)
+    with caplog.at_level(logging.INFO, logger="agent_bailiff.effector.drift"):
+        gate.verify()
+    requests, throttled = audit.traffic()
+    assert f"effector RBAC check took {seconds} s: {requests} requests, {throttled} throttled" in caplog.messages
+    warned = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    expected = [f"effector RBAC check took {seconds} s, over half its 120 s freshness window"]
+    assert warned == (expected if alarm else [])
 
 
 def test_the_release_webhook_is_read_with_the_audit_token(api, audit):

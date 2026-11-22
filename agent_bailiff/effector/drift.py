@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agent_bailiff.effector.catalog import CatalogOperation
-from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
+from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Throttled, Transport, read_token
 from agent_bailiff.effector.platform import (
     DANGEROUS_ACTIONS,
     VERSION_PATH,
@@ -166,8 +166,17 @@ class RbacAudit:
             account: self._granted_to(account) for account in (identity.service_account, identity.audit_account)
         }
         self._tokens = {identity.service_account: effector_token, identity.audit_account: audit_token}
+        self._traffic_lock = threading.Lock()
+        self._requests = 0
+        self._throttled = 0
+
+    def traffic(self) -> tuple[int, int]:
+        with self._traffic_lock:
+            return self._requests, self._throttled
 
     def check(self) -> list[str]:
+        with self._traffic_lock:
+            self._requests = self._throttled = 0
         problems = check_version(self._platform, self._request(self._audit_token, "GET", VERSION_PATH, None))
         if problems:
             return problems
@@ -465,10 +474,18 @@ class RbacAudit:
             payload = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
         for attempt in range(THROTTLE_RETRIES + 1):
-            status, data = self._transport.request(method, path, headers, payload)
-            if status != 429 or attempt == THROTTLE_RETRIES:
-                break
-            self._sleep(random.uniform(0, min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2**attempt)))
+            try:
+                status, data = self._transport.request(method, path, headers, payload)
+            except Throttled as exc:
+                self._count(throttled=True)
+                if attempt == THROTTLE_RETRIES:
+                    raise KubernetesUnavailable(
+                        f"{method} {path.split('?')[0]} was throttled {THROTTLE_RETRIES + 1} times"
+                    ) from None
+                self._sleep(_backoff(attempt, exc.retry_after))
+                continue
+            self._count(throttled=False)
+            break
         if status != 200 and status != 201:
             raise KubernetesUnavailable(f"{method} {path.split('?')[0]} returned {status}")
         try:
@@ -478,6 +495,11 @@ class RbacAudit:
         if not isinstance(document, dict):
             raise KubernetesUnavailable(f"{path} did not return an object")
         return document
+
+    def _count(self, *, throttled: bool) -> None:
+        with self._traffic_lock:
+            self._requests += 1
+            self._throttled += throttled
 
 
 class RbacGate:
@@ -505,6 +527,7 @@ class RbacGate:
             problems = [f"the RBAC check failed: {exc}"]
         restart_problems = [] if problems else self._extra("the Deployment schema", self._audit.check_restart_schema)
         write_problems = [] if problems else self._extra("the release webhook", self._audit.check_release_webhook)
+        self._log_cost(self._clock() - now)
         with self._lock:
             self._verified_at = None if problems else now
             self._restart_verified_at = None if problems or restart_problems else now
@@ -532,6 +555,17 @@ class RbacGate:
         with self._lock:
             verified, write = self._verified_at, self._write_verified_at
         return self._fresh(verified, now) and self._fresh(write, now)
+
+    def _log_cost(self, seconds: int) -> None:
+        requests, throttled = self._audit.traffic()
+        logger.info("effector RBAC check took %d s: %d requests, %d throttled", seconds, requests, throttled)
+        window = 2 * self._interval
+        if 2 * seconds > window:
+            logger.warning(
+                "effector RBAC check took %d s, over half its %d s freshness window",
+                seconds,
+                window,
+            )
 
     def _extra(self, subject: str, check: Callable[[], list[str]]) -> list[str]:
         try:
@@ -561,6 +595,12 @@ class RbacGate:
             except RbacDrift:
                 logger.error("the effector refuses calls until its RBAC matches the generated set")
             delay = min(self._interval, max(0, self._interval - (self._clock() - started)))
+
+
+def _backoff(attempt: int, retry_after: float | None) -> float:
+    if retry_after is None:
+        return random.uniform(0, min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * 2**attempt))
+    return min(RETRY_MAX_SECONDS, retry_after) + random.uniform(0, RETRY_BASE_SECONDS)
 
 
 def _key(item: Mapping[str, Any], kind: str | None = None) -> Key:
