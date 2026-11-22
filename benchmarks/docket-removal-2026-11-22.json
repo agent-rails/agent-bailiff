@@ -1,0 +1,41 @@
+{
+  "recorded_at": "2026-11-22T01:09:54+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "python": "3.13.15"
+  },
+  "removals_per_pass": 64,
+  "passes": [
+    {
+      "retained_segments": 1,
+      "manifest_bytes_before": 15609,
+      "pass_seconds": 0.068,
+      "write_manifest_ms": {
+        "p50": 0.553,
+        "p99": 0.961,
+        "max": 1.103
+      },
+      "loop_stall_ms": {
+        "p50": 0.015,
+        "p99": 1.055,
+        "max": 1.57
+      }
+    },
+    {
+      "retained_segments": 2000,
+      "manifest_bytes_before": 502462,
+      "pass_seconds": 1.53,
+      "write_manifest_ms": {
+        "p50": 11.281,
+        "p99": 21.834,
+        "max": 22.736
+      },
+      "loop_stall_ms": {
+        "p50": 0.018,
+        "p99": 23.771,
+        "max": 33.728
+      }
+    }
+  ]
+}
