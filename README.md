@@ -54,7 +54,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 |---|---|
 | `agent_bailiff.decide` | Verify a call and issue a clearance |
 | `agent_bailiff.custodian` | Store credentials encrypted; release one per clearance |
-| `agent_bailiff.docket` | Signed, append-only security trace |
+| `agent_bailiff.docket` | Signed, hash-chained security trace, cut into segments and archived |
 | `agent_bailiff.adapters.agentgateway` | agentgateway `ExtMcp` processors and `check-config` |
 | `agent_bailiff.effector` | Operation catalog, effector MCP server, Kubernetes client, generated RBAC and admission, drift check |
 | `agent_bailiff.webhook` | Release-verifying admission webhook, drift/access audit, bounded structured security events |
@@ -91,13 +91,14 @@ Each component has its own commands, run as that component's uid:
 - `agent-bailiff init {decide,custodian,control,docket}` creates the component's config; for decide, custodian and control it also creates the signing key. Decide starts with a deny-all policy and the custodian with no credential bindings.
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
 - `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
-- `agent-bailiff docket verify` checks every record against pinned writer keys; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
+- `agent-bailiff docket verify` checks every record on the host against pinned writer keys, and with `--archive` every record from the first; `docket archive` copies sealed segments to separate storage and writes the receipt the sink needs before it removes one; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, one call end to end, data and signed records
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): assets, attackers, mitigations and residual risks
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits
+- [docs/CLIENT.md](docs/CLIENT.md): agent-side client, refusal actions, delegating to a sub-agent and route schemas
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 - [docs/EFFECTOR.md](docs/EFFECTOR.md): the Kubernetes effector, its catalog, generated RBAC and admission, drift check and limits
