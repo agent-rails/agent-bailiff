@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from agent_bailiff.client import BailiffClient, Holder, Outcome, PreparedCall, Refused, Result
-from agent_bailiff.routes import ToolRoute, ToolRoutes
+from agent_bailiff.routes import ToolRoutes
 
 STATE = Path("/var/lib/bailiff")
 AGENT_KEY = STATE / "agent" / "agent.key"
@@ -36,7 +36,12 @@ ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text(
 SERVICE = "gitea"
 ORG = "quickstart"
 INJECTED_TOOL = "get_file_contents"
-UNROUTED = {"service": SERVICE, "name": "issue_write", "tool": "gitea.issues.write", "resource": "gitea/issues"}
+UNROUTED = {
+    "service": SERVICE,
+    "name": "issue_write",
+    "tool": "gitea.issues.write",
+    "resource": "gitea/repos/quickstart/demo/issues",
+}
 RAW_LIMIT_BYTES = 4 * 1024 * 1024
 RAW_TIMEOUT_SECONDS = 30
 RAW_CASES: tuple[tuple[str, str, dict[str, Any]], ...] = (
@@ -102,12 +107,12 @@ def load_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(AGENT_KEY.read_text().strip()))
 
 
-def client_for(task: dict[str, str], key: Ed25519PrivateKey, extra: Sequence[dict[str, str]] = ()) -> BailiffClient:
+def client_for(task: dict[str, str], key: Ed25519PrivateKey, extra: Sequence[dict[str, Any]] = ()) -> BailiffClient:
     holder = Holder(task["task_root"], (), key, task["decider_id"])
-    return BailiffClient(GATEWAY_URL, holder, ToolRoutes([ToolRoute(**route) for route in [*ROUTES, *extra]]))
+    return BailiffClient(GATEWAY_URL, holder, ToolRoutes.from_document({"routes": [*ROUTES, *extra]}))
 
 
-def open_client(extra: Sequence[dict[str, str]] = ()) -> tuple[BailiffClient, str]:
+def open_client(extra: Sequence[dict[str, Any]] = ()) -> tuple[BailiffClient, str]:
     task = json.loads(TASK_FILE.read_text())
     return client_for(task, load_key(), extra), task["task_id"]
 
@@ -157,7 +162,7 @@ def run_scenarios(client: BailiffClient) -> list[Check]:
     replayed = client.send(retained)
     checks.append(expect("replayed call refused", "refused: already_*", replayed, refused_already))
     payroll = client.call(SERVICE, "list_issues", {"owner": ORG, "repo": "payroll"})
-    checks.append(expect("disclosed: list_issues on payroll stays allowed", "result", payroll, is_result))
+    checks.append(expect("other repository refused", "refused: out_of_scope", payroll, refused_with("out_of_scope")))
     arguments = {"method": "create", "owner": ORG, "repo": "demo", "title": "written by the agent"}
     unrouted = client.call(SERVICE, UNROUTED["name"], arguments)
     unknown = refused_with("unknown_tool")

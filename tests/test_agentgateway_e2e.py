@@ -30,6 +30,7 @@ from agent_bailiff.adapters.agentgateway.server import ProcessorServer
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.effector.catalog import Argument
 from agent_bailiff.routes import ToolRoute, ToolRoutes
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +43,14 @@ ROUTES = ToolRoutes(
         ToolRoute("deploy", "deploy_service", "deploy.service", "env/staging/api"),
         ToolRoute("deploy", "deploy_production", "deploy.service", "env/prod/api"),
         ToolRoute("deploy", "deploy_canary", "deploy.canary", "env/staging/api"),
+        ToolRoute(
+            "deploy",
+            "deploy_named",
+            "deploy.service",
+            "env/{stage}/{service}",
+            (Argument("stage", "identifier"), Argument("service", "identifier")),
+            strict=False,
+        ),
     ]
 )
 STARTUP_SECONDS = 15
@@ -362,6 +371,30 @@ def test_an_out_of_scope_call_is_refused_and_reaches_no_upstream(stack):
     request = make_request(resource="env/prod/api")
     status, body = stack["agent"].call("deploy_production", request.args, agent_headers(request))
     assert refused(body, "out_of_scope"), body
+    assert stack["upstream"].calls() == []
+
+
+def test_a_templated_route_takes_its_resource_from_the_arguments(stack):
+    arguments = {"stage": "staging", "service": "api", "replicas": 2}
+    request = make_request(resource="env/staging/api", args=arguments)
+    status, body = stack["agent"].call("deploy_named", arguments, agent_headers(request))
+    assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
+    assert len(stack["upstream"].calls()) == 1
+
+
+def test_a_templated_route_naming_another_resource_is_refused_and_reaches_no_upstream(stack):
+    arguments = {"stage": "prod", "service": "api", "replicas": 2}
+    request = make_request(resource="env/prod/api", args=arguments)
+    status, body = stack["agent"].call("deploy_named", arguments, agent_headers(request))
+    assert refused(body, "out_of_scope"), body
+    assert stack["upstream"].calls() == []
+
+
+def test_a_templated_route_with_a_bad_argument_is_malformed_and_reaches_no_upstream(stack):
+    arguments = {"stage": "..", "service": "api", "replicas": 2}
+    request = make_request(resource="env/staging/api", args=arguments)
+    status, body = stack["agent"].call("deploy_named", arguments, agent_headers(request))
+    assert refused(body, "malformed_request"), body
     assert stack["upstream"].calls() == []
 
 
