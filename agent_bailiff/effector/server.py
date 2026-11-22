@@ -67,18 +67,18 @@ class Effector:
             return _error("malformed_request")
         if self._suspension.suspended is not False:
             return _error("suspended")
-        if not self._rbac.healthy(now):
-            return _error("rbac_unverified")
         try:
             checked = self._check.verify(params.get("name"), params.get("arguments", {}), release_token, now)
             self._check.claim(checked, now)
         except ReleaseRefused as refusal:
             logger.warning("effector refused a call: %s", refusal.reason)
             return _error(refusal.reason)
+        if not self._rbac.healthy(now):
+            return self._refuse(checked, "rbac_unverified", now)
         if checked.operation.call.restarts and not self._rbac.restart_healthy(now):
-            return _error("restart_unverified")
+            return self._refuse(checked, "restart_unverified", now)
         if checked.operation.call.verb == "patch" and not self._rbac.write_healthy(now):
-            return _error("webhook_unverified")
+            return self._refuse(checked, "webhook_unverified", now)
         attempt = self._entry(checked, "attempt", now)
         if not self._record(attempt):
             return _error("docket_unavailable")
@@ -127,6 +127,10 @@ class Effector:
         if len(text.encode()) > checked.operation.max_response_bytes:
             return _error("response_too_large")
         return {"content": [{"type": "text", "text": text}], "isError": False}
+
+    def _refuse(self, checked: CheckedCall, reason: str, now: int) -> dict[str, Any]:
+        self._record(replace(self._entry(checked, "outcome", now), outcome="refused", reason=reason))
+        return _error(reason)
 
     def _entry(self, checked: CheckedCall, decision: str, now: int) -> Entry:
         release, clearance = checked.release, checked.clearance
