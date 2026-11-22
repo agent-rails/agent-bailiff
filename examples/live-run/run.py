@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import secrets
 import shutil
 import signal
@@ -33,7 +34,8 @@ from agent_bailiff.service.settings import load_docket
 HERE = Path(__file__).resolve().parent
 PYTHON = Path(sys.executable)
 CLI = PYTHON.parent / "agent-bailiff"
-GATEWAY = Path.home() / ".cache/agent-bailiff/agentgateway/v1.7.0/agentgateway-darwin-arm64"
+GATEWAY_VERSION = "v1.7.0"
+GATEWAY_PLATFORMS = {("darwin", "arm64"): "darwin-arm64", ("linux", "x86_64"): "linux-amd64"}
 UID, GID = os.geteuid(), os.getegid()
 TENANT, PRINCIPAL, ISSUER = "acme", "user:alice", "issuer.live"
 DECIDE, CUSTODIAN, CONTROL = "decide.live", "custodian.live", "control.live"
@@ -71,6 +73,19 @@ def cli(*arguments: object, stdin: str | None = None) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"agent-bailiff {arguments[:2]} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def gateway_binary() -> Path:
+    name = GATEWAY_PLATFORMS.get((sys.platform, platform.machine()))
+    if name is None:
+        raise RuntimeError(f"no pinned agentgateway {GATEWAY_VERSION} binary for {sys.platform} {platform.machine()}")
+    cache = os.environ.get("AGENT_BAILIFF_CACHE") or str(
+        Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "agent-bailiff"
+    )
+    binary = Path(cache) / "agentgateway" / GATEWAY_VERSION / f"agentgateway-{name}"
+    if not binary.is_file():
+        raise RuntimeError(f"{binary} is missing; run adapters/agentgateway/scripts/fetch_gateway.sh")
+    return binary
 
 
 def free_port() -> int:
@@ -311,7 +326,7 @@ class Deployment:
             str(self.upstream_log),
         ]
         self.spawn("upstream", upstream, port=self.upstream_port)
-        self.spawn("gateway", [str(GATEWAY), "-f", str(self.gateway_config)], port=self.gateway_port)
+        self.spawn("gateway", [str(gateway_binary()), "-f", str(self.gateway_config)], port=self.gateway_port)
 
     def spawn(self, name: str, command: list[str], path: Path | None = None, port: int | None = None) -> None:
         log = open(self.logs / f"{name}.log", "wb")

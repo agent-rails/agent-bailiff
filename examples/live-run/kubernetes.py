@@ -20,7 +20,6 @@ import shim
 from agent_warrant.identity import encode_public_key
 from run import (
     CLI,
-    GATEWAY,
     GID,
     ISSUER,
     PRINCIPAL,
@@ -32,6 +31,7 @@ from run import (
     agent_saw,
     cli,
     free_port,
+    gateway_binary,
     private,
     run_claude,
     write_owned,
@@ -365,11 +365,7 @@ class KubernetesDeployment(Deployment):
             [str(CLI), "effector", "run", "--config", str(self.root / "effector" / "config.json")],
             port=self.effector_port,
         )
-        self.spawn("gateway", [str(self.gateway_binary()), "-f", str(self.gateway_config)], port=self.gateway_port)
-
-    def gateway_binary(self) -> Path:
-
-        return GATEWAY
+        self.spawn("gateway", [str(gateway_binary()), "-f", str(self.gateway_config)], port=self.gateway_port)
 
     def catalog_task(self, task_id: str) -> dict[str, Any]:
         scope = {
