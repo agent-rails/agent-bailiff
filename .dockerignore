@@ -14,3 +14,10 @@ agent_bailiff/adapters/agentgateway/_proto
 !examples/quickstart/routes.json
 !examples/quickstart/trace-requirements.txt
 !examples/quickstart/proto-requirements.txt
+!examples/live-run/run.py
+!examples/live-run/kubernetes.py
+!examples/live-run/shim.py
+!examples/live-run/upstream.py
+!examples/live-run/entrypoint.sh
+!examples/live-run/package.json
+!examples/live-run/package-lock.json
