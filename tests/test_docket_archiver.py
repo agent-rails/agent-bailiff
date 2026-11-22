@@ -743,3 +743,44 @@ def test_refresh_keeps_the_tombstone_and_removes_older_receipts(layout):
     assert [receipt(layout, segment) is not None for segment in (1, 2, 3)] == [False, True, True]
     tombstone = receipt(layout, 2)
     assert tombstone.verified_at == NOW
+
+
+def replace_copies_dir(layout, manifest):
+    live = copies(layout, manifest)
+    os.rename(live, layout[0] / "archive" / "detached")
+    live.mkdir(mode=0o750)
+    os.chown(live, -1, GID)
+    os.chmod(live, 0o750)
+
+
+def test_writes_no_receipt_once_the_archive_dir_is_replaced_at_its_path(layout):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    instance = archiver(layout)
+    instance._open()
+    try:
+        assert instance._archive_next()
+        replace_copies_dir(layout, manifest)
+        docket.append("decide", make_entry(5))
+        cut(docket, manifest)
+        with pytest.raises(ArchiveMismatch, match="no longer the directory the archiver opened"):
+            instance._archive_next()
+    finally:
+        instance._close()
+    assert receipt(layout, 2) is None
+
+
+def test_refreshes_no_receipt_once_the_archive_dir_is_replaced_at_its_path(layout):
+    manifest = two_segments(layout[1])
+    clock = Clock()
+    instance = archiver(layout, clock=clock)
+    instance._open()
+    try:
+        assert instance._archive_next() and instance._archive_next()
+        replace_copies_dir(layout, manifest)
+        clock.now = NOW + 1
+        with pytest.raises(ArchiveMismatch, match="no longer the directory the archiver opened"):
+            instance._refresh_next()
+    finally:
+        instance._close()
+    assert receipt(layout, 1).verified_at == NOW
