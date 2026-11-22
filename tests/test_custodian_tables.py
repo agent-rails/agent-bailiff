@@ -13,6 +13,7 @@ from agent_bailiff.custodian import (
     OwnedFileError,
     TaskRateLimiter,
 )
+from agent_bailiff.custodian.bindings import EffectorBinding
 
 NOW = 1_800_000_000
 DEPLOY = {
@@ -91,12 +92,40 @@ def test_malformed_binding_table_is_refused(state, document):
         ("resource", "env/*/api"),
         ("resource", "env/staging*"),
         ("resource", "env/../prod/*"),
+        ("resource", "env/staging-*"),
         ("tool", "deploy.*"),
     ],
 )
 def test_binding_outside_the_scope_grammar_is_refused(field, value):
     with pytest.raises(BindingTableError):
         CredentialBinding(**{**DEPLOY, field: value})
+
+
+@pytest.mark.parametrize("resource", ["gitea/repos/acme-*", "gitea/repos/acme.*", "gitea/repos/acme_*"])
+def test_binding_pattern_that_stops_inside_a_segment_is_refused_at_load(state, resource):
+    with pytest.raises(BindingTableError, match="must end at /"):
+        BindingTable.load(write_table(state / "bindings.json", {"bindings": [{**DEPLOY, "resource": resource}]}))
+
+
+@pytest.mark.parametrize("resource", ["gitea/repos/acme-*", "gitea/repos/acme.*"])
+def test_effector_binding_pattern_that_stops_inside_a_segment_is_refused(resource):
+    with pytest.raises(BindingTableError, match="must end at /"):
+        EffectorBinding(
+            tenant="tenant-a",
+            tool="k8s.scale",
+            resource=resource,
+            credential_id="effector",
+            target="k8s.example",
+            catalog="A" * 43,
+        )
+
+
+def test_binding_pattern_that_ends_at_a_segment_loads(state):
+    table = BindingTable.load(
+        write_table(state / "bindings.json", {"bindings": [{**DEPLOY, "resource": "gitea/repos/acme/*"}]})
+    )
+    assert table.resolve("tenant-a", "deploy.service", "gitea/repos/acme/issues") is not None
+    assert table.resolve("tenant-a", "deploy.service", "gitea/repos/acme-evil/issues") is None
 
 
 @pytest.mark.parametrize(

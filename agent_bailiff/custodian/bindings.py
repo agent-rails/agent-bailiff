@@ -8,6 +8,7 @@ from pathlib import Path
 from agent_warrant.scope import covers, validate_entry
 
 from agent_bailiff.custodian.files import read_owned
+from agent_bailiff.scope_pattern import is_bounded
 from agent_bailiff.strict_json import parse_strict_json
 
 BINDINGS_LABEL = "binding table"
@@ -41,6 +42,8 @@ class CredentialBinding:
         reason = validate_entry(self.resource)
         if reason:
             raise BindingTableError(f"resource is not a valid scope entry: {reason}")
+        if not is_bounded(self.resource):
+            raise BindingTableError("resource pattern must end at /")
         if not HEADER_NAME.fullmatch(self.header_name):
             raise BindingTableError("header_name must be an HTTP field name token")
         if not isinstance(self.canary, bool):
@@ -73,6 +76,8 @@ class EffectorBinding:
         reason = validate_entry(self.resource)
         if reason:
             raise BindingTableError(f"resource is not a valid scope entry: {reason}")
+        if not is_bounded(self.resource):
+            raise BindingTableError("resource pattern must end at /")
         if not isinstance(self.catalog, str) or not CATALOG_DIGEST.fullmatch(self.catalog):
             raise BindingTableError("catalog must be the effector catalog digest")
 
