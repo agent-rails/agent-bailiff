@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import asdict, replace
@@ -416,10 +417,70 @@ def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
     assert docket.entries[-1].outcome == "done"
 
 
+def refusals(docket):
+    return [(entry.decision, entry.outcome, entry.reason, entry.parent_entry) for entry in docket.entries]
+
+
 def test_no_call_is_made_while_rbac_is_unverified(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert transport.requests == []
+    assert refusals(docket) == [("outcome", "refused", "rbac_unverified", "f" * 32)]
+
+
+def test_a_release_refused_after_its_claim_is_consumed(token_file):
+    instance, transport, docket = effector(token_file, rbac_healthy=False)
+    release = release_for()
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    instance._rbac.value = True
+    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "release_replayed"
+    assert transport.requests == [] and len(docket.entries) == 1
+
+
+def test_a_release_that_fails_verification_is_refused_before_rbac_health_and_not_recorded(token_file):
+    instance, transport, docket = effector(token_file, rbac_healthy=False)
+    release = release_for(audience="effector.other")
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "release_wrong_audience"
     assert transport.requests == [] and docket.entries == []
+
+
+def test_replaying_a_refused_release_records_one_refusal(token_file):
+    instance, transport, docket = effector(token_file, rbac_healthy=False)
+    release = release_for()
+    reasons = [instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] for _ in range(1000)]
+    assert reasons[0] == "rbac_unverified" and set(reasons[1:]) == {"release_replayed"}
+    assert transport.requests == [] and len(docket.entries) == 1
+
+
+def test_a_busy_or_early_claim_is_logged_and_not_recorded(token_file, monkeypatch):
+    monkeypatch.setattr("agent_bailiff.effector.release.MAX_TRACKED_RELEASES", 1)
+    instance, transport, docket = effector(token_file)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
+    busy = release_for(clearance_for(op_id="op-busy"))
+    assert instance.call(scale_params(), busy, NOW + 2)["content"][0]["text"] == "effector_busy"
+    early, _, early_docket = effector(token_file, started_at=NOW + 1)
+    assert early.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "release_predates_start"
+    assert [entry.decision for entry in docket.entries] == ["attempt", "outcome"] and early_docket.entries == []
+
+
+def test_concurrent_calls_with_one_release_perform_it_once(token_file):
+    instance, transport, docket = effector(token_file)
+    release = release_for()
+    barrier = threading.Barrier(16)
+    results = []
+
+    def call():
+        barrier.wait()
+        results.append(instance.call(scale_params(), release, NOW + 2))
+
+    threads = [threading.Thread(target=call) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(result["isError"] is False for result in results) == 1
+    assert {result["content"][0]["text"] for result in results if result["isError"]} == {"release_replayed"}
+    assert len(transport.requests) == 1
 
 
 @pytest.mark.parametrize("started_at", [NOW + 1, NOW + 2])
@@ -616,7 +677,8 @@ def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run
     clearance = clearance_for("restart_deployment", arguments, op_id="op-restart-1")
     result = instance.call({"name": "restart_deployment", "arguments": arguments}, release_for(clearance), NOW + 2)
     assert result["content"][0]["text"] == "restart_unverified"
-    assert transport.requests == [] and docket.entries == []
+    assert transport.requests == []
+    assert refusals(docket) == [("outcome", "refused", "restart_unverified", "f" * 32)]
     assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
 
 
@@ -624,7 +686,8 @@ def test_a_write_is_refused_without_a_verified_release_webhook_while_reads_run(t
     instance, transport, docket = effector(token_file)
     instance._rbac.write = False
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "webhook_unverified"
-    assert transport.requests == [] and docket.entries == []
+    assert transport.requests == []
+    assert refusals(docket) == [("outcome", "refused", "webhook_unverified", "f" * 32)]
     arguments = {"namespace": "staging", "limit": 5}
     clearance = clearance_for("list_pods", arguments, op_id="op-list-1")
     assert (
