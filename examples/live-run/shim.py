@@ -87,7 +87,10 @@ class Shim:
         with open(self.state["request_log"], "a") as log:
             record = {"headers": dict(call.headers), "body": json.loads(call.body), "raw": call.body.decode()}
             log.write(json.dumps(record) + "\n")
-        return send(self.client, call)
+        result = send(self.client, call)
+        with open(self.state["result_log"], "a") as log:
+            log.write(json.dumps({"tool": name, "result": result}) + "\n")
+        return result
 
     def read_document(self, name: str) -> dict[str, Any]:
         workspace = Path(self.state["workspace"]).resolve()
