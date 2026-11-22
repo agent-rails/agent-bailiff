@@ -118,11 +118,18 @@ def send(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
         return text(f"gateway_error: {error}", error=True)
 
 
+GUIDANCE = {
+    "stop": "agent-bailiff refused this call under the task's authority; do not retry it or get its effect another way",
+    "ask_user": "agent-bailiff needs a human before this call; stop and tell the user",
+    "retry_later": "an agent-bailiff component was unavailable; the call was not made and may be tried again later",
+}
+
+
 def mcp_result(outcome: Outcome) -> dict[str, Any]:
     if isinstance(outcome, Result):
         return dict(outcome.result)
     if isinstance(outcome, Refused | NeedsApproval):
-        return text(outcome.reason, error=True)
+        return text(f"{outcome.reason}: {GUIDANCE[outcome.action]}", error=True)
     if isinstance(outcome, OutcomeUnknown):
         return text(f"outcome_unknown: {outcome.detail}", error=True)
     raise AssertionError(f"unexpected outcome {outcome!r}")
