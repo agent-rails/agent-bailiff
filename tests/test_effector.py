@@ -15,7 +15,7 @@ from agent_bailiff.decide.identity import snapshot_args
 from agent_bailiff.docket.entry import Record
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.kubernetes import KubernetesClient, KubernetesUnavailable, project, request_path
-from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
+from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig, ReleaseRefused
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
 
 NOW = 1_800_000_000
@@ -253,6 +253,24 @@ def test_a_release_is_used_once(token_file):
     assert instance.call(scale_params(), release, NOW + 2)["isError"] is False
     assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "release_replayed"
     assert len(transport.requests) == 1
+
+
+def test_verifying_a_release_claims_nothing():
+    check = ReleaseCheck(CONFIG, CATALOG, NOW - 1)
+    release = release_for()
+    checked = check.verify("scale_deployment", SCALE_ARGS, release, NOW + 2)
+    assert check.verify("scale_deployment", SCALE_ARGS, release, NOW + 2) == checked
+    check.claim(checked, NOW + 2)
+    assert check.verify("scale_deployment", SCALE_ARGS, release, NOW + 3) == checked
+    with pytest.raises(ReleaseRefused, match="release_replayed"):
+        check.claim(checked, NOW + 3)
+
+
+def test_a_verified_release_from_before_the_start_is_refused_at_claim():
+    check = ReleaseCheck(CONFIG, CATALOG, NOW + 1)
+    checked = check.verify("scale_deployment", SCALE_ARGS, release_for(now=NOW + 1), NOW + 3)
+    with pytest.raises(ReleaseRefused, match="release_predates_start"):
+        check.claim(checked, NOW + 3)
 
 
 def test_a_suspended_or_unreadable_suspension_refuses_before_any_check(token_file):
