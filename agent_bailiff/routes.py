@@ -19,6 +19,7 @@ class ToolRoute:
     tool: str
     resource: str
     schema: tuple[Argument, ...] | None = None
+    strict: bool = True
 
     def __post_init__(self) -> None:
         for name in ("service", "name", "tool", "resource"):
@@ -28,16 +29,16 @@ class ToolRoute:
         problem = validate_entry(self.tool)
         if problem or "*" in self.tool:
             raise ValueError(f"tool must be a concrete scope id: {problem or 'no wildcards'}")
+        if not isinstance(self.strict, bool):
+            raise ValueError("strict must be a bool")
         placeholders = set(PLACEHOLDER.findall(self.resource))
         if self.schema is None and placeholders:
             raise ValueError("a resource template needs an argument schema")
-        if self.schema is None and self.tool.startswith(CATALOG_TOOL_PREFIX):
+        if (self.schema is None or not self.strict) and self.tool.startswith(CATALOG_TOOL_PREFIX):
             raise ValueError(f"{CATALOG_TOOL_PREFIX}* tools are routed only from their catalog")
         if self.schema is not None:
             object.__setattr__(self, "schema", tuple(self.schema))
-            labels = {item.name for item in self.schema if item.kind == "label"}
-            if not placeholders <= labels:
-                raise ValueError("every resource placeholder must be a label argument in the schema")
+            _check_schema(self.schema, placeholders, self.strict)
         filled = PLACEHOLDER.sub("x", self.resource)
         problem = validate_entry(filled)
         if problem or any(character in filled for character in "*{}"):
@@ -46,14 +47,49 @@ class ToolRoute:
     def resource_for(self, arguments: dict[str, Any]) -> str | None:
         if self.schema is None:
             return self.resource
-        if set(arguments) != {item.name for item in self.schema}:
+        names = {item.name for item in self.schema}
+        if self.strict and set(arguments) != names:
+            return None
+        if not names <= set(arguments):
             return None
         if not all(item.accepts(arguments[item.name]) for item in self.schema):
             return None
-        return PLACEHOLDER.sub(lambda match: str(arguments[match.group(1)]), self.resource)
+        resource = PLACEHOLDER.sub(lambda match: str(arguments[match.group(1)]), self.resource)
+        return None if validate_entry(resource) else resource
+
+
+def _check_schema(schema: tuple[Argument, ...], placeholders: set[str], strict: bool) -> None:
+    if strict:
+        labels = {item.name for item in schema if item.kind == "label"}
+        if not placeholders <= labels:
+            raise ValueError("every resource placeholder must be a label argument in the schema")
+        return
+    if not all(isinstance(item, Argument) and item.kind == "identifier" for item in schema):
+        raise ValueError("a route document schema names identifier arguments only")
+    names = [item.name for item in schema]
+    if len(set(names)) != len(names):
+        raise ValueError("a route document schema names each argument once")
+    if set(names) != placeholders:
+        raise ValueError("a route document schema names exactly the resource placeholders")
+
+
+def _document_schema(document: object) -> tuple[Argument, ...]:
+    if not isinstance(document, list):
+        raise ValueError("a route schema must be a list")
+    arguments = []
+    for item in document:
+        if not isinstance(item, dict) or set(item) != SCHEMA_ITEM_FIELDS:
+            raise ValueError("each schema item must have exactly the fields kind, name")
+        if not isinstance(item["name"], str) or not isinstance(item["kind"], str):
+            raise ValueError("a schema item's name and kind must be strings")
+        arguments.append(Argument(item["name"], item["kind"]))
+    return tuple(arguments)
 
 
 DOCUMENT_ROUTE_FIELDS = frozenset({"service", "name", "tool", "resource"})
+DOCUMENT_SCHEMA_FIELD = "schema"
+SCHEMA_ITEM_FIELDS = frozenset({"name", "kind"})
+DOCUMENT_ROUTE_KEYS = DOCUMENT_ROUTE_FIELDS | {DOCUMENT_SCHEMA_FIELD}
 DOCUMENT_CATALOG_FIELDS = frozenset({"service", "name"})
 
 
@@ -85,9 +121,14 @@ class ToolRoutes:
             raise ValueError('a route document must be an object with a "routes" list and optionally a "catalogs" list')
         routes = []
         for item in document["routes"]:
-            if not isinstance(item, dict) or set(item) != DOCUMENT_ROUTE_FIELDS:
-                raise ValueError(f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}")
-            routes.append(ToolRoute(**item))
+            if not isinstance(item, dict) or not DOCUMENT_ROUTE_FIELDS <= set(item) <= DOCUMENT_ROUTE_KEYS:
+                raise ValueError(
+                    f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}"
+                    f" and optionally {DOCUMENT_SCHEMA_FIELD}"
+                )
+            fields = {key: item[key] for key in DOCUMENT_ROUTE_FIELDS}
+            schema = _document_schema(item[DOCUMENT_SCHEMA_FIELD]) if DOCUMENT_SCHEMA_FIELD in item else None
+            routes.append(ToolRoute(**fields, schema=schema, strict=False))
         for item in document.get("catalogs", []):
             if not isinstance(item, dict) or set(item) != DOCUMENT_CATALOG_FIELDS:
                 raise ValueError("each catalog must have exactly the fields name, service")
