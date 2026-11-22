@@ -50,13 +50,30 @@ The three runs cost $0.089 in model usage together. Per-run output is written to
 
 ## Run it
 
-Requires the agentgateway v1.7.0 binary (`adapters/agentgateway/scripts/fetch_gateway.sh`), the generated proto stubs (`adapters/agentgateway/scripts/generate_proto.sh`), and Claude Code signed in.
+Both runs execute in one `linux/amd64` container, started by `launch.py` on the host. Requires OrbStack (Docker and, for the Kubernetes run, its Kubernetes), kubectl, and a Claude Code OAuth token from `claude setup-token`. `ANTHROPIC_API_KEY` must be unset.
 
 ```sh
-.venv/bin/python examples/live-run/run.py --out live-run.json
+export CLAUDE_CODE_OAUTH_TOKEN=...
+.venv/bin/python examples/live-run/launch.py --script run --out live-run.json
+.venv/bin/python examples/live-run/launch.py --script kubernetes --out live-run-k8s.json
 ```
 
-The deployment is created under `/tmp/claude-501/bl` by default (`--root`), a short path because macOS limits Unix socket paths. It is deleted and recreated on each run.
+The launcher builds the image (`Dockerfile`: Python and Node bases by digest, Claude Code from `package-lock.json`, kubectl and agentgateway by sha256, Python deps from `requirements-ci.txt`) and runs it by repo digest. The token and, for the Kubernetes run, a kubeconfig minified to the `orbstack` context travel on stdin, never in argv, the environment or a mount. The result is the harness's last stdout line, written by the host with mode 0600.
+
+In the container:
+
+- the root entrypoint requires an empty tmpfs at `/live`, creates `receipts/` owned by the archiver uid (`--archiver-uid`, default 10009) with the `bailiff` group at 0750, writes the token and kubeconfig into `work/`, and hands `work/` to `bailiff`;
+- the harness and every component then run as `bailiff` through `setpriv`, with no capabilities and `no_new_privs`; the harness refuses to start otherwise, or if the layout differs;
+- only Claude Code receives the token, read from `work/claude-token`; every other process gets only the allowlist in `run.py` (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `TMPDIR`, `SHELL`, `DISABLE_AUTOUPDATER`).
+
+Running the archiver uid's own process is not part of this run; the uid exists to own the receipt dir, which the docket requires to differ from its own uid. `tests/test_docket_archiver.py` shows, on Linux CI, that the sink's uid cannot write that dir or change the archive.
+
+Only OrbStack is supported: the launcher needs a repo digest for a locally built image, which OrbStack's image store provides and a Linux host's classic store may not. There is no fallback to the image ID.
+
+### What the container does not isolate
+
+- Every component, Claude Code and the harness share the `bailiff` uid. Code running as that uid can read the OAuth token, the cluster admin credential in the kubeconfig and every component's keys, and can call the upstream or the cluster directly, bypassing the shim, gateway and docket. Claude Code runs with `--tools ""`, which is the only thing keeping the model from running code.
+- `docker exec` into the container runs as root by default.
 
 ## Kubernetes target
 
@@ -107,11 +124,13 @@ The four runs cost $0.182 in model usage together.
 
 ### Run it
 
-Requires the same as above, plus kubectl, a disposable cluster context, and the webhook image built into the Docker engine the cluster runs images from. `--webhook-image` takes only a `name@sha256:<digest>` reference, and the Deployment runs that reference:
+`launch.py --script kubernetes` (above) also builds the webhook image and passes it by `name@sha256:<digest>`; the Deployment runs that reference.
+
+The run takes a cluster-scoped lock first, the Namespace `agent-bailiff-lock` annotated with the run id, and labels everything it creates `agent-bailiff/run=<run id>`. A second run against the same cluster fails while the lock exists. `docker stop` (and the launcher's 3600 s limit) sends SIGTERM, and teardown runs within one 240 s deadline, inside the container's 300 s stop timeout; the lock is deleted last, and kept if any cleanup step failed.
+
+After `docker kill` or a host crash the lock stays. The launcher reports the owner run id and whether container `bl-<run id>` still runs; it never deletes the lock. Only when that container is not running, delete what the run labelled, then the lock:
 
 ```sh
-docker --context orbstack build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:live .
-docker --context orbstack image inspect agent-bailiff-webhook:live --format '{{index .RepoDigests 0}}'
+kubectl --context orbstack delete validatingwebhookconfigurations,validatingadmissionpolicybindings,validatingadmissionpolicies,clusterrolebindings,clusterroles,namespaces -l agent-bailiff/run=<run id>
+kubectl --context orbstack delete namespace agent-bailiff-lock
 ```
-
-Neither run starts as one OS user since the docket began refusing an archiver uid equal to its own: the docket stops at start with `docket.archiver_uid ... is the sink's own uid`. Running the archiver as a second uid needs a second OS user, which these scripts do not create. On 2026-11-22 the Kubernetes run got as far as the docket start, with the webhook serving in Enforce after all three phases on OrbStack.
