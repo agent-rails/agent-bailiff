@@ -26,6 +26,7 @@ def catalog_state(tmp_path):
         "catalogs": [{"service": "k8s", "name": "kubernetes"}],
         "workspace": str(tmp_path),
         "request_log": str(tmp_path / "requests.jsonl"),
+        "result_log": str(tmp_path / "results.jsonl"),
     }
 
 
@@ -49,3 +50,10 @@ def test_shim_replays_a_logged_request(tmp_path):
     replayed = shim.replay(state, sent)
     assert replayed["isError"] is True
     assert replayed["content"][0]["text"].startswith("gateway_error")
+
+
+def test_shim_logs_the_result_it_returns_for_each_sent_call(tmp_path):
+    state = catalog_state(tmp_path)
+    returned = shim.Shim(state).call("scale_deployment", {"namespace": "team-a", "name": "api", "replicas": 2})
+    logged = [json.loads(line) for line in Path(state["result_log"]).read_text().splitlines()]
+    assert logged == [{"tool": "scale_deployment", "result": returned}]
