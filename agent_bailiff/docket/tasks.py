@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from agent_bailiff.docket.report import printable, utc
 from agent_bailiff.docket.sink import VerifiedLine
 
 CONTROL_HOP = "control"
+DECIDE_HOP = "decide"
 TASK_COLUMNS = ("tenant", "task", "principal", "first", "last", "allows", "releases", "refusals", "state")
 
 
@@ -27,15 +29,20 @@ class TaskRow:
 
 
 class TaskList:
-    def __init__(self) -> None:
+    def __init__(self, control_writers: frozenset[str]) -> None:
+        if not control_writers:
+            raise ValueError("at least one control writer is required")
+        self._control_writers = control_writers
         self._rows: dict[tuple[str, str], TaskRow] = {}
-        self._revocations: list[tuple[str, dict[str, str]]] = []
+        self._revoked_tasks: dict[tuple[str, str], str] = {}
+        self._revoked_roots: dict[str, str] = {}
+        self._revoked_tenants: dict[str, str] = {}
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
         if entry.hop == CONTROL_HOP:
-            if entry.decision == "revoke":
-                self._revocations.append((entry.entry_id, dict(entry.handles)))
+            if entry.decision == "revoke" and verified.record.writer in self._control_writers:
+                self._add_revocation(entry.entry_id, entry.handles)
             return
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
@@ -53,21 +60,29 @@ class TaskList:
             row.releases += 1
         elif entry.decision == "allow":
             row.allows += 1
-        row.record, row.record_line = verified.record.token, verified.line
+        if entry.hop == DECIDE_HOP and entry.tenant == tenant:
+            row.record, row.record_line = verified.record.token, verified.line
 
     def rows(self) -> list[TaskRow]:
         rows = sorted(self._rows.values(), key=lambda row: (row.last, row.tenant, row.task))
         for row in rows:
-            row.revoked_by = next((entry_id for entry_id, handles in self._revocations if _revokes(handles, row)), None)
+            row.revoked_by = self._revoked_by(row)
         return rows
 
+    def _add_revocation(self, entry_id: str, handles: Mapping[str, str]) -> None:
+        if "task" in handles and "tenant" in handles:
+            self._revoked_tasks.setdefault((handles["tenant"], handles["task"]), entry_id)
+        elif "root" in handles:
+            self._revoked_roots.setdefault(handles["root"], entry_id)
+        elif "tenant" in handles and "link" not in handles:
+            self._revoked_tenants.setdefault(handles["tenant"], entry_id)
 
-def _revokes(handles: dict[str, str], row: TaskRow) -> bool:
-    if "task" in handles:
-        return handles["task"] == row.task and handles.get("tenant") == row.tenant
-    if "root" in handles:
-        return handles["root"] in row.roots
-    return handles.get("tenant") == row.tenant
+    def _revoked_by(self, row: TaskRow) -> str | None:
+        task = self._revoked_tasks.get((row.tenant, row.task))
+        if task is not None:
+            return task
+        root = next((self._revoked_roots[root] for root in sorted(row.roots) if root in self._revoked_roots), None)
+        return root if root is not None else self._revoked_tenants.get(row.tenant)
 
 
 def task_header() -> str:
