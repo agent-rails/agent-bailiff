@@ -118,3 +118,10 @@ def test_a_catalog_route_still_refuses_extra_arguments():
     route = ToolRoute("k8s", "x", "k8s.x", "k8s/{namespace}/x", (Argument("namespace", "label"),))
     assert route.resource_for({"namespace": "staging"}) == "k8s/staging/x"
     assert route.resource_for({"namespace": "staging", "extra": 1}) is None
+
+
+@pytest.mark.parametrize("resource", ["k8s/{namespace}{name}", "k8s/a{namespace}", "k8s/{namespace}-x/pods"])
+def test_a_catalog_route_placeholder_must_be_a_whole_segment(resource):
+    schema = (Argument("namespace", "label"), Argument("name", "label"))
+    with pytest.raises(ValueError, match="whole resource segment"):
+        ToolRoute("k8s", "x", "k8s.x", resource, schema)

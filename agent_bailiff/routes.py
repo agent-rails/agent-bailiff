@@ -60,6 +60,8 @@ class ToolRoute:
 
 def _check_schema(schema: tuple[Argument, ...], resource: str, strict: bool) -> None:
     placeholders = set(PLACEHOLDER.findall(resource))
+    if any("{" in segment and not PLACEHOLDER.fullmatch(segment) for segment in resource.split("/")):
+        raise ValueError("a resource placeholder must be a whole resource segment")
     if strict:
         labels = {item.name for item in schema if item.kind == "label"}
         if not placeholders <= labels:
@@ -72,8 +74,6 @@ def _check_schema(schema: tuple[Argument, ...], resource: str, strict: bool) -> 
         raise ValueError("a route document schema names each argument once")
     if set(names) != placeholders:
         raise ValueError("a route document schema names exactly the resource placeholders")
-    if any("{" in segment and not PLACEHOLDER.fullmatch(segment) for segment in resource.split("/")):
-        raise ValueError("a route document placeholder must be a whole resource segment")
 
 
 def _document_schema(document: object) -> tuple[Argument, ...]:
