@@ -44,6 +44,8 @@ from agent_bailiff.custodian import (
     Released,
 )
 from agent_bailiff.custodian import custodian as custodian_module
+from agent_bailiff.custodian.bindings import EffectorBinding
+from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide import (
     Clearance,
     CostTable,
@@ -424,21 +426,30 @@ def test_clearance_for_another_request_of_the_same_task_is_refused(make_custodia
     assert make_custodian().release(first_token, second_request, NOW + 1) == Refused("clearance_mismatch")
 
 
-def test_request_outside_the_chain_scope_is_refused(make_custodian):
+def test_request_outside_the_chain_scope_is_refused_and_recorded(make_custodian, workdir):
     root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     assert make_custodian().release(token, request, NOW + 1) == Refused("out_of_scope")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "out_of_scope")]
 
 
-def test_an_unbounded_leaf_grant_is_refused_even_with_a_clearance(make_custodian):
+@pytest.mark.parametrize(
+    "binding",
+    [
+        CredentialBinding(TENANT, "deploy.service", "env/*", "deploy-api", "deploy.example", "Authorization", False),
+        EffectorBinding(TENANT, "deploy.service", "env/*", "deploy-api", "deploy.example", "c" * 43),
+    ],
+)
+def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(make_custodian, workdir, binding):
     root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5})
     request = make_request(root, resource="env/staging-x/api")
     token = sign_clearance(clearance_for(request, root))
-    bindings = (
-        CredentialBinding(TENANT, "deploy.service", "env/*", "deploy-api", "deploy.example", "Authorization", False),
+    custodian = make_custodian(
+        bindings=(binding,), release_signer=ReleaseSigner(CUSTODIAN_ID, Ed25519PrivateKey.generate(), "r-1")
     )
-    assert make_custodian(bindings=bindings).release(token, request, NOW + 1) == Refused("unbounded_scope")
+    assert custodian.release(token, request, NOW + 1) == Refused("unbounded_scope")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
 
 
 def test_revoked_chain_is_refused(make_custodian, issue, writer):
