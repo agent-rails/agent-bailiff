@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from agent_warrant.ledger import STATES
@@ -53,7 +53,11 @@ REFUSAL_REASONS = frozenset(
     | {f"already_{state}" for state in STATES}
 )
 
+RETRY_LATER_REASONS = frozenset({"docket_unavailable", "ledger_unavailable", "internal_error"})
+ASK_USER_REASONS = frozenset({NEEDS_APPROVAL, "suspended"})
+
 Clock = Callable[[], int]
+Action = Literal["stop", "ask_user", "retry_later"]
 
 
 def system_clock() -> int:
@@ -69,14 +73,40 @@ class Result:
         return self.result.get("isError") is True
 
 
+def refusal_action(reason: str) -> Action:
+    if reason not in REFUSAL_REASONS:
+        raise ValueError(f"{reason!r} is not a bailiff refusal reason")
+    if reason in RETRY_LATER_REASONS:
+        return "retry_later"
+    if reason in ASK_USER_REASONS:
+        return "ask_user"
+    return "stop"
+
+
 @dataclass(frozen=True)
 class Refused:
     reason: str
+
+    @property
+    def action(self) -> Action:
+        return refusal_action(self.reason)
+
+    @property
+    def retryable(self) -> bool:
+        return self.action == "retry_later"
 
 
 @dataclass(frozen=True)
 class NeedsApproval:
     reason: str = NEEDS_APPROVAL
+
+    @property
+    def action(self) -> Action:
+        return refusal_action(self.reason)
+
+    @property
+    def retryable(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True)

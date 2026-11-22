@@ -28,6 +28,7 @@ from agent_bailiff.client import (
     OutcomeUnknown,
     Refused,
     Result,
+    refusal_action,
 )
 from agent_bailiff.client import client as client_module
 from agent_bailiff.client.contract import new_traceparent, prepare_call
@@ -419,6 +420,39 @@ def test_a_bailiff_refusal_is_typed(client, stub, reason):
 def test_needs_approval_has_its_own_type(client, stub):
     stub.responders["tools/call"] = [refusal("needs_approval")]
     assert client.call("deploy", "deploy_service", ARGS) == NeedsApproval()
+
+
+@pytest.mark.parametrize(
+    ("reason", "action"),
+    [
+        ("out_of_scope", "stop"),
+        ("policy_denied", "stop"),
+        ("chain_invalid", "stop"),
+        ("already_issued", "stop"),
+        ("reservation_refused", "stop"),
+        ("release_refused", "stop"),
+        ("suspended", "ask_user"),
+        ("needs_approval", "ask_user"),
+        ("docket_unavailable", "retry_later"),
+        ("ledger_unavailable", "retry_later"),
+        ("internal_error", "retry_later"),
+    ],
+)
+def test_a_refusal_says_what_the_agent_should_do(client, stub, reason, action):
+    stub.responders["tools/call"] = [refusal(reason)]
+    outcome = client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, Refused | NeedsApproval)
+    assert outcome.action == action
+    assert outcome.retryable is (action == "retry_later")
+
+
+def test_every_refusal_reason_has_an_action():
+    assert {refusal_action(reason) for reason in REFUSAL_REASONS} == {"stop", "ask_user", "retry_later"}
+
+
+def test_an_unknown_reason_has_no_action():
+    with pytest.raises(ValueError, match="not a bailiff refusal reason"):
+        refusal_action("repository not found")
 
 
 def test_a_tool_error_with_other_text_is_a_result(client, stub):
