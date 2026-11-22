@@ -19,6 +19,7 @@ from agent_bailiff.effector.release import CheckedCall, ReleaseCheck, ReleaseRef
 from agent_bailiff.strict_json import parse_strict_json
 
 HOP = "effector"
+REASON_PREFIX = "effector_"
 PROTOCOL_VERSION = "2025-06-18"
 MAX_BODY_BYTES = 65536
 SESSION_METHODS = frozenset({"initialize", "ping", "tools/list"})
@@ -164,7 +165,8 @@ class Effector:
 
 
 def _error(reason: str) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": reason}], "isError": True}
+    text = reason if reason.startswith(REASON_PREFIX) else f"{REASON_PREFIX}{reason}"
+    return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
 def _tool(operation: CatalogOperation) -> dict[str, Any]:
