@@ -169,9 +169,14 @@ class Deployment:
                 *docket,
             )  # fmt: skip
         )
+        receipts = self.root / "receipts"
+        receipts.mkdir(mode=0o750)
+        os.chown(receipts, -1, GID)
+        os.chmod(receipts, 0o750)
         cli(
             "init", "docket", "--dir", private(self.root / "docket"), "--socket", self.sockets["docket"],
-            "--socket-group", GID, "--allowed-uid", UID, "--pin", decide_pin, "--pin", custodian_pin,
+            "--socket-group", GID, "--reader-group", GID, "--receipt-dir", receipts, "--archiver-uid", UID,
+            "--allowed-uid", UID, "--pin", decide_pin, "--pin", custodian_pin,
             "--pin", control_pin, *self.extra_pins(pins, decide_pin, custodian_pin, docket),
         )  # fmt: skip
         self.configure()
