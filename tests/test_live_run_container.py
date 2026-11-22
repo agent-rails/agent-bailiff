@@ -19,13 +19,14 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def image():
-    subprocess.run(
+    built = subprocess.run(
         ["docker", "build", "--platform", "linux/amd64", "-f", "examples/live-run/Dockerfile", "-t", TAG, "."],
         cwd=ROOT,
-        check=True,
         capture_output=True,
+        text=True,
         timeout=1800,
     )
+    assert built.returncode == 0, built.stderr[-4000:]
     return TAG
 
 
