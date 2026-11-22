@@ -754,3 +754,32 @@ def test_a_credential_in_a_result_the_agent_received_is_seen(tmp_path):
     assert run.seen_by_agent(deployment, outcomes, "s3cret") is True
     assert run.seen_by_agent(deployment, [run.Outcome("injection", "s3cret")], "other") is False
     assert run.seen_by_agent(deployment, [run.Outcome("injection", "said other")], "other") is True
+
+
+class CheckedDeployment:
+    secret = "s3cret"
+
+    def __init__(self, root):
+        self.root = root
+        (root / "docket.jsonl").write_text("")
+
+    def upstream_calls(self, tool):
+        return []
+
+    def config(self, name):
+        return self.root / "docket.jsonl"
+
+    def docket_lines(self):
+        return []
+
+
+def test_final_checks_see_a_credential_in_a_result_the_agent_received(tmp_path, monkeypatch):
+    deployment = CheckedDeployment(tmp_path)
+    loaded = type("L", (), {"docket": tmp_path / "docket.jsonl", "writers": {}})()
+    monkeypatch.setattr(run, "load_docket", lambda path: loaded)
+    monkeypatch.setattr(run, "verify_docket", lambda docket, writers: type("R", (), {"ok": True})())
+    received = tmp_path / "agent" / "task-a" / "results.jsonl"
+    received.parent.mkdir(parents=True)
+    received.write_text(json.dumps({"tool": "read_document", "result": shim.text("key s3cret")}) + "\n")
+    checks = run.final_checks(deployment, [stop_outcome("revoke"), stop_outcome("suspend")])
+    assert checks["credential seen by the agent or the model"] is True
