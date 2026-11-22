@@ -57,7 +57,7 @@ The docket config's `retained_bytes` (at least `2 * segment_bytes`; `agent-baili
 - A failed manifest write keeps the segment and retries in 60 s. A failed directory fsync after the replace stops removals until restart. A failed unlink is retried before the next removal.
 - Start finishes a committed removal: if the segment named by `base` is still present, the sink unlinks it only when its receipt names this docket and its size; otherwise it refuses to start with `segment_mismatch` ("left the manifest"). Any `<docket>.seg-*` not in the manifest refuses start too.
 - The receipt directory is opened at start and must be owned by `archiver_uid` with group `reader_group` and mode 0750; the sink refuses to start otherwise. `agent-bailiff init docket --receipt-dir PATH --archiver-uid UID` writes both keys but does not create the directory; create it as the archiver uid before the first start.
-- `archiver_uid` must not be the sink's own uid: the service refuses to start with "is the sink's own uid". A sink that could write receipts could vouch for its own removals.
+- `archiver_uid` must not be the sink's own uid: the service refuses to start with "is the sink's own uid". A sink that could write receipts could vouch for its own removals. For the same reason the service refuses to start as root with "is running as root".
 - Removal frees the segment on the host only. The records are then only in the archive; `docket verify` without `--archive` starts from `base`.
 
 ### Archive
