@@ -4,12 +4,15 @@ import json
 import os
 import shutil
 import stat
+import sys
+import tempfile
 import threading
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_docket import make_entry
-from test_docket_report import PINS, WRITERS, Docket, filled
+from test_docket_report import OTHER_USER, PINS, WRITERS, Docket, filled, linux_cross_uid, run_as
 from test_docket_report import cut as cut_docket
 
 from agent_bailiff import cli
@@ -45,21 +48,25 @@ def other_device(path):
     return -1
 
 
-@pytest.fixture
-def layout(tmp_path):
-    state = tmp_path / "state"
-    archive = tmp_path / "archive"
-    receipts = tmp_path / "receipts"
+def make_layout(root):
+    state = root / "state"
+    archive = root / "archive"
+    receipts = root / "receipts"
     for path, mode in ((state, 0o700), (archive, 0o750), (receipts, 0o750)):
         path.mkdir()
         os.chown(path, -1, GID)
         os.chmod(path, mode)
-    docket_path = tmp_path / "docket" / "docket.log"
+    docket_path = root / "docket" / "docket.log"
     docket_path.parent.mkdir()
     docket_path.touch(mode=0o640)
     os.chown(docket_path, -1, GID)
     os.chmod(docket_path, 0o640)
-    return tmp_path, Docket(docket_path)
+    return root, Docket(docket_path)
+
+
+@pytest.fixture
+def layout(tmp_path):
+    return make_layout(tmp_path)
 
 
 @pytest.fixture
@@ -854,3 +861,82 @@ def test_the_first_prune_removes_every_receipt_below_the_tombstone(layout):
     finally:
         instance._close()
     assert sorted(os.listdir(layout[0] / "receipts")) == ["notes", "seg-000000000100.receipt"]
+
+
+PROBE = """import os, sys
+directory, name = sys.argv[1], sys.argv[2]
+path = os.path.join(directory, name)
+
+
+def attempt(label, operation):
+    try:
+        operation()
+    except PermissionError:
+        print(label, "denied")
+    else:
+        print(label, "allowed")
+
+
+def rename():
+    os.rename(path, path + ".moved")
+    os.rename(path + ".moved", path)
+
+
+attempt("write", lambda: open(path, "ab").close())
+attempt("create", lambda: open(os.path.join(directory, "planted"), "xb").close())
+attempt("rename", rename)
+attempt("unlink", lambda: os.unlink(path))
+"""
+
+OPERATIONS = ("write", "create", "rename", "unlink")
+
+
+def probe_as(user, directory, name):
+    result = run_as(user, sys.executable, "-I", "-c", PROBE, str(directory), name)
+    assert result.returncode == 0, result
+    return dict(line.split() for line in result.stdout.splitlines())
+
+
+@pytest.fixture
+def shared_layout():
+    root = Path(tempfile.mkdtemp(prefix="ba-", dir="/tmp"))
+    os.chmod(root, 0o755)
+    yield make_layout(root)
+    shutil.rmtree(root)
+
+
+@linux_cross_uid[0]
+@linux_cross_uid[1]
+def test_the_sink_uid_cannot_write_the_receipt_dir(shared_layout):
+    two_segments(shared_layout[1])
+    assert run(shared_layout) == 2
+    receipts = shared_layout[0] / "receipts"
+    for name in sorted(os.listdir(receipts)):
+        assert probe_as(OTHER_USER, receipts, name) == dict.fromkeys(OPERATIONS, "denied")
+    assert len(os.listdir(receipts)) == 2
+
+
+@linux_cross_uid[0]
+@linux_cross_uid[1]
+def test_the_sink_uid_cannot_change_the_archive(shared_layout):
+    manifest = two_segments(shared_layout[1])
+    assert run(shared_layout) == 2
+    directory = copies(shared_layout, manifest)
+    before = {name: (directory / name).read_bytes() for name in os.listdir(directory)}
+    for name in sorted(before):
+        assert probe_as(OTHER_USER, directory, name) == dict.fromkeys(OPERATIONS, "denied")
+    assert {name: (directory / name).read_bytes() for name in os.listdir(directory)} == before
+
+
+@linux_cross_uid[0]
+@linux_cross_uid[1]
+def test_the_probe_reports_a_group_writable_dir(shared_layout):
+    directory = shared_layout[0] / "open"
+    directory.mkdir()
+    os.chown(directory, -1, GID)
+    os.chmod(directory, 0o770)
+    target = directory / "target"
+    target.touch()
+    os.chown(target, -1, GID)
+    os.chmod(target, 0o660)
+    assert probe_as(OTHER_USER, directory, "target") == dict.fromkeys(OPERATIONS, "allowed")
