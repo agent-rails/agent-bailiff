@@ -197,9 +197,10 @@ def put_credential(settings: CustodianSettings, tenant: str, credential_id: str,
 
 
 async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
-    if sink_euid() == 0:
+    euid = sink_euid()
+    if euid == 0:
         raise ValueError("the docket sink is running as root; run it as its own uid so it cannot write receipts")
-    if settings.retention.archiver_uid == sink_euid():
+    if settings.retention.archiver_uid == euid:
         raise ValueError(
             f"docket.archiver_uid {settings.retention.archiver_uid} is the sink's own uid; "
             "run the archiver as another uid so the sink cannot write the receipts it removes segments by"
