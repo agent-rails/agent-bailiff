@@ -12,6 +12,15 @@ outcome = client.call("gitea", "get_me", {})
 ## Request contract
 
 - Routes are the same `agent_bailiff.routes.ToolRoutes` the gateway adapter reads. `prepare(service, name, arguments)` maps the call to its scope `tool` and `resource`, and rejects an unrouted tool or arguments outside the route's schema before signing.
+- A route document (`ToolRoutes.from_document`) lists routes with exactly `service`, `name`, `tool` and `resource`, and optionally `schema`: a list of `{"name": ..., "kind": "identifier"}` items naming each `{placeholder}` in `resource` once. An identifier is `[A-Za-z0-9_][A-Za-z0-9._-]{0,99}`. The filled resource must also be a valid scope entry, so `..` or `.` is refused as `malformed_request`. Only schema arguments are checked; any other argument passes to the upstream unchecked. A document route cannot route a `k8s.*` tool; those come from the effector catalog, whose routes refuse any argument outside their schema.
+
+  ```json
+  {"service": "gitea", "name": "list_issues", "tool": "gitea.issues.list",
+   "resource": "gitea/repos/{owner}/{repo}/issues",
+   "schema": [{"name": "owner", "kind": "identifier"}, {"name": "repo", "kind": "identifier"}]}
+  ```
+
+- Scope resource grants must be exact or end at `/*`. Decide refuses a call whose leaf scope holds any other pattern, such as `gitea/repos/acme-*`, with `unbounded_scope`, and the custodian refuses to load a binding with one. `/*` covers every resource below that segment; resources compare byte for byte, so `Demo` is not `demo`.
 - Nonce: 16 random bytes, hex. Each `prepare` makes a new nonce, so each prepared call is a new operation.
 - Leaf proof: signed by the holder key over the last record in the chain, with `audience` set to the decider id, `iat` from the client clock, and `request_digest` = `request_digest(tool, resource, arguments, nonce)` (`agent_bailiff/decide/identity.py`).
 - Headers: `x-bailiff-task-root`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`, `traceparent`, and `x-bailiff-links` (comma-joined) when the holder is a delegate.
@@ -54,7 +63,7 @@ sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_i
 - `Refused` and `NeedsApproval` carry `action` and `retryable`, fixed per reason by `refusal_action`, so an agent knows what to do next without parsing the reason:
   - `retry_later` (`retryable` true): `docket_unavailable`, `ledger_unavailable`, `internal_error`. A component was unavailable and the gateway did not forward the call; a later call may pass. Budget for the refused attempt may already be spent: decide refuses with `docket_unavailable` after it reserved and issued the operation, and its `ledger_unavailable` does not say how far the reservation got. A retry is a new operation with a new nonce and spends budget again, so bound retries and back off.
   - `ask_user`: `needs_approval`, `suspended`. A human has to act before the task can go on. `suspended` means an operator suspended the gateway; the user may not be able to resume it, so the agent stops and does not retry until it is resumed.
-  - `stop`: every other reason. The gateway did not forward the call. The reason does not say whether a later call could pass: `already_*` means this nonce was already used, and `release_refused` covers every custodian refusal, a custodian ledger outage included, after decide issued the operation. The agent does not retry it or reach the same effect another way, and reports to the user.
+  - `stop`: every other reason, `unbounded_scope` included: the task's scope must be reissued. The gateway did not forward the call. The reason does not say whether a later call could pass: `already_*` means this nonce was already used, and `release_refused` covers every custodian refusal, a custodian ledger outage included, after decide issued the operation. The agent does not retry it or reach the same effect another way, and reports to the user.
   The action comes from the reason alone. It does not say which scope, binding or policy rule refused the call.
 - A gateway refusal is an HTTP 200 tool error whose only content is one text item equal to the reason. An upstream cannot deliver that shape to the client through a gateway running a checked config: check-config requires a response-phase refusal guard on `tools/call` that turns any upstream tool error whose only content is a bailiff reason into a JSON-RPC error, which the client classifies as `OutcomeUnknown`. Gateway refusals never reach a response-phase processor.
 - The classification relies on the gateway running a config that passed check-config. A client pointed at a gateway without the guard cannot tell an upstream's text from a refusal.
