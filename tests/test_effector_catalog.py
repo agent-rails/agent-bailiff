@@ -146,6 +146,8 @@ def test_the_arguments_must_match_the_call_exactly():
 def test_argument_kinds_and_bounds_are_strict():
     refused(lambda d: scale(d)["arguments"].update(namespace={"kind": "label", "default": "x"}), "label")
     refused(lambda d: scale(d)["arguments"].update(name={"kind": "string"}), "label")
+    refused(lambda d: scale(d)["arguments"].update(name={"kind": "identifier"}), "label")
+    refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "identifier"}), "integer")
     refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "label"}), "integer")
     refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer"}), "integer")
     refused(lambda d: scale(d)["arguments"].update(replicas={"kind": "integer", "minimum": 5, "maximum": 1}), "bounds")
