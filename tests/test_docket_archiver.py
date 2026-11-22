@@ -2,6 +2,7 @@ import functools
 import hashlib
 import json
 import os
+import shutil
 import stat
 import threading
 from dataclasses import replace
@@ -761,6 +762,24 @@ def test_writes_no_receipt_once_the_archive_dir_is_replaced_at_its_path(layout):
     try:
         assert instance._archive_next()
         replace_copies_dir(layout, manifest)
+        docket.append("decide", make_entry(5))
+        cut(docket, manifest)
+        with pytest.raises(ArchiveMismatch, match="no longer the directory the archiver opened"):
+            instance._archive_next()
+    finally:
+        instance._close()
+    assert receipt(layout, 2) is None
+
+
+@pytest.mark.parametrize("remove", [lambda path: os.rename(path, path.with_name("detached")), shutil.rmtree])
+def test_writes_no_receipt_once_the_archive_dir_is_removed_from_its_path(layout, remove):
+    _, docket = layout
+    manifest = cut(filled(docket))
+    instance = archiver(layout)
+    instance._open()
+    try:
+        assert instance._archive_next()
+        remove(copies(layout, manifest))
         docket.append("decide", make_entry(5))
         cut(docket, manifest)
         with pytest.raises(ArchiveMismatch, match="no longer the directory the archiver opened"):
