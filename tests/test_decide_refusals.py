@@ -62,6 +62,7 @@ def test_agent_reasons_share_one_budget():
         ("suspended", Admission("capped", 0), "operational_refusals_capped"),
         ("already_issued", Admission("capped", 0), "operational_refusals_capped"),
         ("internal_error", Admission("capped", 0), "operational_refusals_capped"),
+        ("unbounded_scope", Admission("capped", 0), "operational_refusals_capped"),
         ("out_of_scope", Admission("capped", 0, tenant_overflow=True), "tenant_refusals_capped"),
     ],
 )

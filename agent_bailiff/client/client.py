@@ -38,6 +38,7 @@ REFUSAL_REASONS = frozenset(
         "method_refused",
         "chain_invalid",
         "out_of_scope",
+        "unbounded_scope",
         "unknown_cost",
         "cost_over_call_cap",
         "no_binding",
