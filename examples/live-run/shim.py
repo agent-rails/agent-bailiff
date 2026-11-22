@@ -76,6 +76,12 @@ class Shim:
         return {"jsonrpc": "2.0", "id": message["id"], "result": result}
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = self.answer(name, arguments)
+        with open(self.state["result_log"], "a") as log:
+            log.write(json.dumps({"tool": name, "result": result}) + "\n")
+        return result
+
+    def answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "read_document":
             return self.read_document(str(arguments.get("name", "")))
         if name not in self.services:
@@ -87,10 +93,7 @@ class Shim:
         with open(self.state["request_log"], "a") as log:
             record = {"headers": dict(call.headers), "body": json.loads(call.body), "raw": call.body.decode()}
             log.write(json.dumps(record) + "\n")
-        result = send(self.client, call)
-        with open(self.state["result_log"], "a") as log:
-            log.write(json.dumps({"tool": name, "result": result}) + "\n")
-        return result
+        return send(self.client, call)
 
     def read_document(self, name: str) -> dict[str, Any]:
         workspace = Path(self.state["workspace"]).resolve()
