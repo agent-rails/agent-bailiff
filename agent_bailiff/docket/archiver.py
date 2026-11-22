@@ -349,7 +349,10 @@ class DocketArchiver:
         if self._archive_fd is None or self._copies_fd is None:
             raise RuntimeError("the archiver is not open")
         for path, fd in ((self._archive_dir, self._archive_fd), (self._archive_dir / docket_id, self._copies_fd)):
-            current = os.stat(path, follow_symlinks=False)
+            try:
+                current = os.stat(path, follow_symlinks=False)
+            except FileNotFoundError:
+                raise ArchiveMismatch(f"{path} is no longer the directory the archiver opened") from None
             opened = os.fstat(fd)
             if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
                 raise ArchiveMismatch(f"{path} is no longer the directory the archiver opened")
@@ -394,6 +397,7 @@ class DocketArchiver:
             return True
 
     def _archive(self, checkpoint: ArchiverCheckpoint, entry: SegmentEntry, copies: int) -> bool:
+        self._check_pinned(checkpoint.docket_id)
         opened = open_segment(self._docket_path, entry.segment)
         if opened is None:
             return False
