@@ -104,6 +104,9 @@ def test_a_fixed_document_route_may_carry_an_empty_schema():
         ({"schema": OWNER_REPO[:1]}, "exactly the resource placeholders"),
         ({"schema": OWNER_REPO, "tool": "k8s.pods.list"}, "routed only from their catalog"),
         ({"extra": 1}, "exactly the fields"),
+        ({"resource": "gitea/repos/{owner}{repo}/issues"}, "whole resource segment"),
+        ({"resource": "gitea/repos/{owner}/{repo}-x/issues"}, "whole resource segment"),
+        ({"resource": "gitea/repos/{owner}.{repo}"}, "whole resource segment"),
     ],
 )
 def test_a_route_document_schema_outside_the_format_is_refused(changes, match):

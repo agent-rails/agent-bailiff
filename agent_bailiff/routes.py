@@ -38,7 +38,7 @@ class ToolRoute:
             raise ValueError(f"{CATALOG_TOOL_PREFIX}* tools are routed only from their catalog")
         if self.schema is not None:
             object.__setattr__(self, "schema", tuple(self.schema))
-            _check_schema(self.schema, placeholders, self.strict)
+            _check_schema(self.schema, self.resource, self.strict)
         filled = PLACEHOLDER.sub("x", self.resource)
         problem = validate_entry(filled)
         if problem or any(character in filled for character in "*{}"):
@@ -58,7 +58,8 @@ class ToolRoute:
         return None if validate_entry(resource) else resource
 
 
-def _check_schema(schema: tuple[Argument, ...], placeholders: set[str], strict: bool) -> None:
+def _check_schema(schema: tuple[Argument, ...], resource: str, strict: bool) -> None:
+    placeholders = set(PLACEHOLDER.findall(resource))
     if strict:
         labels = {item.name for item in schema if item.kind == "label"}
         if not placeholders <= labels:
@@ -71,6 +72,8 @@ def _check_schema(schema: tuple[Argument, ...], placeholders: set[str], strict: 
         raise ValueError("a route document schema names each argument once")
     if set(names) != placeholders:
         raise ValueError("a route document schema names exactly the resource placeholders")
+    if any("{" in segment and not PLACEHOLDER.fullmatch(segment) for segment in resource.split("/")):
+        raise ValueError("a route document placeholder must be a whole resource segment")
 
 
 def _document_schema(document: object) -> tuple[Argument, ...]:
