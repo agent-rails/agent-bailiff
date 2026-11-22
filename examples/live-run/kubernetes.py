@@ -40,6 +40,9 @@ from run import (
 from agent_bailiff.docket.report import verify_docket
 from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
 from agent_bailiff.service.settings import load_docket
+from agent_bailiff.webhook.certs import issue_serving_certificate
+from agent_bailiff.webhook.manifests import NAME as WEBHOOK
+from agent_bailiff.webhook.manifests import generate_manifests
 
 EFFECTOR = "effector.live"
 SERVICE = "k8s"
@@ -68,9 +71,10 @@ class Cluster:
         self.context = context
         self.directory = private(directory)
         suffix = secrets.token_hex(3)
-        self.namespaces = {key: f"bl-{suffix}-{key}" for key in ("sys", "staging", "prod")}
+        self.namespaces = {key: f"bl-{suffix}-{key}" for key in ("sys", "hook", "staging", "prod")}
         self.applier = json.loads(kubectl(context, "auth", "whoami", "-o", "json"))["status"]["userInfo"]["username"]
         self.manifests = self.directory / "manifests.json"
+        self.webhook_manifests = self.directory / "webhook.json"
         self.created = False
 
     def up(self) -> None:
@@ -84,6 +88,8 @@ class Cluster:
                 "effector",
                 "--applier",
                 self.applier,
+                "--webhook-namespace",
+                self.namespaces["hook"],
                 "--tenant",
                 f"{TENANT}={self.namespaces['staging']}",
             )  # fmt: skip
@@ -94,10 +100,12 @@ class Cluster:
             for item in items
             if "namespace" not in item["metadata"]
         ]
+        names.append(f"validatingwebhookconfiguration/{WEBHOOK}")
         taken = kubectl(self.context, "get", *names, "--ignore-not-found", "-o", "name").split()
         if taken:
             raise RuntimeError(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
         self.created = True
+        kubectl(self.context, "create", "namespace", self.namespaces["hook"])
         for key in ("staging", "prod"):
             kubectl(self.context, "create", "namespace", self.namespaces[key])
             kubectl(
@@ -114,18 +122,65 @@ class Cluster:
         (self.directory / "ca.crt").write_bytes(base64.b64decode(cluster["certificate-authority-data"]))
         self.server = urllib.parse.urlsplit(cluster["server"])
 
+    def deploy_webhook(self, effector: dict[str, Any], image: str, docker_context: str) -> None:
+        namespace = self.namespaces["hook"]
+        certs = self.directory / "webhook-certs"
+        issue_serving_certificate(certs, WEBHOOK, namespace)
+        kubectl(
+            self.context, "-n", namespace, "create", "secret", "tls", WEBHOOK + "-tls",
+            f"--cert={certs / 'tls.crt'}", f"--key={certs / 'tls.key'}",
+        )  # fmt: skip
+        digest = subprocess.run(
+            ["docker", "--context", docker_context, "image", "inspect", image, "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout.strip()
+        pins = {
+            "effector_id": effector["name"],
+            "custodian_id": effector["custodian"],
+            "decider_id": effector["decider"],
+            "custodian_keys": effector["custodian_keys"],
+            "decide_keys": effector["decide_keys"],
+            "catalog_digest": CATALOG.digest,
+            "skew_seconds": 2,
+            "max_clearance_lifetime": effector["max_clearance_lifetime"],
+        }
+        for enforce, phase in ((False, "all"), (True, "prepare"), (True, "register")):
+            manifests = generate_manifests(
+                namespace=namespace,
+                image=f"{image.split(':')[0]}@{digest}",
+                ca_pem=(certs / "ca.crt").read_bytes(),
+                pins=pins,
+                catalog=CATALOG,
+                enforce=enforce,
+                deployers=[self.applier],
+                phase=phase,
+            )
+            deployments = [item for item in manifests["items"] if item["kind"] == "Deployment"]
+            for item in deployments:
+                item["spec"]["template"]["spec"]["containers"][0]["image"] = image
+            if phase == "all":
+                self.webhook_manifests.write_text(json.dumps(manifests))
+            kubectl(self.context, "apply", "-f", "-", stdin=json.dumps(manifests))
+            if deployments:
+                kubectl(self.context, "-n", namespace, "rollout", "status", f"deployment/{WEBHOOK}", "--timeout=90s")
+
     def down(self) -> None:
         if not self.created:
             return
-        subprocess.run(
-            ["kubectl", "--context", self.context, "delete", "-f", str(self.manifests), "--ignore-not-found"],
-            capture_output=True,
-            check=False,
-        )
+        for manifests in (self.webhook_manifests, self.manifests):
+            if manifests.exists():
+                subprocess.run(
+                    ["kubectl", "--context", self.context, "delete", "-f", str(manifests), "--ignore-not-found"],
+                    capture_output=True,
+                    check=False,
+                )
         subprocess.run(
             [
                 "kubectl", "--context", self.context, "delete", "namespace", self.namespaces["staging"],
-                self.namespaces["prod"], "--ignore-not-found",
+                self.namespaces["prod"], self.namespaces["hook"], "--ignore-not-found",
             ],
             capture_output=True,
             check=False,
@@ -184,6 +239,8 @@ class KubernetesDeployment(Deployment):
                 "effector",
                 "--applier",
                 cluster.applier,
+                "--webhook-namespace",
+                cluster.namespaces["hook"],
                 "--tenant",
                 f"{TENANT}={cluster.namespaces['staging']}",
                 *docket,
@@ -377,6 +434,8 @@ def main() -> None:
     parser.add_argument("--context", required=True, help="kube context of a disposable cluster")
     parser.add_argument("--model", default="claude-sonnet-5-5")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--webhook-image", default="agent-bailiff-webhook:live", help="local tag of the webhook image")
+    parser.add_argument("--docker-context", default="orbstack", help="docker context whose images the cluster runs")
     args = parser.parse_args()
     if args.root.exists():
         shutil.rmtree(args.root)
@@ -389,6 +448,8 @@ def main() -> None:
     try:
         cluster.up()
         deployment.prepare()
+        effector = json.loads(deployment.config("effector").read_text())
+        cluster.deploy_webhook(effector, args.webhook_image, args.docker_context)
         deployment.start()
         outcomes.append(
             scenario(deployment, args.model, "scale", f"Scale the api deployment in namespace {staging} to 3 replicas.")
