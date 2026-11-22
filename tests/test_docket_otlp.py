@@ -21,10 +21,11 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode, TraceFlags
 from test_docket import make_entry
 from test_docket_report import PINS, WRITERS, Docket
+from test_effector import EFFECTOR_TOKEN, NOW, effector, release_for, scale_params
 
 from agent_bailiff import cli
 from agent_bailiff.docket import DocketCorrupt
-from agent_bailiff.docket.entry import Head
+from agent_bailiff.docket.entry import Head, Record
 from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, load_checkpoint
 from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.otlp import DocketExporter, ExportFailed, OtlpHttpExporter, span_id_for, to_span
@@ -223,6 +224,20 @@ def test_a_refusal_is_an_error_span_with_its_reason(docket):
     span = to_span(verified(record))
     assert span.status.status_code is StatusCode.ERROR
     assert span.attributes["error.type"] == "out_of_scope"
+
+
+def test_an_effector_refusal_is_an_error_span_under_its_release(tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(EFFECTOR_TOKEN)
+    os.chmod(token_file, 0o600)
+    instance, _, effector_docket = effector(token_file, rbac_healthy=False)
+    instance.call(scale_params(), release_for(), NOW + 2)
+    [entry] = effector_docket.entries
+    span = to_span(verified(Record("effector.homelab", 1, None, entry, "k", "t")))
+    assert span.status.status_code is StatusCode.ERROR
+    assert span.attributes["error.type"] == "rbac_unverified"
+    assert span.attributes["bailiff.handle.task"] == "task-1"
+    assert span.parent.span_id == span_id_for("f" * 32)
 
 
 def test_export_ships_every_record_in_batches_and_checkpoints(docket, checkpoint):

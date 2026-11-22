@@ -129,7 +129,8 @@ class Effector:
         return {"content": [{"type": "text", "text": text}], "isError": False}
 
     def _refuse(self, checked: CheckedCall, reason: str, now: int) -> dict[str, Any]:
-        self._record(replace(self._entry(checked, "outcome", now), outcome="refused", reason=reason))
+        handles = {"tenant": checked.release.tenant, "task": checked.release.task}
+        self._record(replace(self._entry(checked, "refuse", now), reason=reason, handles=handles))
         return _error(reason)
 
     def _entry(self, checked: CheckedCall, decision: str, now: int) -> Entry:
