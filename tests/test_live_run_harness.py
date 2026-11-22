@@ -257,12 +257,77 @@ def test_teardown_continues_past_an_expired_deadline_and_names_every_step(tmp_pa
     monkeypatch.setattr(kubernetes, "kubectl", slow_kubectl)
     deadline = kubernetes.Deadline
     monkeypatch.setattr(kubernetes, "Deadline", lambda seconds: deadline(seconds, clock))
-    cluster = object.__new__(kubernetes.Cluster)
-    cluster.context, cluster.created = "orbstack", True
-    cluster.namespaces = {key: f"bl-x-{key}" for key in ("sys", "hook", "staging", "prod")}
-    cluster.manifests = cluster.webhook_manifests = tmp_path / "absent.json"
+    cluster = bare_cluster(tmp_path, created=True)
     with pytest.raises(RuntimeError, match="cleanup incomplete") as raised:
         cluster.down()
     assert timeouts == [240, 40]
     assert "skipped: teardown deadline" in str(raised.value)
     assert "unchecked" in str(raised.value)
+    assert "agent-bailiff-lock kept" in str(raised.value)
+
+
+def bare_cluster(tmp_path, created=False):
+    cluster = object.__new__(kubernetes.Cluster)
+    cluster.context, cluster.run_id, cluster.directory = "orbstack", "r1", tmp_path
+    cluster.created = cluster.locked = created
+    cluster.namespaces = {key: f"bl-x-{key}" for key in ("sys", "hook", "staging", "prod")}
+    cluster.manifests = cluster.webhook_manifests = tmp_path / "absent.json"
+    return cluster
+
+
+def test_a_held_lock_fails_fast_and_names_its_owner(tmp_path, monkeypatch):
+    def locked(context, *args, stdin=None, timeout=120):
+        if args[0] == "create":
+            raise RuntimeError('Error from server (AlreadyExists): namespaces "agent-bailiff-lock" already exists')
+        return "r0"
+
+    monkeypatch.setattr(kubernetes, "kubectl", locked)
+    cluster = bare_cluster(tmp_path)
+    with pytest.raises(RuntimeError, match="locked by run r0.*bl-r0 is not running"):
+        cluster.acquire_lock()
+    assert not cluster.locked
+
+
+def test_the_lock_carries_the_owner_and_run_label(tmp_path, monkeypatch):
+    sent = []
+    monkeypatch.setattr(kubernetes, "kubectl", lambda context, *args, stdin=None, timeout=120: sent.append(stdin))
+    cluster = bare_cluster(tmp_path)
+    cluster.acquire_lock()
+    metadata = json.loads(sent[0])["metadata"]
+    assert metadata["name"] == "agent-bailiff-lock"
+    assert metadata["annotations"] == {"agent-bailiff/owner": "r1"}
+    assert metadata["labels"] == {"agent-bailiff/run": "r1"}
+    assert cluster.locked
+
+
+def test_every_listed_object_gets_the_run_label():
+    document = {"items": [{"metadata": {}}, {"metadata": {"labels": {"app": "x"}}}]}
+    labels = [item["metadata"]["labels"] for item in kubernetes.labelled(document, "r1")["items"]]
+    assert labels == [{"agent-bailiff/run": "r1"}, {"app": "x", "agent-bailiff/run": "r1"}]
+
+
+def test_a_clean_teardown_deletes_the_lock_last(tmp_path, monkeypatch):
+    calls = []
+
+    def record(context, *args, stdin=None, timeout=120):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(kubernetes, "kubectl", record)
+    cluster = bare_cluster(tmp_path, created=True)
+    cluster.down()
+    assert calls[-1][:3] == ("delete", "namespace", "agent-bailiff-lock")
+
+
+def test_an_unlocked_cluster_tears_down_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(kubernetes, "kubectl", lambda *args, **options: pytest.fail("kubectl called"))
+    bare_cluster(tmp_path).down()
+
+
+@pytest.mark.parametrize(
+    "image", ["agent-bailiff-webhook:live", "agent-bailiff-webhook@sha256:abc", "sha256:" + "a" * 64]
+)
+def test_the_webhook_image_must_be_a_digest_ref(tmp_path, monkeypatch, image):
+    monkeypatch.setattr(kubernetes, "kubectl", lambda *args, **options: pytest.fail("kubectl called"))
+    with pytest.raises(RuntimeError, match="pinned by sha256 digest"):
+        bare_cluster(tmp_path).deploy_webhook({}, image)

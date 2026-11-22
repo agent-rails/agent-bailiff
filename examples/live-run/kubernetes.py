@@ -51,13 +51,16 @@ from agent_bailiff.service.settings import load_docket
 from agent_bailiff.webhook.audit import WebhookAudit
 from agent_bailiff.webhook.certs import issue_serving_certificate
 from agent_bailiff.webhook.guard import guard_policies
+from agent_bailiff.webhook.manifests import IMAGE_DIGEST, generate_manifests
 from agent_bailiff.webhook.manifests import NAME as WEBHOOK
-from agent_bailiff.webhook.manifests import generate_manifests
 
 EFFECTOR = "effector.live"
 SERVICE = "k8s"
 CATALOG = OperationCatalog.load(shipped_catalog("kubernetes"))
 TEARDOWN_SECONDS = 240
+LOCK = "agent-bailiff-lock"
+RUN_LABEL = "agent-bailiff/run"
+OWNER_ANNOTATION = "agent-bailiff/owner"
 TOOLS = sorted({operation.tool for operation in CATALOG.operations})
 RUNBOOK = """# Runbook: api capacity
 
@@ -82,6 +85,12 @@ def kubectl(context: str, *args: str, stdin: str | None = None, timeout: float =
     return result.stdout
 
 
+def labelled(document: dict[str, Any], run_id: str) -> dict[str, Any]:
+    for item in document.get("items", [document]):
+        item["metadata"].setdefault("labels", {})[RUN_LABEL] = run_id
+    return document
+
+
 class Deadline:
     def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
         self.clock = clock
@@ -92,8 +101,9 @@ class Deadline:
 
 
 class Cluster:
-    def __init__(self, context: str, directory: Path) -> None:
+    def __init__(self, context: str, directory: Path, run_id: str) -> None:
         self.context = context
+        self.run_id = run_id
         self.directory = private(directory)
         suffix = secrets.token_hex(3)
         self.namespaces = {key: f"bl-{suffix}-{key}" for key in ("sys", "hook", "staging", "prod")}
@@ -101,9 +111,36 @@ class Cluster:
         self.manifests = self.directory / "manifests.json"
         self.webhook_manifests = self.directory / "webhook.json"
         self.created = False
+        self.locked = False
+
+    def acquire_lock(self) -> None:
+        lock = {
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {"name": LOCK, "annotations": {OWNER_ANNOTATION: self.run_id}},
+        }
+        try:
+            kubectl(self.context, "create", "-f", "-", stdin=json.dumps(labelled(lock, self.run_id)))
+        except RuntimeError as error:
+            if "AlreadyExists" not in str(error):
+                raise
+            owner = kubectl(
+                self.context, "get", "namespace", LOCK, "-o", "jsonpath={.metadata.annotations.agent-bailiff/owner}"
+            )
+            raise RuntimeError(
+                f"the cluster is locked by run {owner or '<unknown>'} (namespace {LOCK}); "
+                f"delete it only once container bl-{owner or '<unknown>'} is not running"
+            ) from error
+        self.locked = True
+
+    def create(self, *args: str, namespace: str | None = None) -> None:
+        scope = ["-n", namespace] if namespace else []
+        document = json.loads(kubectl(self.context, *scope, "create", *args, "--dry-run=client", "-o", "json"))
+        kubectl(self.context, *scope, "create", "-f", "-", stdin=json.dumps(labelled(document, self.run_id)))
 
     def up(self) -> None:
-        self.manifests.write_text(
+        self.acquire_lock()
+        manifests = json.loads(
             cli(
                 "effector",
                 "manifests",
@@ -119,7 +156,8 @@ class Cluster:
                 f"{TENANT}={self.namespaces['staging']}",
             )  # fmt: skip
         )
-        items = json.loads(self.manifests.read_text())["items"]
+        self.manifests.write_text(json.dumps(labelled(manifests, self.run_id)))
+        items = manifests["items"]
         names = [
             f"{item['kind'].lower()}/{item['metadata']['name']}"
             for item in items
@@ -134,13 +172,10 @@ class Cluster:
         if taken:
             raise RuntimeError(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
         self.created = True
-        kubectl(self.context, "create", "namespace", self.namespaces["hook"])
+        self.create("namespace", self.namespaces["hook"])
         for key in ("staging", "prod"):
-            kubectl(self.context, "create", "namespace", self.namespaces[key])
-            kubectl(
-                self.context, "-n", self.namespaces[key], "create", "deployment", "api",
-                "--image=registry.k8s.io/pause:3.10",
-            )  # fmt: skip
+            self.create("namespace", self.namespaces[key])
+            self.create("deployment", "api", "--image=registry.k8s.io/pause:3.10", namespace=self.namespaces[key])
         kubectl(self.context, "apply", "-f", str(self.manifests))
         for account, name in (("effector", "effector.token"), ("effector-audit", "audit.token")):
             token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=10m")
@@ -151,21 +186,16 @@ class Cluster:
         (self.directory / "ca.crt").write_bytes(base64.b64decode(cluster["certificate-authority-data"]))
         self.server = urllib.parse.urlsplit(cluster["server"])
 
-    def deploy_webhook(self, effector: dict[str, Any], image: str, docker_context: str) -> None:
+    def deploy_webhook(self, effector: dict[str, Any], image: str) -> None:
+        if IMAGE_DIGEST.fullmatch(image) is None:
+            raise RuntimeError(f"the webhook image {image!r} must be pinned by sha256 digest")
         namespace = self.namespaces["hook"]
         certs = self.directory / "webhook-certs"
         issue_serving_certificate(certs, WEBHOOK, namespace)
-        kubectl(
-            self.context, "-n", namespace, "create", "secret", "tls", WEBHOOK + "-tls",
-            f"--cert={certs / 'tls.crt'}", f"--key={certs / 'tls.key'}",
+        self.create(
+            "secret", "tls", WEBHOOK + "-tls", f"--cert={certs / 'tls.crt'}", f"--key={certs / 'tls.key'}",
+            namespace=namespace,
         )  # fmt: skip
-        digest = subprocess.run(
-            ["docker", "--context", docker_context, "image", "inspect", image, "--format", "{{.Id}}"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        ).stdout.strip()
         pins = {
             "effector_id": effector["name"],
             "custodian_id": effector["custodian"],
@@ -180,7 +210,7 @@ class Cluster:
         def bundle(enforce: bool, phase: str) -> dict[str, Any]:
             manifests = generate_manifests(
                 namespace=namespace,
-                image=f"{image.split(':')[0]}@{digest}",
+                image=image,
                 ca_pem=(certs / "ca.crt").read_bytes(),
                 pins=pins,
                 catalog=CATALOG,
@@ -188,10 +218,7 @@ class Cluster:
                 deployers=[self.applier],
                 phase=phase,
             )
-            for item in manifests["items"]:
-                if item["kind"] == "Deployment":
-                    item["spec"]["template"]["spec"]["containers"][0]["image"] = image
-            return manifests
+            return labelled(manifests, self.run_id)
 
         for enforce, phase in ((False, "all"), (True, "prepare"), (True, "register")):
             manifests = bundle(enforce, phase)
@@ -219,8 +246,15 @@ class Cluster:
             raise RuntimeError(f"webhook audit failed: {problems}")
 
     def down(self) -> None:
-        if not self.created:
+        if not self.locked:
             return
+        deadline = Deadline(TEARDOWN_SECONDS)
+        failures = self.remove(deadline) if self.created else []
+        if failures:
+            raise RuntimeError(f"cleanup incomplete, namespace {LOCK} kept: " + "; ".join(failures))
+        self.within(deadline, "delete", "namespace", LOCK, "--ignore-not-found", "--timeout=60s")
+
+    def remove(self, deadline: Deadline) -> list[str]:
         failures = []
         steps = [
             ("delete", f"validatingwebhookconfiguration/{WEBHOOK}", "--ignore-not-found", "--timeout=60s"),
@@ -234,7 +268,6 @@ class Cluster:
                 "--ignore-not-found", "--timeout=120s",
             ),
         ]  # fmt: skip
-        deadline = Deadline(TEARDOWN_SECONDS)
         for step in steps:
             try:
                 self.within(deadline, *step)
@@ -248,8 +281,7 @@ class Cluster:
             left = f"validatingwebhookconfiguration/{WEBHOOK} (unchecked: {error})"
         if left:
             failures.append(f"{left} may still be registered with failurePolicy Fail for bailiff: users; delete it")
-        if failures:
-            raise RuntimeError("cleanup incomplete: " + "; ".join(failures))
+        return failures
 
     def within(self, deadline: Deadline, *args: str) -> str:
         remaining = deadline.remaining()
@@ -501,13 +533,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_layout_arguments(parser)
     parser.add_argument("--context", required=True, help="kube context of a disposable cluster")
-    parser.add_argument("--webhook-image", default="agent-bailiff-webhook:live", help="local tag of the webhook image")
-    parser.add_argument("--docker-context", default="orbstack", help="docker context whose images the cluster runs")
+    parser.add_argument("--webhook-image", required=True, help="the webhook image, pinned by sha256 digest")
     args = parser.parse_args()
     install_sigterm()
     require_layout(args.root, args.receipt_dir, WORK_FILES | {"kubeconfig"})
     require_confined()
-    cluster = Cluster(args.context, args.root / "cluster")
+    cluster = Cluster(args.context, args.root / "cluster", args.run_id)
     deployment = KubernetesDeployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.cluster = cluster
     outcomes: list[Outcome] = []
@@ -516,7 +547,7 @@ def main() -> None:
         cluster.up()
         deployment.prepare()
         effector = json.loads(deployment.config("effector").read_text())
-        cluster.deploy_webhook(effector, args.webhook_image, args.docker_context)
+        cluster.deploy_webhook(effector, args.webhook_image)
         deployment.start()
         outcomes.append(
             scenario(deployment, args.model, "scale", f"Scale the api deployment in namespace {staging} to 3 replicas.")

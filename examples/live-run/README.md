@@ -107,11 +107,11 @@ The four runs cost $0.182 in model usage together.
 
 ### Run it
 
-Requires the same as above, plus kubectl, a disposable cluster context, and the webhook image built into the Docker engine the cluster runs images from (`--docker-context`, default `orbstack`; the generator requires a digest, so the harness passes the local image ID, but the Deployment runs the mutable local tag, so this is not a digest pin):
+Requires the same as above, plus kubectl, a disposable cluster context, and the webhook image built into the Docker engine the cluster runs images from. `--webhook-image` takes only a `name@sha256:<digest>` reference, and the Deployment runs that reference:
 
 ```sh
 docker --context orbstack build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:live .
-.venv/bin/python examples/live-run/kubernetes.py --context orbstack --out live-run-k8s.json
+docker --context orbstack image inspect agent-bailiff-webhook:live --format '{{index .RepoDigests 0}}'
 ```
 
 Neither run starts as one OS user since the docket began refusing an archiver uid equal to its own: the docket stops at start with `docket.archiver_uid ... is the sink's own uid`. Running the archiver as a second uid needs a second OS user, which these scripts do not create. On 2026-11-22 the Kubernetes run got as far as the docket start, with the webhook serving in Enforce after all three phases on OrbStack.
