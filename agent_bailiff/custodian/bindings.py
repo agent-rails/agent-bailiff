@@ -43,7 +43,7 @@ class CredentialBinding:
         if reason:
             raise BindingTableError(f"resource is not a valid scope entry: {reason}")
         if not is_bounded(self.resource):
-            raise BindingTableError("resource pattern must end at /")
+            raise BindingTableError("resource pattern must be exact or end at /*")
         if not HEADER_NAME.fullmatch(self.header_name):
             raise BindingTableError("header_name must be an HTTP field name token")
         if not isinstance(self.canary, bool):
@@ -77,7 +77,7 @@ class EffectorBinding:
         if reason:
             raise BindingTableError(f"resource is not a valid scope entry: {reason}")
         if not is_bounded(self.resource):
-            raise BindingTableError("resource pattern must end at /")
+            raise BindingTableError("resource pattern must be exact or end at /*")
         if not isinstance(self.catalog, str) or not CATALOG_DIGEST.fullmatch(self.catalog):
             raise BindingTableError("catalog must be the effector catalog digest")
 

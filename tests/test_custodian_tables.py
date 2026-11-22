@@ -103,13 +103,13 @@ def test_binding_outside_the_scope_grammar_is_refused(field, value):
 
 @pytest.mark.parametrize("resource", ["gitea/repos/acme-*", "gitea/repos/acme.*", "gitea/repos/acme_*"])
 def test_binding_pattern_that_stops_inside_a_segment_is_refused_at_load(state, resource):
-    with pytest.raises(BindingTableError, match="must end at /"):
+    with pytest.raises(BindingTableError, match="exact or end at /\\*"):
         BindingTable.load(write_table(state / "bindings.json", {"bindings": [{**DEPLOY, "resource": resource}]}))
 
 
 @pytest.mark.parametrize("resource", ["gitea/repos/acme-*", "gitea/repos/acme.*"])
 def test_effector_binding_pattern_that_stops_inside_a_segment_is_refused(resource):
-    with pytest.raises(BindingTableError, match="must end at /"):
+    with pytest.raises(BindingTableError, match="exact or end at /\\*"):
         EffectorBinding(
             tenant="tenant-a",
             tool="k8s.scale",
