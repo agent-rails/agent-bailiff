@@ -780,6 +780,28 @@ def test_the_docket_command_refuses_an_archiver_uid_equal_to_its_own(deployment)
     assert not deployment.sockets["docket"].exists()
 
 
+def test_serve_docket_refuses_to_run_the_sink_as_root(deployment, monkeypatch):
+    constructed = []
+
+    class RecordingSink:
+        def __init__(self, *args, **options):
+            constructed.append(options)
+
+        async def start(self):
+            raise RuntimeError("sink started")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(run, "DocketSink", RecordingSink)
+    monkeypatch.setattr(run, "sink_euid", lambda: 0)
+    settings = load_docket(deployment.paths["docket"])
+    assert settings.retention.archiver_uid != 0
+    with pytest.raises(ValueError, match="running as root"):
+        asyncio.run(run.serve_docket(settings, asyncio.Event()))
+    assert constructed == []
+
+
 def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch):
     seen = {}
 
