@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from agent_bailiff.effector.catalog import CatalogOperation
 from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
-from agent_bailiff.effector.platform import VERSION_PATH, Platform, check_version
+from agent_bailiff.effector.platform import VERSION_PATH, Platform, accepts_incomplete, check_version
 from agent_bailiff.effector.rbac import (
     DEPLOYMENT_FIELDS,
     DEPLOYMENT_SPEC_FIELDS,
@@ -310,8 +310,12 @@ class RbacAudit:
         status = self._request(
             self._tokens[account], "POST", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews", review
         ).get("status")
-        if not isinstance(status, dict) or status.get("incomplete") is not False:
+        if not isinstance(status, dict):
             return [f"the rules of {account} in {namespace} could not be listed completely"]
+        if status.get("incomplete") is not False and not accepts_incomplete(self._platform, status):
+            error = status.get("evaluationError")
+            detail = f": {error}" if isinstance(error, str) and error else ""
+            return [f"the rules of {account} in {namespace} could not be listed completely{detail}"]
         rules = self._granted[account]
         allowed = (
             atoms(BASELINE_RULES) | atoms(BASELINE_NON_RESOURCE) | rules.get(None, set()) | rules.get(namespace, set())

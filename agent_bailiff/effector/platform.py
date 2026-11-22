@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 Platform = Literal["upstream", "gke", "eks"]
 PLATFORMS: tuple[Platform, ...] = ("upstream", "gke", "eks")
 VERSION_PATH = "/version"
 GKE_VERSION_MARKER = "-gke."
+ACCEPTED_INCOMPLETE: Mapping[Platform, frozenset[str]] = {
+    "upstream": frozenset(),
+    "gke": frozenset({"webhook authorizer does not support user rule resolution"}),
+    "eks": frozenset(),
+}
 
 
 def parse_platform(value: object) -> Platform:
@@ -24,3 +30,8 @@ def check_version(platform: Platform, version: object) -> list[str]:
     if platform == "gke" and not on_gke:
         return [f"the effector platform is gke but the cluster runs {git_version}"]
     return []
+
+
+def accepts_incomplete(platform: Platform, status: Mapping[str, Any]) -> bool:
+    error = status.get("evaluationError")
+    return status.get("incomplete") is True and isinstance(error, str) and error in ACCEPTED_INCOMPLETE[platform]

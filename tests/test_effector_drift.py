@@ -26,6 +26,7 @@ from agent_bailiff.webhook import manifests as webhook
 
 WEBHOOK_PATH = f"/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations/{webhook.NAME}"
 SERVICE_PATH = f"/api/v1/namespaces/bailiff-webhook/services/{webhook.NAME}"
+GKE_ERROR = "webhook authorizer does not support user rule resolution"
 
 IDENTITY = EffectorIdentity("bailiff-system", "effector", "gitops", "bailiff-webhook")
 TENANTS = {"tenant-a": ["staging"]}
@@ -98,6 +99,7 @@ class FakeApi:
         self.extra_non_resource = []
         self.sar_overrides = {}
         self.incomplete = set()
+        self.evaluation_error = None
         self.status = {}
         self.page_size = None
         self.requests = []
@@ -180,6 +182,8 @@ class FakeApi:
                 "nonResourceRules": list(BASELINE_NON_RESOURCE) + self.extra_non_resource,
                 "incomplete": namespace in self.incomplete,
             }
+            if namespace in self.incomplete and self.evaluation_error is not None:
+                status["evaluationError"] = self.evaluation_error
             return 201, json.dumps({"status": status}).encode()
         if plural == "namespaces":
             items = [{"metadata": {"name": name}} for name in self.namespaces]
@@ -207,8 +211,7 @@ def api(tmp_path):
     return FakeApi(tmp_path)
 
 
-@pytest.fixture
-def audit(api, tmp_path):
+def make_audit(api, tmp_path, platform):
     for name, value in (("effector", EFFECTOR_TOKEN), ("audit", AUDIT_TOKEN)):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
@@ -220,9 +223,20 @@ def audit(api, tmp_path):
         MANIFESTS,
         TENANTS,
         CATALOG.operations,
-        platform="upstream",
+        platform=platform,
         sleep=SLEEPS.append,
     )
+
+
+@pytest.fixture
+def audit(api, tmp_path):
+    return make_audit(api, tmp_path, "upstream")
+
+
+@pytest.fixture
+def gke_audit(api, tmp_path):
+    api.version = {"gitVersion": "v1.36.4-gke.2377000"}
+    return make_audit(api, tmp_path, "gke")
 
 
 SLEEPS: list[float] = []
@@ -278,6 +292,39 @@ def test_an_incomplete_rules_review_is_drift(api, audit):
     assert audit.check() == [
         "the rules of effector in default could not be listed completely",
         "the rules of effector-audit in default could not be listed completely",
+    ]
+
+
+def test_the_pinned_incomplete_review_is_accepted_on_gke(api, gke_audit):
+    api.incomplete.update(api.namespaces)
+    api.evaluation_error = GKE_ERROR
+    assert gke_audit.check() == []
+
+
+def test_an_accepted_incomplete_review_still_compares_the_listed_rules(api, gke_audit):
+    api.incomplete.update(api.namespaces)
+    api.evaluation_error = GKE_ERROR
+    api.extra_rules["kube-system"] = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]
+    [problem] = gke_audit.check()
+    assert problem.startswith("effector holds a grant outside the generated set in kube-system")
+
+
+@pytest.mark.parametrize("error", ["another authorizer failed", f"[{GKE_ERROR}, another authorizer failed]"])
+def test_an_incomplete_review_with_another_error_is_drift_on_gke(api, gke_audit, error):
+    api.incomplete.add("default")
+    api.evaluation_error = error
+    assert gke_audit.check() == [
+        f"the rules of effector in default could not be listed completely: {error}",
+        f"the rules of effector-audit in default could not be listed completely: {error}",
+    ]
+
+
+def test_the_gke_error_is_drift_on_upstream(api, audit):
+    api.incomplete.add("default")
+    api.evaluation_error = GKE_ERROR
+    assert audit.check() == [
+        f"the rules of effector in default could not be listed completely: {GKE_ERROR}",
+        f"the rules of effector-audit in default could not be listed completely: {GKE_ERROR}",
     ]
 
 
