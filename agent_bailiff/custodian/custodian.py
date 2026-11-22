@@ -24,6 +24,7 @@ from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
+from agent_bailiff.scope_pattern import is_bounded
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
 
@@ -219,6 +220,8 @@ class Custodian:
         )
         if not chain.valid or chain.root is None or chain.leaf_scope is None or chain.leaf_subject is None:
             raise _Refusal("chain_invalid")
+        if not all(is_bounded(pattern) for pattern in chain.leaf_scope["resources"]):
+            raise _Refusal("unbounded_scope")
         if not covers(chain.leaf_scope, request.tool, request.resource):
             raise _Refusal("out_of_scope")
         root = chain.root

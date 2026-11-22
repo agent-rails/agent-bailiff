@@ -431,6 +431,16 @@ def test_request_outside_the_chain_scope_is_refused(make_custodian):
     assert make_custodian().release(token, request, NOW + 1) == Refused("out_of_scope")
 
 
+def test_an_unbounded_leaf_grant_is_refused_even_with_a_clearance(make_custodian):
+    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5})
+    request = make_request(root, resource="env/staging-x/api")
+    token = sign_clearance(clearance_for(request, root))
+    bindings = (
+        CredentialBinding(TENANT, "deploy.service", "env/*", "deploy-api", "deploy.example", "Authorization", False),
+    )
+    assert make_custodian(bindings=bindings).release(token, request, NOW + 1) == Refused("unbounded_scope")
+
+
 def test_revoked_chain_is_refused(make_custodian, issue, writer):
     request, token = issue()
     writer.revoke_task(TENANT, "task-1", NOW)
