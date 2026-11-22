@@ -1,6 +1,8 @@
 import pytest
 
-from agent_bailiff.effector.platform import PLATFORMS, check_version, parse_platform
+from agent_bailiff.effector.platform import PLATFORMS, accepts_incomplete, check_version, parse_platform
+
+GKE_ERROR = "webhook authorizer does not support user rule resolution"
 
 
 @pytest.mark.parametrize("value", PLATFORMS)
@@ -43,3 +45,29 @@ def test_the_gke_platform_on_a_cluster_that_is_not_gke_is_refused():
 @pytest.mark.parametrize("version", [{}, {"gitVersion": ""}, {"gitVersion": 1}, [], None])
 def test_a_version_without_git_version_is_refused(version):
     assert check_version("upstream", version) == ["/version returned no gitVersion"]
+
+
+def test_the_pinned_gke_error_is_accepted_on_gke():
+    assert accepts_incomplete("gke", {"incomplete": True, "evaluationError": GKE_ERROR})
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"incomplete": True},
+        {"incomplete": True, "evaluationError": ""},
+        {"incomplete": True, "evaluationError": None},
+        {"incomplete": True, "evaluationError": "another authorizer failed"},
+        {"incomplete": True, "evaluationError": f"[{GKE_ERROR}, another authorizer failed]"},
+        {"incomplete": True, "evaluationError": f"{GKE_ERROR} "},
+        {"incomplete": "true", "evaluationError": GKE_ERROR},
+        {"incomplete": False, "evaluationError": GKE_ERROR},
+    ],
+)
+def test_any_other_review_is_not_accepted_on_gke(status):
+    assert not accepts_incomplete("gke", status)
+
+
+@pytest.mark.parametrize("platform", ["upstream", "eks"])
+def test_no_incomplete_review_is_accepted_outside_gke(platform):
+    assert not accepts_incomplete(platform, {"incomplete": True, "evaluationError": GKE_ERROR})
