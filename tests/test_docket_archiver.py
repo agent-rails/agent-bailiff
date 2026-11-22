@@ -771,6 +771,24 @@ def test_writes_no_receipt_once_the_archive_dir_is_replaced_at_its_path(layout):
     assert receipt(layout, 2) is None
 
 
+def test_writes_no_receipt_once_the_archive_root_is_replaced_by_a_symlink_to_it(layout):
+    root, docket = layout
+    manifest = cut(filled(docket))
+    instance = archiver(layout)
+    instance._open()
+    try:
+        assert instance._archive_next()
+        os.rename(root / "archive", root / "detached")
+        (root / "archive").symlink_to(root / "detached")
+        docket.append("decide", make_entry(5))
+        cut(docket, manifest)
+        with pytest.raises(ArchiveMismatch, match=f"{root / 'archive'} is no longer the directory"):
+            instance._archive_next()
+    finally:
+        instance._close()
+    assert receipt(layout, 2) is None
+
+
 @pytest.mark.parametrize("remove", [lambda path: os.rename(path, path.with_name("detached")), shutil.rmtree])
 def test_writes_no_receipt_once_the_archive_dir_is_removed_from_its_path(layout, remove):
     _, docket = layout
