@@ -8,9 +8,9 @@ import json
 import os
 import platform
 import secrets
-import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -46,6 +46,8 @@ ROUTES = [
 ]
 CREDENTIAL_HEADER = "X-Api-Key"
 CHAIN_HEADERS = ["x-bailiff-task-root", "x-bailiff-links", "x-bailiff-leaf-proof", "x-bailiff-nonce", "traceparent"]
+RECEIPT_MODE = 0o750
+WORK_FILES = frozenset({"claude-token", "home"})
 CLAUDE_ENVIRONMENT_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL")
 INJECTED = """# Release 1.4.0
 
@@ -88,6 +90,28 @@ def gateway_binary() -> Path:
     return binary
 
 
+def require_layout(work: Path, receipts: Path, files: frozenset[str]) -> None:
+    parent = work.parent
+    if receipts.parent != parent or set(os.listdir(parent)) != {work.name, receipts.name}:
+        raise RuntimeError(f"{parent} must hold only {work.name} and {receipts.name}")
+    for path in (work, receipts):
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            raise RuntimeError(f"{path} must be a directory, not a link")
+    if os.listdir(receipts) or stat.S_IMODE(os.lstat(receipts).st_mode) != RECEIPT_MODE:
+        raise RuntimeError(f"{receipts} must be empty with mode {RECEIPT_MODE:o}")
+    if set(os.listdir(work)) != files:
+        raise RuntimeError(f"{work} must hold only {', '.join(sorted(files))}")
+    for path in (work, *(work / name for name in files)):
+        if os.lstat(path).st_uid != os.geteuid():
+            raise RuntimeError(f"{path} must be owned by uid {os.geteuid()}")
+
+
+def check_receipt_dir(path: Path, archiver_uid: int, reader_gid: int) -> None:
+    info = os.lstat(path)
+    if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (archiver_uid, reader_gid, RECEIPT_MODE):
+        raise RuntimeError(f"{path} must be owned by {archiver_uid}:{reader_gid} with mode {RECEIPT_MODE:o}")
+
+
 def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -97,10 +121,14 @@ def free_port() -> int:
 @dataclass
 class Deployment:
     root: Path
+    receipt_dir: Path = field(kw_only=True)
+    archiver_uid: int = field(kw_only=True)
     secret: str = field(default_factory=lambda: f"live-{secrets.token_hex(12)}")
     processes: list[subprocess.Popen[bytes]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if self.archiver_uid == os.geteuid():
+            raise RuntimeError(f"the archiver uid {self.archiver_uid} is the harness's own uid")
         self.run_dir = self.root / "run"
         self.sockets = {name: self.run_dir / name[0] / f"{name}.sock" for name in ("docket", "decide", "custodian")}
         self.ledger = self.root / "ledger" / "ledger.db"
@@ -113,6 +141,7 @@ class Deployment:
         return self.root / name / "config.json"
 
     def prepare(self) -> None:
+        check_receipt_dir(self.receipt_dir, self.archiver_uid, GID)
         private(self.run_dir)
         ledger_dir = self.ledger.parent
         ledger_dir.mkdir(mode=0o750)
@@ -184,13 +213,10 @@ class Deployment:
                 *docket,
             )  # fmt: skip
         )
-        receipts = self.root / "receipts"
-        receipts.mkdir(mode=0o750)
-        os.chown(receipts, -1, GID)
-        os.chmod(receipts, 0o750)
         cli(
             "init", "docket", "--dir", private(self.root / "docket"), "--socket", self.sockets["docket"],
-            "--socket-group", GID, "--reader-group", GID, "--receipt-dir", receipts, "--archiver-uid", UID,
+            "--socket-group", GID, "--reader-group", GID, "--receipt-dir", self.receipt_dir,
+            "--archiver-uid", self.archiver_uid,
             "--allowed-uid", UID, "--pin", decide_pin, "--pin", custodian_pin,
             "--pin", control_pin, *self.extra_pins(pins, decide_pin, custodian_pin, docket),
         )  # fmt: skip
@@ -569,15 +595,31 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
     }
 
 
+def add_layout_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", type=Path, required=True, help="the harness's own empty work dir")
+    parser.add_argument("--receipt-dir", type=Path, required=True, help="empty dir owned by the archiver uid")
+    parser.add_argument("--archiver-uid", type=int, required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--model", default="claude-sonnet-5-5")
+
+
+def print_result(run_id: str, model: str, outcomes: list[Outcome], summary: dict[str, Any]) -> None:
+    result = {
+        "run_id": run_id,
+        "status": "ok",
+        "model": model,
+        "outcomes": [asdict(outcome) for outcome in outcomes],
+        "final": summary,
+    }
+    print(json.dumps(result, separators=(",", ":")), flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("/tmp/claude-501/bl"))
-    parser.add_argument("--model", default="claude-sonnet-5-5")
-    parser.add_argument("--out", type=Path, required=True)
+    add_layout_arguments(parser)
     args = parser.parse_args()
-    if args.root.exists():
-        shutil.rmtree(args.root)
-    deployment = Deployment(private(args.root))
+    require_layout(args.root, args.receipt_dir, WORK_FILES)
+    deployment = Deployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.prepare()
     deployment.start()
     outcomes: list[Outcome] = []
@@ -590,10 +632,7 @@ def main() -> None:
         summary = final_checks(deployment, outcomes)
     finally:
         deployment.stop()
-    args.out.write_text(
-        json.dumps({"model": args.model, "outcomes": [asdict(o) for o in outcomes], "final": summary}, indent=2)
-    )
-    print(json.dumps(summary, indent=2))
+    print_result(args.run_id, args.model, outcomes, summary)
 
 
 if __name__ == "__main__":
