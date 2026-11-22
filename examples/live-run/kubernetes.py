@@ -280,7 +280,8 @@ class KubernetesDeployment(Deployment):
         }
         task = self.task(task_id, scope)
         state = task["state"]
-        state["routes"] = {item.name: {"tool": item.tool, "resource": item.resource} for item in CATALOG.operations}
+        state["routes"] = []
+        state["catalogs"] = [{"service": SERVICE, "name": "kubernetes"}]
         state["tools"] = [*self.effector_tools(), *(tool for tool in shim.TOOLS if tool["name"] == "read_document")]
         write_owned(Path(task["mcp_config"]).parent / "state.json", state)
         namespaces = self.cluster.namespaces
@@ -336,7 +337,7 @@ def scenario_scripted(deployment: KubernetesDeployment) -> Outcome:
     arguments = {"namespace": deployment.cluster.namespaces["staging"], "name": "api", "replicas": 4}
     first = tools.call("scale_deployment", arguments)
     sent = json.loads(Path(task["state"]["request_log"]).read_text().splitlines()[-1])
-    replayed = shim.gateway_result(shim.post(task["state"]["gateway_url"], sent["body"], sent["headers"]))
+    replayed = shim.replay(task["state"], sent)
     out_of_range = tools.call("scale_deployment", {**arguments, "replicas": 20})
     outcome = Outcome("scripted", "scripted: replay the agent's exact scale request, then ask for 20 replicas")
     outcome.checks = {
