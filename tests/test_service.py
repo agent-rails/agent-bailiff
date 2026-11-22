@@ -780,6 +780,28 @@ def test_the_docket_command_refuses_an_archiver_uid_equal_to_its_own(deployment)
     assert not deployment.sockets["docket"].exists()
 
 
+def test_the_docket_command_refuses_to_run_as_root(deployment):
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            SEPARATE_ARCHIVER.replace("lambda: -1", "lambda: 0"),
+            "docket",
+            "run",
+            "--config",
+            str(deployment.paths["docket"]),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert process.returncode == 1
+    assert "the docket sink is running as root" in process.stderr
+    assert not deployment.sockets["docket"].exists()
+
+
 def test_serve_docket_refuses_to_run_the_sink_as_root(deployment, monkeypatch):
     constructed = []
 
