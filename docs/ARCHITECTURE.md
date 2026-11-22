@@ -8,7 +8,8 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 |---|---|---|---|
 | decide | its own uid; owns the ledger | its signing key, policy, cost table, routes, the ledger (writer), the suspension switch | Unix socket for the gateway (ExtMcp) |
 | custodian | its own uid; in the ledger group | its signing key, key encryption key, credential store, binding table, claims database, routes; the ledger and suspension state read-only | Unix socket for the gateway (ExtMcp) |
-| docket | its own uid | the docket file, pinned writer keys | Unix socket for decide, custodian and control |
+| docket | its own uid | the active segment, sealed segments and their manifest, pinned writer keys | Unix socket for decide, custodian and control |
+| docket archive | `archiver_uid`; in the docket reader group | its checkpoint, the archive directory, the receipt directory, pinned writer keys | none |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
 | docket export (optional) | its own uid; in the docket reader group | its checkpoint, pinned writer keys | none; sends OTLP/HTTP to a collector |
 | agentgateway | its own uid | gateway config | the agent's MCP connection |
@@ -67,7 +68,7 @@ The entries for a verified call carry the clearance's trace id and op_id, so the
 - **Suspension:** `<ledger>.suspension`, a directory owned by decide, group the ledger group, mode 0750. A `suspended` file in it means suspended. Decide and the custodian both treat anything they cannot verify as suspended.
 - **Credential store:** SQLite, custodian-only, mode 0600. Each credential is encrypted with AES-GCM under its own data key; the data key is wrapped by the key encryption key. Both use the associated data `{tenant, credential_id, target}`.
 - **Claims:** SQLite, custodian-only. The op_id is the primary key, so a second release of the same operation fails. Task denies from canary hits are stored here.
-- **Docket:** one append-only file of signed records with per-writer sequence and hash chains. See [DOCKET.md](DOCKET.md).
+- **Docket:** signed records with per-writer sequence and hash chains, appended to an active segment that is sealed at `segment_bytes`. A sealed segment is removed from the host only after the archiver has written a receipt for a verified copy. See [DOCKET.md](DOCKET.md).
 
 ## Signed records
 
