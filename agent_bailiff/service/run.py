@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -46,6 +47,7 @@ from agent_bailiff.service.settings import (
 )
 
 logger = logging.getLogger(__name__)
+sink_euid = os.geteuid
 
 
 class Closeable(Protocol):
@@ -195,6 +197,11 @@ def put_credential(settings: CustodianSettings, tenant: str, credential_id: str,
 
 
 async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
+    if settings.retention.archiver_uid == sink_euid():
+        raise ValueError(
+            f"docket.archiver_uid {settings.retention.archiver_uid} is the sink's own uid; "
+            "run the archiver as another uid so the sink cannot write the receipts it removes segments by"
+        )
     sink = DocketSink(
         settings.docket,
         settings.socket,

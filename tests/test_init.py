@@ -351,7 +351,8 @@ def edit(path, change):
     path.write_text(json.dumps(document))
 
 
-def test_a_stack_built_by_init_releases_once_and_control_revokes(root, ledger_dir, capsys, live):
+def test_a_stack_built_by_init_releases_once_and_control_revokes(root, ledger_dir, capsys, live, monkeypatch):
+    monkeypatch.setattr(run, "sink_euid", lambda: -1)
     sockets, _ = init_all(root, ledger_dir, capsys)
     binding = {"tenant": TENANT, "tool": "deploy.service", "resource": "env/staging/*"}
     binding |= {"credential_id": "deploy-api", "target": "deploy.example"}

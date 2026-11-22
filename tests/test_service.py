@@ -272,6 +272,11 @@ class DocketThread:
         self.loop.close()
 
 
+@pytest.fixture(autouse=True)
+def separate_archiver(monkeypatch):
+    monkeypatch.setattr(run, "sink_euid", lambda: -1)
+
+
 @pytest.fixture
 def deployment():
     root = Path(tempfile.mkdtemp(prefix="bv-", dir="/tmp"))
@@ -664,9 +669,18 @@ def wait_for(path, process, seconds=10):
     raise AssertionError(f"{path} did not appear")
 
 
+SEPARATE_ARCHIVER = (
+    "import sys\n"
+    "from agent_bailiff.service import run\n"
+    "run.sink_euid = lambda: -1\n"
+    "from agent_bailiff import cli\n"
+    "sys.exit(cli.main())\n"
+)
+
+
 def service_process(*arguments):
     return subprocess.Popen(
-        [sys.executable, "-m", "agent_bailiff.cli", *arguments],
+        [sys.executable, "-c", SEPARATE_ARCHIVER, *arguments],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -750,6 +764,20 @@ def test_segment_bytes_is_required(deployment):
 def test_segment_bytes_admits_64_mib(deployment):
     settings = parse_docket(mutate(deployment.documents["docket"], lambda doc: doc.update(segment_bytes=64 << 20)))
     assert settings.segment_bytes == 64 << 20
+
+
+def test_the_docket_command_refuses_an_archiver_uid_equal_to_its_own(deployment):
+    process = subprocess.run(
+        [sys.executable, "-m", "agent_bailiff.cli", "docket", "run", "--config", str(deployment.paths["docket"])],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert process.returncode == 1
+    assert f"docket.archiver_uid {UID} is the sink's own uid" in process.stderr
+    assert not deployment.sockets["docket"].exists()
 
 
 def test_serve_docket_passes_snapshot_every_to_the_sink(deployment, monkeypatch):
