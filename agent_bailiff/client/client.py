@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -61,6 +62,19 @@ ASK_USER_REASONS = frozenset({NEEDS_APPROVAL, "suspended"})
 Clock = Callable[[], int]
 Action = Literal["stop", "ask_user", "retry_later"]
 
+EFFECTOR_ERROR_PREFIX = "effector_"
+EFFECTOR_ERROR_ACTIONS: Mapping[str, Action] = MappingProxyType(
+    {
+        "effector_suspended": "ask_user",
+        "effector_busy": "retry_later",
+        "effector_docket_unavailable": "retry_later",
+        "effector_rbac_unverified": "retry_later",
+        "effector_restart_unverified": "retry_later",
+        "effector_webhook_unverified": "retry_later",
+        "effector_kubernetes_429": "retry_later",
+    }
+)
+
 
 def system_clock() -> int:
     return int(time.time())
@@ -73,6 +87,15 @@ class Result:
     @property
     def is_error(self) -> bool:
         return self.result.get("isError") is True
+
+    @property
+    def effector_error(self) -> str | None:
+        text = _only_text(self.result)
+        return text if text is not None and text.startswith(EFFECTOR_ERROR_PREFIX) else None
+
+
+def effector_error_action(reason: str) -> Action:
+    return EFFECTOR_ERROR_ACTIONS.get(reason, "stop")
 
 
 def refusal_action(reason: str) -> Action:
@@ -379,6 +402,11 @@ def classify(exchange: _Exchange) -> Outcome:
 
 
 def refusal_reason(result: Mapping[str, Any]) -> str | None:
+    text = _only_text(result)
+    return text if text in REFUSAL_REASONS else None
+
+
+def _only_text(result: Mapping[str, Any]) -> str | None:
     if result.get("isError") is not True:
         return None
     content = result.get("content")
@@ -387,7 +415,7 @@ def refusal_reason(result: Mapping[str, Any]) -> str | None:
     if set(content[0]) != {"type", "text"} or content[0]["type"] != "text":
         return None
     text = content[0]["text"]
-    return text if text in REFUSAL_REASONS else None
+    return text if isinstance(text, str) else None
 
 
 def read_json(response: http.client.HTTPResponse) -> dict[str, Any] | None:

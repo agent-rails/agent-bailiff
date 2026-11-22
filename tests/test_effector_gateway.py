@@ -18,6 +18,7 @@ from test_effector import EFFECTOR_TOKEN, FakeTransport, RecordingDocket, Suspen
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.client.client import Result, _Exchange, classify, effector_error_action
 from agent_bailiff.custodian.bindings import EffectorBinding
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner
 from agent_bailiff.decide.config import TargetBinding
@@ -67,7 +68,7 @@ class RecordingHandler(_Handler):
         super().do_POST()
 
 
-def effector_server(transport, docket):
+def effector_server(transport, docket, suspension, rbac):
     check = ReleaseCheck(
         ReleaseCheckConfig(
             effector_id=EFFECTOR_ID,
@@ -86,9 +87,9 @@ def effector_server(transport, docket):
         CATALOG,
         check,
         KubernetesClient(transport, transport.token_file),
-        Suspended(False),
+        suspension,
         docket,
-        Verified(True),
+        rbac,
     )
     server = EffectorServer(effector, 0, clock=lambda: NOW + 2)
     server.RequestHandlerClass = RecordingHandler
@@ -182,7 +183,8 @@ def stack(binary, workdir, private, make_decider, make_custodian, token_file):
     transport = FakeTransport()
     transport.token_file = token_file
     effector_docket = RecordingDocket()
-    effector = effector_server(transport, effector_docket)
+    suspension, rbac = Suspended(False), Verified(True)
+    effector = effector_server(transport, effector_docket, suspension, rbac)
     url = f"http://127.0.0.1:{effector.server_address[1]}/mcp"
     servers, gateway = build_stack(binary, workdir, private, make_decider, make_custodian, url)
     try:
@@ -191,6 +193,8 @@ def stack(binary, workdir, private, make_decider, make_custodian, token_file):
             "effector": effector,
             "transport": transport,
             "docket": effector_docket,
+            "suspension": suspension,
+            "rbac": rbac,
             "gateway": gateway,
         }
     finally:
@@ -294,6 +298,39 @@ def test_a_release_replayed_directly_at_the_effector_is_refused(stack, monkeypat
         body = json.loads(response.read())
     assert body["result"]["content"][0]["text"] == "effector_release_replayed"
     assert len(stack["transport"].requests) == 1
+
+
+def break_effector(stack, reason):
+    if reason == "effector_suspended":
+        stack["suspension"].suspended = True
+    elif reason == "effector_docket_unavailable":
+        stack["docket"].fail_on = ("attempt",)
+    elif reason == "effector_rbac_unverified":
+        stack["rbac"].value = False
+    elif reason.startswith("effector_kubernetes_"):
+        stack["transport"].status = int(reason.rsplit("_", 1)[1])
+    elif reason == "effector_outcome_unknown":
+        stack["transport"].status = 503
+
+
+@pytest.mark.parametrize(
+    ("reason", "action"),
+    [
+        ("effector_suspended", "ask_user"),
+        ("effector_docket_unavailable", "retry_later"),
+        ("effector_rbac_unverified", "retry_later"),
+        ("effector_kubernetes_429", "retry_later"),
+        ("effector_kubernetes_403", "stop"),
+        ("effector_outcome_unknown", "stop"),
+    ],
+)
+def test_an_effector_error_reaches_the_client_as_a_result_with_its_action(stack, reason, action):
+    break_effector(stack, reason)
+    request = request_for("scale_deployment", SCALE)
+    status, body = stack["agent"].call("scale_deployment", SCALE, headers_for(request))
+    outcome = classify(_Exchange(status, {}, body))
+    assert isinstance(outcome, Result) and outcome.effector_error == reason, body
+    assert effector_error_action(reason) == action
 
 
 def test_the_gateway_does_not_retry_a_failed_effector_call(binary, workdir, private, make_decider, make_custodian):
