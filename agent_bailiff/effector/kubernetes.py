@@ -34,6 +34,18 @@ class StaleConnection(KubernetesUnavailable):
     pass
 
 
+class Throttled(KubernetesUnavailable):
+    def __init__(self, retry_after: float | None) -> None:
+        super().__init__("the API server throttled the request")
+        self.retry_after = retry_after
+
+
+def retry_after_seconds(value: str | None) -> float | None:
+    if value is None or not value.isascii() or not value.isdigit():
+        return None
+    return float(value)
+
+
 @dataclass(frozen=True)
 class KubernetesResult:
     status: int
@@ -81,13 +93,13 @@ class PooledTransport:
             connection = self._idle.get_nowait()
         except queue.Empty:
             connection = self._connect()
-            status, will_close, data = self._exchange(connection, method, path, headers, body)
+            status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
         else:
             try:
-                status, will_close, data = self._exchange(connection, method, path, headers, body)
+                status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
             except StaleConnection:
                 connection = self._connect()
-                status, will_close, data = self._exchange(connection, method, path, headers, body)
+                status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
         oversized = len(data) > self._max
         if oversized or will_close:
             connection.close()
@@ -98,6 +110,8 @@ class PooledTransport:
                 connection.close()
         if oversized:
             raise KubernetesUnavailable("response larger than the limit")
+        if status == 429:
+            raise Throttled(retry_after)
         return status, data if 200 <= status < 300 else b""
 
     def close(self) -> None:
@@ -117,7 +131,7 @@ class PooledTransport:
         path: str,
         headers: Mapping[str, str],
         body: bytes | None,
-    ) -> tuple[int, bool, bytes]:
+    ) -> tuple[int, bool, bytes, float | None]:
         try:
             connection.request(method, path, body=body, headers=dict(headers))
             response = connection.getresponse()
@@ -128,7 +142,8 @@ class PooledTransport:
         except (OSError, http.client.HTTPException) as exc:
             connection.close()
             raise KubernetesUnavailable(str(exc)) from None
-        return response.status, not response.isclosed() or response.will_close, data
+        will_close = not response.isclosed() or response.will_close
+        return response.status, will_close, data, retry_after_seconds(response.getheader("Retry-After"))
 
 
 class KubernetesClient:

@@ -604,8 +604,11 @@ def test_the_transport_refuses_an_oversized_2xx_body(monkeypatch, tmp_path):
 
 
 class PooledResponse:
-    def __init__(self, status=200, body=b"{}", will_close=False):
-        self.status, self.body, self.will_close = status, body, will_close
+    def __init__(self, status=200, body=b"{}", will_close=False, headers=None):
+        self.status, self.body, self.will_close, self.headers = status, body, will_close, headers or {}
+
+    def getheader(self, name):
+        return self.headers.get(name)
 
     def read(self, limit):
         return self.body[:limit]
@@ -684,6 +687,31 @@ def test_the_pooled_transport_drops_a_connection_the_server_closes_or_that_overf
     with pytest.raises(KubernetesUnavailable, match="larger than the limit"):
         pooled.request("GET", "/api", {}, None)
     assert PooledConnection.opened[1].closed
+
+
+@pytest.mark.parametrize(
+    ("header", "retry_after"),
+    [
+        ("2", 2.0),
+        ("0", 0.0),
+        (None, None),
+        ("", None),
+        ("-1", None),
+        ("1.5", None),
+        ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+    ],
+)
+def test_the_pooled_transport_raises_a_throttle_with_its_retry_after(pooled, header, retry_after):
+    from agent_bailiff.effector.kubernetes import Throttled
+
+    pooled.request("GET", "/api", {}, None)
+    headers = {} if header is None else {"Retry-After": header}
+    PooledConnection.opened[0].responses = [PooledResponse(status=429, body=b"", headers=headers), PooledResponse()]
+    with pytest.raises(Throttled) as raised:
+        pooled.request("GET", "/api", {}, None)
+    assert raised.value.retry_after == retry_after
+    assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
+    assert len(PooledConnection.opened) == 1
 
 
 def test_closing_the_pooled_transport_closes_idle_connections(pooled):
