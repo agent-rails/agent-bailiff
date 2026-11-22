@@ -120,12 +120,21 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 ## docket tasks
 
 ```
-agent-bailiff docket tasks --docket PATH --pin decide.pub.json --pin custodian.pub.json [--json]
+agent-bailiff docket tasks --docket PATH --pin decide.pub.json --pin custodian.pub.json \
+  --control-pin control.pub.json [--archive DIR] [--json]
 ```
 
-Run it like `docket verify`. It verifies every record first and prints nothing if any line fails. Then it prints one row per tenant and task id, from records whose `handles` name both: principal, first and last time, decide allows, custodian releases, verified refusals, and `revoked` when a control revocation names the task, one of its roots or its tenant. A link revocation does not mark the task. Refusals before verification are not docketed, so they are not counted; see THREAT_MODEL.md, Unrecorded refusals.
+Run it like `docket verify`. It verifies every record first and prints nothing if any line fails. Then it prints one row per tenant and task id, from records whose `handles` name both: principal, first and last time, decide allows, custodian releases and verified refusals. Refusals before verification are not docketed, so they are not counted; see THREAT_MODEL.md, Unrecorded refusals.
 
-`--json` rows also carry `record`, the signed token of the task's latest non-control record, and its `record_line`. To revoke a task from it:
+STATE is `revoked` when a revocation recorded in the verified docket names the task, one of its roots or its tenant. Only revocations signed by a `--control-pin` writer count, so another pinned writer cannot mark a task. STATE is not the ledger's state:
+
+- A link revocation blocks every chain through that link but does not mark the task.
+- If control revoked in the ledger but its docket append failed (`ControlUnrecorded`), the task shows `-`.
+- After segment removal, records in removed segments are read only with `--archive`; without it the listing starts at the manifest base, so older tasks and revocations are missing.
+
+A root is named by its binding, a hash of the signed root, which includes its tenant, so a root revocation marks tasks of one tenant only.
+
+`--json` rows also carry `record`, the signed token of the task's latest decide record whose tenant matches the row, and its `record_line`; both are `null` when the task has none. Control accepts it only if decide is among control's writer pins. To revoke a task from it:
 
 ```
 agent-bailiff docket tasks ... --json | jq -r 'select(.tenant == "acme" and .task == "TASK").record' > record
