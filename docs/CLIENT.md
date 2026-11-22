@@ -11,8 +11,8 @@ outcome = client.call("gitea", "get_me", {})
 
 ## Request contract
 
-- Routes are the same `agent_bailiff.routes.ToolRoutes` the gateway adapter reads. `prepare(service, name, arguments)` maps the call to its scope `tool` and `resource`, and rejects an unrouted tool or arguments outside the route's schema before signing.
-- A route document (`ToolRoutes.from_document`) lists routes with exactly `service`, `name`, `tool` and `resource`, and optionally `schema`: a list of `{"name": ..., "kind": "identifier"}` items naming each `{placeholder}` in `resource` once. An identifier is `[A-Za-z0-9_][A-Za-z0-9._-]{0,99}`. The filled resource must also be a valid scope entry, so `..` or `.` is refused as `malformed_request`. Only schema arguments are checked; any other argument passes to the upstream unchecked. A document route cannot route a `k8s.*` tool; those come from the effector catalog, whose routes refuse any argument outside their schema.
+- Routes are the same `agent_bailiff.routes.ToolRoutes` the gateway adapter reads. `prepare(service, name, arguments)` maps the call to its scope `tool` and `resource`, and raises `ValueError` before signing for an unrouted tool, or for arguments the route refuses: outside the schema of a catalog route, or schema arguments of a route document that are missing or not identifiers.
+- A route document (`ToolRoutes.from_document`) lists routes with exactly `service`, `name`, `tool` and `resource`, and optionally `schema`: a list of `{"name": ..., "kind": "identifier"}` items naming each `{placeholder}` in `resource` once; each placeholder must be a whole `/`-separated segment. An identifier is `[A-Za-z0-9_][A-Za-z0-9._-]{0,99}`, so it cannot be `.`, `..` or contain `/`, and the filled resource must be a valid scope entry (at most 128 characters). The client raises `ValueError` for a call that fails these checks; the gateway refuses it with `malformed_request`. Only schema arguments are checked; any other argument passes to the upstream unchecked. A document route cannot route a `k8s.*` tool; those come from the effector catalog, whose routes refuse any argument outside their schema.
 
   ```json
   {"service": "gitea", "name": "list_issues", "tool": "gitea.issues.list",
@@ -20,7 +20,7 @@ outcome = client.call("gitea", "get_me", {})
    "schema": [{"name": "owner", "kind": "identifier"}, {"name": "repo", "kind": "identifier"}]}
   ```
 
-- Scope resource grants must be exact or end at `/*`. Decide refuses a call whose leaf scope holds any other pattern, such as `gitea/repos/acme-*`, with `unbounded_scope`, and the custodian refuses to load a binding with one. `/*` covers every resource below that segment; resources compare byte for byte, so `Demo` is not `demo`.
+- Scope resource grants must be exact or end at `/*`. Decide refuses a call whose leaf scope holds any other pattern, such as `gitea/repos/acme-*`, with `unbounded_scope`, the custodian refuses such a leaf on release, and refuses to load a binding with one. `/*` covers every resource below that segment; resources compare byte for byte, so `Demo` is not `demo`.
 - Nonce: 16 random bytes, hex. Each `prepare` makes a new nonce, so each prepared call is a new operation.
 - Leaf proof: signed by the holder key over the last record in the chain, with `audience` set to the decider id, `iat` from the client clock, and `request_digest` = `request_digest(tool, resource, arguments, nonce)` (`agent_bailiff/decide/identity.py`).
 - Headers: `x-bailiff-task-root`, `x-bailiff-leaf-proof`, `x-bailiff-nonce`, `traceparent`, and `x-bailiff-links` (comma-joined) when the holder is a delegate.
