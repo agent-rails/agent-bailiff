@@ -346,6 +346,15 @@ class DocketArchiver:
         self._copies_fd = fd
         return fd
 
+    def _check_pinned(self, docket_id: str) -> None:
+        if self._archive_fd is None or self._copies_fd is None:
+            raise RuntimeError("the archiver is not open")
+        for path, fd in ((self._archive_dir, self._archive_fd), (self._archive_dir / docket_id, self._copies_fd)):
+            current = os.stat(path, follow_symlinks=False)
+            opened = os.fstat(fd)
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                raise ArchiveMismatch(f"{path} is no longer the directory the archiver opened")
+
     def _load_checkpoint(self) -> ArchiverCheckpoint | None:
         try:
             content = read_state_file(
@@ -407,6 +416,7 @@ class DocketArchiver:
         self._check_copy(entry, copies)
         if self._receipts is None:
             raise RuntimeError("the archiver is not open")
+        self._check_pinned(checkpoint.docket_id)
         now = int(self._clock())
         receipt = Receipt(checkpoint.docket_id, entry.segment, entry.sha256, entry.size, entry.end_heads, now)
         self._receipts.write(receipt, fsync=self._fsync)
@@ -450,6 +460,7 @@ class DocketArchiver:
                 entry.segment,
             )
             return
+        self._check_pinned(docket_id)
         self._receipts.write(replace(receipt, verified_at=int(self._clock())), fsync=self._fsync)
 
     def _prune(self, manifest: Manifest) -> None:
