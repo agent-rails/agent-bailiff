@@ -130,7 +130,10 @@ class Effector:
 
     def _refuse(self, checked: CheckedCall, reason: str, now: int) -> dict[str, Any]:
         handles = {"tenant": checked.release.tenant, "task": checked.release.task}
-        self._record(replace(self._entry(checked, "refuse", now), reason=reason, handles=handles))
+        if not self._record(replace(self._entry(checked, "refuse", now), reason=reason, handles=handles)):
+            event = {"event": "effector_refusal_unrecorded", "op_id": checked.release.op_id, "reason": reason}
+            event.update(handles)
+            logger.error("%s", json.dumps(event, sort_keys=True))
         return _error(reason)
 
     def _entry(self, checked: CheckedCall, decision: str, now: int) -> Entry:

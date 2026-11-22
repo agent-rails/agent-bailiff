@@ -1,4 +1,5 @@
 import base64
+import errno
 import json
 import os
 import threading
@@ -445,6 +446,34 @@ def test_an_effector_refusal_counts_against_its_task(token_file):
     tasks.add(verified)
     [row] = tasks.rows()
     assert (row.tenant, row.task, row.refusals, row.allows) == ("tenant-a", "task-1", 1, 0)
+
+
+class FailingDocket:
+    def __init__(self, failure):
+        self.failure = failure
+        self.entries = []
+
+    def append(self, entry):
+        if isinstance(self.failure, Exception):
+            raise self.failure
+        return Record(writer="someone-else", seq=1, prev=None, entry=entry, kid="k", token="t")
+
+
+@pytest.mark.parametrize(
+    "failure", [ConnectionError("docket down"), OSError(errno.ENOSPC, "no space left on device"), "unacknowledged"]
+)
+def test_a_refusal_the_docket_does_not_record_is_still_refused_and_logged(token_file, caplog, failure):
+    instance, transport, _ = effector(token_file, docket=FailingDocket(failure), rbac_healthy=False)
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert transport.requests == []
+    [event] = [json.loads(item.message) for item in caplog.records if "effector_refusal_unrecorded" in item.message]
+    assert event == {
+        "event": "effector_refusal_unrecorded",
+        "op_id": "op-scale_deployment-3",
+        "reason": "rbac_unverified",
+        "task": "task-1",
+        "tenant": "tenant-a",
+    }
 
 
 def test_a_release_refused_after_its_claim_is_consumed(token_file):
