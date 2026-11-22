@@ -178,7 +178,9 @@ def test_routes_load_from_a_strict_document():
         {"routes": [{"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/a"}]}
     )
     assert routes.services == frozenset({"deploy"})
-    assert routes.route("deploy", "deploy_service") == ToolRoute("deploy", "deploy_service", "deploy.service", "env/a")
+    assert routes.route("deploy", "deploy_service") == ToolRoute(
+        "deploy", "deploy_service", "deploy.service", "env/a", strict=False
+    )
 
 
 @pytest.mark.parametrize(
@@ -264,3 +266,35 @@ def test_routes_allow_one_tool_on_distinct_resources():
         ]
     )
     assert routes.services == frozenset({"service-a", "service-b"})
+
+
+ISSUES = ToolRoutes.from_document(
+    {
+        "routes": [
+            {
+                "service": "gitea",
+                "name": "list_issues",
+                "tool": "gitea.issues.read",
+                "resource": "gitea/repos/{owner}/{repo}/issues",
+                "schema": [{"name": "owner", "kind": "identifier"}, {"name": "repo", "kind": "identifier"}],
+            }
+        ]
+    }
+)
+
+
+def issues_call(arguments):
+    return message(params={"name": "list_issues", "arguments": arguments}, services=("gitea",))
+
+
+def test_a_templated_document_route_names_the_repository_in_the_resource():
+    request = read_call(issues_call({"owner": "quickstart", "repo": "demo", "page": 2}), ISSUES)
+    assert request.resource == "gitea/repos/quickstart/demo/issues"
+    assert request.args == {"owner": "quickstart", "repo": "demo", "page": 2}
+
+
+@pytest.mark.parametrize("repo", ["../payroll", "demo/../payroll", ".", "", 7])
+def test_a_repository_argument_outside_the_schema_is_refused_before_decide(repo):
+    with pytest.raises(CallRefused) as refused:
+        read_call(issues_call({"owner": "quickstart", "repo": repo}), ISSUES)
+    assert refused.value.reason == "malformed_request"
