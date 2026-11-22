@@ -25,6 +25,7 @@ from test_decide import AGENT_KEY, CHILD_KEY, DECIDER_ID, make_root
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.calls import read_call
 from agent_bailiff.client import (
+    EFFECTOR_ERROR_ACTIONS,
     REFUSAL_REASONS,
     BailiffClient,
     GatewayError,
@@ -33,6 +34,7 @@ from agent_bailiff.client import (
     OutcomeUnknown,
     Refused,
     Result,
+    effector_error_action,
     refusal_action,
 )
 from agent_bailiff.client import client as client_module
@@ -538,6 +540,54 @@ def test_an_unknown_reason_has_no_action():
         refusal_action("repository not found")
 
 
+@pytest.mark.parametrize(
+    ("reason", "action"),
+    [
+        ("effector_suspended", "ask_user"),
+        ("effector_busy", "retry_later"),
+        ("effector_docket_unavailable", "retry_later"),
+        ("effector_rbac_unverified", "retry_later"),
+        ("effector_restart_unverified", "retry_later"),
+        ("effector_webhook_unverified", "retry_later"),
+        ("effector_kubernetes_429", "retry_later"),
+        ("effector_kubernetes_403", "stop"),
+        ("effector_kubernetes_404", "stop"),
+        ("effector_release_replayed", "stop"),
+        ("effector_release_expired", "stop"),
+        ("effector_outcome_unknown", "stop"),
+        ("effector_response_too_large", "stop"),
+        ("effector_something_new", "stop"),
+    ],
+)
+def test_an_effector_error_says_what_the_agent_should_do(client, stub, reason, action):
+    stub.responders["tools/call"] = [refusal(reason)]
+    outcome = client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, Result) and outcome.effector_error == reason
+    assert effector_error_action(reason) == action
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"content": [{"type": "text", "text": "effector_busy"}], "isError": False},
+        {"content": [{"type": "text", "text": "repository not found"}], "isError": True},
+        {"content": [{"type": "text", "text": "effector_busy"}, {"type": "text", "text": "x"}], "isError": True},
+    ],
+)
+def test_only_a_lone_prefixed_tool_error_is_an_effector_error(result):
+    assert Result(result).effector_error is None
+
+
+def test_every_effector_retry_or_ask_reason_is_one_the_effector_emits():
+    sources = [ROOT / "agent_bailiff" / "effector" / name for name in ("server.py", "release.py")]
+    literals = set()
+    for path in sources:
+        literals |= set(re.findall(r'(?:_error|_refuse\(checked,|ReleaseRefused)\(?\s*"([a-z_]+)"', path.read_text()))
+    emitted = {reason if reason.startswith("effector_") else f"effector_{reason}" for reason in literals}
+    assert {"effector_suspended", "effector_rbac_unverified", "effector_busy"} <= emitted
+    assert set(EFFECTOR_ERROR_ACTIONS) - {"effector_kubernetes_429"} <= emitted
+
+
 def test_a_tool_error_with_other_text_is_a_result(client, stub):
     stub.responders["tools/call"] = [refusal("repository not found")]
     outcome = client.call("deploy", "deploy_service", ARGS)
@@ -699,6 +749,14 @@ def test_other_upstream_answers_pass_the_refusal_guard(gateway_client, stack, re
     stack["upstream"].call_result = result
     outcome = gateway_client.call("deploy", "deploy_service", ARGS)
     assert isinstance(outcome, Result) and outcome.result["content"] == result["content"], outcome
+
+
+@live
+@pytest.mark.parametrize("reason", ["effector_suspended", "effector_docket_unavailable", "effector_malformed_request"])
+def test_an_effector_error_passes_the_refusal_guard(gateway_client, stack, reason):
+    stack["upstream"].call_result = {"content": [{"type": "text", "text": reason}], "isError": True}
+    outcome = gateway_client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, Result) and outcome.effector_error == reason, outcome
 
 
 @live
