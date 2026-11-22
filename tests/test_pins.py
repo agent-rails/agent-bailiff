@@ -131,3 +131,16 @@ def test_the_live_run_claude_cli_is_pinned_by_lockfile():
         assert package["version"] == CLAUDE_CLI_VERSION, path
         assert package["resolved"].startswith("https://registry.npmjs.org/@anthropic-ai/"), path
         assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", package["integrity"]), path
+
+
+def test_the_live_run_image_pins_every_input_by_digest():
+    dockerfile = (ROOT / "examples" / "live-run" / "Dockerfile").read_text()
+    for image in re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE):
+        assert re.fullmatch(r"[\w.-]+:[\w.-]+@sha256:[0-9a-f]{64}", image), image
+    added = dict(re.findall(r"ADD --checksum=sha256:([0-9a-f]{64}) --chmod=0755 \\\n\s+(\S+)", dockerfile))
+    assert len(added) == 2
+    pins = (ROOT / "adapters" / "agentgateway" / "agentgateway-v1.7.0.sha256").read_text()
+    gateway = re.search(r"^([0-9a-f]{64})  agentgateway-linux-amd64$", pins, re.MULTILINE).group(1)
+    assert added[gateway].endswith("/v1.7.0/agentgateway-linux-amd64")
+    assert "npm ci" in dockerfile and "npm install" not in dockerfile
+    assert "--require-hashes -r /tmp/requirements-ci.txt" in dockerfile
