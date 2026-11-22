@@ -37,7 +37,7 @@ During revoke and suspend, the upstream holds every deploy response from the sta
 In every run:
 
 - every deploy that reached the upstream carried the credential header, and none carried an `x-bailiff-` header;
-- the credential did not appear in anything the agent sent or the model received, or in the docket;
+- the credential did not appear in anything the agent sent, the model's output or the docket (these runs predate scanning the results the agent received);
 - the docket verified (signatures, per-writer sequence and hash chain): 15 entries, 4 allows, 4 releases, 4 refusals, and the revoke, suspend and resume control entries.
 
 The three runs cost $0.089 in model usage together. Per-run output is written to the `--out` file.
