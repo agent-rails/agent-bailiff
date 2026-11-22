@@ -91,7 +91,7 @@ Each component has its own commands, run as that component's uid:
 - `agent-bailiff init {decide,custodian,control,docket}` creates the component's config; for decide, custodian and control it also creates the signing key. Decide starts with a deny-all policy and the custodian with no credential bindings.
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
 - `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
-- `agent-bailiff docket verify` checks every record against pinned writer keys; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
+- `agent-bailiff docket verify` checks every record against pinned writer keys; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
 
 ## Documentation
 

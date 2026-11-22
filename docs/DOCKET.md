@@ -117,6 +117,23 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 - `--receipts RECEIPT_DIR` also checks each retained segment against its receipt, if it has one, and the `base` against the receipt of the removed segment. stderr gives `N retained segments match their receipts` and `the base matches removed segment N`; any difference exits 1.
 - Verifying a docket while the sink is appending can report `torn_tail` for a line still being written. Run it again; if `torn_tail` stays, follow Torn tail repair.
 
+## docket tasks
+
+```
+agent-bailiff docket tasks --docket PATH --pin decide.pub.json --pin custodian.pub.json [--json]
+```
+
+Run it like `docket verify`. It verifies every record first and prints nothing if any line fails. Then it prints one row per tenant and task id, from records whose `handles` name both: principal, first and last time, decide allows, custodian releases, verified refusals, and `revoked` when a control revocation names the task, one of its roots or its tenant. A link revocation does not mark the task. Refusals before verification are not docketed, so they are not counted; see THREAT_MODEL.md, Unrecorded refusals.
+
+`--json` rows also carry `record`, the signed token of the task's latest non-control record, and its `record_line`. To revoke a task from it:
+
+```
+agent-bailiff docket tasks ... --json | jq -r 'select(.tenant == "acme" and .task == "TASK").record' > record
+agent-bailiff control revoke --config CONTROL --actor NAME --level task --record record
+```
+
+Control verifies that record against its writer pins again, so a doctored row cannot revoke another task. `docket verify --task ID` shows the records of one task.
+
 ## docket export
 
 ```
