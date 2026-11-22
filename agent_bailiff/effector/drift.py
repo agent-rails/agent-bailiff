@@ -14,6 +14,7 @@ from typing import Any, Protocol
 
 from agent_bailiff.effector.catalog import CatalogOperation
 from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
+from agent_bailiff.effector.platform import VERSION_PATH, Platform, check_version
 from agent_bailiff.effector.rbac import (
     DEPLOYMENT_FIELDS,
     DEPLOYMENT_SPEC_FIELDS,
@@ -139,10 +140,13 @@ class RbacAudit:
         manifests: Mapping[str, Any],
         tenants: Mapping[str, Sequence[str]],
         operations: Sequence[CatalogOperation],
+        *,
+        platform: Platform,
         workers: int = REVIEW_WORKERS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._transport = transport
+        self._platform = platform
         self._workers = workers
         self._sleep = sleep
         self._audit_token = audit_token
@@ -156,7 +160,9 @@ class RbacAudit:
         self._tokens = {identity.service_account: effector_token, identity.audit_account: audit_token}
 
     def check(self) -> list[str]:
-        problems: list[str] = []
+        problems = check_version(self._platform, self._request(self._audit_token, "GET", VERSION_PATH, None))
+        if problems:
+            return problems
         namespaces = [item["metadata"]["name"] for item in self._list("/api/v1/namespaces")]
         if not namespaces:
             problems.append("the audit identity listed no namespaces")

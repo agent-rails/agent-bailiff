@@ -19,6 +19,7 @@ from agent_bailiff.effector.drift import (
     grants,
 )
 from agent_bailiff.effector.kubernetes import KubernetesUnavailable
+from agent_bailiff.effector.platform import VERSION_PATH
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
 from agent_bailiff.webhook import manifests as webhook
@@ -126,6 +127,7 @@ class FakeApi:
             ]
         }
         self.service = {"spec": {"selector": {"app.kubernetes.io/name": webhook.NAME, webhook.MODE_LABEL: "enforce"}}}
+        self.version = {"gitVersion": "v1.36.5"}
         self.throttled = 0
         self.closed = False
 
@@ -139,6 +141,8 @@ class FakeApi:
             return 429, b""
         url = urllib.parse.urlsplit(path)
         query = dict(urllib.parse.parse_qsl(url.query))
+        if url.path == VERSION_PATH:
+            return self.status.get("version", 200), json.dumps(self.version).encode()
         if url.path == APPS_SCHEMA_PATH:
             return self.status.get("openapi", 200), json.dumps(self.schema).encode()
         if url.path == WEBHOOK_PATH:
@@ -216,6 +220,7 @@ def audit(api, tmp_path):
         MANIFESTS,
         TENANTS,
         CATALOG.operations,
+        platform="upstream",
         sleep=SLEEPS.append,
     )
 
@@ -348,6 +353,18 @@ def test_changed_generated_rbac_is_drift(api, audit):
 def test_weakened_admission_is_drift(api, audit, kind, name, change):
     change(api.find(kind, name)["spec"])
     assert audit.check() == [f"the generated {kind} {name} was changed"]
+
+
+def test_a_gke_cluster_under_the_upstream_platform_is_drift_before_any_review(api, audit):
+    api.version = {"gitVersion": "v1.36.4-gke.2377000"}
+    assert audit.check() == ["the cluster runs GKE (v1.36.4-gke.2377000) but the effector platform is upstream"]
+    assert api.requests == [("GET", VERSION_PATH, f"Bearer {AUDIT_TOKEN}")]
+
+
+def test_an_unreadable_version_fails_the_check(api, audit):
+    api.status["version"] = 403
+    with pytest.raises(KubernetesUnavailable, match="GET /version returned 403"):
+        audit.check()
 
 
 def test_an_api_error_fails_the_check(api, audit):
@@ -515,7 +532,16 @@ def test_synthetic_users_are_reviewed_only_in_their_own_tenant_namespaces(api, t
     generated = generate_manifests(CATALOG, IDENTITY, tenants)
     api.objects = [served(item) for item in generated["items"] if item["kind"] not in ("Namespace", "ServiceAccount")]
     api.namespaces += ["dev", "qa", "prod"]
-    wide = RbacAudit(api, tmp_path / "effector", tmp_path / "audit", IDENTITY, generated, tenants, CATALOG.operations)
+    wide = RbacAudit(
+        api,
+        tmp_path / "effector",
+        tmp_path / "audit",
+        IDENTITY,
+        generated,
+        tenants,
+        CATALOG.operations,
+        platform="upstream",
+    )
     assert wide.check() == []
     access = [path for _, path, _ in api.requests if path.endswith("/subjectaccessreviews")]
     assert len(access) == 3 * len(CATALOG.operations) * 4

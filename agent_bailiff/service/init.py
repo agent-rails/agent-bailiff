@@ -182,6 +182,7 @@ def init_effector(
     ledger_uid: int,
     ledger_group: int,
     port: int,
+    platform: str,
     kubernetes: Mapping[str, Any],
     rbac: Mapping[str, Any],
     docket: Mapping[str, Any],
@@ -199,6 +200,7 @@ def init_effector(
         "skew_seconds": DEFAULT_SKEW_SECONDS,
         "max_clearance_lifetime": DEFAULT_MAX_PROOF_AGE,
         "port": port,
+        "platform": platform,
         "kubernetes": {
             "host": kubernetes["host"],
             "port": kubernetes["port"],

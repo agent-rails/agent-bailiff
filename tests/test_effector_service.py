@@ -64,7 +64,7 @@ def self_signed_ca():
     return certificate.public_bytes(serialization.Encoding.PEM)
 
 
-def effector_config(root, port):
+def effector_config(root, port, platform="upstream"):
     keys = private(root / "keys")
     custodian = generate_signing_key(keys / "custodian.key", "custodian.example")
     decide = generate_signing_key(keys / "decide.key", "decide.example")
@@ -82,6 +82,7 @@ def effector_config(root, port):
         ledger_uid=UID,
         ledger_group=GID,
         port=port,
+        platform=platform,
         kubernetes={"host": "127.0.0.1", "port": 6443, "ca": ca, "token_file": token, "audit_token_file": token},
         rbac={
             "namespace": "bailiff-system",
@@ -105,6 +106,7 @@ def test_init_writes_an_effector_config_that_loads(root):
         18080,
     )
     assert settings.suspension_dir == root / "ledger" / "ledger.db.suspension"
+    assert settings.platform == "upstream"
     assert settings.catalog.name == "kubernetes.json" and settings.catalog.is_file()
     assert oct(path.stat().st_mode & 0o777) == "0o600"
 
@@ -119,6 +121,17 @@ def test_the_effector_config_refuses_unknown_and_missing_keys(root):
         parse_effector(without)
     with pytest.raises(ConfigError):
         parse_effector({**document, "port": 0})
+
+
+def test_the_effector_config_carries_its_platform(root):
+    assert load_effector(effector_config(root, 18083, platform="gke")).platform == "gke"
+
+
+@pytest.mark.parametrize("platform", ["aks", "GKE", None])
+def test_the_effector_config_refuses_an_unknown_platform(root, platform):
+    document = json.loads(effector_config(root, 18084).read_text())
+    with pytest.raises(ConfigError, match="effector.platform: platform must be one of"):
+        parse_effector({**document, "platform": platform})
 
 
 def test_the_effector_refuses_to_start_when_its_rbac_cannot_be_verified(root):

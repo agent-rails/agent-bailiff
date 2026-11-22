@@ -39,6 +39,7 @@ from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine,
 from agent_bailiff.docket.tasks import TaskList, task_header, task_json_row, task_table_row
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
+from agent_bailiff.effector.platform import PLATFORMS
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
 from agent_bailiff.keys import PublicKeyRecord
 from agent_bailiff.service import run
@@ -264,6 +265,9 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     effector.add_argument("--ledger-uid", type=int, required=True)
     effector.add_argument("--ledger-group", type=int, required=True)
     effector.add_argument("--port", type=int, required=True, help="127.0.0.1 port the gateway reaches")
+    effector.add_argument(
+        "--platform", choices=PLATFORMS, default="upstream", help="the cluster's platform; upstream is strictest"
+    )
     effector.add_argument("--kube-host", required=True)
     effector.add_argument("--kube-port", type=int, required=True)
     effector.add_argument("--kube-ca", type=Path, required=True)
@@ -351,6 +355,7 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             ledger_uid=args.ledger_uid,
             ledger_group=args.ledger_group,
             port=args.port,
+            platform=args.platform,
             kubernetes=kubernetes,
             rbac=rbac,
             docket=docket,
