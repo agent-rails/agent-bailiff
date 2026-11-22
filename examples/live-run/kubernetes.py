@@ -8,7 +8,6 @@ import base64
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import urllib.parse
 import urllib.request
@@ -26,13 +25,17 @@ from run import (
     PYTHON,
     TENANT,
     UID,
+    WORK_FILES,
     Deployment,
     Outcome,
+    add_layout_arguments,
     agent_saw,
     cli,
     free_port,
     gateway_binary,
+    print_result,
     private,
+    require_layout,
     run_claude,
     write_owned,
 )
@@ -468,18 +471,14 @@ def final_checks(deployment: KubernetesDeployment, outcomes: list[Outcome]) -> d
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("/tmp/claude-501/bk"))
+    add_layout_arguments(parser)
     parser.add_argument("--context", required=True, help="kube context of a disposable cluster")
-    parser.add_argument("--model", default="claude-sonnet-5-5")
-    parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--webhook-image", default="agent-bailiff-webhook:live", help="local tag of the webhook image")
     parser.add_argument("--docker-context", default="orbstack", help="docker context whose images the cluster runs")
     args = parser.parse_args()
-    if args.root.exists():
-        shutil.rmtree(args.root)
-    root = private(args.root)
-    cluster = Cluster(args.context, root / "cluster")
-    deployment = KubernetesDeployment(root)
+    require_layout(args.root, args.receipt_dir, WORK_FILES | {"kubeconfig"})
+    cluster = Cluster(args.context, args.root / "cluster")
+    deployment = KubernetesDeployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.cluster = cluster
     outcomes: list[Outcome] = []
     staging, prod = cluster.namespaces["staging"], cluster.namespaces["prod"]
@@ -521,10 +520,7 @@ def main() -> None:
             deployment.stop()
         finally:
             cluster.down()
-    args.out.write_text(
-        json.dumps({"model": args.model, "outcomes": [asdict(o) for o in outcomes], "final": summary}, indent=2)
-    )
-    print(json.dumps(summary, indent=2))
+    print_result(args.run_id, args.model, outcomes, summary)
 
 
 if __name__ == "__main__":
