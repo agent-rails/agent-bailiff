@@ -59,6 +59,7 @@ The docket config's `retained_bytes` (at least `2 * segment_bytes`; `agent-baili
 - The receipt directory is opened at start and must be owned by `archiver_uid` with group `reader_group` and mode 0750; the sink refuses to start otherwise. `agent-bailiff init docket --receipt-dir PATH --archiver-uid UID` writes both keys but does not create the directory; create it as the archiver uid before the first start.
 - `archiver_uid` must not be the sink's own uid: the service refuses to start with "is the sink's own uid". A sink that could write receipts could vouch for its own removals.
 - Removal frees the segment on the host only. The records are then only in the archive; `docket verify` without `--archive` starts from `base`.
+- Each removal rewrites and fsyncs the manifest on the sink's event loop, so appends wait for it. Measured on one host (`benchmarks/docket-removal-2026-11-22.json`, Apple silicon, APFS, one 64-segment pass each): with 2000 retained segments (502 KB manifest) a manifest write took 11.3 ms p50 and 22.7 ms max, and the longest loop stall was 33.7 ms; with one retained segment, 0.6 ms and 1.6 ms. The manifest holds about one entry per `segment_bytes` of `retained_bytes` (256 at the init defaults). Not measured: a manifest near its 4 MiB cap (about 17000 segments). If stalls grow linearly with manifest size they reach about 0.3 s there, below the writers' 5 s append timeout; that is an extrapolation.
 
 ### Archive
 
