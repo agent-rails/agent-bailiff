@@ -23,7 +23,7 @@ from agent_bailiff.docket.archiver import (
 from agent_bailiff.docket.entry import Head
 from agent_bailiff.docket.follower import DocketFollower
 from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
-from agent_bailiff.docket.receipt import ReceiptDir
+from agent_bailiff.docket.receipt import Receipt, ReceiptDir
 from agent_bailiff.docket.segments import SegmentRemoved
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
@@ -784,3 +784,18 @@ def test_refreshes_no_receipt_once_the_archive_dir_is_replaced_at_its_path(layou
     finally:
         instance._close()
     assert receipt(layout, 1).verified_at == NOW
+
+
+def test_the_first_prune_removes_every_receipt_below_the_tombstone(layout):
+    tombstone = 100
+    instance = archiver(layout)
+    instance._open()
+    try:
+        heads = {"decide": Head(1, "A" * 43)}
+        for segment in range(1, tombstone + 1):
+            instance._receipts.write(Receipt("0" * 32, segment, "0" * 64, 1, heads, NOW))
+        (layout[0] / "receipts" / "notes").write_bytes(b"")
+        instance._prune(Manifest("0" * 32, 2, Base(tombstone, 1, heads), ()))
+    finally:
+        instance._close()
+    assert sorted(os.listdir(layout[0] / "receipts")) == ["notes", "seg-000000000100.receipt"]
