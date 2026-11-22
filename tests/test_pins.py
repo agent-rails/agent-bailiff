@@ -100,7 +100,7 @@ def test_every_ci_job_installs_only_from_the_hash_lock():
         elif INSTALLER.search(line):
             assert current is not None, line
             current.append(line.strip().removeprefix("- run:").strip())
-    assert set(jobs) == {"test", "quickstart-integration"}
+    assert set(jobs) == {"test", "quickstart-integration", "live-run-image"}
     for name, installs in jobs.items():
         assert installs == [
             "python -m pip install --require-hashes -r requirements-ci.txt",
