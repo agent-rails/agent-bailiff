@@ -328,7 +328,7 @@ def table_row(verified: VerifiedLine) -> str:
     entry = record.entry
     values = (
         str(verified.line),
-        _utc(entry.at),
+        utc(entry.at),
         record.writer,
         str(record.seq),
         entry.decision,
@@ -340,7 +340,7 @@ def table_row(verified: VerifiedLine) -> str:
     return "\t".join(printable(value) for value in values)
 
 
-def _utc(at: int) -> str:
+def utc(at: int) -> str:
     try:
         return datetime.fromtimestamp(at, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     except (OverflowError, ValueError, OSError):

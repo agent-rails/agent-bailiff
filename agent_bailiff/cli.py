@@ -36,6 +36,7 @@ from agent_bailiff.docket.report import (
 )
 from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
+from agent_bailiff.docket.tasks import TaskList, task_header, task_json_row, task_table_row
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
@@ -146,6 +147,15 @@ def _parser() -> argparse.ArgumentParser:
                 "--receipts", type=Path, help="also cross-check the manifest seeds against this receipt directory"
             )
             verify.set_defaults(handler=_verify_docket)
+            tasks = component.add_parser(
+                "tasks", help="verify every record and print one row per task; --json rows carry a record to revoke"
+            )
+            tasks.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            tasks.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            tasks.add_argument("--json", action="store_true", help="print one JSON object per task")
+            tasks.set_defaults(handler=_list_tasks)
             export = component.add_parser(
                 "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
             )
@@ -426,6 +436,30 @@ def _run_docket(args: argparse.Namespace) -> int:
         asyncio.run(_serve_docket_until_signal(settings))
     except STARTUP_ERRORS as exc:
         return _refused("docket", exc)
+    return 0
+
+
+def _list_tasks(args: argparse.Namespace) -> int:
+    tasks = TaskList()
+    try:
+        writers = pinned_writers(read_pin(path) for path in args.pin)
+        report = verify_records(args.docket, writers, RecordFilter(), tasks.add)
+    except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
+        return _refused("docket tasks", exc)
+    if not report.ok:
+        where = "the docket" if report.line is None else f"line {report.line}"
+        print(
+            f"{PROG} docket tasks: {where} fails verification: {report.reason} {printable(report.detail)}; "
+            "no tasks printed",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+    rows = tasks.rows()
+    if not args.json:
+        print(task_header())
+    for row in rows:
+        print(task_json_row(row) if args.json else task_table_row(row))
+    print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
     return 0
 
 

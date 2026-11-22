@@ -758,3 +758,77 @@ def test_a_snapshot_of_a_sealed_segment_does_not_match_after_a_cut(docket, pin_f
     code, _, err = verify(docket, pin_files, "--snapshot", str(path), capsys=capsys)
     assert code == cli.EXIT_REFUSED
     assert "does not match the docket: segment" in err
+
+
+def list_tasks(docket, pin_files, *arguments, capsys):
+    pins = [item for name in ("decide", "custodian") for item in ("--pin", pin_files[name])]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), *arguments])
+    captured = capsys.readouterr()
+    return code, captured.out.splitlines(), captured.err
+
+
+def task_docket(docket):
+    root_a = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=root_a, principal="alice"))
+    docket.append("custodian", make_entry(2, handles=root_a, hop="custodian", component="custodian", performed=True))
+    docket.append("decide", make_entry(3, handles=root_a, decision="refuse", reason="out_of_scope"))
+    docket.append("decide", make_entry(4, handles={"tenant": "acme", "task": "task-b", "root": "root-b"}))
+    docket.append("decide", make_entry(5, handles={"tenant": "zeta", "task": "task-a", "root": "root-z"}))
+    docket.append(
+        "decide", make_entry(6, hop="control", decision="revoke", handles={"tenant": "acme", "task": "task-a"})
+    )
+    return docket
+
+
+def test_tasks_prints_one_row_per_tenant_and_task(docket, pin_files, capsys):
+    task_docket(docket)
+    code, out, err = list_tasks(docket, pin_files, capsys=capsys)
+    assert code == 0, err
+    assert out[0].split("\t") == [
+        "TENANT", "TASK", "PRINCIPAL", "FIRST", "LAST", "ALLOWS", "RELEASES", "REFUSALS", "STATE"
+    ]  # fmt: skip
+    rows = [row.split("\t") for row in out[1:]]
+    assert [(row[0], row[1], *row[5:]) for row in rows] == [
+        ("acme", "task-a", "1", "1", "1", "revoked"),
+        ("acme", "task-b", "1", "0", "0", "-"),
+        ("zeta", "task-a", "1", "0", "0", "-"),
+    ]
+    assert "6 records verified, 3 tasks" in err
+
+
+def test_a_task_row_carries_its_last_record_for_control(docket, pin_files, capsys):
+    task_docket(docket)
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    row = json_rows(out)[0]
+    assert row["record"] == docket.records[2].token and row["record_line"] == 3
+    assert row["roots"] == ["root-a"] and row["principal"] == "alice"
+    assert row["revoked_by"] == "e-6"
+    assert decode_record(row["record"], build_kid_index(WRITERS)).entry.handles["task"] == "task-a"
+
+
+@pytest.mark.parametrize(
+    ("handles", "revoked"),
+    [
+        ({"root": "root-b"}, ["task-b"]),
+        ({"tenant": "zeta"}, ["task-a@zeta"]),
+        ({"link": "link-1"}, []),
+    ],
+)
+def test_root_and_tenant_revocations_mark_their_tasks(docket, pin_files, capsys, handles, revoked):
+    docket.append("decide", make_entry(1, handles={"tenant": "acme", "task": "task-b", "root": "root-b"}))
+    docket.append("decide", make_entry(2, handles={"tenant": "zeta", "task": "task-a", "root": "root-z"}))
+    docket.append("decide", make_entry(3, hop="control", decision="revoke", handles=handles))
+    _, out, _ = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    marked = [row["task"] + ("@zeta" if row["tenant"] == "zeta" else "") for row in json_rows(out) if row["revoked_by"]]
+    assert marked == revoked
+
+
+def test_tasks_prints_nothing_from_a_docket_that_fails_verification(docket, pin_files, capsys):
+    task_docket(docket)
+    with open(docket.path, "a") as stream:
+        stream.write("not-a-record\n")
+    code, out, err = list_tasks(docket, pin_files, capsys=capsys)
+    assert code != 0
+    assert out == []
+    assert "line 7 fails verification" in err
