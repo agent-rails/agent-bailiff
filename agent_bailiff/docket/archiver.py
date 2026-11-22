@@ -48,7 +48,6 @@ DEFAULT_POLL_INTERVAL = 10.0
 DEFAULT_REFRESH_INTERVAL = 900.0
 REFRESH_JITTER = 0.1
 REFRESH_BATCH = 8
-MAX_PRUNE = 64
 CHECKPOINT_KEYS = frozenset({"version", "docket_id", "segment", "entries", "heads"})
 
 logger = logging.getLogger(__name__)
@@ -467,10 +466,13 @@ class DocketArchiver:
         if manifest.base is None or self._receipts is None:
             return
         tombstone = manifest.base.segment
-        start = self._pruned_below or max(1, tombstone - MAX_PRUNE)
-        for segment in range(start, tombstone):
+        if self._pruned_below is None:
+            stale = [segment for segment in self._receipts.segments() if segment < tombstone]
+        else:
+            stale = list(range(self._pruned_below, tombstone))
+        for segment in stale:
             self._receipts.remove(segment, fsync=self._fsync)
-        self._pruned_below = max(start, tombstone)
+        self._pruned_below = max(self._pruned_below or 1, tombstone)
 
     def _rebuild(self, checkpoint: ArchiverCheckpoint, copies: int) -> None:
         segment = checkpoint.segment

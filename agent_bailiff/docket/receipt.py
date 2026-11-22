@@ -32,6 +32,7 @@ RECEIPT_DIR_MODE = 0o750
 RECEIPT_KEYS = frozenset({"version", "docket_id", "segment", "sha256", "size", "end_heads", "verified_at"})
 VERIFIED_AT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 VERIFIED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+RECEIPT_NAME = re.compile(r"seg-([0-9]{12})\.receipt")
 
 
 class ReceiptInvalid(ValueError):
@@ -131,6 +132,10 @@ class ReceiptDir:
     def write(self, receipt: Receipt, *, fsync: Callable[[int], None] = os.fsync) -> None:
         path = self.path / receipt_name(receipt.segment)
         replace_state_file(path, receipt.encode(), reader_gid=self._reader_gid, fsync=fsync, dir_fd=self._fd)
+
+    def segments(self) -> list[int]:
+        found = (RECEIPT_NAME.fullmatch(name) for name in os.listdir(self._fd))
+        return sorted(segment for match in found if match and 1 <= (segment := int(match[1])) <= MAX_SEGMENT)
 
     def remove(self, segment: int, *, fsync: Callable[[int], None] = os.fsync) -> None:
         try:
