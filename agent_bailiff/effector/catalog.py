@@ -19,6 +19,7 @@ CATALOG_TOOL_PREFIX = "k8s."
 MAX_CATALOG_BYTES = 1 << 20
 MAX_RESPONSE_BYTES = 1 << 20
 LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
+IDENTIFIER = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,99}")
 TOOL_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
 ARGUMENT_NAME = re.compile(r"[a-z][A-Za-z0-9]{0,31}")
 FIELD_PATH = re.compile(r"[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*")
@@ -69,6 +70,8 @@ class Argument:
     def accepts(self, value: object) -> bool:
         if self.kind == "label":
             return isinstance(value, str) and LABEL.fullmatch(value) is not None
+        if self.kind == "identifier":
+            return isinstance(value, str) and IDENTIFIER.fullmatch(value) is not None
         return (
             isinstance(value, int)
             and not isinstance(value, bool)

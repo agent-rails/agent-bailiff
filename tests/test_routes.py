@@ -1,6 +1,10 @@
 import subprocess
 import sys
 
+import pytest
+
+from agent_bailiff.effector.catalog import Argument
+
 PROBE = """
 import sys
 from importlib.abc import MetaPathFinder
@@ -25,3 +29,16 @@ def test_routes_import_without_the_gateway_adapter_or_protobuf():
     result = subprocess.run([sys.executable, "-c", PROBE], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "gitea/user/self"
+
+
+IDENTIFIER = Argument("repo", "identifier")
+
+
+@pytest.mark.parametrize("value", ["My_Repo.v2", "a-b", "a", "_x", "9", "a" * 100, "a..b"])
+def test_an_identifier_accepts_real_repository_names(value):
+    assert IDENTIFIER.accepts(value)
+
+
+@pytest.mark.parametrize("value", [".hidden", "..", ".", "a" * 101, "a/b", "a b", "a\n", "", 1, None, True, "é"])
+def test_an_identifier_refuses_anything_that_is_not_one_segment(value):
+    assert not IDENTIFIER.accepts(value)
