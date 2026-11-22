@@ -29,8 +29,10 @@ sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_i
 
 - `delegate` signs the next chain link with the holder key, at the client clock, naming the sub-agent's public key as subject. It returns the holder's links plus the new one. `Holder.delegate(..., now=)` does the same without a client.
 - The sub-agent's private key never reaches the parent: only its public key goes in. Pass the returned links to the sub-agent; they are public, signed records.
-- `delegate` refuses, with `ValueError`, a scope that does not narrow the holder's, a budget above the holder's, a depth past the root's `max_depth`, a non-positive `ttl`, or a holder record not valid now. Expiry is clamped to the holder's. These are the checks decide applies again to every call (`agent_warrant.chain.delegate`), so a refused delegation is one decide would refuse.
-- Calls from the sub-agent are checked against the narrowed link. A call outside it is refused (`out_of_scope`), and its docket entries carry the sub-agent key and the `link` handle, which `control revoke --level link` takes to revoke that link.
+- `delegate` refuses, with `ValueError`, a scope that does not narrow the holder's, a budget above the holder's, a depth past the root's `max_depth`, a non-positive `ttl`, or a holder record not valid now. Expiry is clamped to the holder's. These are local link-construction checks (`agent_warrant.chain.delegate`), the same rules decide applies to scope, budget, depth and expiry. Decide independently verifies the whole chain on every call: root trust, every link's signature, the possession proof and revocation.
+- Calls from the sub-agent are checked against the narrowed link. A call outside it is refused (`out_of_scope`), and its docket entries carry the sub-agent key and the `link` handle. Pass a signed docket record of a verified sub-agent call to `control revoke --level link` to revoke that link; the holder's own calls go on. A call refused as `chain_invalid` has no verified sub-agent, so its record carries no link handle.
+- `issued_at` comes from the client clock. Decide refuses a link issued more than 5 s (`CLOCK_SKEW_SECONDS`) ahead of its own clock, so keep the client clock within that of decide's.
+- Every link travels in one request header, about 660 characters per link with a small scope; a larger scope makes each link larger. Depth up to the root's `max_depth` was not tested through the gateway, and proxy header limits on the path were not checked.
 
 ## Session
 
