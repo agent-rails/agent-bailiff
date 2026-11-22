@@ -79,8 +79,9 @@ def token_environment(monkeypatch):
     monkeypatch.setenv(launch.TOKEN_VARIABLE, " oauth-token\n")
 
 
-def test_the_token_is_read_from_the_oauth_variable(token_environment):
+def test_the_token_is_taken_out_of_the_environment_children_inherit(token_environment):
     assert launch.read_token() == "oauth-token"
+    assert launch.TOKEN_VARIABLE not in launch.os.environ
 
 
 def test_an_api_key_in_the_environment_is_refused(token_environment, monkeypatch):
@@ -173,9 +174,10 @@ def test_the_kubernetes_command_needs_a_webhook_image():
         launch.container_command(spec("kubernetes", webhook_image=None), DIGEST)
 
 
-def test_the_result_is_the_last_compact_line():
-    stdout = 'progress\n{"run_id":"r1","status":"ok","final":{}}\n'
-    assert launch.read_result(stdout, "r1")["final"] == {}
+@pytest.mark.parametrize("status", ["ok", "failed"])
+def test_the_result_is_the_last_compact_line(status):
+    stdout = f'progress\n{{"run_id":"r1","status":"{status}","final":{{}}}}\n'
+    assert launch.read_result(stdout, "r1")["status"] == status
 
 
 @pytest.mark.parametrize(
@@ -183,11 +185,11 @@ def test_the_result_is_the_last_compact_line():
     [
         ("", "printed no result"),
         ('{\n  "run_id": "r1",\n  "status": "ok"\n}\n', "not compact result JSON"),
-        ('{"run_id":"r2","status":"ok"}', "not an ok result for run r1"),
-        ('{"run_id":"r1","status":"failed"}', "not an ok result for run r1"),
-        ('["r1"]', "not an ok result for run r1"),
+        ('{"run_id":"r2","status":"ok"}', "not a result for run r1"),
+        ('{"run_id":"r1"}', "not a result for run r1"),
+        ('["r1"]', "not a result for run r1"),
     ],
-    ids=["empty", "pretty", "wrong-run", "not-ok", "not-object"],
+    ids=["empty", "pretty", "wrong-run", "no-status", "not-object"],
 )
 def test_a_result_other_than_an_ok_line_for_this_run_is_refused(stdout, message):
     with pytest.raises(RuntimeError, match=message):

@@ -47,6 +47,7 @@ ROUTES = [
 CREDENTIAL_HEADER = "X-Api-Key"
 CHAIN_HEADERS = ["x-bailiff-task-root", "x-bailiff-links", "x-bailiff-leaf-proof", "x-bailiff-nonce", "traceparent"]
 RECEIPT_MODE = 0o750
+STOP_SECONDS = 20
 WORK_FILES = frozenset({"claude-token", "home"})
 CLAUDE_ENVIRONMENT_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL", "DISABLE_AUTOUPDATER")
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -118,6 +119,10 @@ def install_sigterm() -> None:
         raise SystemExit(143)
 
     signal.signal(signal.SIGTERM, stop)
+
+
+def ignore_sigterm() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 
 def minimal_environment() -> dict[str, str]:
@@ -394,9 +399,10 @@ class Deployment:
     def stop(self) -> None:
         for process in reversed(self.processes):
             process.send_signal(signal.SIGTERM)
+        deadline = time.monotonic() + STOP_SECONDS
         for process in self.processes:
             try:
-                process.wait(10)
+                process.wait(max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 process.kill()
 
@@ -622,6 +628,19 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
     }
 
 
+def failed_checks(summary: dict[str, Any]) -> list[str]:
+    failures = [
+        name for name in ("credential seen by the agent or the model", "credential in the docket") if summary[name]
+    ]
+    if not summary["every upstream deploy carried the credential header"]:
+        failures.append("every upstream deploy carried the credential header")
+    if summary["upstream deploys carrying any x-bailiff header"]:
+        failures.append("upstream deploys carrying any x-bailiff header")
+    if not summary["docket verifies"]:
+        failures.append("docket verifies")
+    return failures
+
+
 def add_layout_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, required=True, help="the harness's own empty work dir")
     parser.add_argument("--receipt-dir", type=Path, required=True, help="empty dir owned by the archiver uid")
@@ -630,10 +649,13 @@ def add_layout_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default="claude-sonnet-5-5")
 
 
-def print_result(run_id: str, model: str, outcomes: list[Outcome], summary: dict[str, Any]) -> None:
+def print_result(
+    run_id: str, model: str, outcomes: list[Outcome], summary: dict[str, Any], failures: list[str]
+) -> None:
     result = {
         "run_id": run_id,
-        "status": "ok",
+        "status": "failed" if failures else "ok",
+        "failures": failures,
         "model": model,
         "outcomes": [asdict(outcome) for outcome in outcomes],
         "final": summary,
@@ -660,8 +682,9 @@ def main() -> None:
         outcomes.append(scenario_replay(deployment))
         summary = final_checks(deployment, outcomes)
     finally:
+        ignore_sigterm()
         deployment.stop()
-    print_result(args.run_id, args.model, outcomes, summary)
+    print_result(args.run_id, args.model, outcomes, summary, failed_checks(summary))
 
 
 if __name__ == "__main__":

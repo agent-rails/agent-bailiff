@@ -135,11 +135,62 @@ def test_a_receipt_dir_the_archiver_does_not_hold_is_refused(tmp_path, uid_offse
         run.check_receipt_dir(tmp_path, os.geteuid() + uid_offset, gid + gid_offset)
 
 
-def test_the_result_is_one_compact_line(capsys):
-    run.print_result("r1", "m", [run.Outcome("s", "p")], {"docket verifies": True})
+@pytest.mark.parametrize(("failures", "status"), [([], "ok"), (["docket verifies"], "failed")])
+def test_the_result_is_one_compact_line_whose_status_follows_the_checks(capsys, failures, status):
+    run.print_result("r1", "m", [run.Outcome("s", "p")], {"docket verifies": True}, failures)
     out = capsys.readouterr().out
     assert out.count("\n") == 1
-    assert json.loads(out)["run_id"] == "r1" and json.loads(out)["status"] == "ok"
+    result = json.loads(out)
+    assert (result["run_id"], result["status"], result["failures"]) == ("r1", status, failures)
+
+
+RUN_SUMMARY = {
+    "every upstream deploy carried the credential header": True,
+    "upstream deploys carrying any x-bailiff header": 0,
+    "credential seen by the agent or the model": False,
+    "credential in the docket": False,
+    "docket verifies": True,
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        ({}, None),
+        ({"every upstream deploy carried the credential header": False}, "every upstream deploy carried"),
+        ({"upstream deploys carrying any x-bailiff header": 1}, "x-bailiff header"),
+        ({"credential seen by the agent or the model": True}, "credential seen"),
+        ({"credential in the docket": True}, "credential in the docket"),
+        ({"docket verifies": False}, "docket verifies"),
+    ],
+)
+def test_the_run_fails_on_any_broken_invariant(change, failure):
+    failures = run.failed_checks({**RUN_SUMMARY, **change})
+    assert failures == ([] if failure is None else [next(name for name in failures if failure in name)])
+
+
+KUBERNETES_SUMMARY = {
+    "effector token seen by the agent or the model": False,
+    "effector token in the docket": False,
+    "effector token in the gateway log": False,
+    "docket verifies": True,
+    "final replicas": {"staging": 3, "prod": 1},
+}
+
+
+@pytest.mark.parametrize(
+    ("change", "failure"),
+    [
+        ({}, None),
+        ({"effector token seen by the agent or the model": True}, "effector token seen by the agent or the model"),
+        ({"effector token in the docket": True}, "effector token in the docket"),
+        ({"effector token in the gateway log": True}, "effector token in the gateway log"),
+        ({"docket verifies": False}, "docket verifies"),
+        ({"final replicas": {"staging": 2, "prod": 5}}, "final replicas"),
+    ],
+)
+def test_the_kubernetes_run_fails_on_any_broken_invariant(change, failure):
+    assert kubernetes.failed_checks({**KUBERNETES_SUMMARY, **change}) == ([] if failure is None else [failure])
 
 
 def status_file(tmp_path, cap_eff, no_new_privs):
@@ -213,16 +264,21 @@ try:
     print("ready", flush=True)
     time.sleep(30)
 finally:
+    run.ignore_sigterm()
+    print("tearing down", flush=True)
+    time.sleep(1)
     open(sys.argv[1], "w").write("finally ran")
 """
 
 
-def test_sigterm_runs_the_finally_block(tmp_path):
+def test_sigterm_runs_the_finally_block_and_a_second_one_does_not_stop_it(tmp_path):
     marker = tmp_path / "marker"
     child = subprocess.Popen(
         [sys.executable, "-c", SIGTERM_CHILD, str(marker)], cwd=LIVE_RUN, stdout=subprocess.PIPE, text=True
     )
     assert child.stdout.readline() == "ready\n"
+    child.send_signal(signal.SIGTERM)
+    assert child.stdout.readline() == "tearing down\n"
     child.send_signal(signal.SIGTERM)
     assert child.wait(10) == 143
     assert marker.read_text() == "finally ran"
@@ -288,6 +344,19 @@ def test_a_held_lock_fails_fast_and_names_its_owner(tmp_path, monkeypatch):
     assert not cluster.locked
 
 
+def test_the_lock_counts_as_held_while_its_create_runs(tmp_path, monkeypatch):
+    cluster = bare_cluster(tmp_path)
+
+    def interrupted(context, *args, stdin=None, timeout=120):
+        assert cluster.locked
+        raise SystemExit(143)
+
+    monkeypatch.setattr(kubernetes, "kubectl", interrupted)
+    with pytest.raises(SystemExit):
+        cluster.acquire_lock()
+    assert cluster.locked
+
+
 def test_the_lock_carries_the_owner_and_run_label(tmp_path, monkeypatch):
     sent = []
     monkeypatch.setattr(kubernetes, "kubectl", lambda context, *args, stdin=None, timeout=120: sent.append(stdin))
@@ -311,12 +380,28 @@ def test_a_clean_teardown_deletes_the_lock_last(tmp_path, monkeypatch):
 
     def record(context, *args, stdin=None, timeout=120):
         calls.append(args)
-        return ""
+        return "r1" if args[:3] == ("get", "namespace", "agent-bailiff-lock") else ""
 
     monkeypatch.setattr(kubernetes, "kubectl", record)
     cluster = bare_cluster(tmp_path, created=True)
     cluster.down()
     assert calls[-1][:3] == ("delete", "namespace", "agent-bailiff-lock")
+
+
+@pytest.mark.parametrize("owner", ["r0", ""])
+def test_a_lock_this_run_does_not_own_is_never_deleted(tmp_path, monkeypatch, owner):
+    calls = []
+
+    def record(context, *args, stdin=None, timeout=120):
+        calls.append(args)
+        return owner if args[:3] == ("get", "namespace", "agent-bailiff-lock") else ""
+
+    monkeypatch.setattr(kubernetes, "kubectl", record)
+    cluster = bare_cluster(tmp_path)
+    cluster.locked = True
+    cluster.down()
+    assert calls == [("get", "namespace", "agent-bailiff-lock", "--ignore-not-found", "-o",
+                      "jsonpath={.metadata.annotations.agent-bailiff/owner}")]  # fmt: skip
 
 
 def test_an_unlocked_cluster_tears_down_nothing(tmp_path, monkeypatch):

@@ -94,7 +94,7 @@ def minify_kubeconfig(context: str, allowed: frozenset[str] = ALLOWED_CONTEXTS) 
 def read_token() -> str:
     if "ANTHROPIC_API_KEY" in os.environ:
         raise RuntimeError("unset ANTHROPIC_API_KEY; the live run authenticates only with CLAUDE_CODE_OAUTH_TOKEN")
-    token = os.environ.get(TOKEN_VARIABLE, "").strip()
+    token = os.environ.pop(TOKEN_VARIABLE, "").strip()
     if not token:
         raise RuntimeError(f"set {TOKEN_VARIABLE} (claude setup-token)")
     return token
@@ -131,8 +131,8 @@ def read_result(stdout: str, run_id: str) -> dict[str, Any]:
         result = json.loads(lines[-1])
     except json.JSONDecodeError as error:
         raise RuntimeError(f"the last stdout line is not compact result JSON: {lines[-1][:200]!r}") from error
-    if not isinstance(result, dict) or result.get("run_id") != run_id or result.get("status") != "ok":
-        raise RuntimeError(f"the result is not an ok result for run {run_id}")
+    if not isinstance(result, dict) or result.get("run_id") != run_id or result.get("status") not in ("ok", "failed"):
+        raise RuntimeError(f"the result is not a result for run {run_id}")
     return result
 
 
@@ -176,6 +176,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.out.exists():
         raise SystemExit(f"{args.out} already exists")
+    if args.out.resolve().is_relative_to(REPO):
+        raise SystemExit(f"{args.out} is inside the repo, which is the image build context; write it elsewhere")
     token = read_token()
     kubernetes = args.script == "kubernetes"
     kubeconfig = minify_kubeconfig(args.context) if kubernetes else None
@@ -211,8 +213,11 @@ def main() -> None:
         if kubernetes:
             print(report_lock(args.context, args.docker_context), file=sys.stderr)
         raise SystemExit(process.returncode)
-    write_result(spec.out, read_result(stdout.decode(), spec.run_id))
+    result = read_result(stdout.decode(), spec.run_id)
+    write_result(spec.out, result)
     print(f"run {spec.run_id}: wrote {spec.out}")
+    if result["status"] != "ok":
+        raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=...
 .venv/bin/python examples/live-run/launch.py --script kubernetes --out live-run-k8s.json
 ```
 
-The launcher builds the image (`Dockerfile`: Python and Node bases by digest, Claude Code from `package-lock.json`, kubectl and agentgateway by sha256, Python deps from `requirements-ci.txt`) and runs it by repo digest. The token and, for the Kubernetes run, a kubeconfig minified to the `orbstack` context travel on stdin, never in argv, the environment or a mount. The result is the harness's last stdout line, written by the host with mode 0600.
+The launcher builds the image (`Dockerfile`: Python and Node bases by digest, Claude Code from `package-lock.json`, kubectl and agentgateway by sha256, Python deps from `requirements-ci.txt`) and runs it by repo digest. The token and, for the Kubernetes run, a kubeconfig minified to the `orbstack` context travel on stdin, never in argv, the environment or a mount. The result is the harness's last stdout line, written by the host with mode 0600 outside the repo. Its `status` is `failed`, with the broken checks in `failures`, when a credential leaked, the docket did not verify, or (Kubernetes) prod changed; the launcher then exits 1. The `live-run-image` CI job builds the image and checks the entrypoint and a confined start; a successful run and teardown are tested only against a local cluster.
 
 In the container:
 

@@ -35,6 +35,7 @@ from run import (
     cli,
     free_port,
     gateway_binary,
+    ignore_sigterm,
     install_sigterm,
     print_result,
     private,
@@ -119,9 +120,11 @@ class Cluster:
             "kind": "Namespace",
             "metadata": {"name": LOCK, "annotations": {OWNER_ANNOTATION: self.run_id}},
         }
+        self.locked = True
         try:
             kubectl(self.context, "create", "-f", "-", stdin=json.dumps(labelled(lock, self.run_id)))
         except RuntimeError as error:
+            self.locked = False
             if "AlreadyExists" not in str(error):
                 raise
             owner = kubectl(
@@ -131,7 +134,6 @@ class Cluster:
                 f"the cluster is locked by run {owner or '<unknown>'} (namespace {LOCK}); "
                 f"delete it only once container bl-{owner or '<unknown>'} is not running"
             ) from error
-        self.locked = True
 
     def create(self, *args: str, namespace: str | None = None) -> None:
         scope = ["-n", namespace] if namespace else []
@@ -252,7 +254,17 @@ class Cluster:
         failures = self.remove(deadline) if self.created else []
         if failures:
             raise RuntimeError(f"cleanup incomplete, namespace {LOCK} kept: " + "; ".join(failures))
-        self.within(deadline, "delete", "namespace", LOCK, "--ignore-not-found", "--timeout=60s")
+        owner = self.within(
+            deadline,
+            "get",
+            "namespace",
+            LOCK,
+            "--ignore-not-found",
+            "-o",
+            f"jsonpath={{.metadata.annotations.{OWNER_ANNOTATION}}}",
+        ).strip()
+        if owner == self.run_id:
+            self.within(deadline, "delete", "namespace", LOCK, "--ignore-not-found", "--timeout=60s")
 
     def remove(self, deadline: Deadline) -> list[str]:
         failures = []
@@ -529,6 +541,23 @@ def final_checks(deployment: KubernetesDeployment, outcomes: list[Outcome]) -> d
     }
 
 
+def failed_checks(summary: dict[str, Any]) -> list[str]:
+    failures = [
+        name
+        for name in (
+            "effector token seen by the agent or the model",
+            "effector token in the docket",
+            "effector token in the gateway log",
+        )
+        if summary[name]
+    ]
+    if not summary["docket verifies"]:
+        failures.append("docket verifies")
+    if summary["final replicas"]["prod"] != 1:
+        failures.append("final replicas")
+    return failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_layout_arguments(parser)
@@ -577,11 +606,12 @@ def main() -> None:
         outcomes.append(scenario_scripted(deployment))
         summary = final_checks(deployment, outcomes)
     finally:
+        ignore_sigterm()
         try:
             deployment.stop()
         finally:
             cluster.down()
-    print_result(args.run_id, args.model, outcomes, summary)
+    print_result(args.run_id, args.model, outcomes, summary, failed_checks(summary))
 
 
 if __name__ == "__main__":
