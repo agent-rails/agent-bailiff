@@ -27,7 +27,7 @@ Every bailiff container and gitea-mcp is read-only, drops all capabilities and s
 
 Every service has a memory and process limit (`mem_limit`, `pids_limit`), with swap capped at the memory limit (`memswap_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
 
-The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/issues`, budget 20, one hour. Three routes exist (`routes.json`): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include.
+The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/repos/quickstart/demo/*`, budget 20, one hour. Three routes exist (`routes.json`): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include. Each route builds its resource from the call's `owner` and `repo` arguments, for example `gitea/repos/quickstart/demo/issues`, so the scope names one repository. The custodian bindings cover `gitea/repos/quickstart/*`.
 
 ## Run it
 
@@ -71,12 +71,12 @@ The probes are real calls made with the stored token, so this is the token's mea
 ```console
 $ docker compose run --rm -T agent run | tee run.json
 {
-  "task_id": "task-7a8ba7e75eb39931",
+  "task_id": "task-04c2212456940c17",
   "checks": [
     {"scenario": "allowed call reaches gitea", "expected": "result", "observed": "result", "pass": true},
     {"scenario": "injected out-of-scope call refused", "expected": "refused: out_of_scope", "observed": "refused: out_of_scope", "pass": true},
     {"scenario": "replayed call refused", "expected": "refused: already_*", "observed": "refused: already_issued", "pass": true},
-    {"scenario": "disclosed: list_issues on payroll stays allowed", "expected": "result", "observed": "result", "pass": true},
+    {"scenario": "other repository refused", "expected": "refused: out_of_scope", "observed": "refused: out_of_scope", "pass": true},
     {"scenario": "disclosed: unrouted write tool refused", "expected": "refused: unknown_tool", "observed": "refused: unknown_tool", "pass": true}
   ]
 }
@@ -85,7 +85,7 @@ $ docker compose run --rm -T agent run | tee run.json
 - Allowed: `list_issues` and `issue_read` on `quickstart/demo` return results.
 - Injected: `get_file_contents` for `salaries.csv` is refused by decide. The token could read the file; the task scope cannot.
 - Replayed: the exact headers and body of an allowed call are resent and refused.
-- Disclosed: `list_issues` on `quickstart/payroll` is allowed, see [limits](#what-this-does-not-show).
+- Other repository: `list_issues` on `quickstart/payroll` is refused. Its resource is `gitea/repos/quickstart/payroll/issues`, outside the scope.
 - Disclosed: `issue_write` has no route and is refused before any scope check.
 
 The operator reads the docket, then revokes the task from a verified record:
@@ -94,31 +94,30 @@ The operator reads the docket, then revokes the task from a verified record:
 $ TASK=$(jq -r .task_id run.json)
 $ docker compose run --rm -T reader --task "$TASK"
 LINE	AT	WRITER	SEQ	DECISION	TOOL	RESOURCE	REASON	NOTE
-1	2026-11-20T08:37:52Z	decide.quickstart	1	allow	gitea.issues.list	gitea/issues	ok	-
-2	2026-11-20T08:37:52Z	custodian.quickstart	1	release	gitea.issues.list	gitea/issues	ok	released, target outcome unknown
-3	2026-11-20T08:37:52Z	decide.quickstart	2	allow	gitea.issues.read	gitea/issues	ok	-
-4	2026-11-20T08:37:52Z	custodian.quickstart	2	release	gitea.issues.read	gitea/issues	ok	released, target outcome unknown
-5	2026-11-20T08:37:52Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/contents	out_of_scope	-
-6	2026-11-20T08:37:52Z	decide.quickstart	4	refuse	gitea.issues.list	gitea/issues	already_issued	-
-7	2026-11-20T08:37:52Z	decide.quickstart	5	allow	gitea.issues.list	gitea/issues	ok	-
-8	2026-11-20T08:37:52Z	custodian.quickstart	3	release	gitea.issues.list	gitea/issues	ok	released, target outcome unknown
-agent-bailiff docket verify: 8 records verified, 8 printed
+1	2026-11-22T14:07:15Z	decide.quickstart	1	allow	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	-
+2	2026-11-22T14:07:15Z	custodian.quickstart	1	release	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
+3	2026-11-22T14:07:15Z	decide.quickstart	2	allow	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	-
+4	2026-11-22T14:07:15Z	custodian.quickstart	2	release	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
+5	2026-11-22T14:07:15Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
+6	2026-11-22T14:07:15Z	decide.quickstart	4	refuse	gitea.issues.list	gitea/repos/quickstart/demo/issues	already_issued	-
+7	2026-11-22T14:07:15Z	decide.quickstart	5	refuse	gitea.issues.list	gitea/repos/quickstart/payroll/issues	out_of_scope	-
+agent-bailiff docket verify: 7 records verified, 7 printed
 $ docker compose run --rm -T reader --task "$TASK" --json \
     | jq -r 'select(.writer == "decide.quickstart" and .entry.decision == "allow") | .token' | tail -n 1 \
     | docker compose run --rm -T control revoke --config /var/lib/bailiff/control/config.json --actor operator --level task --record -
-agent-bailiff docket verify: 8 records verified, 8 printed
-{"action": "revoke", "entry_id": "559b397da81140499e7e1acaf5eebcfb", "handles": {"task": "task-7a8ba7e75eb39931", "tenant": "quickstart"}, "reason": "task", "trace_id": "87ec2205f838a0b1282af3fe66682273"}
+agent-bailiff docket verify: 7 records verified, 7 printed
+{"action": "revoke", "entry_id": "79825d1dbf414a17bb8ba0de44109e00", "handles": {"task": "task-04c2212456940c17", "tenant": "quickstart"}, "reason": "task", "trace_id": "399b2cd9174d87289639cb12dd9211b4"}
 $ docker compose run --rm -T agent after-revoke
 {
-  "task_id": "task-7a8ba7e75eb39931",
+  "task_id": "task-04c2212456940c17",
   "checks": [
     {"scenario": "call after revoke refused", "expected": "refused: chain_invalid", "observed": "refused: chain_invalid", "pass": true}
   ]
 }
 $ docker compose run --rm -T reader
 ...
-9	2026-11-20T08:37:54Z	control.quickstart	1	revoke	-	-	task	-
-agent-bailiff docket verify: 9 records verified, 9 printed
+8	2026-11-22T14:07:17Z	control.quickstart	1	revoke	-	-	task	-
+agent-bailiff docket verify: 8 records verified, 8 printed
 ```
 
 The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke is not in the docket: decide could not verify the chain, so it logs the refusal instead of recording it.
@@ -131,18 +130,18 @@ Two optional profiles. `trace` runs Jaeger and `agent-bailiff docket export`; `r
 $ docker compose --profile trace --profile rule up --build --detach --wait
 $ docker compose run --rm -T agent inject | tee inject.json
 {
-  "task_id": "task-a03d0f63b02ae5a0",
+  "task_id": "task-90033a566373be1b",
   "checks": [
     {"scenario": "allowed call reaches gitea", "expected": "result", "observed": "result", "pass": true},
     {"scenario": "injected out-of-scope call refused", "expected": "refused: out_of_scope", "observed": "refused: out_of_scope", "pass": true}
   ]
 }
 $ docker compose logs --no-log-prefix rule
-{"entry_id": "ce93d73633cb4f31a90c34d5a69e7c50", "line": 5, "rule": "out_of_scope", "task": "task-a03d0f63b02ae5a0", "tenant": "quickstart"}
+{"entry_id": "854cbba532a24c23ac69d9c2697d70b7", "line": 5, "rule": "out_of_scope", "task": "task-90033a566373be1b", "tenant": "quickstart"}
 $ docker compose run --rm -T reader --task "$(jq -r .task_id inject.json)"
 ...
-5	2026-11-20T10:16:21Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/contents	out_of_scope	-
-6	2026-11-20T10:16:21Z	rule.quickstart	1	revoke	-	-	task	-
+5	2026-11-22T14:14:38Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
+6	2026-11-22T14:14:39Z	rule.quickstart	1	revoke	-	-	task	-
 agent-bailiff docket verify: 6 records verified, 6 printed
 $ docker compose run --rm -T agent after-revoke
 ...
@@ -169,7 +168,7 @@ The `archive` profile runs `agent-bailiff docket archive` as uid 10009 in the do
 $ docker compose --profile archive up --build --detach --wait
 $ docker compose run --rm -T reader --receipts /var/lib/bailiff/receipts
 ...
-agent-bailiff docket verify: 9 records verified, 9 printed
+agent-bailiff docket verify: 8 records verified, 8 printed
 agent-bailiff docket verify: 0 retained segments match their receipts
 ```
 
@@ -188,7 +187,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 
 ## What this shows
 
-- Scoped claims: decide allows a call only when the tool and resource are in the task scope, the budget has room and the call was not seen before. The scope names a tool and a fixed resource; it does not read tool arguments.
+- Scoped claims: decide allows a call only when the tool and resource are in the task scope, the budget has room and the call was not seen before. The resource comes from the route: a fixed string, or a template filled from named arguments that must be identifiers (`[A-Za-z0-9_][A-Za-z0-9._-]{0,99}`, and the filled resource must be a valid scope entry). A resource grant must be exact or end at `/*`; decide refuses a task whose leaf grant is any other pattern with `unbounded_scope`.
 - The agent never holds the Gitea token. The canary test reads the stored token and scans for it, its base64 form and the base64 of `token <value>` across every bailiff named volume (not Gitea's own `gitea-data` and `gitea-config`), the agent container's whole filesystem and environment, and the logs of every service. The only place the test permits a hit is Gitea's own logs. It passed on agent-warrant 0.3.0.
 - Each release is bound to one decide allow, and the custodian limits releases to 60 per task per 60 seconds (`rate_limit`, `rate_window`).
 - An operator revoke stops later calls on the task, and so does the rule's revoke after an out-of-scope refusal.
@@ -209,11 +208,15 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - No rollback or compensation of an upstream effect.
 - No approval service. Decide can refuse with `needs_approval`; nothing here grants approval.
 - Credential passthrough (H4): gitea-mcp receives the injected `Authorization` header and forwards it to Gitea. MCP guidance forbids a server accepting a token issued for another service; this stack trusts gitea-mcp as part of the upstream. A compromised gitea-mcp holds every released token for the length of a call.
-- Token reach is wider than the task. The token reads `quickstart/payroll`, including `salaries.csv`. Decide refuses `get_file_contents` only because that tool is outside the task scope.
-- `list_issues` on `quickstart/payroll` stays allowed: the resource is `gitea/issues`, not a repository, so the scope cannot tell `demo` from `payroll`.
+- Token reach is wider than the task. The token reads `quickstart/payroll`, including `salaries.csv`. Decide refuses `get_file_contents` on `payroll` because neither the tool nor the repository is in the task scope.
+- Only `owner` and `repo` are checked. Every other argument reaches gitea-mcp unchecked (gitea-mcp-server 1.13.0 `tools/list`):
+  - `list_issues`: `assigned_by`, `before`, `created_by`, `labels`, `mentioned_by`, `milestones`, `page`, `per_page`, `since`, `state`, `type`.
+  - `issue_read`: `attachment_id`, `attachment_uuid`, `comment_id`, `issue_number`, `method`, `output_path`, `page`, `per_page`.
+  - `get_file_contents`: `end_line`, `path`, `ref`, `sha`, `start_line`, `with_lines`.
+- Resources compare byte for byte. `list_issues` with `repo` `Demo` or `DEMO` resolves to `gitea/repos/quickstart/Demo/issues` and is refused as `out_of_scope`; a scope must name the repository in the case the agent sends.
 - `issue_read` accepts any `method` value gitea-mcp offers. Decide does not inspect it; the read-only token scope is what keeps it read-only.
 - gitea-mcp's `tools/list` exposes 48 tools, writes included, and the gateway returns all of them. Only the three routed tools can be called; the decide processor refuses any other name with `unknown_tool` before a scope check.
-- The rule is not detection. It acts on an `out_of_scope` refusal of one configured tool, or on 17 agent-caused refusals of one task in 60 s; misuse that decide allows, or a few refusals for another reason, does not trigger it. An agent probing the payroll repo with `list_issues` (`gitea.issues.list`) a few times is refused but not revoked.
+- The rule is not detection. It acts on an `out_of_scope` refusal of one configured tool, or on 17 agent-caused refusals of one task in 60 s; misuse that decide allows, or a few refusals for another reason, does not trigger it. An agent probing the payroll repo with `list_issues` (`gitea.issues.list`) a few times is refused as `out_of_scope` but not revoked.
 - Evidence is scoped:
   - Not every refusal is recorded. An `unknown_tool` refusal, a refusal on an unverifiable chain (`chain_invalid`, including a call after a revoke) and, per task in 60 s, refusals past the 17th caused by the agent's request (scope, cost, binding, policy) or past the 17th of any other reason write no record. The 17th agent-caused refusal is recorded as `refusals_capped` and the rule revokes on it as on `out_of_scope`, so padding a task with refusals does not hide a later probe. Suspension, outage and replay refusals get `operational_refusals_capped`, which does not revoke. Past 4096 windows in one tenant per 60 s, decide records one `tenant_refusals_capped` marker and the rule takes no action (THREAT_MODEL "Unrecorded refusals").
   - A `release` record means the custodian released the token, not that Gitea applied the call: `released, target outcome unknown`.
