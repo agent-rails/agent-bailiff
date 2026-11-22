@@ -49,12 +49,13 @@ class ReleaseCheck:
         self._seen: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def check(self, name: object, arguments: object, token: object, now: int) -> CheckedCall:
-        checked = verify_operation(self._config, self._catalog, name, arguments, token, now)
+    def verify(self, name: object, arguments: object, token: object, now: int) -> CheckedCall:
+        return verify_operation(self._config, self._catalog, name, arguments, token, now)
+
+    def claim(self, checked: CheckedCall, now: int) -> None:
         if checked.release.iat <= self._started_at:
             raise ReleaseRefused("release_predates_start")
         self._claim(checked.release, now)
-        return checked
 
     def _claim(self, release: Release, now: int) -> None:
         with self._lock:

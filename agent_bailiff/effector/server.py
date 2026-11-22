@@ -70,7 +70,8 @@ class Effector:
         if not self._rbac.healthy(now):
             return _error("rbac_unverified")
         try:
-            checked = self._check.check(params.get("name"), params.get("arguments", {}), release_token, now)
+            checked = self._check.verify(params.get("name"), params.get("arguments", {}), release_token, now)
+            self._check.claim(checked, now)
         except ReleaseRefused as refusal:
             logger.warning("effector refused a call: %s", refusal.reason)
             return _error(refusal.reason)
