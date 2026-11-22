@@ -188,6 +188,7 @@ class BailiffClient:
         )
 
     def delegate(self, child: Ed25519PublicKey, *, scope: dict[str, Any], budget: int, ttl: int) -> tuple[str, ...]:
+        self._check_thread()
         return self._holder.delegate(child, scope=scope, budget=budget, ttl=ttl, now=self._clock())
 
     def send(self, call: PreparedCall) -> Outcome:

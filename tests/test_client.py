@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import socket
 import subprocess
@@ -11,10 +12,13 @@ from pathlib import Path
 
 import pytest
 import test_agentgateway_e2e
+import test_custodian
 from agent_warrant.chain import ChainLink, LeafProof
 from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_agentgateway_e2e import BINARY
+from test_control import MemoryDocket
+from test_control_suspension import shared_suspension
 from test_custodian import NOW, docket_entries
 from test_decide import AGENT_KEY, CHILD_KEY, DECIDER_ID, make_root
 
@@ -33,6 +37,7 @@ from agent_bailiff.client import (
 )
 from agent_bailiff.client import client as client_module
 from agent_bailiff.client.contract import new_traceparent, prepare_call
+from agent_bailiff.control import Control, Suspension
 from agent_bailiff.effector.catalog import Argument
 from agent_bailiff.routes import ToolRoute, ToolRoutes
 
@@ -309,6 +314,34 @@ def test_a_delegation_that_widens_the_parent_is_refused(options, message):
     request = {"scope": CHILD_SCOPE, "budget": 10, "ttl": 600, **options}
     with pytest.raises(ValueError, match=message):
         holder().delegate(CHILD_KEY.public_key(), now=NOW, **request)
+
+
+def test_a_delegation_past_the_root_max_depth_is_refused():
+    current = holder()
+    for _ in range(4):
+        child_key = Ed25519PrivateKey.generate()
+        links = current.delegate(child_key.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600, now=NOW)
+        current = Holder(current.task_root, links, child_key, DECIDER_ID)
+    with pytest.raises(ValueError, match="max_depth"):
+        current.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600, now=NOW)
+
+
+@pytest.mark.parametrize("now", [NOW - 1, NOW + 3600])
+def test_a_delegation_outside_the_holder_record_window_is_refused(now):
+    with pytest.raises(ValueError, match="not valid at now"):
+        holder().delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600, now=now)
+
+
+def test_a_client_delegates_only_on_its_thread(client):
+    errors: list[BaseException] = []
+
+    def delegate():
+        client.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600)
+
+    thread = threading.Thread(target=lambda: _capture(errors, delegate))
+    thread.start()
+    thread.join()
+    assert len(errors) == 1 and "one per thread" in str(errors[0])
 
 
 def test_the_client_delegates_at_its_clock(stub):
@@ -737,3 +770,32 @@ def test_a_sub_agent_calls_through_agentgateway_under_a_narrowed_link(gateway_cl
     assert [entry.decision for entry in decided] == ["allow", "refuse"]
     child_key = encode_public_key(CHILD_KEY.public_key())
     assert all(entry.agent_key == child_key and entry.handles["link"] for entry in decided)
+
+
+@live
+def test_revoking_a_sub_agent_link_stops_the_sub_agent_but_not_its_parent(
+    gateway_client, stack, workdir, writer, private
+):
+    links = gateway_client.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600)
+    sub_agent = BailiffClient(
+        stack["agent"].url,
+        Holder(make_root().encode(), links, CHILD_KEY, DECIDER_ID),
+        test_agentgateway_e2e.ROUTES,
+        clock=lambda: NOW,
+    )
+    try:
+        assert sub_agent.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+        control = Control(
+            "control",
+            test_custodian.WRITERS,
+            writer,
+            Suspension(shared_suspension(private("shared")), os.getegid()),
+            MemoryDocket(),
+            "control",
+        )
+        control.revoke(test_agentgateway_e2e.allow_record_line(workdir), "link", "ops", NOW)
+        assert sub_agent.call("deploy", "deploy_service", ARGS) == Refused("chain_invalid")
+    finally:
+        sub_agent.close()
+    assert gateway_client.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+    assert len(stack["upstream"].calls()) == 2
