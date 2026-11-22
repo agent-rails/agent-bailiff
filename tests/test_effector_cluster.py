@@ -84,6 +84,7 @@ def cluster(tmp_path_factory):
                 manifests,
                 tenants,
                 CATALOG.operations,
+                platform="upstream",
             ),
         }
     finally:

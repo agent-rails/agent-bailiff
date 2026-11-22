@@ -309,6 +309,7 @@ def start_effector(settings: EffectorSettings) -> RunningEffector:
         manifests,
         settings.tenants,
         catalog.operations,
+        platform=settings.platform,
     )
     rbac = RbacGate(audit, lambda: int(time.time()))
     try:

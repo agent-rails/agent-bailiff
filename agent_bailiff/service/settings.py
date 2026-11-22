@@ -17,6 +17,7 @@ from agent_bailiff.decide.costs import CostTable
 from agent_bailiff.docket.manifest import MAX_MANIFEST_BYTES, entry_bytes_bound
 from agent_bailiff.docket.retention import MAX_RECEIPT_AGE, MIN_RECEIPT_AGE, Retention
 from agent_bailiff.docket.sink import MIN_FREE_SPACE_FLOOR, MIN_SEGMENT_BYTES, Writers
+from agent_bailiff.effector.platform import Platform, parse_platform
 from agent_bailiff.effector.rbac import EffectorIdentity, check_inputs
 from agent_bailiff.keys import check_component, parse_pinned_keys
 from agent_bailiff.strict_json import parse_strict_json
@@ -57,7 +58,7 @@ DOCKET_KEYS = frozenset(
 )
 EFFECTOR_KEYS = frozenset(
     {"name", "key", "catalog", "custodian", "custodian_keys", "decider", "decide_keys", "skew_seconds"}
-    | {"max_clearance_lifetime", "port", "kubernetes", "rbac", "ledger", "docket"}
+    | {"max_clearance_lifetime", "port", "platform", "kubernetes", "rbac", "ledger", "docket"}
 )
 KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file", "audit_token_file"})
 RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "webhook_namespace", "tenants"})
@@ -214,6 +215,7 @@ class EffectorSettings:
     skew_seconds: int
     max_clearance_lifetime: int
     port: int
+    platform: Platform
     kubernetes: KubernetesSettings
     rbac: EffectorIdentity
     tenants: Mapping[str, tuple[str, ...]]
@@ -297,6 +299,10 @@ def parse_effector(document: object) -> EffectorSettings:
         check_inputs(identity, tenants)
     except ValueError as exc:
         raise rbac.wrap("tenants", exc) from None
+    try:
+        platform = parse_platform(config.raw("platform"))
+    except ValueError as exc:
+        raise config.wrap("platform", exc) from None
     return EffectorSettings(
         name=config.component("name"),
         key=config.path("key"),
@@ -308,6 +314,7 @@ def parse_effector(document: object) -> EffectorSettings:
         skew_seconds=config.integer("skew_seconds", 0, 300),
         max_clearance_lifetime=config.integer("max_clearance_lifetime", 1),
         port=config.integer("port", 1, 65535),
+        platform=platform,
         kubernetes=KubernetesSettings(
             host,
             kubernetes.integer("port", 1, 65535),
