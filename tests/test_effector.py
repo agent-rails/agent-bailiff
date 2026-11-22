@@ -14,6 +14,8 @@ from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.identity import snapshot_args
 from agent_bailiff.docket.entry import Record
+from agent_bailiff.docket.sink import VerifiedLine
+from agent_bailiff.docket.tasks import TaskList
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.kubernetes import KubernetesClient, KubernetesUnavailable, project, request_path
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig, ReleaseRefused
@@ -417,15 +419,32 @@ def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
     assert docket.entries[-1].outcome == "done"
 
 
+TASK_HANDLES = {"tenant": "tenant-a", "task": "task-1"}
+
+
 def refusals(docket):
-    return [(entry.decision, entry.outcome, entry.reason, entry.parent_entry) for entry in docket.entries]
+    return [
+        (entry.decision, entry.outcome, entry.reason, entry.parent_entry, dict(entry.handles))
+        for entry in docket.entries
+    ]
 
 
 def test_no_call_is_made_while_rbac_is_unverified(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
     assert transport.requests == []
-    assert refusals(docket) == [("outcome", "refused", "rbac_unverified", "f" * 32)]
+    assert refusals(docket) == [("refuse", None, "rbac_unverified", "f" * 32, TASK_HANDLES)]
+
+
+def test_an_effector_refusal_counts_against_its_task(token_file):
+    instance, _, docket = effector(token_file, rbac_healthy=False)
+    instance.call(scale_params(), release_for(), NOW + 2)
+    [entry] = docket.entries
+    verified = VerifiedLine(1, Record("effector.homelab", 1, None, entry, "k", "t"), 0, 2)
+    tasks = TaskList(frozenset({"control.example"}))
+    tasks.add(verified)
+    [row] = tasks.rows()
+    assert (row.tenant, row.task, row.refusals, row.allows) == ("tenant-a", "task-1", 1, 0)
 
 
 def test_a_release_refused_after_its_claim_is_consumed(token_file):
@@ -678,7 +697,7 @@ def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run
     result = instance.call({"name": "restart_deployment", "arguments": arguments}, release_for(clearance), NOW + 2)
     assert result["content"][0]["text"] == "restart_unverified"
     assert transport.requests == []
-    assert refusals(docket) == [("outcome", "refused", "restart_unverified", "f" * 32)]
+    assert refusals(docket) == [("refuse", None, "restart_unverified", "f" * 32, TASK_HANDLES)]
     assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
 
 
@@ -687,7 +706,7 @@ def test_a_write_is_refused_without_a_verified_release_webhook_while_reads_run(t
     instance._rbac.write = False
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "webhook_unverified"
     assert transport.requests == []
-    assert refusals(docket) == [("outcome", "refused", "webhook_unverified", "f" * 32)]
+    assert refusals(docket) == [("refuse", None, "webhook_unverified", "f" * 32, TASK_HANDLES)]
     arguments = {"namespace": "staging", "limit": 5}
     clearance = clearance_for("list_pods", arguments, op_id="op-list-1")
     assert (
