@@ -20,6 +20,18 @@ outcome = client.call("gitea", "get_me", {})
 - `Holder` rejects a key that is not the subject of the last record in the chain.
 - Golden vectors: `tests/vectors/client-v1.json` (root holder and delegated holder). `tests/test_client.py` checks that the client produces them and that the gateway adapter reads them back to the same tool, resource, arguments, links, trace id and request digest.
 
+## Delegating to a sub-agent
+
+```python
+links = client.delegate(sub_agent_key.public_key(), scope=scope, budget=10, ttl=600)
+sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_id), routes)
+```
+
+- `delegate` signs the next chain link with the holder key, at the client clock, naming the sub-agent's public key as subject. It returns the holder's links plus the new one. `Holder.delegate(..., now=)` does the same without a client.
+- The sub-agent's private key never reaches the parent: only its public key goes in. Pass the returned links to the sub-agent; they are public, signed records.
+- `delegate` refuses, with `ValueError`, a scope that does not narrow the holder's, a budget above the holder's, a depth past the root's `max_depth`, a non-positive `ttl`, or a holder record not valid now. Expiry is clamped to the holder's. These are the checks decide applies again to every call (`agent_warrant.chain.delegate`), so a refused delegation is one decide would refuse.
+- Calls from the sub-agent are checked against the narrowed link. A call outside it is refused (`out_of_scope`), and its docket entries carry the sub-agent key and the `link` handle, which `control revoke --level link` takes to revoke that link.
+
 ## Session
 
 - MCP Streamable HTTP. `initialize` offers `2025-11-25` and accepts `2025-11-25` or `2025-06-18`; any other version fails with `GatewayError`. agentgateway v1.7.0 negotiates `2025-11-25`.
