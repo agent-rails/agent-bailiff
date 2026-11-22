@@ -2,10 +2,14 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "live-run"))
+import launch  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TAG = "agent-bailiff-live-run:test"
@@ -85,17 +89,7 @@ def test_the_harness_starts_confined_in_the_entrypoint_layout(image):
 
 
 def kubeconfig(context):
-    view = json.loads(
-        subprocess.run(
-            ["kubectl", "config", "view", "--minify", "--flatten", "--context", context, "-o", "json"],
-            capture_output=True,
-            check=True,
-            timeout=30,
-        ).stdout
-    )
-    for cluster in view["clusters"]:
-        cluster["cluster"]["server"] = cluster["cluster"]["server"].replace("127.0.0.1", "k8s.orb.local")
-    return json.dumps(view).encode()
+    return json.dumps(launch.minify_kubeconfig(context)).encode()
 
 
 def kubectl(*arguments):
