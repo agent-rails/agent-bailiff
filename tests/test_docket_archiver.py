@@ -439,6 +439,24 @@ def test_verify_without_the_archive_starts_at_the_base(layout, pin_files, capsys
     assert lines == [5, 6]
 
 
+def tasks_command(layout, pin_files, capsys, *arguments):
+    _, docket = layout
+    pins = ["--pin", pin_files["decide"], "--pin", pin_files["custodian"], "--control-pin", pin_files["control"]]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), "--json", *map(str, arguments)])
+    captured = capsys.readouterr()
+    return code, [json.loads(line) for line in captured.out.splitlines()], captured.err
+
+
+def test_tasks_with_the_archive_counts_records_in_removed_segments(layout, pin_files, capsys):
+    archived_and_removed(layout)
+    code, rows, err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == 0, err
+    assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 3, 1, 1)]
+    code, rows, err = tasks_command(layout, pin_files, capsys)
+    assert code == 0, err
+    assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 2, 0, 0)]
+
+
 def test_verify_refuses_an_archived_copy_differing_from_its_sidecar(layout, pin_files, capsys):
     manifest, _ = archived_and_removed(layout)
     copy = copies(layout, manifest) / "seg-000000000001"

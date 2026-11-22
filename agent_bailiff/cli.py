@@ -154,6 +154,16 @@ def _parser() -> argparse.ArgumentParser:
             tasks.add_argument(
                 "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
             )
+            tasks.add_argument(
+                "--control-pin",
+                type=Path,
+                action="append",
+                required=True,
+                help="control's public key record; only its revocations set STATE; repeat",
+            )
+            tasks.add_argument(
+                "--archive", type=Path, help="read removed segments from this archive, so older tasks are listed"
+            )
             tasks.add_argument("--json", action="store_true", help="print one JSON object per task")
             tasks.set_defaults(handler=_list_tasks)
             export = component.add_parser(
@@ -440,10 +450,11 @@ def _run_docket(args: argparse.Namespace) -> int:
 
 
 def _list_tasks(args: argparse.Namespace) -> int:
-    tasks = TaskList()
     try:
-        writers = pinned_writers(read_pin(path) for path in args.pin)
-        report = verify_records(args.docket, writers, RecordFilter(), tasks.add)
+        control = [read_pin(path) for path in args.control_pin]
+        writers = pinned_writers([*(read_pin(path) for path in args.pin), *control])
+        tasks = TaskList(frozenset(pin.component for pin in control))
+        report = verify_records(args.docket, writers, RecordFilter(), tasks.add, archive=args.archive)
     except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket tasks", exc)
     if not report.ok:

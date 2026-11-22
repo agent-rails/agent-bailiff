@@ -26,11 +26,12 @@ from agent_bailiff.signing import sign
 
 DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(1, 33)))
+CONTROL_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(2, 34)))
 PINS = {
     name: PublicKeyRecord(name, key_id(name, key.public_key()), key.public_key())
-    for name, key in (("decide", DECIDE_KEY), ("custodian", CUSTODIAN_KEY))
+    for name, key in (("decide", DECIDE_KEY), ("custodian", CUSTODIAN_KEY), ("control", CONTROL_KEY))
 }
-KEYS = {"decide": DECIDE_KEY, "custodian": CUSTODIAN_KEY}
+KEYS = {"decide": DECIDE_KEY, "custodian": CUSTODIAN_KEY, "control": CONTROL_KEY}
 WRITERS = {name: {pin.kid: pin.public_key} for name, pin in PINS.items()}
 OTHER_USER = os.environ.get("AGENT_BAILIFF_TEST_OTHER_USER")
 
@@ -762,6 +763,7 @@ def test_a_snapshot_of_a_sealed_segment_does_not_match_after_a_cut(docket, pin_f
 
 def list_tasks(docket, pin_files, *arguments, capsys):
     pins = [item for name in ("decide", "custodian") for item in ("--pin", pin_files[name])]
+    pins += ["--control-pin", pin_files["control"]]
     code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), *arguments])
     captured = capsys.readouterr()
     return code, captured.out.splitlines(), captured.err
@@ -775,7 +777,7 @@ def task_docket(docket):
     docket.append("decide", make_entry(4, handles={"tenant": "acme", "task": "task-b", "root": "root-b"}))
     docket.append("decide", make_entry(5, handles={"tenant": "zeta", "task": "task-a", "root": "root-z"}))
     docket.append(
-        "decide", make_entry(6, hop="control", decision="revoke", handles={"tenant": "acme", "task": "task-a"})
+        "control", make_entry(6, hop="control", decision="revoke", handles={"tenant": "acme", "task": "task-a"})
     )
     return docket
 
@@ -818,10 +820,46 @@ def test_a_task_row_carries_its_last_record_for_control(docket, pin_files, capsy
 def test_root_and_tenant_revocations_mark_their_tasks(docket, pin_files, capsys, handles, revoked):
     docket.append("decide", make_entry(1, handles={"tenant": "acme", "task": "task-b", "root": "root-b"}))
     docket.append("decide", make_entry(2, handles={"tenant": "zeta", "task": "task-a", "root": "root-z"}))
-    docket.append("decide", make_entry(3, hop="control", decision="revoke", handles=handles))
+    docket.append("control", make_entry(3, hop="control", decision="revoke", handles=handles))
     _, out, _ = list_tasks(docket, pin_files, "--json", capsys=capsys)
     marked = [row["task"] + ("@zeta" if row["tenant"] == "zeta" else "") for row in json_rows(out) if row["revoked_by"]]
     assert marked == revoked
+
+
+def test_a_revocation_from_a_writer_other_than_control_leaves_the_task_unmarked(docket, pin_files, capsys):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles))
+    docket.append("decide", make_entry(2, hop="control", decision="revoke", handles=handles))
+    docket.append("custodian", make_entry(3, hop="control", decision="revoke", handles={"tenant": "acme"}))
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [row["revoked_by"] for row in json_rows(out)] == [None]
+
+
+def test_the_record_for_control_is_the_latest_decide_record_of_the_task(docket, pin_files, capsys):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles))
+    docket.append("decide", make_entry(2, handles=handles, tenant="zeta"))
+    docket.append("custodian", make_entry(3, handles=handles, hop="custodian", component="custodian", performed=True))
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    [row] = json_rows(out)
+    assert (row["record"], row["record_line"]) == (docket.records[0].token, 1)
+    assert (row["allows"], row["releases"]) == (2, 1)
+
+
+def test_a_task_with_no_decide_record_has_no_record_for_control(docket, pin_files, capsys):
+    handles = {"tenant": "acme", "task": "task-a"}
+    docket.append("custodian", make_entry(1, handles=handles, hop="custodian", component="custodian", performed=True))
+    _, out, _ = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    [row] = json_rows(out)
+    assert row["record"] is None and row["record_line"] is None
+
+
+def test_tasks_requires_a_control_pin(docket, pin_files, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["docket", "tasks", "--docket", str(docket.path), "--pin", str(pin_files["decide"])])
+    assert "--control-pin" in capsys.readouterr().err
 
 
 def test_tasks_prints_nothing_from_a_docket_that_fails_verification(docket, pin_files, capsys):
