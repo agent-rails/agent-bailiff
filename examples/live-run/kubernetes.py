@@ -39,8 +39,11 @@ from run import (
 
 from agent_bailiff.docket.report import verify_docket
 from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
+from agent_bailiff.effector.kubernetes import HttpsTransport, read_token
 from agent_bailiff.service.settings import load_docket
+from agent_bailiff.webhook.audit import WebhookAudit
 from agent_bailiff.webhook.certs import issue_serving_certificate
+from agent_bailiff.webhook.guard import guard_policies
 from agent_bailiff.webhook.manifests import NAME as WEBHOOK
 from agent_bailiff.webhook.manifests import generate_manifests
 
@@ -101,6 +104,10 @@ class Cluster:
             if "namespace" not in item["metadata"]
         ]
         names.append(f"validatingwebhookconfiguration/{WEBHOOK}")
+        names += [
+            f"{guard['kind'].lower()}/{guard['metadata']['name']}"
+            for guard in guard_policies(self.namespaces["hook"], WEBHOOK, [self.applier], False)
+        ]
         taken = kubectl(self.context, "get", *names, "--ignore-not-found", "-o", "name").split()
         if taken:
             raise RuntimeError(f"the cluster already holds {', '.join(taken)}; use a disposable cluster")
@@ -147,7 +154,8 @@ class Cluster:
             "skew_seconds": 2,
             "max_clearance_lifetime": effector["max_clearance_lifetime"],
         }
-        for enforce, phase in ((False, "all"), (True, "prepare"), (True, "register")):
+
+        def bundle(enforce: bool, phase: str) -> dict[str, Any]:
             manifests = generate_manifests(
                 namespace=namespace,
                 image=f"{image.split(':')[0]}@{digest}",
@@ -158,33 +166,67 @@ class Cluster:
                 deployers=[self.applier],
                 phase=phase,
             )
-            deployments = [item for item in manifests["items"] if item["kind"] == "Deployment"]
-            for item in deployments:
-                item["spec"]["template"]["spec"]["containers"][0]["image"] = image
+            for item in manifests["items"]:
+                if item["kind"] == "Deployment":
+                    item["spec"]["template"]["spec"]["containers"][0]["image"] = image
+            return manifests
+
+        for enforce, phase in ((False, "all"), (True, "prepare"), (True, "register")):
+            manifests = bundle(enforce, phase)
             if phase == "all":
                 self.webhook_manifests.write_text(json.dumps(manifests))
             kubectl(self.context, "apply", "-f", "-", stdin=json.dumps(manifests))
-            if deployments:
+            if any(item["kind"] == "Deployment" for item in manifests["items"]):
                 kubectl(self.context, "-n", namespace, "rollout", "status", f"deployment/{WEBHOOK}", "--timeout=90s")
+            if phase == "all":
+                self.audit_webhook(manifests)
+        self.audit_webhook(bundle(True, "target"))
+
+    def audit_webhook(self, manifests: dict[str, Any]) -> None:
+        staging = self.namespaces["staging"]
+        problems = WebhookAudit(
+            HttpsTransport(self.server.hostname or "", self.server.port or 443, self.directory / "ca.crt"),
+            read_token(self.directory / "audit.token"),
+            manifests,
+            self.namespaces["sys"],
+            "effector",
+            [f"bailiff:{TENANT}:{identity}" for identity in ("read", "scale", "restart")],
+            [staging],
+        ).check()
+        if problems:
+            raise RuntimeError(f"webhook audit failed: {problems}")
 
     def down(self) -> None:
         if not self.created:
             return
-        for manifests in (self.webhook_manifests, self.manifests):
-            if manifests.exists():
-                subprocess.run(
-                    ["kubectl", "--context", self.context, "delete", "-f", str(manifests), "--ignore-not-found"],
-                    capture_output=True,
-                    check=False,
-                )
-        subprocess.run(
-            [
-                "kubectl", "--context", self.context, "delete", "namespace", self.namespaces["staging"],
-                self.namespaces["prod"], self.namespaces["hook"], "--ignore-not-found",
-            ],
-            capture_output=True,
-            check=False,
-        )  # fmt: skip
+        failures = []
+        steps = [
+            ("delete", f"validatingwebhookconfiguration/{WEBHOOK}", "--ignore-not-found", "--timeout=60s"),
+            *(
+                ("delete", "-f", str(manifests), "--ignore-not-found", "--timeout=60s")
+                for manifests in (self.webhook_manifests, self.manifests)
+                if manifests.exists()
+            ),
+            (
+                "delete", "namespace", self.namespaces["staging"], self.namespaces["prod"], self.namespaces["hook"],
+                "--ignore-not-found", "--timeout=120s",
+            ),
+        ]  # fmt: skip
+        for step in steps:
+            try:
+                kubectl(self.context, *step)
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                failures.append(str(error))
+        try:
+            left = kubectl(
+                self.context, "get", f"validatingwebhookconfiguration/{WEBHOOK}", "--ignore-not-found", "-o", "name"
+            ).strip()
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            left = f"validatingwebhookconfiguration/{WEBHOOK} (unchecked: {error})"
+        if left:
+            failures.append(f"{left} may still be registered with failurePolicy Fail for bailiff: users; delete it")
+        if failures:
+            raise RuntimeError("cleanup incomplete: " + "; ".join(failures))
 
     def replicas(self, key: str) -> int:
         output = kubectl(
@@ -479,8 +521,10 @@ def main() -> None:
         outcomes.append(scenario_scripted(deployment))
         summary = final_checks(deployment, outcomes)
     finally:
-        deployment.stop()
-        cluster.down()
+        try:
+            deployment.stop()
+        finally:
+            cluster.down()
     args.out.write_text(
         json.dumps({"model": args.model, "outcomes": [asdict(o) for o in outcomes], "final": summary}, indent=2)
     )
