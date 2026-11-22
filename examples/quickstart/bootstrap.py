@@ -72,10 +72,11 @@ WRITERS = ("decide", "custodian", "control", "rule")
 CREDENTIAL_ID = "gitea-token"
 TARGET = "gitea"
 CREDENTIAL_HEADER = "Authorization"
+BINDING_RESOURCE = "gitea/repos/quickstart/*"
 ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text())["routes"]
 TASK_SCOPE = {
     "tools": ["gitea.issues.list", "gitea.issues.read"],
-    "resources": ["gitea/issues"],
+    "resources": ["gitea/repos/quickstart/demo/*"],
     "max_cost_per_call": 1,
 }
 TASK_BUDGET = 20
@@ -189,7 +190,7 @@ def bindings(**extra: Any) -> list[dict[str, Any]]:
         {
             "tenant": TENANT,
             "tool": route["tool"],
-            "resource": route["resource"],
+            "resource": BINDING_RESOURCE,
             "credential_id": CREDENTIAL_ID,
             "target": TARGET,
             **extra,

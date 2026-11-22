@@ -8,11 +8,12 @@ stack = test_quickstart_stack.stack
 
 DECIDE = b.NAMES["decide"]
 CONTROL = b.NAMES["control"]
+PAYROLL = "gitea/repos/quickstart/payroll"
 SCENARIOS = {
     "allowed call reaches gitea": "result",
     "injected out-of-scope call refused": "refused: out_of_scope",
     "replayed call refused": "refused: already_issued",
-    "disclosed: list_issues on payroll stays allowed": "result",
+    "other repository refused": "refused: out_of_scope",
     "disclosed: unrouted write tool refused": "refused: unknown_tool",
 }
 
@@ -50,12 +51,12 @@ def test_quickstart(stack):
     after_task, after = agent(stack, "after-revoke")
     assert after_task == task_id
     assert after == {"call after revoke refused": "refused: chain_invalid"}
-    decisions = [
-        (row["writer"], row["entry"]["decision"], row["entry"]["tool"], row["entry"]["reason"])
-        for row in verified_rows(stack, task_id)
-    ]
-    assert (DECIDE, "refuse", "gitea.contents.read", "out_of_scope") in decisions
+    rows = [row["entry"] | {"writer": row["writer"]} for row in verified_rows(stack, task_id)]
+    decisions = [(row["writer"], row["decision"], row["tool"], row["reason"]) for row in rows]
+    resources = {(row["decision"], row["tool"], row.get("resource"), row["reason"]) for row in rows}
+    assert ("refuse", "gitea.contents.read", f"{PAYROLL}/contents", "out_of_scope") in resources
+    assert ("refuse", "gitea.issues.list", f"{PAYROLL}/issues", "out_of_scope") in resources
     assert (DECIDE, "refuse", "gitea.issues.list", "already_issued") in decisions
     assert (CONTROL, "revoke", None, "task") in decisions
-    assert sum(decision[:2] == (DECIDE, "allow") for decision in decisions) == 3
+    assert sum(decision[:2] == (DECIDE, "allow") for decision in decisions) == 2
     assert not any(decision[2] == "gitea.contents.read" and decision[1] != "refuse" for decision in decisions)
