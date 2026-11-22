@@ -6,10 +6,10 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from agent_warrant.chain import ChainLink, prove_leaf
+from agent_warrant.chain import ChainLink, delegate, prove_leaf
 from agent_warrant.identity import encode_public_key
 from agent_warrant.task_root import TaskRoot
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from agent_bailiff.chain_headers import (
     LEAF_PROOF_HEADER,
@@ -47,6 +47,21 @@ class Holder:
         if not self.audience:
             raise ValueError("audience must be the decider id")
         object.__setattr__(self, "leaf", leaf)
+
+    def delegate(
+        self, child: Ed25519PublicKey, *, scope: dict[str, Any], budget: int, ttl: int, now: int
+    ) -> tuple[str, ...]:
+        link = delegate(
+            TaskRoot.decode(self.task_root),
+            self.leaf,
+            self.key,
+            child_subject=encode_public_key(child),
+            scope=scope,
+            budget=budget,
+            ttl=ttl,
+            now=now,
+        )
+        return (*self.links, link.encode())
 
 
 class PreparedCall:
