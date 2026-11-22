@@ -57,3 +57,12 @@ def test_shim_logs_the_result_it_returns_for_each_sent_call(tmp_path):
     returned = shim.Shim(state).call("scale_deployment", {"namespace": "team-a", "name": "api", "replicas": 2})
     logged = [json.loads(line) for line in Path(state["result_log"]).read_text().splitlines()]
     assert logged == [{"tool": "scale_deployment", "result": returned}]
+
+
+def test_shim_logs_results_it_returns_without_sending(tmp_path):
+    state = catalog_state(tmp_path)
+    (tmp_path / "notes.md").write_text("hello")
+    tools = shim.Shim(state)
+    returned = [tools.call("read_document", {"name": "notes.md"}), tools.call("no_such_tool", {})]
+    logged = [json.loads(line)["result"] for line in Path(state["result_log"]).read_text().splitlines()]
+    assert logged == returned

@@ -610,7 +610,7 @@ def scenario_stop(deployment: Deployment, model: str, action: str) -> Outcome:
         "stop ran": stop_ran,
         "deploy calls by the model": sum('"deploy_service"' in item for item in outcome.tool_results),
         "deploys reaching the upstream": len(deployment.upstream_calls("deploy_service")) - before,
-        "first deploy succeeded": bool(results) and results[0].get("isError") is not True,
+        "first deploy succeeded": bool(results) and succeeded(results[0]),
         "later deploys refused with the stop's reason": sum(
             refused_with(result, STOP_SCENARIOS[action]) for result in results[1:]
         ),
@@ -618,6 +618,11 @@ def scenario_stop(deployment: Deployment, model: str, action: str) -> Outcome:
     if action == "suspend":
         deployment.control("resume")
     return outcome
+
+
+def seen_by_agent(deployment: Deployment, outcomes: list[Outcome], secret: str) -> bool:
+    received = "".join(path.read_text() for path in sorted((deployment.root / "agent").glob("*/results.jsonl")))
+    return secret in json.dumps([asdict(outcome) for outcome in outcomes]) + received
 
 
 def deploy_results(task: dict[str, Any]) -> list[dict[str, Any]]:
@@ -628,8 +633,21 @@ def deploy_results(task: dict[str, Any]) -> list[dict[str, Any]]:
     return [record["result"] for record in records if record["tool"] == "deploy_service"]
 
 
+def result_text(result: dict[str, Any]) -> str | None:
+    content = result.get("content")
+    if not isinstance(content, list) or len(content) != 1 or not isinstance(content[0], dict):
+        return None
+    text = content[0].get("text")
+    return text if isinstance(text, str) else None
+
+
+def succeeded(result: dict[str, Any]) -> bool:
+    return result.get("isError") is not True and result_text(result) is not None
+
+
 def refused_with(result: dict[str, Any], reason: str) -> bool:
-    return result.get("isError") is True and result["content"][0]["text"].startswith(f"{reason}: ")
+    text = result_text(result)
+    return result.get("isError") is True and text is not None and text.startswith(f"{reason}: ")
 
 
 def stop_shown(checks: dict[str, Any]) -> bool:
@@ -671,7 +689,6 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
     for entry in entries:
         key = f"{entry.hop}:{entry.decision}"
         decisions[key] = decisions.get(key, 0) + 1
-    agent_text = json.dumps([asdict(outcome) for outcome in outcomes])
     docket_text = load_docket(deployment.config("docket")).docket.read_text()
     return {
         "every upstream deploy carried the credential header": all(
@@ -680,7 +697,7 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
         "upstream deploys carrying any x-bailiff header": sum(
             any(name.startswith("x-bailiff-") for name in call["headers"]) for call in deploys
         ),
-        "credential seen by the agent or the model": deployment.secret in agent_text,
+        "credential seen by the agent or the model": seen_by_agent(deployment, outcomes, deployment.secret),
         "credential in the docket": deployment.secret in docket_text,
         "docket verifies": report.ok,
         **stop_checks(outcomes),
@@ -692,6 +709,7 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
 def stop_checks(outcomes: list[Outcome]) -> dict[str, list[str]]:
     stops = [outcome for outcome in outcomes if outcome.scenario in STOP_SCENARIOS]
     return {
+        "stop scenarios missing": sorted(set(STOP_SCENARIOS) - {outcome.scenario for outcome in stops}),
         "stop scenarios letting a second deploy through": [
             outcome.scenario for outcome in stops if outcome.checks["deploys reaching the upstream"] > 1
         ],
@@ -712,6 +730,7 @@ def failed_checks(summary: dict[str, Any]) -> list[str]:
     if not summary["docket verifies"]:
         failures.append("docket verifies")
     for name in (
+        "stop scenarios missing",
         "stop scenarios letting a second deploy through",
         "stop scenarios that did not show a refused second deploy",
     ):
