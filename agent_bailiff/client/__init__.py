@@ -1,6 +1,7 @@
 from agent_bailiff.client.client import (
     PROTOCOL_VERSION,
     REFUSAL_REASONS,
+    Action,
     BailiffClient,
     GatewayError,
     NeedsApproval,
@@ -8,6 +9,7 @@ from agent_bailiff.client.client import (
     OutcomeUnknown,
     Refused,
     Result,
+    refusal_action,
 )
 from agent_bailiff.client.contract import CONTRACT_VERSION, Holder, PreparedCall
 
@@ -15,6 +17,7 @@ __all__ = [
     "CONTRACT_VERSION",
     "PROTOCOL_VERSION",
     "REFUSAL_REASONS",
+    "Action",
     "BailiffClient",
     "GatewayError",
     "Holder",
@@ -24,4 +27,5 @@ __all__ = [
     "PreparedCall",
     "Refused",
     "Result",
+    "refusal_action",
 ]

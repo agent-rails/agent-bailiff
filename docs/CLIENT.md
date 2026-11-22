@@ -37,6 +37,11 @@ outcome = client.call("gitea", "get_me", {})
 | `NeedsApproval()` | The gateway refused the call with `needs_approval`: the policy requires a human. The call was not forwarded upstream. |
 | `OutcomeUnknown(detail)` | Timeout, dropped connection, oversized or non-UTF-8 response, response id not matching the request, non-200 status, JSON-RPC error (including an upstream answer the refusal guard rejected) or expired session. The credential may have been released and the target may have acted. |
 
+- `Refused` and `NeedsApproval` carry `action` and `retryable`, fixed per reason by `refusal_action`, so an agent knows what to do next without parsing the reason:
+  - `retry_later` (`retryable` true): `docket_unavailable`, `ledger_unavailable`, `internal_error`. A component was unavailable; a later call may pass. It is a new operation with a new nonce and spends budget again.
+  - `ask_user`: `needs_approval`, `suspended`. A human has to act before the task can go on.
+  - `stop`: every other reason. The task's authority, policy or the ledger refuses this call; retrying it or reaching the same effect another way will not be authorized.
+  The action comes from the reason alone. It does not say which scope, binding or policy rule refused the call.
 - A gateway refusal is an HTTP 200 tool error whose only content is one text item equal to the reason. An upstream cannot deliver that shape to the client through a gateway running a checked config: check-config requires a response-phase refusal guard on `tools/call` that turns any upstream tool error whose only content is a bailiff reason into a JSON-RPC error, which the client classifies as `OutcomeUnknown`. Gateway refusals never reach a response-phase processor.
 - The classification relies on the gateway running a config that passed check-config. A client pointed at a gateway without the guard cannot tell an upstream's text from a refusal.
 - A non-200 status after the gateway forwarded the call, such as an upstream rejecting the released credential, is `OutcomeUnknown`.
