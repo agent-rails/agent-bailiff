@@ -136,3 +136,67 @@ def test_the_result_is_one_compact_line(capsys):
     out = capsys.readouterr().out
     assert out.count("\n") == 1
     assert json.loads(out)["run_id"] == "r1" and json.loads(out)["status"] == "ok"
+
+
+def status_file(tmp_path, cap_eff, no_new_privs):
+    path = tmp_path / "status"
+    path.write_text(f"Name:\tpython\nCapInh:\t0000000000000000\nCapEff:\t{cap_eff}\nNoNewPrivs:\t{no_new_privs}\n")
+    return path
+
+
+def test_a_confined_harness_is_accepted(tmp_path):
+    run.require_confined(status_file(tmp_path, "0000000000000000", 1))
+
+
+@pytest.mark.parametrize(("cap_eff", "no_new_privs"), [("00000000000000c0", 1), ("0000000000000000", 0)])
+def test_an_unconfined_harness_is_refused(tmp_path, cap_eff, no_new_privs):
+    with pytest.raises(RuntimeError, match="no effective capabilities"):
+        run.require_confined(status_file(tmp_path, cap_eff, no_new_privs))
+
+
+@pytest.fixture
+def secret_environment(monkeypatch):
+    for key in run.CLAUDE_ENVIRONMENT_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-host")
+    monkeypatch.setenv(run.TOKEN_VARIABLE, "host-token")
+    monkeypatch.setenv("KUBECONFIG", "/root/.kube/config")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+
+def test_a_component_gets_only_the_minimal_environment(tmp_path, monkeypatch, secret_environment):
+    seen = {}
+
+    class Started:
+        def __init__(self, command, stdout, stderr, env):
+            seen.update(env)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(run.subprocess, "Popen", Started)
+    deployment = run.Deployment(tmp_path, receipt_dir=tmp_path, archiver_uid=os.geteuid() + 1)
+    deployment.spawn("docket", ["true"], path=tmp_path)
+    assert seen == {"PATH": "/usr/bin"}
+
+
+def test_claude_gets_the_token_from_its_file_and_no_api_key(tmp_path, monkeypatch, secret_environment):
+    token = tmp_path / "claude-token"
+    token.write_text("file-token\n")
+    seen = {}
+
+    def complete(command, cwd, env, **options):
+        seen.update(env)
+        return run.subprocess.CompletedProcess(command, 0, stdout=json.dumps({"result": "done"}), stderr="")
+
+    monkeypatch.setattr(run.subprocess, "run", complete)
+    task = {"mcp_config": tmp_path / "mcp.json", "workspace": tmp_path, "claude_token": token}
+    assert run.run_claude("p", task, "m")["result"] == "done"
+    assert seen == {"PATH": "/usr/bin", run.TOKEN_VARIABLE: "file-token"}
+
+
+def test_an_empty_token_file_is_refused(tmp_path):
+    token = tmp_path / "claude-token"
+    token.write_text("\n")
+    with pytest.raises(RuntimeError, match="is empty"):
+        run.run_claude("p", {"mcp_config": tmp_path, "workspace": tmp_path, "claude_token": token}, "m")

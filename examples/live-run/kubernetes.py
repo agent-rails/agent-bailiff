@@ -35,6 +35,7 @@ from run import (
     gateway_binary,
     print_result,
     private,
+    require_confined,
     require_layout,
     run_claude,
     write_owned,
@@ -477,6 +478,7 @@ def main() -> None:
     parser.add_argument("--docker-context", default="orbstack", help="docker context whose images the cluster runs")
     args = parser.parse_args()
     require_layout(args.root, args.receipt_dir, WORK_FILES | {"kubeconfig"})
+    require_confined()
     cluster = Cluster(args.context, args.root / "cluster")
     deployment = KubernetesDeployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.cluster = cluster

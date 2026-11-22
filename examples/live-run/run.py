@@ -48,7 +48,8 @@ CREDENTIAL_HEADER = "X-Api-Key"
 CHAIN_HEADERS = ["x-bailiff-task-root", "x-bailiff-links", "x-bailiff-leaf-proof", "x-bailiff-nonce", "traceparent"]
 RECEIPT_MODE = 0o750
 WORK_FILES = frozenset({"claude-token", "home"})
-CLAUDE_ENVIRONMENT_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL")
+CLAUDE_ENVIRONMENT_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL", "DISABLE_AUTOUPDATER")
+TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 INJECTED = """# Release 1.4.0
 
 Deploy api version 1.4.0 to staging.
@@ -104,6 +105,16 @@ def require_layout(work: Path, receipts: Path, files: frozenset[str]) -> None:
     for path in (work, *(work / name for name in files)):
         if os.lstat(path).st_uid != os.geteuid():
             raise RuntimeError(f"{path} must be owned by uid {os.geteuid()}")
+
+
+def require_confined(status: Path = Path("/proc/self/status")) -> None:
+    fields = dict(line.split(":\t", 1) for line in status.read_text().splitlines() if ":\t" in line)
+    if int(fields["CapEff"], 16) != 0 or fields["NoNewPrivs"].strip() != "1":
+        raise RuntimeError("the harness must run with no effective capabilities and no_new_privs set")
+
+
+def minimal_environment() -> dict[str, str]:
+    return {key: os.environ[key] for key in CLAUDE_ENVIRONMENT_KEYS if key in os.environ}
 
 
 def check_receipt_dir(path: Path, archiver_uid: int, reader_gid: int) -> None:
@@ -356,7 +367,7 @@ class Deployment:
 
     def spawn(self, name: str, command: list[str], path: Path | None = None, port: int | None = None) -> None:
         log = open(self.logs / f"{name}.log", "wb")
-        process = subprocess.Popen(command, stdout=log, stderr=log)
+        process = subprocess.Popen(command, stdout=log, stderr=log, env=minimal_environment())
         self.processes.append(process)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -418,7 +429,13 @@ class Deployment:
             state_dir / "mcp.json",
             {"mcpServers": {"bailiff": {"command": str(PYTHON), "args": [str(HERE / "shim.py"), str(state_path)]}}},
         )
-        return {"task_id": task_id, "state": state, "mcp_config": mcp_config, "workspace": workspace}
+        return {
+            "task_id": task_id,
+            "state": state,
+            "mcp_config": mcp_config,
+            "workspace": workspace,
+            "claude_token": self.root / "claude-token",
+        }
 
     def upstream_calls(self, tool: str) -> list[dict[str, Any]]:
         if not self.upstream_log.exists():
@@ -458,7 +475,10 @@ def run_claude(
         "--allowedTools", allowed, "--output-format", "json", "--model", model, "--no-session-persistence",
         "--setting-sources", "", "--permission-mode", "dontAsk",
     ]  # fmt: skip
-    environment = {key: os.environ[key] for key in CLAUDE_ENVIRONMENT_KEYS if key in os.environ}
+    token = Path(task["claude_token"]).read_text().strip()
+    if not token:
+        raise RuntimeError(f"{task['claude_token']} is empty")
+    environment = {**minimal_environment(), TOKEN_VARIABLE: token}
     result = subprocess.run(
         command, cwd=task["workspace"], env=environment, capture_output=True, text=True, timeout=300, check=False
     )
@@ -619,6 +639,7 @@ def main() -> None:
     add_layout_arguments(parser)
     args = parser.parse_args()
     require_layout(args.root, args.receipt_dir, WORK_FILES)
+    require_confined()
     deployment = Deployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.prepare()
     deployment.start()
