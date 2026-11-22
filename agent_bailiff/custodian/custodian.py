@@ -4,7 +4,7 @@ import logging
 import threading
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from agent_warrant.chain import ChainContext, ChainLink, verify_chain
 from agent_warrant.ledger import LedgerError, Operation, Reservation
@@ -83,6 +83,7 @@ class _Verified:
     leaf_binding: str
     snapshot: ArgsSnapshot
     token: str
+    leaf_scope: dict[str, Any]
 
 
 class _Refusal(Exception):
@@ -157,6 +158,7 @@ class Custodian:
 
     def _release_verified(self, verified: _Verified, entry: Entry, now: int) -> Released:
         clearance = verified.clearance
+        _check_scope(verified)
         binding = self._binding(verified)
         self._check_reservation(verified, now)
         if isinstance(binding, EffectorBinding):
@@ -220,10 +222,6 @@ class Custodian:
         )
         if not chain.valid or chain.root is None or chain.leaf_scope is None or chain.leaf_subject is None:
             raise _Refusal("chain_invalid")
-        if not all(is_bounded(pattern) for pattern in chain.leaf_scope["resources"]):
-            raise _Refusal("unbounded_scope")
-        if not covers(chain.leaf_scope, request.tool, request.resource):
-            raise _Refusal("out_of_scope")
         root = chain.root
         leaf_binding = chain.links[-1].binding() if chain.links else root.binding()
         expected = {
@@ -239,7 +237,9 @@ class Custodian:
         }
         if any(getattr(clearance, name) != value for name, value in expected.items()):
             raise _Refusal("clearance_mismatch")
-        return _Verified(clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token)
+        return _Verified(
+            clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token, chain.leaf_scope
+        )
 
     def _release_to_effector(self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int) -> Released:
         clearance = verified.clearance
@@ -414,6 +414,14 @@ class Custodian:
         ):
             logger.error("docket acknowledgement does not match the release entry")
             raise _UnacknowledgedRelease
+
+
+def _check_scope(verified: _Verified) -> None:
+    scope = verified.leaf_scope
+    if not all(is_bounded(pattern) for pattern in scope["resources"]):
+        raise _Refusal("unbounded_scope")
+    if not covers(scope, verified.clearance.tool, verified.clearance.resource):
+        raise _Refusal("out_of_scope")
 
 
 def _header_value(secret: bytes) -> str | None:
