@@ -13,6 +13,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from agent_warrant.ledger import STATES
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.client.contract import Holder, PreparedCall, TokenBytes, prepare_call
 from agent_bailiff.routes import ToolRoutes
@@ -185,6 +186,9 @@ class BailiffClient:
             token_bytes=self._token_bytes,
             traceparent=traceparent,
         )
+
+    def delegate(self, child: Ed25519PublicKey, *, scope: dict[str, Any], budget: int, ttl: int) -> tuple[str, ...]:
+        return self._holder.delegate(child, scope=scope, budget=budget, ttl=ttl, now=self._clock())
 
     def send(self, call: PreparedCall) -> Outcome:
         self._check_thread()

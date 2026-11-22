@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 import test_agentgateway_e2e
-from agent_warrant.chain import LeafProof
+from agent_warrant.chain import ChainLink, LeafProof
+from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_agentgateway_e2e import BINARY
-from test_custodian import NOW
+from test_custodian import NOW, docket_entries
 from test_decide import AGENT_KEY, CHILD_KEY, DECIDER_ID, make_root
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
@@ -268,6 +269,54 @@ def test_arguments_outside_a_route_schema_are_rejected(stub):
 def test_a_holder_key_that_is_not_the_leaf_subject_is_rejected():
     with pytest.raises(ValueError, match="holder key"):
         holder(CHILD_KEY)
+
+
+CHILD_SCOPE = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}
+
+
+def test_a_delegated_holder_extends_the_chain_to_the_child_key():
+    parent = holder()
+    links = parent.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600, now=NOW)
+    child = Holder(parent.task_root, links, CHILD_KEY, DECIDER_ID)
+    [link] = (ChainLink.decode(token) for token in links)
+    assert link.subject == encode_public_key(CHILD_KEY.public_key())
+    assert link.issuer == encode_public_key(AGENT_KEY.public_key())
+    assert (link.scope, link.budget, link.depth) == (CHILD_SCOPE, 10, 1)
+    assert child.leaf == link
+
+
+def test_a_delegate_of_a_delegate_appends_to_the_chain():
+    parent = holder()
+    links = parent.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600, now=NOW)
+    grandchild_key = Ed25519PrivateKey.generate()
+    child = Holder(parent.task_root, links, CHILD_KEY, DECIDER_ID)
+    chain = child.delegate(grandchild_key.public_key(), scope=CHILD_SCOPE, budget=5, ttl=60, now=NOW)
+    assert chain[:1] == links and ChainLink.decode(chain[1]).depth == 2
+    assert Holder(parent.task_root, chain, grandchild_key, DECIDER_ID).leaf.budget == 5
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"scope": {**CHILD_SCOPE, "resources": ["env/*"]}}, "does not narrow"),
+        ({"scope": {**CHILD_SCOPE, "tools": ["deploy.*", "admin.*"]}}, "does not narrow"),
+        ({"scope": {**CHILD_SCOPE, "max_cost_per_call": 6}}, "does not narrow"),
+        ({"budget": 101}, "budget"),
+        ({"ttl": 0}, "ttl"),
+    ],
+)
+def test_a_delegation_that_widens_the_parent_is_refused(options, message):
+    request = {"scope": CHILD_SCOPE, "budget": 10, "ttl": 600, **options}
+    with pytest.raises(ValueError, match=message):
+        holder().delegate(CHILD_KEY.public_key(), now=NOW, **request)
+
+
+def test_the_client_delegates_at_its_clock(stub):
+    instance = BailiffClient(stub.url, holder(), ROUTES, clock=lambda: NOW + 5)
+    [token] = instance.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600)
+    instance.close()
+    link = ChainLink.decode(token)
+    assert (link.issued_at, link.expires_at) == (NOW + 5, NOW + 605)
 
 
 def test_an_allowed_call_returns_the_result(client, stub):
@@ -671,3 +720,20 @@ def test_a_trickling_event_stream_stops_at_the_deadline(stub):
     instance.close()
     assert isinstance(outcome, OutcomeUnknown) and outcome.detail.startswith("transport:")
     assert elapsed < 1.0
+
+
+@live
+def test_a_sub_agent_calls_through_agentgateway_under_a_narrowed_link(gateway_client, stack, workdir):
+    links = gateway_client.delegate(CHILD_KEY.public_key(), scope=CHILD_SCOPE, budget=10, ttl=600)
+    child = Holder(make_root().encode(), links, CHILD_KEY, DECIDER_ID)
+    sub_agent = BailiffClient(stack["agent"].url, child, test_agentgateway_e2e.ROUTES, clock=lambda: NOW)
+    try:
+        assert sub_agent.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+        assert sub_agent.call("deploy", "deploy_canary", ARGS) == Refused("out_of_scope")
+    finally:
+        sub_agent.close()
+    assert len(stack["upstream"].calls()) == 1
+    decided = [entry for entry in docket_entries(workdir) if entry.hop == "decide"]
+    assert [entry.decision for entry in decided] == ["allow", "refuse"]
+    child_key = encode_public_key(CHILD_KEY.public_key())
+    assert all(entry.agent_key == child_key and entry.handles["link"] for entry in decided)
