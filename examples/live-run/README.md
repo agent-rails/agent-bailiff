@@ -54,9 +54,9 @@ The three runs cost $0.089 in model usage together. Per-run output is written to
 | suspend | deploy, deploy | 1 deploy | `suspended` on the second |
 | replay | (scripted) | 0 from the replay | `already_issued` |
 
-The final checks held as above: credential header on every deploy, no `x-bailiff-` header upstream, credential not seen by the agent or in the docket, docket verified (14 entries). Model usage: $0.028. Result file (not committed): `~/live-run-results/run-2026-11-22b.json`.
+In revoke and suspend the stop command ran, the first deploy succeeded, and the second came back refused with the stop's reason. The final checks held as above: credential header on every deploy, no `x-bailiff-` header upstream, credential not seen by the agent or in the docket, docket verified (14 entries, 3 refusals: `out_of_scope`, `suspended`, `already_issued`; the `chain_invalid` refusal is not docketed). Model usage: $0.061. Result file (not committed): `~/live-run-results/run-2026-11-22c.json`.
 
-An earlier container run is not counted. Both suspend deploys reached the upstream, and the run still reported `ok`. At the time nothing held the first deploy while the control command ran, and the control CLI starts in about 1.1 s under amd64 emulation, so the second deploy could get there first. The run in the table was made with the hold, and refused the second deploy.
+An earlier container run is not counted. Both suspend deploys reached the upstream, and the run still reported `ok`. At the time nothing held the first deploy while the control command ran, and the control CLI starts in about 1.1 s under amd64 emulation, so the second deploy could get there first. The run in the table was made with the hold and the stop checks above.
 
 ## What this does not show
 
