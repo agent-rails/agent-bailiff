@@ -1,6 +1,14 @@
 import pytest
 
-from agent_bailiff.effector.platform import PLATFORMS, accepts_incomplete, check_version, parse_platform
+from agent_bailiff.effector.platform import (
+    DANGEROUS_ACTIONS,
+    PLATFORMS,
+    Action,
+    accepts_incomplete,
+    check_version,
+    parse_platform,
+    reviews_denied_actions,
+)
 
 GKE_ERROR = "webhook authorizer does not support user rule resolution"
 
@@ -71,3 +79,61 @@ def test_any_other_review_is_not_accepted_on_gke(status):
 @pytest.mark.parametrize("platform", ["upstream", "eks"])
 def test_no_incomplete_review_is_accepted_outside_gke(platform):
     assert not accepts_incomplete(platform, {"incomplete": True, "evaluationError": GKE_ERROR})
+
+
+CLUSTER = {"namespaced": False}
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        Action("*", "*", "*"),
+        Action("get", "", "secrets"),
+        Action("list", "", "secrets"),
+        Action("watch", "", "secrets"),
+        Action("create", "", "pods"),
+        Action("create", "", "pods", "exec"),
+        Action("create", "", "pods", "attach"),
+        Action("create", "", "pods", "portforward"),
+        Action("patch", "", "pods", "ephemeralcontainers"),
+        Action("create", "", "serviceaccounts", "token"),
+        Action("patch", "apps", "deployments"),
+        Action("patch", "apps", "deployments", "scale"),
+        Action("create", "apps", "daemonsets"),
+        Action("create", "apps", "statefulsets"),
+        Action("create", "batch", "jobs"),
+        Action("create", "batch", "cronjobs"),
+        Action("create", "rbac.authorization.k8s.io", "rolebindings"),
+        Action("bind", "rbac.authorization.k8s.io", "roles"),
+        Action("escalate", "rbac.authorization.k8s.io", "roles"),
+        Action("impersonate:serviceaccount", "authentication.k8s.io", "serviceaccounts"),
+        Action("impersonate-on:user-info:get", "", "secrets"),
+        Action("create", "rbac.authorization.k8s.io", "clusterrolebindings", **CLUSTER),
+        Action("escalate", "rbac.authorization.k8s.io", "clusterroles", **CLUSTER),
+        Action("impersonate", "", "users", **CLUSTER),
+        Action("impersonate", "authentication.k8s.io", "userextras", **CLUSTER),
+        Action("impersonate:user-info", "authentication.k8s.io", "groups", **CLUSTER),
+        Action("impersonate:arbitrary-node", "authentication.k8s.io", "nodes", **CLUSTER),
+        Action("create", "", "nodes", "proxy", **CLUSTER),
+        Action("patch", "", "nodes", **CLUSTER),
+        Action("delete", "", "namespaces", **CLUSTER),
+        Action("create", "", "persistentvolumes", **CLUSTER),
+        Action("create", "certificates.k8s.io", "certificatesigningrequests", **CLUSTER),
+        Action("update", "certificates.k8s.io", "certificatesigningrequests", "approval", **CLUSTER),
+        Action("approve", "certificates.k8s.io", "signers", **CLUSTER),
+        Action("create", "admissionregistration.k8s.io", "mutatingwebhookconfigurations", **CLUSTER),
+        Action("delete", "admissionregistration.k8s.io", "validatingadmissionpolicybindings", **CLUSTER),
+        Action("create", "apiextensions.k8s.io", "customresourcedefinitions", **CLUSTER),
+    ],
+)
+def test_the_dangerous_action_list_holds_each_reviewed_action(action):
+    assert action in DANGEROUS_ACTIONS
+
+
+def test_the_dangerous_action_list_has_no_duplicates():
+    assert len(set(DANGEROUS_ACTIONS)) == len(DANGEROUS_ACTIONS)
+
+
+@pytest.mark.parametrize(("platform", "reviewed"), [("gke", True), ("upstream", False), ("eks", False)])
+def test_only_platforms_that_accept_an_incomplete_review_send_dangerous_action_reviews(platform, reviewed):
+    assert reviews_denied_actions(platform) is reviewed
