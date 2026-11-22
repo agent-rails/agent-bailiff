@@ -21,7 +21,8 @@ from agent_bailiff.client import (
     Refused,
     Result,
 )
-from agent_bailiff.routes import ToolRoute, ToolRoutes
+from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
+from agent_bailiff.routes import ToolRoutes
 
 PROTOCOL = "2025-11-25"
 TOOLS = [
@@ -52,6 +53,9 @@ class Shim:
         self.state = state
         self.client = client_for(state)
         self.services = {route["name"]: route["service"] for route in state["routes"]}
+        for catalog in state.get("catalogs", []):
+            operations = OperationCatalog.load(shipped_catalog(catalog["name"])).operations
+            self.services.update((operation.name, catalog["service"]) for operation in operations)
 
     def handle(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -96,7 +100,7 @@ class Shim:
 def client_for(state: dict[str, Any]) -> BailiffClient:
     key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(Path(state["agent_key"]).read_text().strip()))
     holder = Holder(state["task_root"], (), key, state["decider_id"])
-    routes = ToolRoutes([ToolRoute(**route) for route in state["routes"]])
+    routes = ToolRoutes.from_document({"routes": state["routes"], "catalogs": state.get("catalogs", [])})
     return BailiffClient(state["gateway_url"], holder, routes)
 
 
