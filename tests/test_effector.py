@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.identity import snapshot_args
@@ -226,8 +227,17 @@ def test_a_log_read_is_truncated_text(token_file):
 def test_calls_that_do_not_match_their_release_are_refused_before_kubernetes(token_file, params, release, reason):
     instance, transport, docket = effector(token_file)
     result = instance.call(params, release, NOW + 2)
-    assert result == {"content": [{"type": "text", "text": reason}], "isError": True}
+    assert result == {"content": [{"type": "text", "text": f"effector_{reason}"}], "isError": True}
     assert transport.requests == [] and docket.entries == []
+
+
+@pytest.mark.parametrize("suspended, rbac_healthy", [(True, True), (False, False)])
+def test_effector_errors_cannot_be_read_as_bailiff_refusals(token_file, suspended, rbac_healthy):
+    instance, _, _ = effector(token_file, suspended=suspended, rbac_healthy=rbac_healthy)
+    for params in ({"bogus": 1}, scale_params()):
+        text = instance.call(params, release_for(), NOW + 2)["content"][0]["text"]
+        assert text.startswith("effector_") and text not in REFUSAL_REASONS
+    assert not any(reason.startswith("effector_") for reason in REFUSAL_REASONS)
 
 
 def test_a_clearance_that_disagrees_with_its_release_is_refused(token_file):
@@ -237,7 +247,7 @@ def test_a_clearance_that_disagrees_with_its_release_is_refused(token_file):
         clearance, token, "effector.homelab", CATALOG.digest, "f" * 32, NOW + 1
     )
     instance, transport, _ = effector(token_file)
-    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "clearance_mismatch"
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "effector_clearance_mismatch"
     assert transport.requests == []
 
 
@@ -248,14 +258,14 @@ def test_a_release_signed_by_an_unpinned_key_is_refused(token_file):
         clearance, token, "effector.homelab", CATALOG.digest, "f" * 32, NOW + 1
     )
     instance, transport, _ = effector(token_file)
-    assert instance.call(scale_params(), forged, NOW + 2)["content"][0]["text"] == "release_bad_signature"
+    assert instance.call(scale_params(), forged, NOW + 2)["content"][0]["text"] == "effector_release_bad_signature"
 
 
 def test_a_release_is_used_once(token_file):
     instance, transport, _ = effector(token_file)
     release = release_for()
     assert instance.call(scale_params(), release, NOW + 2)["isError"] is False
-    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "release_replayed"
+    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "effector_release_replayed"
     assert len(transport.requests) == 1
 
 
@@ -279,33 +289,33 @@ def test_a_verified_release_from_before_the_start_is_refused_at_claim():
 
 def test_a_suspended_or_unreadable_suspension_refuses_before_any_check(token_file):
     instance, transport, docket = effector(token_file, suspended=True)
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_suspended"
     instance, transport, docket = effector(token_file, suspended=None)
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_suspended"
     assert transport.requests == [] and docket.entries == []
 
 
 def test_no_call_is_made_without_an_acknowledged_attempt_entry(token_file):
     instance, transport, _ = effector(token_file, docket=RecordingDocket(fail_on=("attempt",)))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "docket_unavailable"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_docket_unavailable"
     assert transport.requests == []
 
 
 def test_a_timeout_or_missing_outcome_entry_is_outcome_unknown_never_success(token_file):
     instance, _, docket = effector(token_file, FakeTransport(error=KubernetesUnavailable("timed out")))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
     assert docket.entries[-1].outcome == "outcome_unknown"
     instance, transport, _ = effector(token_file, docket=RecordingDocket(fail_on=("outcome",)))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
     assert len(transport.requests) == 1
 
 
 def test_kubernetes_refusals_and_server_errors_are_recorded(token_file):
     instance, _, docket = effector(token_file, FakeTransport(status=403, body=b"{}"))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "kubernetes_403"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_kubernetes_403"
     assert (docket.entries[-1].outcome, docket.entries[-1].performed) == ("refused", False)
     instance, _, docket = effector(token_file, FakeTransport(status=503, body=b"{}"))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
 
 
 def test_tools_list_publishes_strict_schemas(token_file):
@@ -363,7 +373,7 @@ def test_the_mcp_server_serves_session_methods_and_calls_on_localhost(token_file
         )
         assert body["result"]["isError"] is False and len(transport.requests) == 1
         status, body = post(port, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": scale_params()})
-        assert body["result"]["content"][0]["text"] == "release_malformed"
+        assert body["result"]["content"][0]["text"] == "effector_release_malformed"
         assert post(port, {"jsonrpc": "2.0", "id": 5, "method": "initialize"}, {"Origin": "http://evil"})[0] == 403
         assert post(port, [{"jsonrpc": "2.0", "id": 6, "method": "ping"}])[0] == 400
     finally:
@@ -387,7 +397,7 @@ class SuspendAfterChecks:
 def test_a_suspension_set_after_the_checks_stops_the_call(token_file):
     instance, transport, docket = effector(token_file)
     instance._suspension = SuspendAfterChecks()
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "suspended"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_suspended"
     assert transport.requests == []
     assert [(entry.decision, entry.outcome, entry.reason) for entry in docket.entries] == [
         ("attempt", None, None),
@@ -398,14 +408,14 @@ def test_a_suspension_set_after_the_checks_stops_the_call(token_file):
 def test_an_unreadable_token_file_is_recorded_as_outcome_unknown(token_file):
     os.chmod(token_file, 0o644)
     instance, transport, docket = effector(token_file)
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
     assert transport.requests == []
     assert docket.entries[-1].outcome == "outcome_unknown"
 
 
 def test_an_unexpected_client_failure_is_recorded_as_outcome_unknown(token_file):
     instance, _, docket = effector(token_file, FakeTransport(error=RuntimeError("bug")))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
     assert docket.entries[-1].outcome == "outcome_unknown"
 
 
@@ -416,7 +426,7 @@ def test_a_json_response_over_the_catalog_limit_is_not_returned(token_file):
     result = instance.call(
         {"name": "list_pods", "arguments": arguments}, release_for(clearance_for("list_pods", arguments)), NOW + 2
     )
-    assert result["content"][0]["text"] == "response_too_large"
+    assert result["content"][0]["text"] == "effector_response_too_large"
     assert docket.entries[-1].outcome == "done"
 
 
@@ -432,7 +442,7 @@ def refusals(docket):
 
 def test_no_call_is_made_while_rbac_is_unverified(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_rbac_unverified"
     assert transport.requests == []
     assert refusals(docket) == [("refuse", None, "rbac_unverified", "f" * 32, TASK_HANDLES)]
 
@@ -464,7 +474,7 @@ class FailingDocket:
 )
 def test_a_refusal_the_docket_does_not_record_is_still_refused_and_logged(token_file, caplog, failure):
     instance, transport, _ = effector(token_file, docket=FailingDocket(failure), rbac_healthy=False)
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_rbac_unverified"
     assert transport.requests == []
     [event] = [json.loads(item.message) for item in caplog.records if "effector_refusal_unrecorded" in item.message]
     assert event == {
@@ -479,16 +489,16 @@ def test_a_refusal_the_docket_does_not_record_is_still_refused_and_logged(token_
 def test_a_release_refused_after_its_claim_is_consumed(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     release = release_for()
-    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "rbac_unverified"
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "effector_rbac_unverified"
     instance._rbac.value = True
-    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "release_replayed"
+    assert instance.call(scale_params(), release, NOW + 3)["content"][0]["text"] == "effector_release_replayed"
     assert transport.requests == [] and len(docket.entries) == 1
 
 
 def test_a_release_that_fails_verification_is_refused_before_rbac_health_and_not_recorded(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     release = release_for(audience="effector.other")
-    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "release_wrong_audience"
+    assert instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] == "effector_release_wrong_audience"
     assert transport.requests == [] and docket.entries == []
 
 
@@ -496,7 +506,7 @@ def test_replaying_a_refused_release_records_one_refusal(token_file):
     instance, transport, docket = effector(token_file, rbac_healthy=False)
     release = release_for()
     reasons = [instance.call(scale_params(), release, NOW + 2)["content"][0]["text"] for _ in range(1000)]
-    assert reasons[0] == "rbac_unverified" and set(reasons[1:]) == {"release_replayed"}
+    assert reasons[0] == "effector_rbac_unverified" and set(reasons[1:]) == {"effector_release_replayed"}
     assert transport.requests == [] and len(docket.entries) == 1
 
 
@@ -507,7 +517,7 @@ def test_a_busy_or_early_claim_is_logged_and_not_recorded(token_file, monkeypatc
     busy = release_for(clearance_for(op_id="op-busy"))
     assert instance.call(scale_params(), busy, NOW + 2)["content"][0]["text"] == "effector_busy"
     early, _, early_docket = effector(token_file, started_at=NOW + 1)
-    assert early.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "release_predates_start"
+    assert early.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_release_predates_start"
     assert [entry.decision for entry in docket.entries] == ["attempt", "outcome"] and early_docket.entries == []
 
 
@@ -527,7 +537,7 @@ def test_concurrent_calls_with_one_release_perform_it_once(token_file):
     for thread in threads:
         thread.join()
     assert sum(result["isError"] is False for result in results) == 1
-    assert {result["content"][0]["text"] for result in results if result["isError"]} == {"release_replayed"}
+    assert {result["content"][0]["text"] for result in results if result["isError"]} == {"effector_release_replayed"}
     assert len(transport.requests) == 1
 
 
@@ -536,7 +546,7 @@ def test_a_release_issued_before_or_in_the_second_the_effector_started_is_refuse
     instance, transport, _ = effector(token_file, started_at=started_at)
     assert (
         instance.call(scale_params(), release_for(now=NOW + 1), NOW + 3)["content"][0]["text"]
-        == "release_predates_start"
+        == "effector_release_predates_start"
     )
     assert transport.requests == []
 
@@ -544,7 +554,7 @@ def test_a_release_issued_before_or_in_the_second_the_effector_started_is_refuse
 @pytest.mark.parametrize("status", [302, 304])
 def test_a_redirect_is_never_reported_as_success(token_file, status):
     instance, _, docket = effector(token_file, FakeTransport(status=status, body=b'{"spec": {"replicas": 3}}'))
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "outcome_unknown"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_outcome_unknown"
     assert (docket.entries[-1].outcome, docket.entries[-1].performed) == ("outcome_unknown", False)
 
 
@@ -724,7 +734,7 @@ def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run
     arguments = {"namespace": "staging", "name": "api"}
     clearance = clearance_for("restart_deployment", arguments, op_id="op-restart-1")
     result = instance.call({"name": "restart_deployment", "arguments": arguments}, release_for(clearance), NOW + 2)
-    assert result["content"][0]["text"] == "restart_unverified"
+    assert result["content"][0]["text"] == "effector_restart_unverified"
     assert transport.requests == []
     assert refusals(docket) == [("refuse", None, "restart_unverified", "f" * 32, TASK_HANDLES)]
     assert instance.call(scale_params(), release_for(), NOW + 2)["isError"] is False
@@ -733,7 +743,7 @@ def test_a_restart_is_refused_without_a_fresh_schema_check_while_other_calls_run
 def test_a_write_is_refused_without_a_verified_release_webhook_while_reads_run(token_file):
     instance, transport, docket = effector(token_file)
     instance._rbac.write = False
-    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "webhook_unverified"
+    assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_webhook_unverified"
     assert transport.requests == []
     assert refusals(docket) == [("refuse", None, "webhook_unverified", "f" * 32, TASK_HANDLES)]
     arguments = {"namespace": "staging", "limit": 5}

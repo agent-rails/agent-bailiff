@@ -292,7 +292,7 @@ def test_a_release_replayed_directly_at_the_effector_is_refused(stack, monkeypat
     )
     with urllib.request.urlopen(direct, timeout=5) as response:
         body = json.loads(response.read())
-    assert body["result"]["content"][0]["text"] == "release_replayed"
+    assert body["result"]["content"][0]["text"] == "effector_release_replayed"
     assert len(stack["transport"].requests) == 1
 
 
