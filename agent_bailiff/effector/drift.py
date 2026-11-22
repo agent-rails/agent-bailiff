@@ -14,7 +14,15 @@ from typing import Any, Protocol
 
 from agent_bailiff.effector.catalog import CatalogOperation
 from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Transport, read_token
-from agent_bailiff.effector.platform import VERSION_PATH, Platform, accepts_incomplete, check_version
+from agent_bailiff.effector.platform import (
+    DANGEROUS_ACTIONS,
+    VERSION_PATH,
+    Action,
+    Platform,
+    accepts_incomplete,
+    check_version,
+    reviews_denied_actions,
+)
 from agent_bailiff.effector.rbac import (
     DEPLOYMENT_FIELDS,
     DEPLOYMENT_SPEC_FIELDS,
@@ -174,6 +182,8 @@ class RbacAudit:
             for account in self._granted
         ]
         reviews.extend(self._synthetic_user_reviews())
+        if reviews_denied_actions(self._platform):
+            reviews.extend(self._denied_action_reviews())
         for found in self._run(reviews):
             problems.extend(found)
         problems.extend(self._check_objects(BINDING_KINDS, bindings, self._compare_binding, self._reaches_effector))
@@ -250,6 +260,40 @@ class RbacAudit:
             for namespace in sorted(set(self._tenants[tenant]))
             for operation in self._operations
         ]
+
+    def _denied_action_reviews(self) -> list[Callable[[], list[str]]]:
+        namespaces = sorted(
+            {self._identity.namespace} | {namespace for allowed in self._tenants.values() for namespace in allowed}
+        )
+        return [
+            functools.partial(self._check_denied, account, scope, action)
+            for account in self._tokens
+            for action in DANGEROUS_ACTIONS
+            for scope in [None, *(namespaces if action.namespaced else [])]
+        ]
+
+    def _check_denied(self, account: str, namespace: str | None, action: Action) -> list[str]:
+        attributes = {"verb": action.verb, "group": action.group, "resource": action.resource}
+        if action.subresource:
+            attributes["subresource"] = action.subresource
+        if namespace is not None:
+            attributes["namespace"] = namespace
+        review = {
+            "apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": attributes},
+        }
+        status = self._request(
+            self._tokens[account], "POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", review
+        ).get("status")
+        if not isinstance(status, dict) or not isinstance(status.get("allowed"), bool):
+            raise KubernetesUnavailable("a SelfSubjectAccessReview returned no decision")
+        if status["allowed"] is not True:
+            return []
+        resource = f"{action.resource}/{action.subresource}" if action.subresource else action.resource
+        group = action.group or "core"
+        where = f"in {namespace}" if namespace is not None else "cluster-wide"
+        return [f"{account} may {action.verb} {group} {resource} {where}, a dangerous action outside the generated set"]
 
     def _check_synthetic_user(self, user: str, namespace: str, operation: CatalogOperation) -> list[str]:
         expected = operation.identity == user.rsplit(":", 1)[1]

@@ -19,7 +19,7 @@ from agent_bailiff.effector.drift import (
     grants,
 )
 from agent_bailiff.effector.kubernetes import KubernetesUnavailable
-from agent_bailiff.effector.platform import VERSION_PATH
+from agent_bailiff.effector.platform import DANGEROUS_ACTIONS, VERSION_PATH
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
 from agent_bailiff.webhook import manifests as webhook
@@ -98,6 +98,8 @@ class FakeApi:
         self.audit_extra_rules = {}
         self.extra_non_resource = []
         self.sar_overrides = {}
+        self.self_allowed = set()
+        self.self_reviews = []
         self.incomplete = set()
         self.evaluation_error = None
         self.status = {}
@@ -173,6 +175,12 @@ class FakeApi:
             )
             assert spec["groups"] == ["system:authenticated"]
             return 201, json.dumps({"status": {"allowed": self.sar_overrides.get(key, allowed)}}).encode()
+        if method == "POST" and plural == "selfsubjectaccessreviews":
+            attributes = json.loads(body)["spec"]["resourceAttributes"]
+            account = TOKENS[headers["Authorization"]]
+            self.self_reviews.append((account, attributes))
+            key = (account, attributes.get("namespace"), attributes["verb"], attributes["resource"])
+            return 201, json.dumps({"status": {"allowed": key in self.self_allowed}}).encode()
         if method == "POST":
             namespace = json.loads(body)["spec"]["namespace"]
             account = TOKENS[headers["Authorization"]]
@@ -317,6 +325,51 @@ def test_an_incomplete_review_with_another_error_is_drift_on_gke(api, gke_audit,
         f"the rules of effector in default could not be listed completely: {error}",
         f"the rules of effector-audit in default could not be listed completely: {error}",
     ]
+
+
+def test_gke_reviews_every_dangerous_action_with_each_account_token(api, gke_audit):
+    assert gke_audit.check() == []
+    namespaced = sum(action.namespaced for action in DANGEROUS_ACTIONS)
+    per_account = len(DANGEROUS_ACTIONS) + namespaced * 2
+    reviews = [(account, attributes.get("namespace")) for account, attributes in api.self_reviews]
+    assert len(reviews) == 2 * per_account
+    for account in ("effector", "effector-audit"):
+        assert len([review for review in reviews if review[0] == account]) == per_account
+        assert {namespace for name, namespace in reviews if name == account} == {None, "bailiff-system", "staging"}
+
+
+def test_upstream_sends_no_dangerous_action_review(api, audit):
+    assert audit.check() == []
+    assert api.self_reviews == []
+
+
+@pytest.mark.parametrize(
+    ("key", "problem"),
+    [
+        (
+            ("effector", None, "get", "secrets"),
+            "effector may get core secrets cluster-wide, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector-audit", "staging", "create", "pods"),
+            "effector-audit may create core pods/exec in staging, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "create", "customresourcedefinitions"),
+            "effector may create apiextensions.k8s.io customresourcedefinitions cluster-wide,"
+            " a dangerous action outside the generated set",
+        ),
+    ],
+)
+def test_a_dangerous_action_an_account_may_take_is_drift(api, gke_audit, key, problem):
+    api.self_allowed.add(key)
+    assert problem in gke_audit.check()
+
+
+def test_a_self_review_without_a_decision_fails_the_check(api, gke_audit):
+    api.status["selfsubjectaccessreviews"] = 500
+    with pytest.raises(KubernetesUnavailable, match="selfsubjectaccessreviews returned 500"):
+        gke_audit.check()
 
 
 def test_the_gke_error_is_drift_on_upstream(api, audit):
