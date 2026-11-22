@@ -3,6 +3,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,7 @@ LIVE_RUN = Path(__file__).resolve().parent.parent / "examples" / "live-run"
 sys.path.insert(0, str(LIVE_RUN))
 import kubernetes  # noqa: E402
 import run  # noqa: E402
+import upstream  # noqa: E402
 
 
 @pytest.fixture
@@ -150,6 +154,7 @@ RUN_SUMMARY = {
     "credential seen by the agent or the model": False,
     "credential in the docket": False,
     "docket verifies": True,
+    "stop scenarios letting a second deploy through": [],
 }
 
 
@@ -157,6 +162,7 @@ RUN_SUMMARY = {
     ("change", "failure"),
     [
         ({}, None),
+        ({"stop scenarios letting a second deploy through": ["suspend"]}, "second deploy"),
         ({"every upstream deploy carried the credential header": False}, "every upstream deploy carried"),
         ({"upstream deploys carrying any x-bailiff header": 1}, "x-bailiff header"),
         ({"credential seen by the agent or the model": True}, "credential seen"),
@@ -416,3 +422,93 @@ def test_the_webhook_image_must_be_a_digest_ref(tmp_path, monkeypatch, image):
     monkeypatch.setattr(kubernetes, "kubectl", lambda *args, **options: pytest.fail("kubectl called"))
     with pytest.raises(RuntimeError, match="pinned by sha256 digest"):
         bare_cluster(tmp_path).deploy_webhook({}, image)
+
+
+@pytest.fixture
+def fake_upstream(tmp_path):
+    server = upstream.Upstream(0, tmp_path / "upstream.jsonl", tmp_path / "upstream.hold")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def deploy(server):
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "deploy_service", "arguments": {}}}
+    ).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_address[1]}/mcp", body, {"content-type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def test_the_upstream_logs_a_held_deploy_and_answers_it_only_once_released(fake_upstream):
+    fake_upstream.hold.touch()
+    answers = []
+    caller = threading.Thread(target=lambda: answers.append(deploy(fake_upstream)))
+    caller.start()
+    deadline = time.monotonic() + 5
+    while not fake_upstream.log.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.3)
+    assert fake_upstream.log.exists() and answers == []
+    fake_upstream.hold.unlink()
+    caller.join(5)
+    assert answers[0]["result"]["content"][0]["text"] == "deployed api unknown to staging"
+
+
+def test_a_hold_never_released_answers_with_an_error(fake_upstream, monkeypatch):
+    monkeypatch.setattr(upstream, "HOLD_SECONDS", 0.2)
+    fake_upstream.hold.touch()
+    assert deploy(fake_upstream)["error"]["message"] == "hold not released"
+
+
+class Watched:
+    def __init__(self, tmp_path):
+        self.upstream_hold = tmp_path / "upstream.hold"
+        self.deploys = 0
+
+    def upstream_calls(self, tool):
+        return [{}] * self.deploys
+
+
+def test_the_stop_action_runs_while_the_first_deploy_is_held(tmp_path):
+    deployment = Watched(tmp_path)
+    held_during_action = []
+    finish = run.watch_first_deploy(deployment, 0, lambda: held_during_action.append(deployment.upstream_hold.exists()))
+    assert deployment.upstream_hold.exists()
+    deployment.deploys = 1
+    deadline = time.monotonic() + 5
+    while deployment.upstream_hold.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    finish()
+    assert held_during_action == [True]
+    assert not deployment.upstream_hold.exists()
+
+
+def test_a_failed_stop_action_releases_the_hold_and_is_raised(tmp_path):
+    deployment = Watched(tmp_path)
+    deployment.deploys = 1
+
+    def fail():
+        raise RuntimeError("control failed")
+
+    finish = run.watch_first_deploy(deployment, 0, fail)
+    deadline = time.monotonic() + 5
+    while deployment.upstream_hold.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match="control failed"):
+        finish()
+    assert not deployment.upstream_hold.exists()
+
+
+def test_without_a_deploy_the_stop_action_never_runs_and_the_hold_is_released(tmp_path):
+    deployment = Watched(tmp_path)
+    actions = []
+    finish = run.watch_first_deploy(deployment, 0, lambda: actions.append(1))
+    finish()
+    assert actions == []
+    assert not deployment.upstream_hold.exists()
