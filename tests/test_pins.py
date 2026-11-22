@@ -1,3 +1,4 @@
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -110,3 +111,23 @@ def test_every_ci_job_installs_only_from_the_hash_lock():
 
 def test_package_imports():
     import agent_bailiff  # noqa: F401
+
+
+CLAUDE_CLI = "@anthropic-ai/claude-code"
+CLAUDE_CLI_VERSION = "2.1.301"
+CLAUDE_CLI_INTEGRITY = "sha512-sEqs0D9IIc6GwbdMvss5GHOjLjhaoqbrZWdickLRlG6v4kT946t4pq3zFAmQdUpRgdv1CvtSLyRrrdp+hDS9ww=="
+
+
+def test_the_live_run_claude_cli_is_pinned_by_lockfile():
+    live_run = ROOT / "examples" / "live-run"
+    assert json.loads((live_run / "package.json").read_text())["dependencies"] == {CLAUDE_CLI: CLAUDE_CLI_VERSION}
+    packages = json.loads((live_run / "package-lock.json").read_text())["packages"]
+    cli = packages[f"node_modules/{CLAUDE_CLI}"]
+    assert (cli["version"], cli["integrity"]) == (CLAUDE_CLI_VERSION, CLAUDE_CLI_INTEGRITY)
+    assert f"node_modules/{CLAUDE_CLI}-linux-x64" in packages
+    for path, package in packages.items():
+        if not path:
+            continue
+        assert package["version"] == CLAUDE_CLI_VERSION, path
+        assert package["resolved"].startswith("https://registry.npmjs.org/@anthropic-ai/"), path
+        assert re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", package["integrity"]), path
