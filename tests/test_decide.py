@@ -402,6 +402,58 @@ def test_refusals_return_no_clearance_reserve_nothing_and_write_an_entry(
 
 
 @pytest.mark.parametrize(
+    ("resources", "resource"),
+    [
+        (["env/staging-*"], "env/staging-api"),
+        (["env/staging/*", "wallet-*"], "env/staging/api"),
+        (["env/staging/a.*"], "env/staging/a.b"),
+    ],
+)
+def test_a_resource_grant_that_stops_inside_a_segment_is_refused_even_when_it_covers(
+    make_decider, ledger, docket_paths, resources, resource
+):
+    root = make_root(scope={**SCOPE, "resources": resources})
+    decision = make_decider().check(make_request(root, resource=resource), NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.resource) == ("refuse", "unbounded_scope", resource)
+    with pytest.raises(LedgerRefused, match="unknown task"):
+        ledger.task_budget(TENANT, "task-1", NOW)
+
+
+def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
+    root = make_root(scope={**SCOPE, "resources": ["env/*"]})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    decision = make_decider().check(make_request(root, (link,), CHILD_KEY, resource="env/staging-api"), NOW)
+    assert decision.reason == "unbounded_scope"
+
+
+def test_only_the_leaf_scope_must_end_at_a_segment(make_decider):
+    root = make_root(scope={**SCOPE, "resources": ["env/staging-*"]})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["deploy.service"], "resources": ["env/staging-x/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    decision = make_decider().check(make_request(root, (link,), CHILD_KEY, resource="env/staging-x/api"), NOW)
+    assert decision.reason == "no_binding"
+
+
+@pytest.mark.parametrize(
     ("reason", "request_options"),
     [
         ("malformed_request", {"nonce": "has space"}),

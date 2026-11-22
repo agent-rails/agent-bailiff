@@ -508,6 +508,7 @@ def test_needs_approval_has_its_own_type(client, stub):
     ("reason", "action"),
     [
         ("out_of_scope", "stop"),
+        ("unbounded_scope", "stop"),
         ("policy_denied", "stop"),
         ("chain_invalid", "stop"),
         ("already_issued", "stop"),

@@ -27,6 +27,7 @@ from agent_bailiff.decide.refusals import RefusalBudget, capped_reason
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.client import UNACKNOWLEDGED, DocketError
 from agent_bailiff.docket.entry import Entry, Record
+from agent_bailiff.scope_pattern import is_bounded
 from agent_bailiff.signing import token_hash
 
 HOP = "decide"
@@ -243,6 +244,8 @@ class Decider:
     ) -> Decision:
         operation_args_digest = snapshot.digest
         leaf_binding = links[-1].binding() if links else root.binding()
+        if not all(is_bounded(pattern) for pattern in scope["resources"]):
+            raise _Refusal("unbounded_scope", entry)
         if not covers(scope, request.tool, request.resource):
             raise _Refusal("out_of_scope", entry)
         try:
