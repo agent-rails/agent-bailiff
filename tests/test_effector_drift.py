@@ -386,6 +386,29 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             "effector may create core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
         (
+            ("effector", "staging", "create", "configmaps"),
+            "effector may create core configmaps in staging, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector-audit", "staging", "deletecollection", "pods"),
+            "effector-audit may deletecollection core pods in staging, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "patch", "endpointslices"),
+            "effector may patch discovery.k8s.io endpointslices cluster-wide,"
+            " a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "create", "apiservices"),
+            "effector may create apiregistration.k8s.io apiservices cluster-wide,"
+            " a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "patch", "customresourcedefinitions"),
+            "effector may patch apiextensions.k8s.io customresourcedefinitions cluster-wide,"
+            " a dangerous action outside the generated set",
+        ),
+        (
             ("effector", None, "create", "customresourcedefinitions"),
             "effector may create apiextensions.k8s.io customresourcedefinitions cluster-wide,"
             " a dangerous action outside the generated set",
