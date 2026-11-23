@@ -97,9 +97,6 @@ def test_no_incomplete_review_is_accepted_outside_gke(platform):
     assert not accepts_incomplete(platform, {"incomplete": True, "evaluationError": GKE_ERROR})
 
 
-CLUSTER = {"namespaced": False}
-
-
 @pytest.mark.parametrize(
     "action",
     [
@@ -132,25 +129,25 @@ CLUSTER = {"namespaced": False}
         Action("escalate", "rbac.authorization.k8s.io", "roles"),
         Action("impersonate:serviceaccount", "authentication.k8s.io", "serviceaccounts"),
         Action("impersonate-on:user-info:get", "", "secrets"),
-        Action("create", "rbac.authorization.k8s.io", "clusterrolebindings", **CLUSTER),
-        Action("escalate", "rbac.authorization.k8s.io", "clusterroles", **CLUSTER),
-        Action("impersonate", "", "users", **CLUSTER),
-        Action("impersonate", "authentication.k8s.io", "userextras", **CLUSTER),
-        Action("impersonate:user-info", "authentication.k8s.io", "groups", **CLUSTER),
-        Action("impersonate:arbitrary-node", "authentication.k8s.io", "nodes", **CLUSTER),
-        Action("create", "", "nodes", "proxy", **CLUSTER),
-        Action("patch", "", "nodes", "proxy", **CLUSTER),
-        Action("patch", "", "nodes", **CLUSTER),
-        Action("delete", "", "namespaces", **CLUSTER),
-        Action("create", "", "persistentvolumes", **CLUSTER),
-        Action("create", "certificates.k8s.io", "certificatesigningrequests", **CLUSTER),
-        Action("update", "certificates.k8s.io", "certificatesigningrequests", "approval", **CLUSTER),
-        Action("approve", "certificates.k8s.io", "signers", **CLUSTER),
-        Action("create", "admissionregistration.k8s.io", "mutatingwebhookconfigurations", **CLUSTER),
-        Action("delete", "admissionregistration.k8s.io", "validatingadmissionpolicybindings", **CLUSTER),
-        Action("create", "apiextensions.k8s.io", "customresourcedefinitions", **CLUSTER),
-        Action("patch", "apiextensions.k8s.io", "customresourcedefinitions", **CLUSTER),
-        Action("create", "apiregistration.k8s.io", "apiservices", **CLUSTER),
+        Action("create", "rbac.authorization.k8s.io", "clusterrolebindings"),
+        Action("escalate", "rbac.authorization.k8s.io", "clusterroles"),
+        Action("impersonate", "", "users"),
+        Action("impersonate", "authentication.k8s.io", "userextras"),
+        Action("impersonate:user-info", "authentication.k8s.io", "groups"),
+        Action("impersonate:arbitrary-node", "authentication.k8s.io", "nodes"),
+        Action("create", "", "nodes", "proxy"),
+        Action("patch", "", "nodes", "proxy"),
+        Action("patch", "", "nodes"),
+        Action("delete", "", "namespaces"),
+        Action("create", "", "persistentvolumes"),
+        Action("create", "certificates.k8s.io", "certificatesigningrequests"),
+        Action("update", "certificates.k8s.io", "certificatesigningrequests", "approval"),
+        Action("approve", "certificates.k8s.io", "signers"),
+        Action("create", "admissionregistration.k8s.io", "mutatingwebhookconfigurations"),
+        Action("delete", "admissionregistration.k8s.io", "validatingadmissionpolicybindings"),
+        Action("create", "apiextensions.k8s.io", "customresourcedefinitions"),
+        Action("patch", "apiextensions.k8s.io", "customresourcedefinitions"),
+        Action("create", "apiregistration.k8s.io", "apiservices"),
     ],
 )
 def test_the_dangerous_action_list_holds_each_reviewed_action(action):

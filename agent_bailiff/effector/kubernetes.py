@@ -88,17 +88,28 @@ class PooledTransport:
         self._max = max_response_bytes
         self._idle: queue.LifoQueue[http.client.HTTPSConnection] = queue.LifoQueue(maxsize=size)
 
-    def request(self, method: str, path: str, headers: Mapping[str, str], body: bytes | None) -> tuple[int, bytes]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        headers: Mapping[str, str],
+        body: bytes | None,
+        *,
+        timeout: float = TIMEOUT_SECONDS,
+    ) -> tuple[int, bytes]:
         try:
             connection = self._idle.get_nowait()
         except queue.Empty:
-            connection = self._connect()
+            connection = self._connect(timeout)
             status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
         else:
+            connection.timeout = timeout
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout)
             try:
                 status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
             except StaleConnection:
-                connection = self._connect()
+                connection = self._connect(timeout)
                 status, will_close, data, retry_after = self._exchange(connection, method, path, headers, body)
         oversized = len(data) > self._max
         if oversized or will_close:
@@ -121,8 +132,8 @@ class PooledTransport:
             except queue.Empty:
                 return
 
-    def _connect(self) -> http.client.HTTPSConnection:
-        return http.client.HTTPSConnection(self._host, self._port, timeout=TIMEOUT_SECONDS, context=self._context)
+    def _connect(self, timeout: float) -> http.client.HTTPSConnection:
+        return http.client.HTTPSConnection(self._host, self._port, timeout=timeout, context=self._context)
 
     def _exchange(
         self,

@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import time
 import urllib.parse
 
 import pytest
@@ -14,12 +15,13 @@ from agent_bailiff.effector.drift import (
     BASELINE_RULES,
     PINNED_REFERENCES,
     PINNED_SCHEMAS,
+    CheckDeadlineExceeded,
     RbacAudit,
     RbacDrift,
     RbacGate,
     grants,
 )
-from agent_bailiff.effector.kubernetes import KubernetesUnavailable, Throttled
+from agent_bailiff.effector.kubernetes import TIMEOUT_SECONDS, KubernetesUnavailable, Throttled
 from agent_bailiff.effector.platform import DANGEROUS_ACTIONS, VERSION_PATH
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
@@ -107,6 +109,7 @@ class FakeApi:
         self.status = {}
         self.page_size = None
         self.requests = []
+        self.timeouts = []
         self.schema = apps_schema()
         self.registration = {
             "webhooks": [
@@ -141,8 +144,9 @@ class FakeApi:
     def close(self):
         self.closed = True
 
-    def request(self, method, path, headers, body):
+    def request(self, method, path, headers, body, *, timeout):
         self.requests.append((method, path, headers["Authorization"]))
+        self.timeouts.append(timeout)
         if self.throttled:
             self.throttled -= 1
             raise Throttled(self.retry_after)
@@ -225,7 +229,7 @@ def api(tmp_path):
     return FakeApi(tmp_path)
 
 
-def make_audit(api, tmp_path, platform):
+def make_audit(api, tmp_path, platform, **options):
     for name, value in (("effector", EFFECTOR_TOKEN), ("audit", AUDIT_TOKEN)):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
@@ -239,6 +243,7 @@ def make_audit(api, tmp_path, platform):
         CATALOG.operations,
         platform=platform,
         sleep=SLEEPS.append,
+        **options,
     )
 
 
@@ -333,15 +338,16 @@ def test_an_incomplete_review_with_another_error_is_drift_on_gke(api, gke_audit,
     ]
 
 
-def test_gke_reviews_every_dangerous_action_with_each_account_token(api, gke_audit):
+def test_gke_reviews_every_dangerous_action_cluster_wide_with_each_account_token(api, gke_audit):
     assert gke_audit.check() == []
-    namespaced = sum(action.namespaced for action in DANGEROUS_ACTIONS)
-    per_account = len(DANGEROUS_ACTIONS) + namespaced * 2
-    reviews = [(account, attributes.get("namespace")) for account, attributes in api.self_reviews]
-    assert len(reviews) == 2 * per_account
+    assert all("namespace" not in attributes for _, attributes in api.self_reviews)
     for account in ("effector", "effector-audit"):
-        assert len([review for review in reviews if review[0] == account]) == per_account
-        assert {namespace for name, namespace in reviews if name == account} == {None, "bailiff-system", "staging"}
+        reviewed = [
+            (attributes["verb"], attributes["group"], attributes["resource"], attributes.get("subresource", ""))
+            for name, attributes in api.self_reviews
+            if name == account
+        ]
+        assert sorted(reviewed) == sorted(tuple(action) for action in DANGEROUS_ACTIONS)
 
 
 def test_upstream_sends_no_dangerous_action_review(api, audit):
@@ -357,25 +363,25 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             "effector may get core secrets cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "staging", "create", "pods"),
-            "effector-audit may create core pods/exec in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "create", "pods"),
+            "effector-audit may create core pods/exec cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "patch", "pods"),
-            "effector may patch core pods in staging, a dangerous action outside the generated set",
+            ("effector", None, "patch", "pods"),
+            "effector may patch core pods cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "bailiff-system", "update", "statefulsets"),
-            "effector-audit may update apps statefulsets in bailiff-system,"
+            ("effector-audit", None, "update", "statefulsets"),
+            "effector-audit may update apps statefulsets cluster-wide, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "create", "replicationcontrollers"),
+            "effector may create core replicationcontrollers cluster-wide,"
             " a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "create", "replicationcontrollers"),
-            "effector may create core replicationcontrollers in staging, a dangerous action outside the generated set",
-        ),
-        (
-            ("effector-audit", "staging", "patch", "services"),
-            "effector-audit may patch core services/proxy in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "patch", "services"),
+            "effector-audit may patch core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
         (
             ("effector", None, "update", "nodes"),
@@ -386,12 +392,12 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             "effector may create core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "create", "configmaps"),
-            "effector may create core configmaps in staging, a dangerous action outside the generated set",
+            ("effector", None, "create", "configmaps"),
+            "effector may create core configmaps cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "staging", "deletecollection", "pods"),
-            "effector-audit may deletecollection core pods in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "deletecollection", "pods"),
+            "effector-audit may deletecollection core pods cluster-wide, a dangerous action outside the generated set",
         ),
         (
             ("effector", None, "patch", "endpointslices"),
@@ -428,8 +434,8 @@ def test_a_dangerous_action_an_account_may_take_is_drift(api, gke_audit, key, pr
             "whether effector may get core secrets cluster-wide could not be decided: webhook authorizer timeout",
         ),
         (
-            ("effector-audit", "staging", "create", "pods"),
-            "whether effector-audit may create core pods/exec in staging could not be decided:"
+            ("effector-audit", None, "create", "pods"),
+            "whether effector-audit may create core pods/exec cluster-wide could not be decided:"
             " webhook authorizer timeout",
         ),
     ],
@@ -862,6 +868,86 @@ def test_dangerous_action_reviews_do_not_grow_with_the_cluster_namespaces(api, g
     api.namespaces += [f"team-{index}" for index in range(1000)]
     assert gke_audit.check() == []
     assert len(api.self_reviews) == few
+
+
+class Ticking:
+    def __init__(self, api, step):
+        self.api, self.step = api, step
+
+    def __call__(self):
+        return len(self.api.requests) * self.step
+
+
+def test_each_request_waits_at_most_the_socket_timeout_or_the_time_left(api, tmp_path):
+    short = make_audit(api, tmp_path, "upstream", deadline_seconds=3, monotonic=lambda: 0.0)
+    assert short.check() == []
+    assert set(api.timeouts) == {3}
+    api.timeouts.clear()
+    long = make_audit(api, tmp_path, "upstream", deadline_seconds=60, monotonic=lambda: 0.0)
+    assert long.check() == []
+    assert set(api.timeouts) == {TIMEOUT_SECONDS}
+
+
+def test_no_request_is_sent_once_the_check_passes_its_deadline(api, tmp_path):
+    slow = make_audit(api, tmp_path, "gke", deadline_seconds=60, monotonic=Ticking(api, 1.0), workers=1)
+    api.version = {"gitVersion": "v1.36.4-gke.2377000"}
+    with pytest.raises(CheckDeadlineExceeded) as raised:
+        slow.check()
+    assert len(api.requests) == 60
+    planned = 2 * len(api.namespaces) + 2 * len(DANGEROUS_ACTIONS) + len(slow._synthetic_user_reviews())
+    reviewed = 60 - len([request for request in api.requests if request[0] == "GET"])
+    assert str(raised.value) == f"the RBAC check passed its 60 s deadline after {reviewed} of {planned} reviews"
+
+
+def test_a_retry_wait_past_the_deadline_fails_the_check_without_sleeping(api, tmp_path):
+    api.throttled = 1
+    api.retry_after = 8.0
+    short = make_audit(api, tmp_path, "upstream", deadline_seconds=8, monotonic=lambda: 0.0)
+    with pytest.raises(CheckDeadlineExceeded, match="passed its 8 s deadline after 0 of 0 reviews"):
+        short.check()
+    assert SLEEPS == []
+
+
+def test_a_check_past_its_deadline_closes_the_gate(api, tmp_path):
+    slow = make_audit(api, tmp_path, "upstream", deadline_seconds=5, monotonic=Ticking(api, 1.0))
+    gate = RbacGate(slow, Clock(), interval=60)
+    with pytest.raises(RbacDrift) as raised:
+        gate.verify()
+    [problem] = raised.value.problems
+    assert problem.startswith("the RBAC check failed: the RBAC check passed its 5 s deadline after ")
+    assert gate.healthy(1000) is False
+
+
+def test_a_check_whose_last_answer_lands_at_its_deadline_closes_the_gate(api, tmp_path):
+    counted = make_audit(api, tmp_path, "upstream", monotonic=lambda: 0.0)
+    RbacGate(counted, Clock(), interval=60).verify()
+    total = len(api.requests)
+    api.requests.clear()
+    late = make_audit(api, tmp_path, "upstream", deadline_seconds=total, monotonic=Ticking(api, 1.0))
+    gate = RbacGate(late, Clock(), interval=60)
+    with pytest.raises(RbacDrift) as raised:
+        gate.verify()
+    assert len(api.requests) == total
+    [problem] = raised.value.problems
+    assert problem.startswith(f"the RBAC check failed: the RBAC check passed its {total} s deadline after ")
+    assert gate.healthy(1000) is False
+
+
+def test_a_failed_review_cancels_the_reviews_not_yet_started(api, tmp_path):
+    audit = make_audit(api, tmp_path, "upstream", workers=1)
+    started = []
+
+    def fail():
+        raise KubernetesUnavailable("review failed")
+
+    def wait():
+        started.append(True)
+        time.sleep(0.05)
+        return []
+
+    with pytest.raises(KubernetesUnavailable, match="review failed"):
+        audit._run([fail] + [wait] * 50)
+    assert len(started) <= 1
 
 
 @pytest.mark.parametrize(("seconds", "alarm"), [(0, False), (60, False), (61, True)])

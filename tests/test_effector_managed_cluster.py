@@ -237,11 +237,10 @@ def test_the_pinned_incomplete_review_passes_the_gke_drift_check(cluster, kind_v
 
 
 def test_a_dangerous_action_the_managed_authorizer_allows_is_drift(cluster, kind_version_as_gke, allow):
-    namespace = cluster["names"]["stg"]
-    allow.add((service_account_user(cluster["names"]["sys"], "effector"), "get", "secrets", namespace))
+    allow.add((service_account_user(cluster["names"]["sys"], "effector"), "get", "secrets", None))
     time.sleep(CACHE_SECONDS)
     problems = gke_audit(cluster["work"], cluster).check()
-    assert problems == [f"effector may get core secrets in {namespace}, a dangerous action outside the generated set"]
+    assert problems == ["effector may get core secrets cluster-wide, a dangerous action outside the generated set"]
 
 
 def test_a_refusal_recorded_before_a_sigkill_survives_in_the_docket(cluster, allow):

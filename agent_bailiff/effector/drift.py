@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -13,7 +14,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agent_bailiff.effector.catalog import CatalogOperation
-from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Throttled, Transport, read_token
+from agent_bailiff.effector.kubernetes import TIMEOUT_SECONDS as SOCKET_TIMEOUT_SECONDS
+from agent_bailiff.effector.kubernetes import USER_PREFIX, KubernetesUnavailable, Throttled, read_token
 from agent_bailiff.effector.platform import (
     DANGEROUS_ACTIONS,
     VERSION_PATH,
@@ -101,8 +103,16 @@ Key = tuple[str, str | None, str]
 logger = logging.getLogger(__name__)
 
 
-class AuditTransport(Transport, Protocol):
+class AuditTransport(Protocol):
+    def request(
+        self, method: str, path: str, headers: Mapping[str, str], body: bytes | None, *, timeout: float
+    ) -> tuple[int, bytes]: ...
+
     def close(self) -> None: ...
+
+
+class CheckDeadlineExceeded(KubernetesUnavailable):
+    pass
 
 
 class RbacDrift(RuntimeError):
@@ -151,12 +161,17 @@ class RbacAudit:
         *,
         platform: Platform,
         workers: int = REVIEW_WORKERS,
+        deadline_seconds: float = CHECK_INTERVAL_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._transport = transport
         self._platform = platform
         self._workers = workers
+        self._deadline_seconds = deadline_seconds
         self._sleep = sleep
+        self._monotonic = monotonic
+        self._deadline = math.inf
         self._audit_token = audit_token
         self._identity = identity
         self._items = {_key(item): item for item in manifests["items"]}
@@ -169,6 +184,8 @@ class RbacAudit:
         self._traffic_lock = threading.Lock()
         self._requests = 0
         self._throttled = 0
+        self._planned = 0
+        self._reviewed = 0
 
     def traffic(self) -> tuple[int, int]:
         with self._traffic_lock:
@@ -176,7 +193,8 @@ class RbacAudit:
 
     def check(self) -> list[str]:
         with self._traffic_lock:
-            self._requests = self._throttled = 0
+            self._requests = self._throttled = self._planned = self._reviewed = 0
+        self._deadline = self._monotonic() + self._deadline_seconds
         problems = check_version(self._platform, self._request(self._audit_token, "GET", VERSION_PATH, None))
         if problems:
             return problems
@@ -193,6 +211,8 @@ class RbacAudit:
         reviews.extend(self._synthetic_user_reviews())
         if reviews_denied_actions(self._platform):
             reviews.extend(self._denied_action_reviews())
+        with self._traffic_lock:
+            self._planned = len(reviews)
         for found in self._run(reviews):
             problems.extend(found)
         problems.extend(self._check_objects(BINDING_KINDS, bindings, self._compare_binding, self._reaches_effector))
@@ -271,22 +291,16 @@ class RbacAudit:
         ]
 
     def _denied_action_reviews(self) -> list[Callable[[], list[str]]]:
-        namespaces = sorted(
-            {self._identity.namespace} | {namespace for allowed in self._tenants.values() for namespace in allowed}
-        )
         return [
-            functools.partial(self._check_denied, account, scope, action)
+            functools.partial(self._check_denied, account, action)
             for account in self._tokens
             for action in DANGEROUS_ACTIONS
-            for scope in [None, *(namespaces if action.namespaced else [])]
         ]
 
-    def _check_denied(self, account: str, namespace: str | None, action: Action) -> list[str]:
+    def _check_denied(self, account: str, action: Action) -> list[str]:
         attributes = {"verb": action.verb, "group": action.group, "resource": action.resource}
         if action.subresource:
             attributes["subresource"] = action.subresource
-        if namespace is not None:
-            attributes["namespace"] = namespace
         review = {
             "apiVersion": "authorization.k8s.io/v1",
             "kind": "SelfSubjectAccessReview",
@@ -299,14 +313,16 @@ class RbacAudit:
             raise KubernetesUnavailable("a SelfSubjectAccessReview returned no decision")
         resource = f"{action.resource}/{action.subresource}" if action.subresource else action.resource
         group = action.group or "core"
-        where = f"in {namespace}" if namespace is not None else "cluster-wide"
         if status["allowed"] is True:
             return [
-                f"{account} may {action.verb} {group} {resource} {where}, a dangerous action outside the generated set"
+                f"{account} may {action.verb} {group} {resource} cluster-wide,"
+                " a dangerous action outside the generated set"
             ]
         error = status.get("evaluationError")
         if error:
-            return [f"whether {account} may {action.verb} {group} {resource} {where} could not be decided: {error}"]
+            return [
+                f"whether {account} may {action.verb} {group} {resource} cluster-wide could not be decided: {error}"
+            ]
         return []
 
     def _check_synthetic_user(self, user: str, namespace: str, operation: CatalogOperation) -> list[str]:
@@ -340,7 +356,29 @@ class RbacAudit:
 
     def _run(self, reviews: Sequence[Callable[[], list[str]]]) -> list[list[str]]:
         with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="rbac-audit") as executor:
-            return list(executor.map(lambda review: review(), reviews))
+            return list(executor.map(self._review, reviews))
+
+    def _review(self, review: Callable[[], list[str]]) -> list[str]:
+        found = review()
+        with self._traffic_lock:
+            self._reviewed += 1
+        return found
+
+    def finish(self) -> None:
+        self._remaining()
+
+    def _remaining(self) -> float:
+        left = self._deadline - self._monotonic()
+        if left <= 0:
+            raise self._overrun()
+        return left
+
+    def _overrun(self) -> CheckDeadlineExceeded:
+        with self._traffic_lock:
+            reviewed, planned = self._reviewed, self._planned
+        return CheckDeadlineExceeded(
+            f"the RBAC check passed its {self._deadline_seconds:g} s deadline after {reviewed} of {planned} reviews"
+        )
 
     def _allowed(self, user: str, namespace: str, operation: CatalogOperation) -> bool:
         call = operation.call
@@ -479,15 +517,19 @@ class RbacAudit:
             payload = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
         for attempt in range(THROTTLE_RETRIES + 1):
+            timeout = min(SOCKET_TIMEOUT_SECONDS, self._remaining())
             try:
-                status, data = self._transport.request(method, path, headers, payload)
+                status, data = self._transport.request(method, path, headers, payload, timeout=timeout)
             except Throttled as exc:
                 self._count(throttled=True)
                 if attempt == THROTTLE_RETRIES:
                     raise KubernetesUnavailable(
                         f"{method} {path.split('?')[0]} was throttled {THROTTLE_RETRIES + 1} times"
                     ) from None
-                self._sleep(_backoff(attempt, exc.retry_after))
+                delay = _backoff(attempt, exc.retry_after)
+                if delay >= self._remaining():
+                    raise self._overrun() from None
+                self._sleep(delay)
                 continue
             self._count(throttled=False)
             break
@@ -532,6 +574,11 @@ class RbacGate:
             problems = [f"the RBAC check failed: {exc}"]
         restart_problems = [] if problems else self._extra("the Deployment schema", self._audit.check_restart_schema)
         write_problems = [] if problems else self._extra("the release webhook", self._audit.check_release_webhook)
+        if not problems:
+            try:
+                self._audit.finish()
+            except KubernetesUnavailable as exc:
+                problems = [f"the RBAC check failed: {exc}"]
         self._log_cost(self._clock() - now)
         with self._lock:
             self._verified_at = None if problems else now

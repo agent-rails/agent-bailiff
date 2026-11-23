@@ -18,7 +18,6 @@ class Action(NamedTuple):
     group: str
     resource: str
     subresource: str = ""
-    namespaced: bool = True
 
 
 def _actions(verbs: tuple[str, ...], group: str, resources: tuple[str, ...], **kind: Any) -> tuple[Action, ...]:
@@ -28,7 +27,6 @@ def _actions(verbs: tuple[str, ...], group: str, resources: tuple[str, ...], **k
 AUTHENTICATION = "authentication.k8s.io"
 WRITES = ("create", "update", "patch", "delete", "deletecollection")
 PROXY = ("get", "create", "update", "patch", "delete")
-CLUSTER: dict[str, Any] = {"namespaced": False}
 DANGEROUS_ACTIONS: tuple[Action, ...] = (
     *_actions(("*",), "*", ("*",)),
     *_actions(("get", "list", "watch"), "", ("secrets",)),
@@ -54,19 +52,19 @@ DANGEROUS_ACTIONS: tuple[Action, ...] = (
     *_actions(("impersonate-on:user-info:create",), "", ("pods",)),
     *_actions(("impersonate-on:user-info:delete",), "apps", ("deployments",)),
     *_actions(("impersonate-on:user-info:create",), "rbac.authorization.k8s.io", ("rolebindings",)),
-    *_actions(("create",), "rbac.authorization.k8s.io", ("clusterroles", "clusterrolebindings"), **CLUSTER),
-    *_actions(("bind", "escalate"), "rbac.authorization.k8s.io", ("clusterroles",), **CLUSTER),
-    *_actions(("impersonate",), "", ("users", "groups"), **CLUSTER),
-    *_actions(("impersonate", "impersonate:user-info"), AUTHENTICATION, ("users", "groups", "uids"), **CLUSTER),
-    *_actions(("impersonate",), AUTHENTICATION, ("userextras",), **CLUSTER),
-    *_actions(("impersonate:arbitrary-node", "impersonate:associated-node"), AUTHENTICATION, ("nodes",), **CLUSTER),
-    *_actions(PROXY, "", ("nodes",), subresource="proxy", **CLUSTER),
-    *_actions(("update", "patch"), "", ("nodes",), **CLUSTER),
-    *_actions(("delete",), "", ("namespaces",), **CLUSTER),
-    *_actions(("create",), "", ("persistentvolumes",), **CLUSTER),
-    *_actions(("create",), "certificates.k8s.io", ("certificatesigningrequests",), **CLUSTER),
-    *_actions(("update",), "certificates.k8s.io", ("certificatesigningrequests",), subresource="approval", **CLUSTER),
-    *_actions(("approve", "sign"), "certificates.k8s.io", ("signers",), **CLUSTER),
+    *_actions(("create",), "rbac.authorization.k8s.io", ("clusterroles", "clusterrolebindings")),
+    *_actions(("bind", "escalate"), "rbac.authorization.k8s.io", ("clusterroles",)),
+    *_actions(("impersonate",), "", ("users", "groups")),
+    *_actions(("impersonate", "impersonate:user-info"), AUTHENTICATION, ("users", "groups", "uids")),
+    *_actions(("impersonate",), AUTHENTICATION, ("userextras",)),
+    *_actions(("impersonate:arbitrary-node", "impersonate:associated-node"), AUTHENTICATION, ("nodes",)),
+    *_actions(PROXY, "", ("nodes",), subresource="proxy"),
+    *_actions(("update", "patch"), "", ("nodes",)),
+    *_actions(("delete",), "", ("namespaces",)),
+    *_actions(("create",), "", ("persistentvolumes",)),
+    *_actions(("create",), "certificates.k8s.io", ("certificatesigningrequests",)),
+    *_actions(("update",), "certificates.k8s.io", ("certificatesigningrequests",), subresource="approval"),
+    *_actions(("approve", "sign"), "certificates.k8s.io", ("signers",)),
     *_actions(
         WRITES,
         "admissionregistration.k8s.io",
@@ -78,10 +76,9 @@ DANGEROUS_ACTIONS: tuple[Action, ...] = (
             "mutatingadmissionpolicies",
             "mutatingadmissionpolicybindings",
         ),
-        **CLUSTER,
     ),
-    *_actions(WRITES, "apiextensions.k8s.io", ("customresourcedefinitions",), **CLUSTER),
-    *_actions(WRITES, "apiregistration.k8s.io", ("apiservices",), **CLUSTER),
+    *_actions(WRITES, "apiextensions.k8s.io", ("customresourcedefinitions",)),
+    *_actions(WRITES, "apiregistration.k8s.io", ("apiservices",)),
 )
 ACCEPTED_INCOMPLETE: Mapping[Platform, frozenset[str]] = {
     "upstream": frozenset(),
