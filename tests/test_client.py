@@ -512,6 +512,26 @@ def test_tools_list_with_more_than_ten_pages_is_refused(client, stub):
     assert stub.methods().count("tools/list") == 10
 
 
+def test_tools_list_restarts_from_the_first_page_after_a_session_expires_mid_listing(client, stub):
+    stub.responders["tools/list"] = [tool_page(0, "c1"), reply(status=404), tool_page(0, "c1"), tool_page(1, None)]
+    assert client.list_tools() == [{"name": "tool_0"}, {"name": "tool_1"}]
+    params = [message["params"] for _, message in stub.requests if message["method"] == "tools/list"]
+    assert params == [{}, {"cursor": "c1"}, {}, {"cursor": "c1"}]
+    assert stub.methods().count("initialize") == 2
+
+
+def test_tools_list_refuses_a_repeated_cursor(client, stub):
+    stub.responders["tools/list"] = [tool_page(0, "c1"), tool_page(1, "c1")]
+    with pytest.raises(GatewayError, match="repeated a nextCursor"):
+        client.list_tools()
+
+
+def test_tools_list_refuses_a_tool_name_listed_twice(client, stub):
+    stub.responders["tools/list"] = [tool_page(0, "c1"), tool_page(0, None)]
+    with pytest.raises(GatewayError, match="listed tool 'tool_0' twice"):
+        client.list_tools()
+
+
 @pytest.mark.parametrize("cursor", ["", 7])
 def test_a_malformed_cursor_is_refused(client, stub, cursor):
     stub.responders["tools/list"] = [reply({"tools": [], "nextCursor": cursor})]

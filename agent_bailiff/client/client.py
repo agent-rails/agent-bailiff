@@ -235,34 +235,41 @@ class BailiffClient:
 
     def list_tools(self) -> list[dict[str, Any]]:
         self._check_thread()
+        try:
+            return self._list_all_tools()
+        except _SessionExpired:
+            try:
+                return self._list_all_tools()
+            except _SessionExpired:
+                raise GatewayError("tools/list returned HTTP 404 after the session was initialized again") from None
+
+    def _list_all_tools(self) -> list[dict[str, Any]]:
+        self._ensure_session()
         tools: list[dict[str, Any]] = []
+        names: set[object] = set()
+        cursors: set[str] = set()
         params: dict[str, Any] = {}
         for _ in range(MAX_TOOL_PAGES):
-            result = self._list_tools_page(params)
+            result = self._setup_request("tools/list", params)["result"]
             page = result.get("tools")
             if not isinstance(page, list) or not all(isinstance(tool, dict) for tool in page):
                 raise GatewayError("tools/list returned no tool list")
+            for tool in page:
+                name = tool.get("name")
+                if name in names:
+                    raise GatewayError(f"tools/list listed tool {name!r:.80} twice")
+                names.add(name)
             tools.extend(page)
             cursor = result.get("nextCursor")
             if cursor is None:
                 return tools
             if not isinstance(cursor, str) or not cursor:
                 raise GatewayError("tools/list returned a nextCursor that is not a non-empty string")
+            if cursor in cursors:
+                raise GatewayError("tools/list repeated a nextCursor")
+            cursors.add(cursor)
             params = {"cursor": cursor}
         raise GatewayError(f"tools/list returned more than {MAX_TOOL_PAGES} pages")
-
-    def _list_tools_page(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_session()
-        try:
-            message = self._setup_request("tools/list", params)
-        except _SessionExpired:
-            self._ensure_session()
-            try:
-                message = self._setup_request("tools/list", params)
-            except _SessionExpired:
-                raise GatewayError("tools/list returned HTTP 404 after the session was initialized again") from None
-        result: dict[str, Any] = message["result"]
-        return result
 
     @property
     def protocol_version(self) -> str | None:
