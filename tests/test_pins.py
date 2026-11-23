@@ -92,7 +92,7 @@ INSTALLER = re.compile(r"\b(pip3?|uv|pipx|poetry|conda|easy_install)\b")
 JOB = re.compile(r"^  [a-z][a-z0-9-]*:$")
 
 
-def test_every_ci_job_installs_only_from_the_hash_lock():
+def test_every_ci_job_installs_from_the_hash_lock_and_the_smoke_job_only_adds_uv():
     jobs: dict[str, list[str]] = {}
     current = None
     for line in WORKFLOW.read_text().split("\njobs:\n", 1)[1].splitlines():
@@ -114,9 +114,11 @@ def test_every_ci_job_installs_only_from_the_hash_lock():
         ], name
 
 
-def test_the_install_smoke_resolves_within_the_ci_lock():
+def test_the_install_smoke_resolves_runtime_and_build_deps_within_the_ci_lock():
     command = test_install_smoke.install_command("HEAD")
     assert command[command.index("--constraints") + 1] == str(test_install_smoke.LOCK)
+    assert command[command.index("--build-constraints") + 1] == str(test_install_smoke.LOCK)
+    assert "--no-python-downloads" in command
     assert test_install_smoke.LOCK == ROOT / "requirements-ci.txt"
 
 
