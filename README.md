@@ -68,6 +68,10 @@ Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roo
 - Linux or macOS (peer credentials on Unix sockets)
 - [agentgateway](https://github.com/agentgateway/agentgateway) v1.7.0 for the gateway adapter
 - For the effector: Kubernetes v1.36 or later (constrained impersonation, beta in v1.36); tested on OrbStack v1.36.5 and kind v1.36.4. On v1.34 the effector's calls are refused (28 of 36 cluster tests fail with 403 on kind v1.34.3).
+- Managed clusters, reads only (`kubernetes-read` catalog, nothing from bailiff runs in the cluster), see [docs/MANAGED_CLUSTERS.md](docs/MANAGED_CLUSTERS.md):
+  - GKE Standard 1.36: probed on 1.36.4-gke.2377000 on 2026-11-22; no recorded effector run yet. Pod logs reach the agent unfiltered.
+  - EKS: not supported; not probed.
+  - GKE Autopilot: not tested.
 
 ## Usage
 
@@ -102,6 +106,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
 - [docs/EFFECTOR.md](docs/EFFECTOR.md): the Kubernetes effector, its catalog, generated RBAC and admission, drift check and limits
+- [docs/MANAGED_CLUSTERS.md](docs/MANAGED_CLUSTERS.md): reads on GKE and EKS, token minting, cloud IAM check and rollback
 - [docs/RELEASE_WEBHOOK.md](docs/RELEASE_WEBHOOK.md): release admission, operator signals, response steps and rollout gates
 - [examples/quickstart](examples/quickstart/README.md): local Docker Compose stack with Gitea, a scripted agent, optional tracing and a revoke rule
 - [examples/live-run](examples/live-run/README.md): end-to-end run with Claude as the agent, and its results
