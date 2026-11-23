@@ -14,6 +14,7 @@ from agent_bailiff.custodian.files import OwnedFileError, replace_at
 KEY_DIR_MODE = 0o700
 KEY_MODE = 0o600
 KEY_SUFFIX = ".key"
+SEED_BYTES = 32
 STAGED_SUFFIX = ".new"
 
 
@@ -50,6 +51,31 @@ def prune(key_dir: Path, keep: str) -> list[str]:
     return removed
 
 
+def load_agent_key(key_dir: Path, subject: str) -> Ed25519PrivateKey:
+    if not is_valid_public_key(subject):
+        raise AgentKeyError("the task root subject is not an agent public key")
+    dir_fd = open_key_dir(key_dir)
+    try:
+        fd = os.open(subject + KEY_SUFFIX, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError as exc:
+        raise AgentKeyError(f"cannot open {subject}{KEY_SUFFIX}: {exc.strerror}") from None
+    finally:
+        os.close(dir_fd)
+    try:
+        problem = _key_problem(os.fstat(fd))
+        if problem:
+            raise AgentKeyError(f"{subject}{KEY_SUFFIX} {problem}")
+        seed = os.read(fd, SEED_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(seed) != SEED_BYTES:
+        raise AgentKeyError(f"{subject}{KEY_SUFFIX} must hold exactly {SEED_BYTES} bytes")
+    private_key = Ed25519PrivateKey.from_private_bytes(seed)
+    if encode_public_key(private_key.public_key()) != subject:
+        raise AgentKeyError(f"{subject}{KEY_SUFFIX} holds a different key")
+    return private_key
+
+
 def open_key_dir(key_dir: Path) -> int:
     try:
         dir_fd = os.open(key_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -62,6 +88,18 @@ def open_key_dir(key_dir: Path) -> int:
             f"the key directory {key_dir} must be owned by uid {os.geteuid()} with mode {oct(KEY_DIR_MODE)}"
         )
     return dir_fd
+
+
+def _key_problem(info: os.stat_result) -> str | None:
+    if not stat.S_ISREG(info.st_mode):
+        return "is not a regular file"
+    if info.st_uid != os.geteuid():
+        return f"is not owned by uid {os.geteuid()}"
+    if stat.S_IMODE(info.st_mode) != KEY_MODE:
+        return f"must have mode {oct(KEY_MODE)}"
+    if info.st_nlink != 1:
+        return "has multiple hard links"
+    return None
 
 
 def _key_subjects(dir_fd: int) -> dict[str, int]:
