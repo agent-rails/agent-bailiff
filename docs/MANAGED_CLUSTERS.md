@@ -6,7 +6,7 @@ How to run the effector against GKE or EKS. Managed clusters get reads only: the
 
 | Platform | Effector status | Evidence |
 |---|---|---|
-| GKE Standard 1.36 | supported at d673325; later revisions not re-run on GKE | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23) at d673325, see `examples/live-run/README.md`. Later revisions add the `evaluationError` rule and more dangerous actions; they passed the kind webhook-authorizer suite, not a GKE run. |
+| GKE Standard 1.36 | supported at d673325; later revisions not re-run on GKE | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23) at d673325, see `examples/live-run/README.md`. Later revisions add the `evaluationError` rule and more dangerous actions; they were tested on the kind webhook-authorizer suite (one 10 s review timeout in 8 local runs, not yet explained), not on GKE. |
 | GKE Autopilot | not supported | not tested |
 | EKS 1.36 | not supported | not probed. `platform: eks` accepts no incomplete rules review, so if EKS reports one the effector does not start. |
 
