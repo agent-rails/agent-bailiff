@@ -56,6 +56,28 @@ def test_a_context_other_than_orbstack_is_refused_before_kubectl(monkeypatch, co
         launch.minify_kubeconfig(context)
 
 
+GKE_PROBE = "gke_engineering-scratch-pad_europe-west1-b_bailiff-probe"
+
+
+@pytest.mark.parametrize("context", [GKE_PROBE, "gke_onstack-infra_europe-west1-b_bailiff-probe-x"])
+def test_only_a_gke_bailiff_probe_context_is_a_gke_platform(context):
+    assert launch.platform_of(context) == ("gke" if context == GKE_PROBE else "upstream")
+
+
+def test_the_applier_token_replaces_the_gke_credential_plugin(kubectl_view):
+    gke = view(GKE_PROBE, "https://34.1.2.3", user={"exec": {"command": "gke-gcloud-auth-plugin"}})
+    kubectl_view(gke)
+    config = launch.minify_kubeconfig(GKE_PROBE, applier_token="applier")
+    assert config["users"][0]["user"] == {"token": "applier"}
+    assert config["clusters"][0]["cluster"]["server"] == "https://34.1.2.3"
+
+
+def test_a_gke_context_without_an_applier_token_is_refused(kubectl_view):
+    kubectl_view(view(GKE_PROBE, "https://34.1.2.3", user={"exec": {"command": "gke-gcloud-auth-plugin"}}))
+    with pytest.raises(RuntimeError, match="credential plugin"):
+        launch.minify_kubeconfig(GKE_PROBE)
+
+
 @pytest.mark.parametrize(
     ("document", "message"),
     [
@@ -176,8 +198,20 @@ def test_the_kubernetes_command_needs_a_webhook_image():
 
 def test_the_read_catalog_command_passes_the_catalog_and_no_webhook():
     command = launch.container_command(spec("kubernetes", webhook_image=None, catalog="kubernetes-read"), DIGEST)
-    assert command[-4:] == ["--context", "orbstack", "--catalog", "kubernetes-read"]
+    assert command[-6:] == ["--context", "orbstack", "--catalog", "kubernetes-read", "--platform", "upstream"]
     assert "--webhook-image" not in command
+
+
+def test_the_gke_read_command_passes_the_platform():
+    command = launch.container_command(
+        spec("kubernetes", context=GKE_PROBE, webhook_image=None, catalog="kubernetes-read", platform="gke"), DIGEST
+    )
+    assert command[-6:] == ["--context", GKE_PROBE, "--catalog", "kubernetes-read", "--platform", "gke"]
+
+
+def test_a_write_catalog_on_gke_is_refused():
+    with pytest.raises(RuntimeError, match="kubernetes-read catalog only"):
+        launch.container_command(spec("kubernetes", context=GKE_PROBE, platform="gke"), DIGEST)
 
 
 def test_the_kubernetes_command_needs_a_context():

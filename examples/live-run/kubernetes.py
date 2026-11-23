@@ -120,10 +120,11 @@ class Deadline:
 
 
 class Cluster:
-    def __init__(self, context: str, directory: Path, run_id: str, catalog: str) -> None:
+    def __init__(self, context: str, directory: Path, run_id: str, catalog: str, platform: str = "upstream") -> None:
         self.context = context
         self.run_id = run_id
         self.catalog = catalog
+        self.platform = platform
         self.directory = private(directory)
         suffix = secrets.token_hex(3)
         self.namespaces = {key: f"bl-{suffix}-{key}" for key in ("sys", "hook", "staging", "prod")}
@@ -439,6 +440,8 @@ class KubernetesDeployment(Deployment):
                 cluster.namespaces["hook"],
                 "--tenant",
                 f"{TENANT}={cluster.namespaces['staging']}",
+                "--platform",
+                cluster.platform,
                 *docket,
             )  # fmt: skip
         )
@@ -879,14 +882,17 @@ def main() -> None:
     parser.add_argument("--context", required=True, help="kube context of a disposable cluster")
     parser.add_argument("--webhook-image", help="the webhook image, pinned by sha256 digest; write catalog only")
     parser.add_argument("--catalog", choices=sorted(CATALOGS), default="kubernetes")
+    parser.add_argument("--platform", choices=("upstream", "gke"), default="upstream")
     args = parser.parse_args()
     read_only = args.catalog == READ_CATALOG
+    if not read_only and args.platform != "upstream":
+        parser.error(f"platform {args.platform} supports the {READ_CATALOG} catalog only")
     if not read_only and args.webhook_image is None:
         parser.error("the kubernetes catalog needs --webhook-image")
     install_sigterm()
     require_layout(args.root, args.receipt_dir, WORK_FILES | {"kubeconfig"})
     require_confined()
-    cluster = Cluster(args.context, args.root / "cluster", args.run_id, args.catalog)
+    cluster = Cluster(args.context, args.root / "cluster", args.run_id, args.catalog, args.platform)
     deployment = KubernetesDeployment(args.root, receipt_dir=args.receipt_dir, archiver_uid=args.archiver_uid)
     deployment.cluster = cluster
     outcomes: list[Outcome] = []
