@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 
@@ -57,6 +58,20 @@ ROUTE = {
 
 def document_route(**changes):
     return ToolRoutes.from_document({"routes": [{**ROUTE, **changes}]}).route("gitea", "list_issues")
+
+
+@pytest.mark.parametrize(
+    ("second", "expected"),
+    [
+        ({**ROUTE, "name": "close_issue", "resource": ""}, "route 1 ('close_issue'): resource must be"),
+        ({**ROUTE, "name": "close_issue", "tool": "gitea.*"}, "route 1 ('close_issue'): tool must be"),
+        ({"service": "gitea"}, "route 1 (None): each route must have exactly the fields"),
+        ("not a route", "route 1 (None): each route must have exactly the fields"),
+    ],
+)
+def test_a_bad_document_route_is_named_by_index_and_name(second, expected):
+    with pytest.raises(ValueError, match=re.escape(expected)):
+        ToolRoutes.from_document({"routes": [ROUTE, second]})
 
 
 def test_a_document_route_checks_its_schema_arguments_and_leaves_the_others():
