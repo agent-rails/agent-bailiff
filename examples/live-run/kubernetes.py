@@ -202,7 +202,7 @@ class Cluster:
             self.create("deployment", "api", "--image=registry.k8s.io/pause:3.10", namespace=self.namespaces[key])
         kubectl(self.context, "apply", "-f", str(self.manifests))
         for account, name in (("effector", "effector.token"), ("effector-audit", "audit.token")):
-            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=30m")
+            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=10m")
             (self.directory / name).write_text(token.strip())
             os.chmod(self.directory / name, 0o600)
         view = json.loads(kubectl(self.context, "config", "view", "--minify", "--raw", "-o", "json"))
