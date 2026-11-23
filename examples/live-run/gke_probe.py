@@ -5,6 +5,8 @@ import base64
 import json
 import math
 import os
+import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,7 @@ NAMESPACE = "bailiff-probe"
 ACCOUNT = "probe"
 ACCOUNTS = 2
 ROUNDS = 3
+RUN_LABEL = "bailiff-probe-run"
 ACCESS_REVIEWS = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
 RULES_REVIEWS = "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"
 
@@ -50,12 +53,26 @@ def refuse_existing(project: str) -> None:
         raise RuntimeError(f"{PROBE_CLUSTER} already exists in {project}; delete it or probe it by hand")
 
 
-def create_cluster(project: str, zone: str) -> None:
+def create_cluster(project: str, zone: str, run_id: str) -> None:
     gcloud(
         "container", "clusters", "create", PROBE_CLUSTER, "--zone", zone, "--num-nodes", "1",
-        "--machine-type", "e2-small", "--release-channel", "regular", "--labels", f"{PROBE_LABEL}={PROBE_CLUSTER}",
+        "--machine-type", "e2-small", "--release-channel", "regular",
+        "--labels", f"{PROBE_LABEL}={PROBE_CLUSTER},{RUN_LABEL}={run_id}",
         project=project,
     )  # fmt: skip
+
+
+def created_by(project: str, zone: str, run_id: str) -> bool:
+    command = [
+        "gcloud", "container", "clusters", "describe", PROBE_CLUSTER, "--zone", zone, "--project", project,
+        "--format", "json",
+    ]  # fmt: skip
+    described = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
+    if described.returncode != 0:
+        if "not found" in described.stderr.lower():
+            return False
+        raise RuntimeError(f"cannot tell whether {PROBE_CLUSTER} is this run's: {described.stderr.strip()}")
+    return (json.loads(described.stdout).get("resourceLabels") or {}).get(RUN_LABEL) == run_id
 
 
 def delete_cluster(project: str, zone: str) -> None:
@@ -177,8 +194,14 @@ def run(
     probe_cluster: Callable[[str, str, Path], dict[str, Any]] = probe,
 ) -> dict[str, Any]:
     refuse_existing(project)
+    run_id = secrets.token_hex(6)
     try:
-        create_cluster(project, zone)
+        create_cluster(project, zone, run_id)
+    except BaseException:
+        if created_by(project, zone, run_id):
+            delete_cluster(project, zone)
+        raise
+    try:
         with tempfile.TemporaryDirectory(prefix="bailiff-gke-probe-") as work:
             result = probe_cluster(project, zone, Path(work))
     finally:
@@ -188,12 +211,17 @@ def run(
     return result
 
 
+def terminate(signum: int, frame: object) -> None:
+    raise SystemExit(128 + signum)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create a disposable GKE cluster, run access reviews, delete it.")
     parser.add_argument("--project", required=True)
     parser.add_argument("--zone", default=ZONE)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    signal.signal(signal.SIGTERM, terminate)
     print(json.dumps(run(args.project, args.zone, args.out), indent=2))
     return 0
 
