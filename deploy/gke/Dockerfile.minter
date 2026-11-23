@@ -1,0 +1,9 @@
+FROM python:3.13.18-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN python -m pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python3.13/ensurepip
+COPY deploy/gke/mint_tokens.py /app/mint_tokens.py
+USER 65532:65532
+CMD ["python", "-I", "/app/mint_tokens.py"]

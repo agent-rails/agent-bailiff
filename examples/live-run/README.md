@@ -176,6 +176,8 @@ A cloud IAM probe on the same cluster, with Workload Identity Federation enabled
 
 An access review probe, 2026-11-23, on a new cluster of the same version and shape, created and deleted by `examples/live-run/gke_probe.py --project <project> --out <file>`: a service account with no RBAC ran a SelfSubjectAccessReview for each of the 172 dangerous actions at cluster scope and again in its own namespace. All 344 answers were exactly `{"allowed": false}`, with no `evaluationError` or `reason`. Its rules review in that namespace was incomplete with exactly the pinned error. Three rounds of 344 cluster-scope reviews (the effector's and the audit account's dangerous-action reviews) at 4 workers over kept-alive connections took 10.11, 10.09 and 10.24 s; per review p50 115 ms, p95 127 ms, p99 180 ms, max 341 ms, measured from the bailiff host. Rules review and SubjectAccessReview latency was not measured. Result file (not committed): `~/live-run-results/gke-access-review-probe.json`.
 
+Re-run 2026-11-23 at e3b534e (effector code as main 065b6f5, with the `evaluationError` rule, the full dangerous-action list and the 60 s check deadline), on a new cluster of the same version and shape, one run (`9550b538`): status ok, all six scenarios passed, the drift check closed the effector before the model ran in E4, the docket verified (25 entries), prod and staging stayed at 1 replica, no answered call named prod, and the effector token was in nothing the agent sent or received, the docket or the gateway log. Result file (not committed): `~/live-run-results/gke-read-7.json`.
+
 `read_pod_log` takes no container name, so it is refused for a pod with more than one container.
 
 ### Run it

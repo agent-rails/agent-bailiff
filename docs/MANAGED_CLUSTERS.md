@@ -6,7 +6,7 @@ How to run the effector against GKE or EKS. Managed clusters get reads only: the
 
 | Platform | Effector status | Evidence |
 |---|---|---|
-| GKE Standard 1.36 | supported at d673325; later revisions not re-run on GKE | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23) at d673325, see `examples/live-run/README.md`. Later revisions add the `evaluationError` rule, more dangerous actions and the 60 s check deadline; an access review probe on the same version (2026-11-23) found no `evaluationError` on ordinary denials. They pass the kind webhook-authorizer suite (6 of 6 local runs; earlier 10 s review timeouts came from the test stub authorizer closing every connection), not on GKE. |
+| GKE Standard 1.36 | supported; read-only run at e3b534e (effector code of 065b6f5) passed on 2026-11-23 | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23) at d673325, see `examples/live-run/README.md`. Later revisions add the `evaluationError` rule, more dangerous actions and the 60 s check deadline; an access review probe on the same version (2026-11-23) found no `evaluationError` on ordinary denials. They pass the kind webhook-authorizer suite (6 of 6 local runs; earlier 10 s review timeouts came from the test stub authorizer closing every connection), and one read-only run on the same GKE version at e3b534e (2026-11-23, run `9550b538`) passed all six scenarios. |
 | GKE Autopilot | not supported | not tested |
 | EKS 1.36 | not supported | not probed. `platform: eks` accepts no incomplete rules review, so if EKS reports one the effector does not start. |
 
@@ -76,7 +76,7 @@ kubectl create token effector -n bailiff-system --duration=10m
 kubectl create token effector-audit -n bailiff-system --duration=10m
 ```
 
-Whether these return a token with `exp - iat` of 600 s on GKE has not been checked. If not, the effector refuses the token.
+On 1.36.4-gke.2377000 (2026-11-23) a TokenRequest for 600 s returned a token with `exp - iat` of exactly 600 s. For GKE, `GKE_QUICKSTART.md` sets up a Cloud Run job on a schedule that mints both tokens into one Secret Manager secret, and `deploy/gke/fetch_tokens.py` on the host copies them into the two files.
 
 ## Cloud IAM check
 
