@@ -47,6 +47,7 @@ from agent_bailiff.keys import PublicKeyRecord, load_signing_key
 from agent_bailiff.proxy.agent_key import AgentKeyError, generate_agent_key
 from agent_bailiff.proxy.server import StdioProxy, Stop, load_routes, read_routes
 from agent_bailiff.proxy.task_state import NoTask, TaskState, TaskUnavailable
+from agent_bailiff.route_generation import MAX_TOOLS_BYTES, generate_routes, write_new
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
@@ -257,6 +258,7 @@ def _parser() -> argparse.ArgumentParser:
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
     _add_proxy(commands)
+    _add_routes(commands)
     _add_task(commands)
     return parser
 
@@ -297,6 +299,18 @@ def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     _add_task_source(serve)
     serve.add_argument("--routes", type=Path, required=True, help="the route table the gateway enforces")
     serve.set_defaults(handler=_proxy_run)
+
+
+def _add_routes(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    routes = commands.add_parser("routes", help="draft route tables")
+    actions = routes.add_subparsers(dest="action", required=True)
+    generate = actions.add_parser(
+        "generate", help="draft a route table from proxy tools output; fill each resource before use"
+    )
+    generate.add_argument("--tools", type=Path, required=True, help="the JSON proxy tools printed")
+    generate.add_argument("--service", required=True, help="the gateway service these tools belong to")
+    generate.add_argument("--out", type=Path, required=True, help="route table to create; never overwritten")
+    generate.set_defaults(handler=_routes_generate)
 
 
 def _add_task_source(parser: argparse.ArgumentParser) -> None:
@@ -726,6 +740,25 @@ def _stop_proxy_on_signals(proxy: StdioProxy) -> None:
 
     for number in (signal.SIGTERM, signal.SIGINT):
         signal.signal(number, stop)
+
+
+def _routes_generate(args: argparse.Namespace) -> int:
+    try:
+        with args.tools.open("rb") as source:
+            raw = source.read(MAX_TOOLS_BYTES + 1)
+        if len(raw) > MAX_TOOLS_BYTES:
+            raise ValueError(f"the tools document is larger than {MAX_TOOLS_BYTES} bytes")
+        document, rejected = generate_routes(parse_strict_json(raw), args.service)
+        write_new(args.out, json.dumps(document, indent=2).encode() + b"\n")
+    except (OSError, ValueError) as exc:
+        return _refused("routes generate", exc)
+    for item in rejected:
+        print(f"{PROG} routes generate: rejected {item.name!r}: {item.reason}", file=sys.stderr)
+    print(
+        f"{PROG} routes generate: wrote {len(document['routes'])} route(s) to {args.out}; fill each resource",
+        file=sys.stderr,
+    )
+    return EXIT_REFUSED if rejected else 0
 
 
 def _task_issue(args: argparse.Namespace) -> int:
