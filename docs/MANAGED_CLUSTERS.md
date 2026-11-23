@@ -6,11 +6,11 @@ How to run the effector against GKE or EKS. Managed clusters get reads only: the
 
 | Platform | Effector status | Evidence |
 |---|---|---|
-| GKE Standard 1.36 | supported | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23), see `examples/live-run/README.md`. |
+| GKE Standard 1.36 | supported at d673325; later revisions not re-run on GKE | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23) at d673325, see `examples/live-run/README.md`. Later revisions add the `evaluationError` rule and more dangerous actions; they passed the kind webhook-authorizer suite, not a GKE run. |
 | GKE Autopilot | not supported | not tested |
 | EKS 1.36 | not supported | not probed. `platform: eks` accepts no incomplete rules review, so if EKS reports one the effector does not start. |
 
-The effector refuses to start on a cluster whose `/version` `gitVersion` contains `-gke.` unless `platform` is `gke`, or `-eks-` unless `platform` is `eks`, and refuses `gke` or `eks` on a cluster without that marker. The `-eks-` marker has not been checked against an EKS cluster.
+The effector refuses to start on a cluster whose `/version` `gitVersion` contains `-gke.` unless `platform` is `gke`, or `-eks-` unless `platform` is `eks`, and refuses `gke` or `eks` on a cluster without that marker. The `-eks-` marker has not been checked against an EKS cluster; it also matches EKS Distro builds (for example `v1.28.2-eks-1-28-6`), which therefore need `platform: eks`.
 
 ## What changes with `platform`
 
