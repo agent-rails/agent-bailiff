@@ -69,6 +69,28 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
     _sync_parent(path)
 
 
+def replace_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> None:
+    staged = f".{name}.new"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(staged, flags, mode, dir_fd=dir_fd)
+    except OSError as exc:
+        raise OwnedFileError(f"cannot create the {label}: {exc.strerror}") from None
+    try:
+        os.fchmod(fd, mode)
+        written = os.write(fd, content)
+        if written != len(content):
+            raise OSError(errno.EIO, f"wrote {written} of {len(content)} bytes")
+        os.fsync(fd)
+        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    except OSError as exc:
+        _unlink_staged(dir_fd, staged)
+        raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
+    finally:
+        os.close(fd)
+
+
 def pin_owned(path: Path, label: str) -> PinnedFile:
     fd = _open_owned(path, label, os.O_RDONLY)
     try:
@@ -143,6 +165,13 @@ def _check_parent(path: Path, label: str) -> None:
         raise OwnedFileError(
             f"the {label} directory must be owned by uid {os.geteuid()} and not writable by group or others"
         )
+
+
+def _unlink_staged(dir_fd: int, staged: str) -> None:
+    try:
+        os.unlink(staged, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
 
 
 def _sync_parent(path: Path) -> None:
