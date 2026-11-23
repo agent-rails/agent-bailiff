@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -161,6 +161,9 @@ class ToolRoutes:
         return frozenset(
             service for (service, _), route in self._table.items() if route.tool.startswith(CATALOG_TOOL_PREFIX)
         )
+
+    def __iter__(self) -> Iterator[ToolRoute]:
+        return iter(self._table.values())
 
     def route(self, service: str, name: str) -> ToolRoute | None:
         return self._table.get((service, name))

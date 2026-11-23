@@ -19,6 +19,19 @@ SUSPENDED_GUIDANCE = (
     "stop, tell the user, and do not retry until it is resumed"
 )
 
+TASK_EXPIRED = (
+    "task_expired: this task's authority has expired and nothing was sent; stop and ask the user to issue a new task"
+)
+NO_TASK = "no_task: no task has been issued to this agent and nothing was sent; stop and ask the user to issue one"
+OUTCOME_UNKNOWN = (
+    "the call was sent but its outcome is unknown, so it may have taken effect; "
+    "do not retry it; check the target's state or tell the user"
+)
+GATEWAY_UNAVAILABLE = (
+    "gateway_unavailable: the gateway did not answer and the call was not sent; "
+    "retry at most twice with backoff, then stop and tell the user"
+)
+
 
 def guidance(outcome: Refused | NeedsApproval) -> str:
     if outcome.reason == "suspended":
@@ -32,7 +45,7 @@ def mcp_result(outcome: Outcome) -> dict[str, Any]:
     if isinstance(outcome, Refused | NeedsApproval):
         return text(f"{outcome.reason}: {guidance(outcome)}", error=True)
     if isinstance(outcome, OutcomeUnknown):
-        return text(f"outcome_unknown: {outcome.detail}", error=True)
+        return text(f"outcome_unknown: {outcome.detail}; {OUTCOME_UNKNOWN}", error=True)
     raise AssertionError(f"unexpected outcome {outcome!r}")
 
 

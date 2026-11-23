@@ -58,7 +58,7 @@ def installed(tmp_path_factory):
     return home / "bin" / "agent-bailiff"
 
 
-@pytest.mark.parametrize("arguments", [["--help"]])
+@pytest.mark.parametrize("arguments", [["--help"], ["proxy", "--help"]])
 def test_the_installed_cli_starts(installed, arguments):
     done = subprocess.run(
         [str(installed), *arguments], capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=False
