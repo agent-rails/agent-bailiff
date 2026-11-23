@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import secrets
 import stat
@@ -77,6 +78,7 @@ def write_task_file(out_dir: Path, task: TaskFile) -> Path:
     content = task.encode()
     dir_fd = _open_task_dir(out_dir)
     try:
+        _lock(dir_fd, out_dir)
         current = _read_current(dir_fd, out_dir)
         if current is not None and current.root.subject == task.root.subject:
             raise TaskIssueError(
@@ -89,6 +91,13 @@ def write_task_file(out_dir: Path, task: TaskFile) -> Path:
     finally:
         os.close(dir_fd)
     return out_dir / TASK_FILE_NAME
+
+
+def _lock(dir_fd: int, out_dir: Path) -> None:
+    try:
+        fcntl.flock(dir_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise TaskIssueError(f"another task issue is running in {out_dir}; retry when it finishes") from None
 
 
 def _open_task_dir(out_dir: Path) -> int:
