@@ -90,6 +90,7 @@ class StubAuthorizer(ThreadingHTTPServer):
 
 class _AuthorizerHandler(BaseHTTPRequestHandler):
     server: StubAuthorizer
+    protocol_version = "HTTP/1.1"
 
     def do_POST(self) -> None:
         review = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
