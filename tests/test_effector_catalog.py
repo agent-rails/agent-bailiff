@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_bailiff.effector.catalog import ALLOWED_CALLS, CatalogError, OperationCatalog
+from agent_bailiff.effector.catalog import ALLOWED_CALLS, CatalogError, OperationCatalog, shipped_catalog
 
 SHIPPED = Path(__file__).resolve().parent.parent / "agent_bailiff" / "effector" / "catalogs" / "kubernetes.json"
 
@@ -207,6 +207,23 @@ def test_the_digest_is_stable_and_changes_with_the_catalog():
     changed = shipped()
     scale(changed)["arguments"]["replicas"]["maximum"] = 9
     assert OperationCatalog(changed).digest != OperationCatalog(shipped()).digest
+
+
+def test_the_read_catalog_ships_only_reads_with_a_pinned_digest():
+    catalog = OperationCatalog.load(shipped_catalog("kubernetes-read"))
+    assert [(item.name, item.call.verb) for item in catalog.operations] == [
+        ("list_pods", "list"),
+        ("read_pod_log", "get"),
+        ("get_deployment", "get"),
+    ]
+    assert "status.observedGeneration" in catalog.operation("get_deployment").response_fields
+    assert catalog.digest == "GBu8dwguJ0LKXDPArll2qQZswVfYu1SrSQ2RTRsMilc"
+
+
+@pytest.mark.parametrize("name", ["kubernetes-write", "../kubernetes", ""])
+def test_an_unshipped_catalog_name_is_refused(name):
+    with pytest.raises(CatalogError, match="choose from kubernetes, kubernetes-read"):
+        shipped_catalog(name)
 
 
 def test_load_refuses_invalid_json_and_oversized_files(tmp_path):

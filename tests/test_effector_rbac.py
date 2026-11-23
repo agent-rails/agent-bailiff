@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from agent_bailiff.cli import main
-from agent_bailiff.effector.catalog import CatalogError, OperationCatalog
+from agent_bailiff.effector.catalog import CatalogError, OperationCatalog, shipped_catalog
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
 from agent_bailiff.service.init import DEFAULT_CATALOG
 
@@ -95,6 +95,21 @@ def test_impersonate_on_grants_mirror_the_catalog_in_each_namespace():
             },
             {"apiGroups": ["apps"], "resources": ["deployments/scale"], "verbs": ["impersonate-on:user-info:patch"]},
         ]
+
+
+def test_the_read_catalog_generates_no_write_grant():
+    items = manifests({"tenant-a": ["staging"]}, catalog=OperationCatalog.load(shipped_catalog("kubernetes-read")))
+    verbs = {verb for item in items for rule in item.get("rules", []) for verb in rule["verbs"]}
+    assert not {verb for verb in verbs if verb.endswith(("patch", "update", "delete"))}
+    assert not [item for item in items if item["metadata"]["name"].endswith(("-scale", "-restart"))]
+    assert named(items, "ClusterRole", "bailiff-effector-impersonate")["rules"][0]["resourceNames"] == [
+        "bailiff:tenant-a:read"
+    ]
+    assert named(items, "Role", "bailiff-effector-on", "staging")["rules"] == [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["impersonate-on:user-info:list"]},
+        {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["impersonate-on:user-info:get"]},
+        {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["impersonate-on:user-info:get"]},
+    ]
 
 
 def test_each_tenant_identity_is_granted_only_its_operations_in_its_namespaces():
