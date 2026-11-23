@@ -491,6 +491,34 @@ def test_tools_list_is_returned(client):
     assert client.list_tools() == [{"name": "deploy_service"}]
 
 
+def tool_page(index, cursor):
+    page = {"tools": [{"name": f"tool_{index}"}]}
+    if cursor is not None:
+        page["nextCursor"] = cursor
+    return reply(page)
+
+
+def test_tools_list_follows_cursors_and_merges_pages(client, stub):
+    stub.responders["tools/list"] = [tool_page(0, "c1"), tool_page(1, "c2"), tool_page(2, None)]
+    assert client.list_tools() == [{"name": "tool_0"}, {"name": "tool_1"}, {"name": "tool_2"}]
+    params = [message["params"] for _, message in stub.requests if message["method"] == "tools/list"]
+    assert params == [{}, {"cursor": "c1"}, {"cursor": "c2"}]
+
+
+def test_tools_list_with_more_than_ten_pages_is_refused(client, stub):
+    stub.responders["tools/list"] = [tool_page(index, f"c{index + 1}") for index in range(11)]
+    with pytest.raises(GatewayError, match="more than 10 pages"):
+        client.list_tools()
+    assert stub.methods().count("tools/list") == 10
+
+
+@pytest.mark.parametrize("cursor", ["", 7])
+def test_a_malformed_cursor_is_refused(client, stub, cursor):
+    stub.responders["tools/list"] = [reply({"tools": [], "nextCursor": cursor})]
+    with pytest.raises(GatewayError, match="nextCursor"):
+        client.list_tools()
+
+
 def refusal(reason):
     return reply({"content": [{"type": "text", "text": reason}], "isError": True})
 

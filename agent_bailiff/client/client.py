@@ -28,6 +28,7 @@ CLIENT_VERSION = "1"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 STREAM_CHUNK_BYTES = 64 * 1024
 SETUP_ATTEMPTS = 3
+MAX_TOOL_PAGES = 10
 BACKOFF_BASE_SECONDS = 0.2
 BACKOFF_CAP_SECONDS = 2.0
 RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
@@ -234,19 +235,34 @@ class BailiffClient:
 
     def list_tools(self) -> list[dict[str, Any]]:
         self._check_thread()
+        tools: list[dict[str, Any]] = []
+        params: dict[str, Any] = {}
+        for _ in range(MAX_TOOL_PAGES):
+            result = self._list_tools_page(params)
+            page = result.get("tools")
+            if not isinstance(page, list) or not all(isinstance(tool, dict) for tool in page):
+                raise GatewayError("tools/list returned no tool list")
+            tools.extend(page)
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return tools
+            if not isinstance(cursor, str) or not cursor:
+                raise GatewayError("tools/list returned a nextCursor that is not a non-empty string")
+            params = {"cursor": cursor}
+        raise GatewayError(f"tools/list returned more than {MAX_TOOL_PAGES} pages")
+
+    def _list_tools_page(self, params: dict[str, Any]) -> dict[str, Any]:
         self._ensure_session()
         try:
-            message = self._setup_request("tools/list", {})
+            message = self._setup_request("tools/list", params)
         except _SessionExpired:
             self._ensure_session()
             try:
-                message = self._setup_request("tools/list", {})
+                message = self._setup_request("tools/list", params)
             except _SessionExpired:
                 raise GatewayError("tools/list returned HTTP 404 after the session was initialized again") from None
-        tools = message.get("result", {}).get("tools")
-        if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
-            raise GatewayError("tools/list returned no tool list")
-        return tools
+        result: dict[str, Any] = message["result"]
+        return result
 
     @property
     def protocol_version(self) -> str | None:
