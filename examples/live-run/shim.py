@@ -10,18 +10,9 @@ from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.client import (
-    BailiffClient,
-    GatewayError,
-    Holder,
-    NeedsApproval,
-    Outcome,
-    OutcomeUnknown,
-    PreparedCall,
-    Refused,
-    Result,
-)
+from agent_bailiff.client import BailiffClient, GatewayError, Holder, PreparedCall
 from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
+from agent_bailiff.proxy.guidance import mcp_result, text
 from agent_bailiff.routes import ToolRoutes
 
 PROTOCOL = "2025-11-25"
@@ -139,40 +130,6 @@ def send(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
         return mcp_result(client.send(call))
     except GatewayError as error:
         return text(f"gateway_error: {error}", error=True)
-
-
-GUIDANCE = {
-    "stop": "agent-bailiff refused this call and the gateway did not forward it; "
-    "do not retry it or get its effect another way; tell the user",
-    "ask_user": "agent-bailiff needs a human to approve this call; the gateway did not forward it; "
-    "stop and tell the user",
-    "retry_later": "an agent-bailiff component was unavailable and the gateway did not forward the call; "
-    "budget for this attempt may already be spent; retry at most twice with backoff, then stop and tell the user",
-}
-SUSPENDED_GUIDANCE = (
-    "an operator suspended agent-bailiff and the gateway did not forward the call; "
-    "stop, tell the user, and do not retry until it is resumed"
-)
-
-
-def guidance(outcome: Refused | NeedsApproval) -> str:
-    if outcome.reason == "suspended":
-        return SUSPENDED_GUIDANCE
-    return GUIDANCE[outcome.action]
-
-
-def mcp_result(outcome: Outcome) -> dict[str, Any]:
-    if isinstance(outcome, Result):
-        return dict(outcome.result)
-    if isinstance(outcome, Refused | NeedsApproval):
-        return text(f"{outcome.reason}: {guidance(outcome)}", error=True)
-    if isinstance(outcome, OutcomeUnknown):
-        return text(f"outcome_unknown: {outcome.detail}", error=True)
-    raise AssertionError(f"unexpected outcome {outcome!r}")
-
-
-def text(value: str, *, error: bool = False) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": value}], "isError": error}
 
 
 def main() -> None:
