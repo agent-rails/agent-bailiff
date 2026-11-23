@@ -29,7 +29,7 @@ def generate_routes(tools: object, service: str) -> tuple[dict[str, Any], list[R
     problem = service_problem(service)
     if problem:
         raise ValueError(problem)
-    names: list[str] = []
+    names: set[str] = set()
     rejected: list[Rejected] = []
     for item in tools["tools"]:
         name = item.get("name") if isinstance(item, dict) else None
@@ -40,7 +40,7 @@ def generate_routes(tools: object, service: str) -> tuple[dict[str, Any], list[R
         if reason:
             rejected.append(Rejected(name[:80], reason))
             continue
-        names.append(name)
+        names.add(name)
     duplicates = {item.name for item in rejected if item.reason == DUPLICATE}
     routes = [
         {"service": service, "name": name, "tool": f"{service}.{name}", "resource": ""}
@@ -58,7 +58,7 @@ def service_problem(service: str) -> str | None:
     return None
 
 
-def name_problem(service: str, name: str, accepted: list[str]) -> str | None:
+def name_problem(service: str, name: str, accepted: set[str]) -> str | None:
     if name in accepted:
         return DUPLICATE
     if not name or not all("!" <= character <= "~" for character in name):
