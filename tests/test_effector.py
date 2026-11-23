@@ -666,11 +666,20 @@ class PooledResponse:
         return True
 
 
+class PooledSocket:
+    def __init__(self):
+        self.timeouts = []
+
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
+
+
 class PooledConnection:
     opened = []
 
-    def __init__(self, *args, **kwargs):
-        self.responses, self.closed, self.sent = [], False, 0
+    def __init__(self, *args, timeout=None, **kwargs):
+        self.responses, self.closed, self.sent, self.timeout = [], False, 0, timeout
+        self.sock = PooledSocket()
         PooledConnection.opened.append(self)
 
     def request(self, *args, **kwargs):
@@ -693,7 +702,7 @@ def pooled(monkeypatch, tmp_path):
     PooledConnection.opened = []
 
     def connect(*args, **kwargs):
-        connection = PooledConnection()
+        connection = PooledConnection(*args, **kwargs)
         connection.responses = [PooledResponse() for _ in range(3)]
         return connection
 
@@ -705,6 +714,19 @@ def test_the_pooled_transport_reuses_an_idle_connection(pooled):
     assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
     assert pooled.request("GET", "/api", {}, None) == (200, b"{}")
     assert len(PooledConnection.opened) == 1 and PooledConnection.opened[0].sent == 2
+
+
+def test_the_pooled_transport_applies_each_request_timeout_to_new_and_idle_connections(pooled):
+    pooled.request("GET", "/api", {}, None, timeout=4.0)
+    pooled.request("GET", "/api", {}, None, timeout=1.5)
+    [connection] = PooledConnection.opened
+    assert connection.sock.timeouts == [1.5]
+    assert connection.timeout == 1.5
+
+
+def test_the_pooled_transport_opens_a_connection_with_the_request_timeout(pooled):
+    pooled.request("GET", "/api", {}, None, timeout=2.5)
+    assert PooledConnection.opened[0].timeout == 2.5
 
 
 def test_the_pooled_transport_retries_a_stale_connection_once_on_a_new_one(pooled):

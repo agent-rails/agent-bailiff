@@ -92,7 +92,7 @@ Alert on these effector log lines:
 - `over half its ... s freshness window`: a check took more than 60 s. At more than 120 s every call is refused.
 - `effector_refusal_unrecorded`: a refusal the docket did not acknowledge.
 
-Each check logs its duration, request count and throttled count. Per account the dangerous-action reviews cost 172 cluster-scope reviews, whatever the tenant and cluster namespace counts. The rules reviews still run once per account per namespace in the cluster. Check durations on GKE have not been measured.
+Each check logs its duration, request count and throttled count. Per account the dangerous-action reviews cost 172 cluster-scope reviews, whatever the tenant and cluster namespace counts. The rules reviews still run once per account per namespace in the cluster. A check fails when it has not finished 60 s after it started (EFFECTOR.md), so a cluster with too many namespaces to review in 60 s keeps the gate closed rather than serving on a stale check.
 
 ## Stop and roll back
 

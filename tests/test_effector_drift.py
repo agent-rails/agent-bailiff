@@ -14,12 +14,13 @@ from agent_bailiff.effector.drift import (
     BASELINE_RULES,
     PINNED_REFERENCES,
     PINNED_SCHEMAS,
+    CheckDeadlineExceeded,
     RbacAudit,
     RbacDrift,
     RbacGate,
     grants,
 )
-from agent_bailiff.effector.kubernetes import KubernetesUnavailable, Throttled
+from agent_bailiff.effector.kubernetes import TIMEOUT_SECONDS, KubernetesUnavailable, Throttled
 from agent_bailiff.effector.platform import DANGEROUS_ACTIONS, VERSION_PATH
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests
 from agent_bailiff.service.init import DEFAULT_CATALOG
@@ -107,6 +108,7 @@ class FakeApi:
         self.status = {}
         self.page_size = None
         self.requests = []
+        self.timeouts = []
         self.schema = apps_schema()
         self.registration = {
             "webhooks": [
@@ -141,8 +143,9 @@ class FakeApi:
     def close(self):
         self.closed = True
 
-    def request(self, method, path, headers, body):
+    def request(self, method, path, headers, body, *, timeout):
         self.requests.append((method, path, headers["Authorization"]))
+        self.timeouts.append(timeout)
         if self.throttled:
             self.throttled -= 1
             raise Throttled(self.retry_after)
@@ -225,7 +228,7 @@ def api(tmp_path):
     return FakeApi(tmp_path)
 
 
-def make_audit(api, tmp_path, platform):
+def make_audit(api, tmp_path, platform, **options):
     for name, value in (("effector", EFFECTOR_TOKEN), ("audit", AUDIT_TOKEN)):
         (tmp_path / name).write_text(value)
         os.chmod(tmp_path / name, 0o600)
@@ -239,6 +242,7 @@ def make_audit(api, tmp_path, platform):
         CATALOG.operations,
         platform=platform,
         sleep=SLEEPS.append,
+        **options,
     )
 
 
@@ -863,6 +867,54 @@ def test_dangerous_action_reviews_do_not_grow_with_the_cluster_namespaces(api, g
     api.namespaces += [f"team-{index}" for index in range(1000)]
     assert gke_audit.check() == []
     assert len(api.self_reviews) == few
+
+
+class Ticking:
+    def __init__(self, api, step):
+        self.api, self.step = api, step
+
+    def __call__(self):
+        return len(self.api.requests) * self.step
+
+
+def test_each_request_waits_at_most_the_socket_timeout_or_the_time_left(api, tmp_path):
+    short = make_audit(api, tmp_path, "upstream", deadline_seconds=3, monotonic=lambda: 0.0)
+    assert short.check() == []
+    assert set(api.timeouts) == {3}
+    api.timeouts.clear()
+    long = make_audit(api, tmp_path, "upstream", deadline_seconds=60, monotonic=lambda: 0.0)
+    assert long.check() == []
+    assert set(api.timeouts) == {TIMEOUT_SECONDS}
+
+
+def test_no_request_is_sent_once_the_check_passes_its_deadline(api, tmp_path):
+    slow = make_audit(api, tmp_path, "gke", deadline_seconds=60, monotonic=Ticking(api, 1.0), workers=1)
+    api.version = {"gitVersion": "v1.36.4-gke.2377000"}
+    with pytest.raises(CheckDeadlineExceeded) as raised:
+        slow.check()
+    assert len(api.requests) == 60
+    planned = 2 * len(api.namespaces) + 2 * len(DANGEROUS_ACTIONS) + len(slow._synthetic_user_reviews())
+    reviewed = 60 - len([request for request in api.requests if request[0] == "GET"])
+    assert str(raised.value) == f"the RBAC check passed its 60 s deadline after {reviewed} of {planned} reviews"
+
+
+def test_a_retry_wait_past_the_deadline_fails_the_check_without_sleeping(api, tmp_path):
+    api.throttled = 1
+    api.retry_after = 8.0
+    short = make_audit(api, tmp_path, "upstream", deadline_seconds=8, monotonic=lambda: 0.0)
+    with pytest.raises(CheckDeadlineExceeded, match="passed its 8 s deadline after 0 of 0 reviews"):
+        short.check()
+    assert SLEEPS == []
+
+
+def test_a_check_past_its_deadline_closes_the_gate(api, tmp_path):
+    slow = make_audit(api, tmp_path, "upstream", deadline_seconds=5, monotonic=Ticking(api, 1.0))
+    gate = RbacGate(slow, Clock(), interval=60)
+    with pytest.raises(RbacDrift) as raised:
+        gate.verify()
+    [problem] = raised.value.problems
+    assert problem.startswith("the RBAC check failed: the RBAC check passed its 5 s deadline after ")
+    assert gate.healthy(1000) is False
 
 
 @pytest.mark.parametrize(("seconds", "alarm"), [(0, False), (60, False), (61, True)])
