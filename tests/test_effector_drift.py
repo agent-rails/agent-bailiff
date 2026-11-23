@@ -370,6 +370,18 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             " a dangerous action outside the generated set",
         ),
         (
+            ("effector", "staging", "create", "replicationcontrollers"),
+            "effector may create core replicationcontrollers in staging, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector-audit", "staging", "patch", "services"),
+            "effector-audit may patch core services/proxy in staging, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "update", "nodes"),
+            "effector may update core nodes cluster-wide, a dangerous action outside the generated set",
+        ),
+        (
             ("effector", None, "create", "services"),
             "effector may create core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
