@@ -238,6 +238,8 @@ def request_path(operation: CatalogOperation, arguments: Mapping[str, Any]) -> s
     if call.subresource:
         path += f"/{call.subresource}"
     query = {parameter: str(arguments[argument]) for parameter, argument in sorted(call.query.items())}
+    if call.subresource == "log":
+        query["limitBytes"] = str(operation.max_response_bytes)
     if call.restarts:
         query["fieldManager"] = FIELD_MANAGER
         query["force"] = "true"
