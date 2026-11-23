@@ -100,6 +100,7 @@ class FakeApi:
         self.extra_non_resource = []
         self.sar_overrides = {}
         self.self_allowed = set()
+        self.self_errors = {}
         self.self_reviews = []
         self.incomplete = set()
         self.evaluation_error = None
@@ -182,7 +183,10 @@ class FakeApi:
             account = TOKENS[headers["Authorization"]]
             self.self_reviews.append((account, attributes))
             key = (account, attributes.get("namespace"), attributes["verb"], attributes["resource"])
-            return 201, json.dumps({"status": {"allowed": key in self.self_allowed}}).encode()
+            status = {"allowed": key in self.self_allowed}
+            if key in self.self_errors:
+                status["evaluationError"] = self.self_errors[key]
+            return 201, json.dumps({"status": status}).encode()
         if method == "POST":
             namespace = json.loads(body)["spec"]["namespace"]
             account = TOKENS[headers["Authorization"]]
@@ -365,6 +369,25 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
 )
 def test_a_dangerous_action_an_account_may_take_is_drift(api, gke_audit, key, problem):
     api.self_allowed.add(key)
+    assert problem in gke_audit.check()
+
+
+@pytest.mark.parametrize(
+    ("key", "problem"),
+    [
+        (
+            ("effector", None, "get", "secrets"),
+            "whether effector may get core secrets cluster-wide could not be decided: webhook authorizer timeout",
+        ),
+        (
+            ("effector-audit", "staging", "create", "pods"),
+            "whether effector-audit may create core pods/exec in staging could not be decided:"
+            " webhook authorizer timeout",
+        ),
+    ],
+)
+def test_an_undecided_dangerous_action_review_is_drift(api, gke_audit, key, problem):
+    api.self_errors[key] = "webhook authorizer timeout"
     assert problem in gke_audit.check()
 
 

@@ -297,12 +297,17 @@ class RbacAudit:
         ).get("status")
         if not isinstance(status, dict) or not isinstance(status.get("allowed"), bool):
             raise KubernetesUnavailable("a SelfSubjectAccessReview returned no decision")
-        if status["allowed"] is not True:
-            return []
         resource = f"{action.resource}/{action.subresource}" if action.subresource else action.resource
         group = action.group or "core"
         where = f"in {namespace}" if namespace is not None else "cluster-wide"
-        return [f"{account} may {action.verb} {group} {resource} {where}, a dangerous action outside the generated set"]
+        if status["allowed"] is True:
+            return [
+                f"{account} may {action.verb} {group} {resource} {where}, a dangerous action outside the generated set"
+            ]
+        error = status.get("evaluationError")
+        if error:
+            return [f"whether {account} may {action.verb} {group} {resource} {where} could not be decided: {error}"]
+        return []
 
     def _check_synthetic_user(self, user: str, namespace: str, operation: CatalogOperation) -> list[str]:
         expected = operation.identity == user.rsplit(":", 1)[1]
