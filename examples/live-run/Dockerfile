@@ -21,10 +21,7 @@ COPY requirements-ci.txt /tmp/requirements-ci.txt
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements-ci.txt
 COPY pyproject.toml README.md LICENSE /app/
 COPY agent_bailiff /app/agent_bailiff
-COPY adapters/agentgateway/proto /app/adapters/agentgateway/proto
-COPY adapters/agentgateway/scripts/generate_proto.sh /app/adapters/agentgateway/scripts/
-RUN sh adapters/agentgateway/scripts/generate_proto.sh \
-    && python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
     && python -m pip check \
     && python -m pip uninstall --yes pip \
     && rm -rf /app/agent_bailiff /app/agent_bailiff.egg-info /app/build /usr/local/lib/python3.13/ensurepip
