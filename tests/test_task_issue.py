@@ -1,3 +1,5 @@
+import errno
+import fcntl
 import json
 import os
 import stat
@@ -8,6 +10,7 @@ from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.cli import main
+from agent_bailiff.custodian import files
 from agent_bailiff.keys import generate_signing_key
 from agent_bailiff.task import issue as issue_module
 from agent_bailiff.task.issue import TaskIssueError, TaskRequest, issue_task, write_task_file
@@ -154,13 +157,54 @@ def test_a_current_file_that_is_not_a_task_file_is_refused(out_dir):
     assert (out_dir / "task.json").read_text() == "{}"
 
 
-def test_a_failed_write_keeps_the_current_task(out_dir):
+def failing_rename(*args, **kwargs):
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def test_a_failed_write_keeps_the_current_task(out_dir, monkeypatch):
     first = issued()
     write_task_file(out_dir, first)
-    (out_dir / ".task.json.new").mkdir()
-    with pytest.raises(TaskIssueError, match="cannot create the task file"):
+    monkeypatch.setattr(files.os, "rename", failing_rename)
+    with pytest.raises(TaskIssueError, match="cannot write the task file"):
         write_task_file(out_dir, issued())
     assert TaskFile.decode((out_dir / "task.json").read_bytes()) == first
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_concurrent_issue_is_refused_while_another_holds_the_lock(out_dir):
+    fd = os.open(out_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with pytest.raises(TaskIssueError, match="another task issue is running"):
+            write_task_file(out_dir, issued())
+    finally:
+        os.close(fd)
+    assert os.listdir(out_dir) == []
+
+
+def test_concurrent_writers_never_share_a_staged_file(out_dir, monkeypatch):
+    first, second = issued(), issued()
+    real_fsync = files.os.fsync
+    nested = []
+
+    def fsync_then_interleave(fd):
+        real_fsync(fd)
+        if not nested:
+            nested.append(True)
+            dir_fd = os.open(out_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                files.replace_at(dir_fd, "task.json", "task file", second.encode(), 0o644)
+            finally:
+                os.close(dir_fd)
+
+    monkeypatch.setattr(files.os, "fsync", fsync_then_interleave)
+    dir_fd = os.open(out_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        files.replace_at(dir_fd, "task.json", "task file", first.encode(), 0o644)
+    finally:
+        os.close(dir_fd)
+    assert TaskFile.decode((out_dir / "task.json").read_bytes()) == first
+    assert os.listdir(out_dir) == ["task.json"]
 
 
 def test_the_cli_issues_and_prints_the_task_id(out_dir, tmp_path, capsys):

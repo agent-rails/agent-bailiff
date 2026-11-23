@@ -9,13 +9,12 @@ from pathlib import Path
 from agent_warrant.identity import encode_public_key, is_valid_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.custodian.files import OwnedFileError, replace_at
+from agent_bailiff.custodian.files import STAGED_SUFFIX, OwnedFileError, replace_at
 
 KEY_DIR_MODE = 0o700
 KEY_MODE = 0o600
 KEY_SUFFIX = ".key"
 SEED_BYTES = 32
-STAGED_SUFFIX = ".new"
 
 
 class AgentKeyError(Exception):
@@ -116,5 +115,7 @@ def _key_subjects(dir_fd: int) -> dict[str, int]:
 
 def _staged_names(dir_fd: int) -> list[str]:
     return sorted(
-        name for name in os.listdir(dir_fd) if name.startswith(".") and name.endswith(KEY_SUFFIX + STAGED_SUFFIX)
+        name
+        for name in os.listdir(dir_fd)
+        if name.startswith(".") and KEY_SUFFIX + "." in name and name.endswith(STAGED_SUFFIX)
     )

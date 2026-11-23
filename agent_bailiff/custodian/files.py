@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
 import sqlite3
 import stat
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 OWNED_MODE = 0o600
+STAGED_SUFFIX = ".new"
 FORBIDDEN_PARENT_BITS = 0o022
 BUSY_TIMEOUT_SECONDS = 30
 
@@ -70,8 +72,8 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
 
 
 def replace_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> None:
-    staged = f".{name}.new"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+    staged = f".{name}.{secrets.token_hex(8)}{STAGED_SUFFIX}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
         fd = os.open(staged, flags, mode, dir_fd=dir_fd)
     except OSError as exc:

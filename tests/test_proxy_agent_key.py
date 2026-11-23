@@ -105,7 +105,7 @@ def test_a_short_write_leaves_no_key_and_prints_no_subject(key_dir):
 
 
 def test_a_staged_leftover_does_not_block_keygen_and_prune_removes_it(key_dir):
-    leftover = key_dir / f".{encode_public_key(Ed25519PrivateKey.generate().public_key())}.key.new"
+    leftover = key_dir / f".{encode_public_key(Ed25519PrivateKey.generate().public_key())}.key.0123456789abcdef.new"
     leftover.write_bytes(b"partial")
     subject = generate_agent_key(key_dir)
     assert prune(key_dir, subject) == []
