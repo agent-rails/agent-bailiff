@@ -271,22 +271,16 @@ class RbacAudit:
         ]
 
     def _denied_action_reviews(self) -> list[Callable[[], list[str]]]:
-        namespaces = sorted(
-            {self._identity.namespace} | {namespace for allowed in self._tenants.values() for namespace in allowed}
-        )
         return [
-            functools.partial(self._check_denied, account, scope, action)
+            functools.partial(self._check_denied, account, action)
             for account in self._tokens
             for action in DANGEROUS_ACTIONS
-            for scope in [None, *(namespaces if action.namespaced else [])]
         ]
 
-    def _check_denied(self, account: str, namespace: str | None, action: Action) -> list[str]:
+    def _check_denied(self, account: str, action: Action) -> list[str]:
         attributes = {"verb": action.verb, "group": action.group, "resource": action.resource}
         if action.subresource:
             attributes["subresource"] = action.subresource
-        if namespace is not None:
-            attributes["namespace"] = namespace
         review = {
             "apiVersion": "authorization.k8s.io/v1",
             "kind": "SelfSubjectAccessReview",
@@ -299,14 +293,16 @@ class RbacAudit:
             raise KubernetesUnavailable("a SelfSubjectAccessReview returned no decision")
         resource = f"{action.resource}/{action.subresource}" if action.subresource else action.resource
         group = action.group or "core"
-        where = f"in {namespace}" if namespace is not None else "cluster-wide"
         if status["allowed"] is True:
             return [
-                f"{account} may {action.verb} {group} {resource} {where}, a dangerous action outside the generated set"
+                f"{account} may {action.verb} {group} {resource} cluster-wide,"
+                " a dangerous action outside the generated set"
             ]
         error = status.get("evaluationError")
         if error:
-            return [f"whether {account} may {action.verb} {group} {resource} {where} could not be decided: {error}"]
+            return [
+                f"whether {account} may {action.verb} {group} {resource} cluster-wide could not be decided: {error}"
+            ]
         return []
 
     def _check_synthetic_user(self, user: str, namespace: str, operation: CatalogOperation) -> list[str]:

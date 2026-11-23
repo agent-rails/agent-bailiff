@@ -333,15 +333,16 @@ def test_an_incomplete_review_with_another_error_is_drift_on_gke(api, gke_audit,
     ]
 
 
-def test_gke_reviews_every_dangerous_action_with_each_account_token(api, gke_audit):
+def test_gke_reviews_every_dangerous_action_cluster_wide_with_each_account_token(api, gke_audit):
     assert gke_audit.check() == []
-    namespaced = sum(action.namespaced for action in DANGEROUS_ACTIONS)
-    per_account = len(DANGEROUS_ACTIONS) + namespaced * 2
-    reviews = [(account, attributes.get("namespace")) for account, attributes in api.self_reviews]
-    assert len(reviews) == 2 * per_account
+    assert all("namespace" not in attributes for _, attributes in api.self_reviews)
     for account in ("effector", "effector-audit"):
-        assert len([review for review in reviews if review[0] == account]) == per_account
-        assert {namespace for name, namespace in reviews if name == account} == {None, "bailiff-system", "staging"}
+        reviewed = [
+            (attributes["verb"], attributes["group"], attributes["resource"], attributes.get("subresource", ""))
+            for name, attributes in api.self_reviews
+            if name == account
+        ]
+        assert sorted(reviewed) == sorted(tuple(action) for action in DANGEROUS_ACTIONS)
 
 
 def test_upstream_sends_no_dangerous_action_review(api, audit):
@@ -357,25 +358,25 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             "effector may get core secrets cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "staging", "create", "pods"),
-            "effector-audit may create core pods/exec in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "create", "pods"),
+            "effector-audit may create core pods/exec cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "patch", "pods"),
-            "effector may patch core pods in staging, a dangerous action outside the generated set",
+            ("effector", None, "patch", "pods"),
+            "effector may patch core pods cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "bailiff-system", "update", "statefulsets"),
-            "effector-audit may update apps statefulsets in bailiff-system,"
+            ("effector-audit", None, "update", "statefulsets"),
+            "effector-audit may update apps statefulsets cluster-wide, a dangerous action outside the generated set",
+        ),
+        (
+            ("effector", None, "create", "replicationcontrollers"),
+            "effector may create core replicationcontrollers cluster-wide,"
             " a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "create", "replicationcontrollers"),
-            "effector may create core replicationcontrollers in staging, a dangerous action outside the generated set",
-        ),
-        (
-            ("effector-audit", "staging", "patch", "services"),
-            "effector-audit may patch core services/proxy in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "patch", "services"),
+            "effector-audit may patch core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
         (
             ("effector", None, "update", "nodes"),
@@ -386,12 +387,12 @@ def test_upstream_sends_no_dangerous_action_review(api, audit):
             "effector may create core services/proxy cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector", "staging", "create", "configmaps"),
-            "effector may create core configmaps in staging, a dangerous action outside the generated set",
+            ("effector", None, "create", "configmaps"),
+            "effector may create core configmaps cluster-wide, a dangerous action outside the generated set",
         ),
         (
-            ("effector-audit", "staging", "deletecollection", "pods"),
-            "effector-audit may deletecollection core pods in staging, a dangerous action outside the generated set",
+            ("effector-audit", None, "deletecollection", "pods"),
+            "effector-audit may deletecollection core pods cluster-wide, a dangerous action outside the generated set",
         ),
         (
             ("effector", None, "patch", "endpointslices"),
@@ -428,8 +429,8 @@ def test_a_dangerous_action_an_account_may_take_is_drift(api, gke_audit, key, pr
             "whether effector may get core secrets cluster-wide could not be decided: webhook authorizer timeout",
         ),
         (
-            ("effector-audit", "staging", "create", "pods"),
-            "whether effector-audit may create core pods/exec in staging could not be decided:"
+            ("effector-audit", None, "create", "pods"),
+            "whether effector-audit may create core pods/exec cluster-wide could not be decided:"
             " webhook authorizer timeout",
         ),
     ],
