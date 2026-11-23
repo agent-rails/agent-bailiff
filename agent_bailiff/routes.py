@@ -76,6 +76,17 @@ def _check_schema(schema: tuple[Argument, ...], resource: str, strict: bool) -> 
         raise ValueError("a route document schema names exactly the resource placeholders")
 
 
+def _document_route(item: object) -> ToolRoute:
+    if not isinstance(item, dict) or not DOCUMENT_ROUTE_FIELDS <= set(item) <= DOCUMENT_ROUTE_KEYS:
+        raise ValueError(
+            f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}"
+            f" and optionally {DOCUMENT_SCHEMA_FIELD}"
+        )
+    fields = {key: item[key] for key in DOCUMENT_ROUTE_FIELDS}
+    schema = _document_schema(item[DOCUMENT_SCHEMA_FIELD]) if DOCUMENT_SCHEMA_FIELD in item else None
+    return ToolRoute(**fields, schema=schema, strict=False)
+
+
 def _document_schema(document: object) -> tuple[Argument, ...]:
     if not isinstance(document, list):
         raise ValueError("a route schema must be a list")
@@ -123,15 +134,12 @@ class ToolRoutes:
         ):
             raise ValueError('a route document must be an object with a "routes" list and optionally a "catalogs" list')
         routes = []
-        for item in document["routes"]:
-            if not isinstance(item, dict) or not DOCUMENT_ROUTE_FIELDS <= set(item) <= DOCUMENT_ROUTE_KEYS:
-                raise ValueError(
-                    f"each route must have exactly the fields {', '.join(sorted(DOCUMENT_ROUTE_FIELDS))}"
-                    f" and optionally {DOCUMENT_SCHEMA_FIELD}"
-                )
-            fields = {key: item[key] for key in DOCUMENT_ROUTE_FIELDS}
-            schema = _document_schema(item[DOCUMENT_SCHEMA_FIELD]) if DOCUMENT_SCHEMA_FIELD in item else None
-            routes.append(ToolRoute(**fields, schema=schema, strict=False))
+        for index, item in enumerate(document["routes"]):
+            name = item.get("name") if isinstance(item, dict) else None
+            try:
+                routes.append(_document_route(item))
+            except ValueError as error:
+                raise ValueError(f"route {index} ({name!r}): {error}") from None
         for item in document.get("catalogs", []):
             if not isinstance(item, dict) or set(item) != DOCUMENT_CATALOG_FIELDS:
                 raise ValueError("each catalog must have exactly the fields name, service")
