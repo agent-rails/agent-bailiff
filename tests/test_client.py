@@ -532,6 +532,13 @@ def test_tools_list_refuses_a_tool_name_listed_twice(client, stub):
         client.list_tools()
 
 
+@pytest.mark.parametrize("name", [["list"], {"n": 1}, None, 7])
+def test_tools_list_refuses_a_tool_without_a_string_name(client, stub, name):
+    stub.responders["tools/list"] = [reply({"tools": [{"name": name}]})]
+    with pytest.raises(GatewayError, match="a tool without a string name"):
+        client.list_tools()
+
+
 @pytest.mark.parametrize("cursor", ["", 7])
 def test_a_malformed_cursor_is_refused(client, stub, cursor):
     stub.responders["tools/list"] = [reply({"tools": [], "nextCursor": cursor})]
