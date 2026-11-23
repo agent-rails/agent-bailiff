@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import stat
@@ -56,7 +57,9 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
         raise OwnedFileError(f"cannot create the {label}: {exc.strerror}") from None
     try:
         os.fchmod(fd, OWNED_MODE)
-        os.write(fd, content)
+        written = os.write(fd, content)
+        if written != len(content):
+            raise OSError(errno.EIO, f"wrote {written} of {len(content)} bytes")
         os.fsync(fd)
     except OSError as exc:
         os.close(fd)

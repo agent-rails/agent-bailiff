@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 
 import pytest
 
@@ -191,3 +193,22 @@ def test_store_changed_after_open_is_refused(state, store, backend, tamper):
     tamper(state / "credentials.db", backend)
     with pytest.raises(CredentialUnavailable, match="unreadable"):
         store.get("tenant-a", "deploy-api", "deploy.example")
+
+
+def test_a_short_write_under_a_file_size_limit_leaves_no_kek(state):
+    script = (
+        "import resource, signal, sys\n"
+        "from pathlib import Path\n"
+        "from agent_bailiff.custodian.files import OwnedFileError, create_owned\n"
+        "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+        "resource.setrlimit(resource.RLIMIT_FSIZE, (10, 10))\n"
+        "try:\n"
+        "    create_owned(Path(sys.argv[1]), 'kek', b'k' * 32)\n"
+        "except OwnedFileError as exc:\n"
+        "    print(exc)\n"
+        "    sys.exit(3)\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script, str(state / "kek")], capture_output=True, text=True)
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "cannot write the kek" in done.stdout
+    assert not (state / "kek").exists()
