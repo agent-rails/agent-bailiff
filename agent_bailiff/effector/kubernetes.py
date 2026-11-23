@@ -165,7 +165,7 @@ class KubernetesClient:
         call = operation.call
         headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": "text/plain" if call.subresource == "log" else "application/json",
+            "Accept": "text/plain, */*" if call.subresource == "log" else "application/json",
             "Impersonate-User": f"{USER_PREFIX}:{tenant}:{operation.identity}",
             f"Impersonate-Extra-{urllib.parse.quote(OP_ID_EXTRA, safe='')}": op_id,
             f"Impersonate-Extra-{urllib.parse.quote(TRACE_EXTRA, safe='')}": trace_id or "none",
