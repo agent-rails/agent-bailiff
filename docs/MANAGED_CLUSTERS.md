@@ -10,7 +10,7 @@ How to run the effector against GKE or EKS. Managed clusters get reads only: the
 | GKE Autopilot | not supported | not tested |
 | EKS 1.36 | not supported | not probed. `platform: eks` accepts no incomplete rules review, so if EKS reports one the effector does not start. |
 
-The effector refuses to start on a cluster whose `/version` `gitVersion` contains `-gke.` unless `platform` is `gke`, and refuses `platform: gke` on any other cluster. There is no EKS version check.
+The effector refuses to start on a cluster whose `/version` `gitVersion` contains `-gke.` unless `platform` is `gke`, or `-eks-` unless `platform` is `eks`, and refuses `gke` or `eks` on a cluster without that marker. The `-eks-` marker has not been checked against an EKS cluster.
 
 ## What changes with `platform`
 
