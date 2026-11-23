@@ -6,4 +6,4 @@ RUN python -m pip uninstall --yes pip \
     && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY deploy/gke/mint_tokens.py /app/mint_tokens.py
 USER 65532:65532
-CMD ["python", "/app/mint_tokens.py"]
+CMD ["python", "-I", "/app/mint_tokens.py"]

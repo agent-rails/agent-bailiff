@@ -13,11 +13,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 TOKEN_SECONDS = 600
-TIMEOUT_SECONDS = 20
+TIMEOUT_SECONDS = 10
 METADATA_TOKEN = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
 SECRET_MANAGER = "https://secretmanager.googleapis.com/v1"
 NAME = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 SECRET = re.compile(r"projects/[a-z0-9-]+/secrets/[A-Za-z0-9_-]+")
+MAX_PAGES = 10
 HOST = re.compile(r"[a-z0-9.-]+\.gke\.goog")
 
 Send = Callable[[str, str, Mapping[str, str], bytes | None], tuple[int, bytes]]
@@ -103,16 +104,32 @@ def publish(transport: Send, bearer: str, secret: str, payload: bytes) -> str:
     return str(json.loads(answer)["name"])
 
 
+def version_number(name: str) -> int:
+    number = name.rsplit("/", 1)[-1]
+    if not number.isdigit():
+        raise MintError(f"unexpected version name {name}")
+    return int(number)
+
+
 def destroy_older(transport: Send, bearer: str, secret: str, keep: str) -> list[str]:
     headers = {"Authorization": f"Bearer {bearer}", "Content-Type": "application/json"}
-    query = urllib.parse.urlencode({"filter": "state:ENABLED OR state:DISABLED", "pageSize": 100})
-    status, answer = transport("GET", f"{SECRET_MANAGER}/{secret}/versions?{query}", headers, None)
-    if status != 200:
-        raise MintError(f"listing the versions of {secret} answered {status}")
+    newest = version_number(keep)
+    names = []
+    page = ""
+    for _ in range(MAX_PAGES):
+        query = {"filter": "state:ENABLED OR state:DISABLED", "pageSize": 100} | ({"pageToken": page} if page else {})
+        url = f"{SECRET_MANAGER}/{secret}/versions?{urllib.parse.urlencode(query)}"
+        status, answer = transport("GET", url, headers, None)
+        if status != 200:
+            raise MintError(f"listing the versions of {secret} answered {status}")
+        listed = json.loads(answer)
+        names += [version["name"] for version in listed.get("versions", [])]
+        page = listed.get("nextPageToken", "")
+        if not page:
+            break
     destroyed = []
-    for version in json.loads(answer).get("versions", []):
-        name = version["name"]
-        if name == keep:
+    for name in sorted(names, key=version_number):
+        if version_number(name) >= newest:
             continue
         status, _ = transport("POST", f"{SECRET_MANAGER}/{name}:destroy", headers, b"{}")
         if status != 200:
@@ -137,8 +154,8 @@ def run(environ: Mapping[str, str], transport: Send = send) -> dict[str, Any]:
 def main() -> int:
     try:
         print(json.dumps(run(os.environ)))
-    except MintError as exc:
-        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+    except (MintError, KeyError, ValueError, OSError) as exc:
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"[:500]}), file=sys.stderr)
         return 1
     return 0
 
