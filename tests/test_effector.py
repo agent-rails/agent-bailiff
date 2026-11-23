@@ -206,6 +206,20 @@ def test_a_log_read_is_truncated_text(token_file):
 
 
 @pytest.mark.parametrize(
+    "body",
+    [b"x" * 65535 + "\u00e9".encode() + b"tail", b"\xff" * 70000],
+    ids=["character-across-the-limit", "invalid-bytes"],
+)
+def test_a_cut_log_stays_within_the_limit(token_file, body):
+    instance, _, _ = effector(token_file, FakeTransport(body=body))
+    arguments = {"namespace": "staging", "name": "p1", "tailLines": 10}
+    clearance = clearance_for("read_pod_log", arguments)
+    result = instance.call({"name": "read_pod_log", "arguments": arguments}, release_for(clearance), NOW + 2)
+    assert result["isError"] is False
+    assert len(result["content"][0]["text"].encode()) <= 65536
+
+
+@pytest.mark.parametrize(
     ("params", "release", "reason"),
     [
         (scale_params(), None, "release_malformed"),

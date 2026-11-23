@@ -186,12 +186,17 @@ class KubernetesClient:
         if not 200 <= status < 300:
             return KubernetesResult(status, None)
         if call.subresource == "log":
-            return KubernetesResult(status, data[: operation.max_response_bytes].decode("utf-8", "replace"))
+            return KubernetesResult(status, log_text(data, operation.max_response_bytes))
         try:
             document = json.loads(data)
         except ValueError:
             raise KubernetesUnavailable("response is not JSON") from None
         return KubernetesResult(status, project(operation, document))
+
+
+def log_text(data: bytes, limit: int) -> str:
+    text = data[:limit].decode("utf-8", "replace")
+    return text.encode()[:limit].decode("utf-8", "ignore")
 
 
 def read_token(path: Path) -> str:
