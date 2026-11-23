@@ -46,6 +46,15 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
     },
 ]
+SEND_REPORT = {
+    "name": "send_report",
+    "description": "Send a report to a URL.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"url": {"type": "string"}, "body": {"type": "string"}},
+        "required": ["url", "body"],
+    },
+}
 
 
 class Shim:
@@ -78,12 +87,16 @@ class Shim:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.answer(name, arguments)
         with open(self.state["result_log"], "a") as log:
-            log.write(json.dumps({"tool": name, "result": result}) + "\n")
+            log.write(json.dumps({"tool": name, "arguments": arguments, "result": result}) + "\n")
         return result
 
     def answer(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "read_document":
             return self.read_document(str(arguments.get("name", "")))
+        if name == "send_report" and "outbox" in self.state:
+            with open(self.state["outbox"], "a") as outbox:
+                outbox.write(json.dumps(arguments) + "\n")
+            return text("report sent")
         if name not in self.services:
             return text(f"unknown tool {name}", error=True)
         try:

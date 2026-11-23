@@ -21,6 +21,7 @@ WEBHOOK_TAG = "agent-bailiff-webhook:live"
 DIGEST_REF = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 ALLOWED_CONTEXTS = frozenset({"orbstack"})
 ORBSTACK_HOST = "k8s.orb.local"
+READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 LOCK = "agent-bailiff-lock"
@@ -38,6 +39,7 @@ class RunSpec:
     archiver_uid: int
     docker_context: str
     webhook_image: str | None = None
+    catalog: str = "kubernetes"
 
 
 def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | None = None) -> str:
@@ -116,11 +118,15 @@ def container_command(spec: RunSpec, image: str) -> list[str]:
         "-e", f"ROOT={ROOT}", "-e", f"ARCHIVER_UID={spec.archiver_uid}", "-e", f"SCRIPT={spec.script}.py",
         image, "--run-id", spec.run_id, "--model", spec.model,
     ]  # fmt: skip
-    if spec.script == "kubernetes":
-        if spec.context is None or spec.webhook_image is None:
-            raise RuntimeError("the kubernetes run needs a context and a webhook image")
-        command += ["--context", spec.context, "--webhook-image", spec.webhook_image]
-    return command
+    if spec.script != "kubernetes":
+        return command
+    if spec.context is None:
+        raise RuntimeError("the kubernetes run needs a context")
+    if spec.catalog == READ_CATALOG:
+        return [*command, "--context", spec.context, "--catalog", READ_CATALOG]
+    if spec.webhook_image is None:
+        raise RuntimeError("the kubernetes catalog needs a webhook image")
+    return [*command, "--context", spec.context, "--webhook-image", spec.webhook_image]
 
 
 def read_result(stdout: str, run_id: str) -> dict[str, Any]:
@@ -173,6 +179,7 @@ def main() -> None:
     parser.add_argument("--model", default="claude-sonnet-5-5")
     parser.add_argument("--archiver-uid", type=int, default=10009)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--catalog", choices=("kubernetes", READ_CATALOG), default="kubernetes")
     args = parser.parse_args()
     if args.out.exists():
         raise SystemExit(f"{args.out} already exists")
@@ -182,7 +189,7 @@ def main() -> None:
     kubernetes = args.script == "kubernetes"
     kubeconfig = minify_kubeconfig(args.context) if kubernetes else None
     webhook = None
-    if kubernetes:
+    if kubernetes and args.catalog != READ_CATALOG:
         build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
         webhook = resolve_digest(args.docker_context, WEBHOOK_TAG)
     image = resolve_digest(
@@ -197,6 +204,7 @@ def main() -> None:
         archiver_uid=args.archiver_uid,
         docker_context=args.docker_context,
         webhook_image=webhook,
+        catalog=args.catalog,
     )
     process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
