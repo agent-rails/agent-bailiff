@@ -69,6 +69,13 @@ def test_the_committed_stubs_match_a_fresh_generation(tmp_path):
     assert result.returncode == 0, result.stderr
     names = ["__init__.py", "ext_mcp_pb2.py", "ext_mcp_pb2.pyi"]
     assert sorted(path.name for path in (tmp_path / "out").iterdir()) == names
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--", str(STUBS.relative_to(ROOT))],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert sorted(Path(path).name for path in tracked) == names
     assert {name: (tmp_path / "out" / name).read_bytes() for name in names} == {
         name: (STUBS / name).read_bytes() for name in names
     }
