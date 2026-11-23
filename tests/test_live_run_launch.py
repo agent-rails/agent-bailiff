@@ -64,18 +64,67 @@ def test_only_a_gke_bailiff_probe_context_is_a_gke_platform(context):
     assert launch.platform_of(context) == ("gke" if context == GKE_PROBE else "upstream")
 
 
-def test_the_applier_token_replaces_the_gke_credential_plugin(kubectl_view):
-    gke = view(GKE_PROBE, "https://34.1.2.3", user={"exec": {"command": "gke-gcloud-auth-plugin"}})
-    kubectl_view(gke)
-    config = launch.minify_kubeconfig(GKE_PROBE, applier_token="applier")
+GKE_SERVER = "https://34.1.2.3"
+GKE_CLUSTER = {"endpoint": "34.1.2.3", "resourceLabels": {"purpose": "bailiff-probe"}}
+
+
+@pytest.fixture
+def gke_probe(monkeypatch):
+    calls = []
+
+    def answer(cluster=GKE_CLUSTER, server=GKE_SERVER, context=GKE_PROBE):
+        documents = {
+            "kubectl": view(context, server, user={"exec": {"command": "gke-gcloud-auth-plugin"}}),
+            "gcloud": cluster,
+        }
+
+        def run(command, **options):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(documents[command[0]]), stderr="")
+
+        monkeypatch.setattr(launch.subprocess, "run", run)
+        return calls
+
+    return answer
+
+
+def test_the_applier_token_replaces_the_gke_credential_plugin(gke_probe):
+    calls = gke_probe()
+    config = launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
     assert config["users"][0]["user"] == {"token": "applier"}
-    assert config["clusters"][0]["cluster"]["server"] == "https://34.1.2.3"
+    assert config["clusters"][0]["cluster"]["server"] == GKE_SERVER
+    assert calls[1] == [
+        "gcloud", "container", "clusters", "describe", "bailiff-probe", "--project", "engineering-scratch-pad",
+        "--location", "europe-west1-b", "--format", "json",
+    ]  # fmt: skip
 
 
-def test_a_gke_context_without_an_applier_token_is_refused(kubectl_view):
-    kubectl_view(view(GKE_PROBE, "https://34.1.2.3", user={"exec": {"command": "gke-gcloud-auth-plugin"}}))
+def test_a_gke_context_without_an_applier_token_is_refused(gke_probe):
+    gke_probe()
     with pytest.raises(RuntimeError, match="credential plugin"):
-        launch.minify_kubeconfig(GKE_PROBE)
+        launch.minify_kubeconfig(GKE_PROBE, gke_project="engineering-scratch-pad")
+
+
+@pytest.mark.parametrize("project", [None, "onstack-infra"])
+def test_a_gke_context_outside_the_given_project_is_refused_before_kubectl(monkeypatch, project):
+    monkeypatch.setattr(launch.subprocess, "run", lambda *args, **options: pytest.fail("kubectl called"))
+    with pytest.raises(RuntimeError, match="not in the probe project"):
+        launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project=project)
+
+
+@pytest.mark.parametrize(
+    ("cluster", "message"),
+    [
+        ({"endpoint": "34.1.2.3"}, "has no label purpose=bailiff-probe"),
+        ({"endpoint": "34.1.2.3", "resourceLabels": {"purpose": "prod"}}, "has no label purpose=bailiff-probe"),
+        ({"endpoint": "35.9.9.9", "resourceLabels": {"purpose": "bailiff-probe"}}, "is not the endpoint"),
+    ],
+    ids=["unlabelled", "other-label", "other-endpoint"],
+)
+def test_a_gke_context_that_is_not_the_labelled_probe_cluster_is_refused(gke_probe, cluster, message):
+    gke_probe(cluster)
+    with pytest.raises(RuntimeError, match=message):
+        launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
 
 
 @pytest.mark.parametrize(
