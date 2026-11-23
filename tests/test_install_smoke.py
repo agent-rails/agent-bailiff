@@ -19,7 +19,19 @@ pytestmark = [
 
 
 def install_command(revision):
-    return ["uv", "tool", "install", "--python", "3.13", "--constraints", str(LOCK), f"git+file://{ROOT}@{revision}"]
+    return [
+        "uv",
+        "tool",
+        "install",
+        "--python",
+        "3.13",
+        "--no-python-downloads",
+        "--constraints",
+        str(LOCK),
+        "--build-constraints",
+        str(LOCK),
+        f"git+file://{ROOT}@{revision}",
+    ]
 
 
 @pytest.fixture(scope="module")
