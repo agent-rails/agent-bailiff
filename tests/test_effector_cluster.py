@@ -8,7 +8,7 @@ import urllib.parse
 
 import pytest
 
-from agent_bailiff.effector.catalog import OperationCatalog
+from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
 from agent_bailiff.effector.drift import RbacAudit
 from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, KubernetesUnavailable, PooledTransport
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, render
@@ -209,6 +209,40 @@ def test_a_service_account_subject_without_a_namespace_is_judged_in_the_binding_
     staging = cluster["names"]["stg"]
     kubectl("create", "-f", "-", stdin=binding(staging), user="mallory")
     restore.append(("-n", staging, "rolebinding", "bare"))
+
+
+def identify(item):
+    return (item["kind"], item["metadata"].get("namespace"), item["metadata"]["name"])
+
+
+def test_the_read_catalog_leaves_the_effector_token_unable_to_write(cluster, restore):
+    staging = cluster["names"]["stg"]
+    read = generate_manifests(
+        OperationCatalog.load(shipped_catalog("kubernetes-read")), cluster["identity"], cluster["tenants"]
+    )
+    kept = {identify(item) for item in read["items"]}
+    for kind, namespace, name in sorted(
+        identify(item) for item in cluster["manifests"]["items"] if identify(item) not in kept
+    ):
+        kubectl(*(["-n", namespace] if namespace else []), "delete", kind, name)
+    apply(render(read))
+    time.sleep(SETTLE_SECONDS)
+    token = (cluster["directory"] / "effector").read_text()
+    for identity in ("scale", "restart", "read"):
+        status, _ = cluster["transport"].request(
+            "PATCH",
+            f"/apis/apps/v1/namespaces/{staging}/deployments/api/scale",
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/merge-patch+json",
+                "Impersonate-User": f"bailiff:ta:{identity}",
+                "Impersonate-Extra-bailiff.dev%2Fop-id": OP_ID,
+            },
+            b'{"spec":{"replicas":2}}',
+        )
+        assert status == 403, identity
+    assert call(cluster, "list_pods", {"namespace": staging, "limit": 5}) == 200
+    assert call(cluster, "get_deployment", {"namespace": staging, "name": "api"}) == 200
 
 
 def test_the_generated_set_is_clean(cluster):

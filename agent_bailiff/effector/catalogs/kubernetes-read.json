@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "target": "kubernetes",
+  "operations": [
+    {
+      "name": "list_pods",
+      "call": {
+        "group": "",
+        "version": "v1",
+        "resource": "pods",
+        "subresource": null,
+        "verb": "list",
+        "query": {
+          "limit": "limit"
+        }
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "limit": {
+          "kind": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "response": {
+        "fields": [
+          "metadata.name",
+          "status.phase",
+          "spec.nodeName"
+        ],
+        "max_bytes": 65536
+      }
+    },
+    {
+      "name": "read_pod_log",
+      "call": {
+        "group": "",
+        "version": "v1",
+        "resource": "pods",
+        "subresource": "log",
+        "verb": "get",
+        "query": {
+          "tailLines": "tailLines"
+        }
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "name": {
+          "kind": "label"
+        },
+        "tailLines": {
+          "kind": "integer",
+          "minimum": 1,
+          "maximum": 500
+        }
+      },
+      "response": {
+        "fields": [],
+        "max_bytes": 65536
+      }
+    },
+    {
+      "name": "get_deployment",
+      "call": {
+        "group": "apps",
+        "version": "v1",
+        "resource": "deployments",
+        "subresource": null,
+        "verb": "get",
+        "query": {}
+      },
+      "arguments": {
+        "namespace": {
+          "kind": "label"
+        },
+        "name": {
+          "kind": "label"
+        }
+      },
+      "response": {
+        "fields": [
+          "metadata.name",
+          "spec.replicas",
+          "status.replicas",
+          "status.readyReplicas",
+          "status.updatedReplicas",
+          "status.observedGeneration"
+        ],
+        "max_bytes": 16384
+      }
+    }
+  ]
+}
