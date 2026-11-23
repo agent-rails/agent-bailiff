@@ -42,6 +42,7 @@ from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.platform import PLATFORMS
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
 from agent_bailiff.keys import PublicKeyRecord
+from agent_bailiff.proxy.agent_key import AgentKeyError, generate_agent_key
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
     DEFAULT_CATALOG,
@@ -240,7 +241,16 @@ def _parser() -> argparse.ArgumentParser:
         action.set_defaults(handler=_control)
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
+    _add_proxy(commands)
     return parser
+
+
+def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    proxy = commands.add_parser("proxy", help="the agent side: a stdio MCP server; run as the agent's uid")
+    actions = proxy.add_subparsers(dest="action", required=True)
+    keygen = actions.add_parser("keygen", help="create a signing key for the next task and print its public key")
+    keygen.add_argument("--key-dir", type=Path, required=True, help="the agent's own 0700 key directory")
+    keygen.set_defaults(handler=_proxy_keygen)
 
 
 def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -618,6 +628,15 @@ async def _serve_docket_until_signal(settings: DocketSettings) -> None:
     for number in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(number, stop.set)
     await run.serve_docket(settings, stop)
+
+
+def _proxy_keygen(args: argparse.Namespace) -> int:
+    try:
+        subject = generate_agent_key(args.key_dir)
+    except AgentKeyError as exc:
+        return _refused("proxy keygen", exc)
+    print(subject)
+    return 0
 
 
 def _put_credential(args: argparse.Namespace) -> int:
