@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import time
 import urllib.parse
 
 import pytest
@@ -915,6 +916,38 @@ def test_a_check_past_its_deadline_closes_the_gate(api, tmp_path):
     [problem] = raised.value.problems
     assert problem.startswith("the RBAC check failed: the RBAC check passed its 5 s deadline after ")
     assert gate.healthy(1000) is False
+
+
+def test_a_check_whose_last_answer_lands_at_its_deadline_closes_the_gate(api, tmp_path):
+    counted = make_audit(api, tmp_path, "upstream", monotonic=lambda: 0.0)
+    RbacGate(counted, Clock(), interval=60).verify()
+    total = len(api.requests)
+    api.requests.clear()
+    late = make_audit(api, tmp_path, "upstream", deadline_seconds=total, monotonic=Ticking(api, 1.0))
+    gate = RbacGate(late, Clock(), interval=60)
+    with pytest.raises(RbacDrift) as raised:
+        gate.verify()
+    assert len(api.requests) == total
+    [problem] = raised.value.problems
+    assert problem.startswith(f"the RBAC check failed: the RBAC check passed its {total} s deadline after ")
+    assert gate.healthy(1000) is False
+
+
+def test_a_failed_review_cancels_the_reviews_not_yet_started(api, tmp_path):
+    audit = make_audit(api, tmp_path, "upstream", workers=1)
+    started = []
+
+    def fail():
+        raise KubernetesUnavailable("review failed")
+
+    def wait():
+        started.append(True)
+        time.sleep(0.05)
+        return []
+
+    with pytest.raises(KubernetesUnavailable, match="review failed"):
+        audit._run([fail] + [wait] * 50)
+    assert len(started) <= 1
 
 
 @pytest.mark.parametrize(("seconds", "alarm"), [(0, False), (60, False), (61, True)])

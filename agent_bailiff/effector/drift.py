@@ -364,6 +364,9 @@ class RbacAudit:
             self._reviewed += 1
         return found
 
+    def finish(self) -> None:
+        self._remaining()
+
     def _remaining(self) -> float:
         left = self._deadline - self._monotonic()
         if left <= 0:
@@ -571,6 +574,11 @@ class RbacGate:
             problems = [f"the RBAC check failed: {exc}"]
         restart_problems = [] if problems else self._extra("the Deployment schema", self._audit.check_restart_schema)
         write_problems = [] if problems else self._extra("the release webhook", self._audit.check_release_webhook)
+        if not problems:
+            try:
+                self._audit.finish()
+            except KubernetesUnavailable as exc:
+                problems = [f"the RBAC check failed: {exc}"]
         self._log_cost(self._clock() - now)
         with self._lock:
             self._verified_at = None if problems else now
