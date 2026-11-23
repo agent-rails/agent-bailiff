@@ -232,9 +232,10 @@ def routed_tools(upstream: list[dict[str, Any]], names: frozenset[str]) -> list[
 
 
 def tool_problem(tool: dict[str, Any]) -> str | None:
-    description = tool.get("description", "")
-    if not isinstance(description, str) or len(description.encode()) > MAX_DESCRIPTION_BYTES:
-        return f"the description is not a string of at most {MAX_DESCRIPTION_BYTES} bytes"
+    for field in ("title", "description"):
+        value = tool.get(field, "")
+        if not isinstance(value, str) or len(value.encode()) > MAX_DESCRIPTION_BYTES:
+            return f"the {field} is not a string of at most {MAX_DESCRIPTION_BYTES} bytes"
     schema = tool.get("inputSchema")
     if not isinstance(schema, dict):
         return "the inputSchema is not an object"

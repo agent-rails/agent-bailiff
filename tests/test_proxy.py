@@ -211,6 +211,8 @@ def test_tools_list_is_the_routed_upstream_tools_without_annotations(proxy, task
     [
         {"description": "d" * 4097},
         {"description": 5},
+        {"title": "t" * 4097},
+        {"title": 5},
         {"inputSchema": {"type": "object", "description": "s" * 16385}},
         {"inputSchema": "object"},
         {"inputSchema": nested(16)},
