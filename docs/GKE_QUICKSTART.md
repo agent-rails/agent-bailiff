@@ -7,7 +7,7 @@ Tested on 2026-11-23 against 1.36.4-gke.2377000 in europe-west1-b, with a laptop
 ## Shape
 
 ```
-Cloud Scheduler (every 5 min) --> Cloud Run job "bailiff-minter" --TokenRequest via DNS endpoint--> GKE
+Cloud Scheduler (every 2 min) --> Cloud Run job "bailiff-minter" --TokenRequest via DNS endpoint--> GKE
                                           |
                                           v
                               Secret Manager "bailiff-tokens" (one enabled version)
@@ -18,7 +18,7 @@ Cloud Scheduler (every 5 min) --> Cloud Run job "bailiff-minter" --TokenRequest 
 ```
 
 - The minter's Google service account can create tokens only for `effector` and `effector-audit` in `bailiff-system`. It cannot read the secret.
-- The host can read the secret and nothing else. Whoever takes the host gets tokens that expire within 600 s and cannot mint more.
+- The host can read the secret and nothing else; it cannot mint. Its `secretAccessor` grant is standing, so whoever takes the host's Google identity reads every new token the minter publishes until that grant is revoked (Stop). Each token expires within 600 s of being minted.
 - If the minter or the fetcher stops, the tokens expire within 600 s and the effector refuses every call.
 
 ## 1. Variables
@@ -115,12 +115,14 @@ gcloud run jobs execute bailiff-minter --region $REGION --wait --project $PROJEC
 gcloud iam service-accounts create bailiff-scheduler --project $PROJECT
 gcloud run jobs add-iam-policy-binding bailiff-minter --region $REGION --member serviceAccount:$TRIGGER \
   --role roles/run.invoker --project $PROJECT
-gcloud scheduler jobs create http bailiff-minter --location $REGION --schedule '*/5 * * * *' \
+gcloud scheduler jobs create http bailiff-minter --location $REGION --schedule '*/2 * * * *' \
   --uri "https://run.googleapis.com/v2/projects/$PROJECT/locations/$REGION/jobs/bailiff-minter:run" \
   --http-method POST --oauth-service-account-email $TRIGGER --project $PROJECT
 ```
 
-Each run checks that both tokens name the right account and live at most 600 s (GKE issued exactly 600 s), adds one version, and destroys every older one. A run that fails publishes nothing and destroys nothing. Every 5 minutes leaves at least 5 minutes on the current tokens; a single missed run is absorbed, two in a row stop the effector.
+Each run checks that both tokens name the right account and live at most 600 s (GKE issued exactly 600 s), adds one version, and destroys only versions numbered below its own, so a late run never destroys a newer one. A run that fails before adding its version destroys nothing; one that fails while destroying leaves older versions enabled until the next run. Each run has a 10 s timeout per request.
+
+The fetcher refuses a token with under 60 s left, so a token is usable for about 540 s after minting. At every 2 minutes, three runs in a row can fail and the fourth still lands before the last token expires; at every 5 minutes, one failed run stops the effector. Alert on the fetcher's exit status and on the job's failed executions.
 
 ## 6. Host
 
@@ -131,18 +133,33 @@ gcloud secrets add-iam-policy-binding bailiff-tokens --member <host principal> \
   --role roles/secretmanager.secretAccessor --project $PROJECT
 ```
 
-As the effector's uid, every 60 s (systemd timer, launchd or cron), into a directory owned by that uid and not writable by group or others:
+As the effector's uid, every 60 s, never two at once (a systemd timer does not overlap runs; with cron, wrap the command in `flock -n`), into a directory owned by that uid and not writable by group or others:
 
 ```sh
 python deploy/gke/fetch_tokens.py --project $PROJECT --secret bailiff-tokens \
+  --namespace bailiff-system --effector-account effector --audit-account effector-audit \
   --effector-token /var/lib/bailiff-effector/effector.token --audit-token /var/lib/bailiff-effector/audit.token
 ```
 
-It refuses a secret whose tokens live longer than 600 s or expire within 60 s, refuses an existing token file that is not 0600, and replaces a file only when its token changed. Then initialize and run the effector with `--platform gke`, the IP endpoint and the cluster CA (`MANAGED_CLUSTERS.md`, Endpoint and CA), and those two files.
+It refuses a secret unless each token names its own service account, lives at most 600 s, was not issued in the future and has at least 60 s left. It refuses an existing token file that is not 0600 and a directory others can write, and replaces a file only when its token changed. Then initialize and run the effector with `--platform gke`, the IP endpoint and the cluster CA (`MANAGED_CLUSTERS.md`, Endpoint and CA), and those two files.
 
 ## Stop
 
-- Stop minting: `gcloud scheduler jobs pause bailiff-minter --location $REGION --project $PROJECT`. The effector stops within 600 s.
+- Stop minting: pause the schedule and cancel any running execution. The effector stops within 600 s.
+
+  ```sh
+  gcloud scheduler jobs pause bailiff-minter --location $REGION --project $PROJECT
+  gcloud run jobs executions list --job bailiff-minter --region $REGION --project $PROJECT
+  gcloud run jobs executions cancel <execution> --region $REGION --project $PROJECT
+  ```
+
+- Host lost or suspected: remove its read grant, then stop minting as above.
+
+  ```sh
+  gcloud secrets remove-iam-policy-binding bailiff-tokens --member <host principal> \
+    --role roles/secretmanager.secretAccessor --project $PROJECT
+  ```
+
 - Cut the minter off: delete the `bailiff-token-minter` RoleBinding.
 
 ## Not tested
