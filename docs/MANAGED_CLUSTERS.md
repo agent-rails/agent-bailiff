@@ -6,7 +6,7 @@ How to run the effector against GKE or EKS. Managed clusters get reads only: the
 
 | Platform | Effector status | Evidence |
 |---|---|---|
-| GKE Standard 1.36 | supported, recorded run pending | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. |
+| GKE Standard 1.36 | supported | Probe on 1.36.4-gke.2377000 (2026-11-22): constrained impersonation enabled, SelfSubjectRulesReview incomplete with the pinned error. The pin was reproduced on kind v1.36.4 with a webhook authorizer. Recorded read-only run on the same version (2026-11-23), see `examples/live-run/README.md`. |
 | GKE Autopilot | not supported | not tested |
 | EKS 1.36 | not supported | not probed. `platform: eks` accepts no incomplete rules review, so if EKS reports one the effector does not start. |
 
@@ -82,7 +82,7 @@ Whether these return a token with `exp - iat` of 600 s on GKE has not been check
 
 Access granted by cloud IAM does not appear in RBAC. The dangerous-action reviews catch a grant on that list. A grant outside the list is not seen by the drift check. Run this check after setup and on a schedule:
 
-- GKE: `gcloud projects get-iam-policy <project> --format json`, and the same for the folders and organization above it. List every principal holding `roles/owner`, `roles/container.admin`, `roles/container.developer`, or a custom role with `container.serviceAccounts.createToken`: each can mint effector tokens (permission lists checked with `gcloud iam roles describe` on 2026-11-23). No binding may name the effector or audit service account (as a Workload Identity principal). Whether such a grant appears in the effector's own access reviews has not been checked on GKE.
+- GKE: `gcloud projects get-iam-policy <project> --format json`, and the same for the folders and organization above it. List every principal holding `roles/owner`, `roles/container.admin`, `roles/container.developer`, or a custom role with `container.serviceAccounts.createToken`: each can mint effector tokens (permission lists checked with `gcloud iam roles describe` on 2026-11-23). No binding may name the effector or audit service account (as a Workload Identity principal). On 1.36.4-gke.2377000 with Workload Identity Federation enabled (2026-11-23), a project `roles/container.developer` binding for a service account's `principal://` identifier did not authorize that account's own requests: its access reviews and real list requests stayed denied for 11 minutes. So a grant of that kind gives the drift check nothing to see. Other roles, custom roles, folder or organization bindings and longer propagation were not tested.
 - EKS: `aws eks list-access-entries --cluster-name <cluster>` and, for each entry, `aws eks list-associated-access-policies`. Any principal with a cluster-admin access policy, or mapped to `system:masters`, can mint effector tokens.
 
 ## Alerts
