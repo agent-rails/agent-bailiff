@@ -174,6 +174,8 @@ In every run the docket verified (21 to 29 entries), prod and staging stayed at 
 
 A cloud IAM probe on the same cluster, with Workload Identity Federation enabled: a project `roles/container.developer` binding for the `principal://` identifier of a service account with no RBAC did not authorize that account's requests. Its access reviews for listing pods, reading secrets and creating deployments, and real list requests, stayed denied for 11 minutes, so the grant was not repeated against a run's effector account. The binding was removed afterwards. See `docs/MANAGED_CLUSTERS.md`.
 
+An access review probe, 2026-11-23, on a new cluster of the same version and shape, created and deleted by `examples/live-run/gke_probe.py --project <project> --out <file>`: a service account with no RBAC ran a SelfSubjectAccessReview for each of the 172 dangerous actions at cluster scope and again in its own namespace. All 344 answers were exactly `{"allowed": false}`, with no `evaluationError` or `reason`. Its rules review in that namespace was incomplete with exactly the pinned error. Three rounds of 344 cluster-scope reviews (the effector's and the audit account's dangerous-action reviews) at 4 workers over kept-alive connections took 10.11, 10.09 and 10.24 s; per review p50 115 ms, p95 127 ms, p99 180 ms, max 341 ms, measured from the bailiff host. Rules review and SubjectAccessReview latency was not measured. Result file (not committed): `~/live-run-results/gke-access-review-probe.json`.
+
 `read_pod_log` takes no container name, so it is refused for a pod with more than one container.
 
 ### Run it
