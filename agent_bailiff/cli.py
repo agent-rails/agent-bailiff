@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import signal
@@ -17,6 +18,7 @@ from agent_warrant.ledger import LedgerError
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
+from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
@@ -43,6 +45,9 @@ from agent_bailiff.effector.platform import PLATFORMS
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
 from agent_bailiff.keys import PublicKeyRecord, load_signing_key
 from agent_bailiff.proxy.agent_key import AgentKeyError, generate_agent_key
+from agent_bailiff.proxy.server import StdioProxy, Stop, load_routes, read_routes
+from agent_bailiff.proxy.task_state import NoTask, TaskState, TaskUnavailable
+from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
     DEFAULT_CATALOG,
@@ -285,6 +290,19 @@ def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     keygen = actions.add_parser("keygen", help="create a signing key for the next task and print its public key")
     keygen.add_argument("--key-dir", type=Path, required=True, help="the agent's own 0700 key directory")
     keygen.set_defaults(handler=_proxy_keygen)
+    tools = actions.add_parser("tools", help="print the gateway's tools/list as JSON, the input to routes generate")
+    _add_task_source(tools)
+    tools.set_defaults(handler=_proxy_tools)
+    serve = actions.add_parser("run", help="serve MCP on stdin and stdout until EOF, SIGINT or SIGTERM")
+    _add_task_source(serve)
+    serve.add_argument("--routes", type=Path, required=True, help="the route table the gateway enforces")
+    serve.set_defaults(handler=_proxy_run)
+
+
+def _add_task_source(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--task-file", type=Path, required=True, help="task.json written by task issue")
+    parser.add_argument("--key-dir", type=Path, required=True, help="the agent's own 0700 key directory")
+    parser.add_argument("--gateway-url", required=True, help="the agentgateway MCP URL")
 
 
 def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -671,6 +689,43 @@ def _proxy_keygen(args: argparse.Namespace) -> int:
         return _refused("proxy keygen", exc)
     print(subject)
     return 0
+
+
+def _proxy_tools(args: argparse.Namespace) -> int:
+    try:
+        state = TaskState.load(args.task_file, args.key_dir)
+        client = BailiffClient(args.gateway_url, state.holder, ToolRoutes(()))
+        try:
+            tools = client.list_tools()
+        finally:
+            client.close()
+    except (NoTask, TaskUnavailable, GatewayError, ValueError) as exc:
+        return _refused("proxy tools", exc)
+    print(json.dumps({"tools": tools}, indent=2, sort_keys=True))
+    return 0
+
+
+def _proxy_run(args: argparse.Namespace) -> int:
+    try:
+        raw = read_routes(args.routes)
+        proxy = StdioProxy(args.task_file, args.key_dir, args.gateway_url, load_routes(raw))
+    except (OSError, ValueError) as exc:
+        return _refused("proxy run", exc)
+    _stop_proxy_on_signals(proxy)
+    logging.getLogger(__name__).info("proxy routes sha256 %s", hashlib.sha256(raw).hexdigest())
+    proxy.run(sys.stdin.buffer, sys.stdout.buffer)
+    return 0
+
+
+def _stop_proxy_on_signals(proxy: StdioProxy) -> None:
+    def stop(_signum: int, _frame: object) -> None:
+        if proxy.busy:
+            proxy.stop_requested = True
+            return
+        raise Stop
+
+    for number in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(number, stop)
 
 
 def _task_issue(args: argparse.Namespace) -> int:
