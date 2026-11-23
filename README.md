@@ -117,11 +117,10 @@ Each component has its own commands, run as that component's uid:
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes -r requirements-ci.txt
 .venv/bin/python -m pip install --no-deps --no-build-isolation -e .
-PYTHON=.venv/bin/python sh adapters/agentgateway/scripts/generate_proto.sh
 .venv/bin/ruff check && .venv/bin/ruff format --check && .venv/bin/mypy && .venv/bin/pytest -q
 ```
 
-`generate_proto.sh` checks the sha256 of the vendored agentgateway `ExtMcp` proto (`adapters/agentgateway/proto/ext_mcp.proto`, v1.7.0, commit `26f5aeb`, Apache-2.0) and generates the Python stubs; the stubs are not committed.
+`generate_proto.sh` checks the sha256 of the vendored agentgateway `ExtMcp` proto (`adapters/agentgateway/proto/ext_mcp.proto`, v1.7.0, commit `26f5aeb`, Apache-2.0) and generates the Python stubs into `agent_bailiff/adapters/agentgateway/_proto`. The stubs are committed so a git install works without `grpcio-tools`; run the script after changing the proto, and the test suite fails when the committed stubs differ from a fresh run.
 
 The end-to-end tests run against the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads it into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it those tests are skipped.
 
