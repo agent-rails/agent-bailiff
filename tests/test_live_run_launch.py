@@ -170,8 +170,19 @@ def test_the_kubernetes_command_passes_the_context_and_webhook_digest():
 
 
 def test_the_kubernetes_command_needs_a_webhook_image():
-    with pytest.raises(RuntimeError, match="needs a context and a webhook image"):
+    with pytest.raises(RuntimeError, match="needs a webhook image"):
         launch.container_command(spec("kubernetes", webhook_image=None), DIGEST)
+
+
+def test_the_read_catalog_command_passes_the_catalog_and_no_webhook():
+    command = launch.container_command(spec("kubernetes", webhook_image=None, catalog="kubernetes-read"), DIGEST)
+    assert command[-4:] == ["--context", "orbstack", "--catalog", "kubernetes-read"]
+    assert "--webhook-image" not in command
+
+
+def test_the_kubernetes_command_needs_a_context():
+    with pytest.raises(RuntimeError, match="needs a context"):
+        launch.container_command(spec("kubernetes", context=None), DIGEST)
 
 
 @pytest.mark.parametrize("status", ["ok", "failed"])
