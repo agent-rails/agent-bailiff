@@ -201,7 +201,7 @@ def test_a_log_read_is_truncated_text(token_file):
     clearance = clearance_for("read_pod_log", arguments)
     result = instance.call({"name": "read_pod_log", "arguments": arguments}, release_for(clearance), NOW + 2)
     assert len(result["content"][0]["text"]) == 65536
-    assert transport.requests[0][1] == "/api/v1/namespaces/staging/pods/p1/log?tailLines=10"
+    assert transport.requests[0][1] == "/api/v1/namespaces/staging/pods/p1/log?tailLines=10&limitBytes=65536"
     assert transport.requests[0][2]["Accept"] == "text/plain, */*"
 
 
