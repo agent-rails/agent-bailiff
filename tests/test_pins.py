@@ -3,6 +3,7 @@ import re
 import tomllib
 from pathlib import Path
 
+import test_install_smoke
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -100,13 +101,23 @@ def test_every_ci_job_installs_only_from_the_hash_lock():
         elif INSTALLER.search(line):
             assert current is not None, line
             current.append(line.strip().removeprefix("- run:").strip())
-    assert set(jobs) == {"test", "quickstart-integration", "live-run-image"}
+    assert set(jobs) == {"test", "install-smoke", "quickstart-integration", "live-run-image"}
+    assert jobs.pop("install-smoke") == [
+        "- uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3",
+        "python -m pip install --require-hashes -r requirements-ci.txt",
+    ]
     for name, installs in jobs.items():
         assert installs == [
             "python -m pip install --require-hashes -r requirements-ci.txt",
             "python -m pip install --no-deps --no-build-isolation -e .",
             "python -m pip check",
         ], name
+
+
+def test_the_install_smoke_resolves_within_the_ci_lock():
+    command = test_install_smoke.install_command("HEAD")
+    assert command[command.index("--constraints") + 1] == str(test_install_smoke.LOCK)
+    assert test_install_smoke.LOCK == ROOT / "requirements-ci.txt"
 
 
 def test_package_imports():
