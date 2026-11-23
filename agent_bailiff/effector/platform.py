@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 Platform = Literal["upstream", "gke", "eks"]
 PLATFORMS: tuple[Platform, ...] = ("upstream", "gke", "eks")
 VERSION_PATH = "/version"
-GKE_VERSION_MARKER = "-gke."
+VERSION_MARKERS: Mapping[Platform, str] = {"gke": "-gke.", "eks": "-eks-"}
 READ_VERBS = frozenset({"get", "list"})
 
 
@@ -103,11 +103,14 @@ def check_version(platform: Platform, version: object) -> list[str]:
     git_version = version.get("gitVersion") if isinstance(version, dict) else None
     if not isinstance(git_version, str) or not git_version:
         return [f"{VERSION_PATH} returned no gitVersion"]
-    on_gke = GKE_VERSION_MARKER in git_version
-    if on_gke and platform != "gke":
-        return [f"the cluster runs GKE ({git_version}) but the effector platform is {platform}"]
-    if platform == "gke" and not on_gke:
-        return [f"the effector platform is gke but the cluster runs {git_version}"]
+    found = [name for name, marker in VERSION_MARKERS.items() if marker in git_version]
+    if len(found) > 1:
+        return [f"the cluster version {git_version} names more than one managed platform"]
+    cluster = found[0] if found else "upstream"
+    if cluster != "upstream" and platform != cluster:
+        return [f"the cluster runs {cluster.upper()} ({git_version}) but the effector platform is {platform}"]
+    if platform != "upstream" and platform != cluster:
+        return [f"the effector platform is {platform} but the cluster runs {git_version}"]
     return []
 
 

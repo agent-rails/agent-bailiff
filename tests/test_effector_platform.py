@@ -46,9 +46,23 @@ def test_a_gke_cluster_under_another_platform_is_refused(platform):
     ]
 
 
-def test_the_gke_platform_on_a_cluster_that_is_not_gke_is_refused():
-    assert check_version("gke", {"gitVersion": "v1.36.5"}) == [
-        "the effector platform is gke but the cluster runs v1.36.5"
+@pytest.mark.parametrize("platform", ["upstream", "gke"])
+def test_an_eks_cluster_under_another_platform_is_refused(platform):
+    assert check_version(platform, {"gitVersion": "v1.36.2-eks-0a21954"}) == [
+        f"the cluster runs EKS (v1.36.2-eks-0a21954) but the effector platform is {platform}"
+    ]
+
+
+@pytest.mark.parametrize("platform", ["gke", "eks"])
+def test_a_managed_platform_on_an_upstream_cluster_is_refused(platform):
+    assert check_version(platform, {"gitVersion": "v1.36.5"}) == [
+        f"the effector platform is {platform} but the cluster runs v1.36.5"
+    ]
+
+
+def test_a_version_naming_two_managed_platforms_is_refused():
+    assert check_version("gke", {"gitVersion": "v1.36.4-gke.1-eks-0a21954"}) == [
+        "the cluster version v1.36.4-gke.1-eks-0a21954 names more than one managed platform"
     ]
 
 
