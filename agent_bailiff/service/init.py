@@ -45,6 +45,7 @@ DEFAULT_SKEW_SECONDS = 5
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW = 60
 DEFAULT_CATALOG = shipped_catalog("kubernetes")
+READ_CATALOG = shipped_catalog("kubernetes-read")
 
 
 class InitError(Exception):
@@ -192,7 +193,7 @@ def init_effector(
     document = {
         "name": name,
         "key": str(directory / KEY),
-        "catalog": str(DEFAULT_CATALOG),
+        "catalog": str(DEFAULT_CATALOG if platform == "upstream" else READ_CATALOG),
         "custodian": custodian.component,
         "custodian_keys": {custodian.kid: encode_public_key(custodian.public_key)},
         "decider": decide.component,

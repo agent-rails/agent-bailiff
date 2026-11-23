@@ -29,6 +29,7 @@ from agent_bailiff.docket.sink import DocketSink
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import REVIEW_WORKERS, RbacAudit, RbacGate
 from agent_bailiff.effector.kubernetes import HttpsTransport, KubernetesClient, PooledTransport
+from agent_bailiff.effector.platform import check_catalog
 from agent_bailiff.effector.rbac import generate_manifests
 from agent_bailiff.effector.release import ReleaseCheck, ReleaseCheckConfig
 from agent_bailiff.effector.server import Effector, EffectorConfig, EffectorServer
@@ -284,6 +285,7 @@ class RunningEffector:
 def start_effector(settings: EffectorSettings) -> RunningEffector:
     key = load_signing_key(settings.key)
     catalog = OperationCatalog.load(settings.catalog)
+    check_catalog(settings.platform, catalog.operations)
     check = ReleaseCheck(
         ReleaseCheckConfig(
             effector_id=settings.name,
