@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from test_effector import post
 
+from agent_bailiff.effector.catalog import shipped_catalog
 from agent_bailiff.effector.drift import RbacDrift, RbacGate
 from agent_bailiff.keys import generate_signing_key
 from agent_bailiff.service import run
@@ -123,8 +124,31 @@ def test_the_effector_config_refuses_unknown_and_missing_keys(root):
         parse_effector({**document, "port": 0})
 
 
-def test_the_effector_config_carries_its_platform(root):
-    assert load_effector(effector_config(root, 18083, platform="gke")).platform == "gke"
+@pytest.mark.parametrize("platform", ["gke", "eks"])
+def test_init_on_a_managed_platform_writes_the_read_catalog(root, platform):
+    settings = load_effector(effector_config(root, 18083, platform=platform))
+    assert settings.platform == platform
+    assert settings.catalog.name == "kubernetes-read.json" and settings.catalog.is_file()
+
+
+@pytest.mark.parametrize("platform", ["gke", "eks"])
+def test_a_managed_platform_effector_refuses_a_write_catalog_before_contacting_kubernetes(root, monkeypatch, platform):
+    monkeypatch.setattr(RbacGate, "verify", lambda self: pytest.fail("the RBAC gate ran"))
+    settings = load_effector(effector_config(root, free_port(), platform=platform))
+    with pytest.raises(ValueError, match="managed platforms support read-only catalogs only"):
+        run.start_effector(dataclasses.replace(settings, catalog=shipped_catalog("kubernetes")))
+
+
+def test_a_managed_platform_effector_serves_the_read_catalog(root, monkeypatch):
+    monkeypatch.setattr(RbacGate, "verify", lambda self: None)
+    port = free_port()
+    service = run.start_effector(load_effector(effector_config(root, port, platform="gke")))
+    try:
+        status, body = post(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert status == 200
+        assert [tool["name"] for tool in body["result"]["tools"]] == ["list_pods", "read_pod_log", "get_deployment"]
+    finally:
+        service.close()
 
 
 @pytest.mark.parametrize("platform", ["aks", "GKE", None])

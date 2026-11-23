@@ -1,10 +1,12 @@
 import pytest
 
+from agent_bailiff.effector.catalog import OperationCatalog, shipped_catalog
 from agent_bailiff.effector.platform import (
     DANGEROUS_ACTIONS,
     PLATFORMS,
     Action,
     accepts_incomplete,
+    check_catalog,
     check_version,
     parse_platform,
     reviews_denied_actions,
@@ -137,3 +139,26 @@ def test_the_dangerous_action_list_has_no_duplicates():
 @pytest.mark.parametrize(("platform", "reviewed"), [("gke", True), ("upstream", False), ("eks", False)])
 def test_only_platforms_that_accept_an_incomplete_review_send_dangerous_action_reviews(platform, reviewed):
     assert reviews_denied_actions(platform) is reviewed
+
+
+WRITE_CATALOG = OperationCatalog.load(shipped_catalog("kubernetes"))
+READ_CATALOG = OperationCatalog.load(shipped_catalog("kubernetes-read"))
+
+
+@pytest.mark.parametrize("platform", ["gke", "eks"])
+def test_a_managed_platform_refuses_a_write_catalog(platform):
+    with pytest.raises(
+        ValueError,
+        match=f"managed platforms support read-only catalogs only; {platform} refuses restart_deployment, "
+        "scale_deployment",
+    ):
+        check_catalog(platform, WRITE_CATALOG.operations)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_every_platform_accepts_the_read_catalog(platform):
+    check_catalog(platform, READ_CATALOG.operations)
+
+
+def test_upstream_accepts_the_write_catalog():
+    check_catalog("upstream", WRITE_CATALOG.operations)

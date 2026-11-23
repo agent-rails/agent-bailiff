@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Literal, NamedTuple
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+
+if TYPE_CHECKING:
+    from agent_bailiff.effector.catalog import CatalogOperation
 
 Platform = Literal["upstream", "gke", "eks"]
 PLATFORMS: tuple[Platform, ...] = ("upstream", "gke", "eks")
 VERSION_PATH = "/version"
 GKE_VERSION_MARKER = "-gke."
+READ_VERBS = frozenset({"get", "list"})
 
 
 class Action(NamedTuple):
@@ -84,6 +88,14 @@ def parse_platform(value: object) -> Platform:
     if value not in PLATFORMS:
         raise ValueError(f"platform must be one of {', '.join(PLATFORMS)}")
     return value
+
+
+def check_catalog(platform: Platform, operations: Iterable[CatalogOperation]) -> None:
+    if platform == "upstream":
+        return
+    writes = sorted(item.name for item in operations if item.call.verb not in READ_VERBS)
+    if writes:
+        raise ValueError(f"managed platforms support read-only catalogs only; {platform} refuses {', '.join(writes)}")
 
 
 def check_version(platform: Platform, version: object) -> list[str]:
