@@ -180,13 +180,13 @@ A cloud IAM probe on the same cluster, with Workload Identity Federation enabled
 
 `launch.py --script kubernetes` (above) also builds the webhook image and passes it by `name@sha256:<digest>`; the Deployment runs that reference. With `--catalog kubernetes-read` the launcher builds no webhook image and passes the catalog instead.
 
-Besides `orbstack`, the launcher accepts only a GKE context for a cluster named `bailiff-probe` (`gke_<project>_<zone>_bailiff-probe`), and runs it with `--platform gke`, which allows the read catalog only. The GKE kubeconfig uses a credential plugin the container does not have, so the applier is a service account in that cluster with a one-hour token, passed in the stdin bundle in place of the plugin:
+Besides `orbstack`, the launcher accepts only a GKE context for a cluster named `bailiff-probe` (`gke_<project>_<zone>_bailiff-probe`) in the project given by `--gke-project`, and runs it with `--platform gke`, which allows the read catalog only. Before using the context it runs `gcloud container clusters describe` and refuses unless the cluster carries the label `purpose=bailiff-probe` (create it with `--labels purpose=bailiff-probe`) and its endpoint is the kubeconfig's server. The GKE kubeconfig uses a credential plugin the container does not have, so the applier is a service account in that cluster with a one-hour token, passed in the stdin bundle in place of the plugin:
 
 ```sh
 kubectl --context <gke context> -n default create serviceaccount bailiff-applier
 kubectl --context <gke context> create clusterrolebinding bailiff-applier --clusterrole=cluster-admin --serviceaccount=default:bailiff-applier
 kubectl --context <gke context> -n default create token bailiff-applier --duration=1h > applier.token
-.venv/bin/python examples/live-run/launch.py --script kubernetes --catalog kubernetes-read --context <gke context> --applier-token-file applier.token --out live-run-gke.json
+.venv/bin/python examples/live-run/launch.py --script kubernetes --catalog kubernetes-read --context <gke context> --gke-project <project> --applier-token-file applier.token --out live-run-gke.json
 ```
 
 Delete the cluster afterwards; the service account and its binding go with it.

@@ -20,7 +20,9 @@ IMAGE_TAG = "agent-bailiff-live-run:local"
 WEBHOOK_TAG = "agent-bailiff-webhook:live"
 DIGEST_REF = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 ALLOWED_CONTEXTS = frozenset({"orbstack"})
-GKE_PROBE = re.compile(r"gke_[a-z0-9-]+_[a-z0-9-]+_bailiff-probe")
+GKE_PROBE = re.compile(r"gke_(?P<project>[a-z0-9-]+)_(?P<location>[a-z0-9-]+)_bailiff-probe")
+PROBE_CLUSTER = "bailiff-probe"
+PROBE_LABEL = "purpose"
 ORBSTACK_HOST = "k8s.orb.local"
 READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
@@ -73,13 +75,32 @@ def platform_of(context: str) -> str:
     return "gke" if GKE_PROBE.fullmatch(context) else "upstream"
 
 
+def check_gke_probe(project: str, location: str, server: str) -> None:
+    output = subprocess.run(
+        ["gcloud", "container", "clusters", "describe", PROBE_CLUSTER, "--project", project, "--location", location,
+         "--format", "json"],
+        capture_output=True, text=True, check=True, timeout=60,
+    ).stdout  # fmt: skip
+    cluster = json.loads(output)
+    if (cluster.get("resourceLabels") or {}).get(PROBE_LABEL) != PROBE_CLUSTER:
+        raise RuntimeError(f"cluster {PROBE_CLUSTER} in {project} has no label {PROBE_LABEL}={PROBE_CLUSTER}")
+    if urllib.parse.urlsplit(server).hostname != cluster.get("endpoint"):
+        raise RuntimeError(f"the kubeconfig server {server} is not the endpoint of {PROBE_CLUSTER} in {project}")
+
+
 def minify_kubeconfig(
-    context: str, allowed: frozenset[str] = ALLOWED_CONTEXTS, applier_token: str | None = None
+    context: str,
+    allowed: frozenset[str] = ALLOWED_CONTEXTS,
+    applier_token: str | None = None,
+    gke_project: str | None = None,
 ) -> dict[str, Any]:
-    if context not in allowed and not GKE_PROBE.fullmatch(context):
+    probe = GKE_PROBE.fullmatch(context)
+    if context not in allowed and probe is None:
         raise RuntimeError(
             f"context {context!r} is not a disposable cluster; allowed: {sorted(allowed)} or a GKE bailiff-probe"
         )
+    if probe is not None and probe["project"] != gke_project:
+        raise RuntimeError(f"context {context!r} is not in the probe project given by --gke-project ({gke_project})")
     output = subprocess.run(
         ["kubectl", "config", "view", "--minify", "--flatten", "--context", context, "-o", "json"],
         capture_output=True,
@@ -99,6 +120,8 @@ def minify_kubeconfig(
     if "exec" in user or "auth-provider" in user:
         raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
     cluster = view["clusters"][0]["cluster"]
+    if probe is not None:
+        check_gke_probe(probe["project"], probe["location"], cluster["server"])
     server = urllib.parse.urlsplit(cluster["server"])
     if server.hostname == "127.0.0.1":
         cluster["server"] = server._replace(netloc=f"{ORBSTACK_HOST}:{server.port}").geturl()
@@ -195,6 +218,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--catalog", choices=("kubernetes", READ_CATALOG), default="kubernetes")
     parser.add_argument("--applier-token-file", type=Path, help="static applier token for a context that uses exec")
+    parser.add_argument("--gke-project", help="project of the GKE bailiff-probe cluster the context must name")
     args = parser.parse_args()
     if args.out.exists():
         raise SystemExit(f"{args.out} already exists")
@@ -203,7 +227,11 @@ def main() -> None:
     token = read_token()
     kubernetes = args.script == "kubernetes"
     applier_token = args.applier_token_file.read_text().strip() if args.applier_token_file else None
-    kubeconfig = minify_kubeconfig(args.context, applier_token=applier_token) if kubernetes else None
+    kubeconfig = (
+        minify_kubeconfig(args.context, applier_token=applier_token, gke_project=args.gke_project)
+        if kubernetes
+        else None
+    )
     webhook = None
     if kubernetes and args.catalog != READ_CATALOG:
         build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
