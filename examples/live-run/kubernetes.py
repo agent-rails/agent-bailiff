@@ -202,13 +202,17 @@ class Cluster:
             self.create("deployment", "api", "--image=registry.k8s.io/pause:3.10", namespace=self.namespaces[key])
         kubectl(self.context, "apply", "-f", str(self.manifests))
         for account, name in (("effector", "effector.token"), ("effector-audit", "audit.token")):
-            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=10m")
+            token = kubectl(self.context, "-n", self.namespaces["sys"], "create", "token", account, "--duration=30m")
             (self.directory / name).write_text(token.strip())
             os.chmod(self.directory / name, 0o600)
         view = json.loads(kubectl(self.context, "config", "view", "--minify", "--raw", "-o", "json"))
         cluster = view["clusters"][0]["cluster"]
         (self.directory / "ca.crt").write_bytes(base64.b64decode(cluster["certificate-authority-data"]))
         self.server = urllib.parse.urlsplit(cluster["server"])
+
+    @property
+    def kube_port(self) -> int:
+        return self.server.port or 443
 
     def deploy_webhook(self, effector: dict[str, Any], image: str) -> None:
         if IMAGE_DIGEST.fullmatch(image) is None:
@@ -258,7 +262,7 @@ class Cluster:
     def audit_webhook(self, manifests: dict[str, Any]) -> None:
         staging = self.namespaces["staging"]
         problems = WebhookAudit(
-            HttpsTransport(self.server.hostname or "", self.server.port or 443, self.directory / "ca.crt"),
+            HttpsTransport(self.server.hostname or "", self.kube_port, self.directory / "ca.crt"),
             read_token(self.directory / "audit.token"),
             manifests,
             self.namespaces["sys"],
@@ -423,7 +427,7 @@ class KubernetesDeployment(Deployment):
                 "--kube-host",
                 cluster.server.hostname,
                 "--kube-port",
-                cluster.server.port,
+                cluster.kube_port,
                 "--kube-ca",
                 cluster.directory / "ca.crt",
                 "--kube-token-file",

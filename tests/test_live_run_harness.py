@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -571,6 +572,13 @@ def bare_cluster(tmp_path, created=False):
     cluster.namespaces = {key: f"bl-x-{key}" for key in ("sys", "hook", "staging", "prod")}
     cluster.manifests = cluster.webhook_manifests = tmp_path / "absent.json"
     return cluster
+
+
+@pytest.mark.parametrize(("server", "port"), [("https://34.79.224.222", 443), ("https://k8s.orb.local:26443", 26443)])
+def test_the_kube_port_defaults_to_https(tmp_path, server, port):
+    cluster = bare_cluster(tmp_path)
+    cluster.server = urllib.parse.urlsplit(server)
+    assert cluster.kube_port == port
 
 
 def test_a_held_lock_fails_fast_and_names_its_owner(tmp_path, monkeypatch):
