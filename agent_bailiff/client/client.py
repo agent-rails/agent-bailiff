@@ -246,7 +246,7 @@ class BailiffClient:
     def _list_all_tools(self) -> list[dict[str, Any]]:
         self._ensure_session()
         tools: list[dict[str, Any]] = []
-        names: set[object] = set()
+        names: set[str] = set()
         cursors: set[str] = set()
         params: dict[str, Any] = {}
         for _ in range(MAX_TOOL_PAGES):
@@ -256,6 +256,8 @@ class BailiffClient:
                 raise GatewayError("tools/list returned no tool list")
             for tool in page:
                 name = tool.get("name")
+                if not isinstance(name, str):
+                    raise GatewayError("tools/list listed a tool without a string name")
                 if name in names:
                     raise GatewayError(f"tools/list listed tool {name!r:.80} twice")
                 names.add(name)
