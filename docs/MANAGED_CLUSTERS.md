@@ -76,7 +76,7 @@ kubectl create token effector -n bailiff-system --duration=10m
 kubectl create token effector-audit -n bailiff-system --duration=10m
 ```
 
-Whether these return a token with `exp - iat` of 600 s on GKE has not been checked. If not, the effector refuses the token.
+On 1.36.4-gke.2377000 (2026-11-23) a TokenRequest for 600 s returned a token with `exp - iat` of exactly 600 s. For GKE, `GKE_QUICKSTART.md` sets up a Cloud Run job on a schedule that mints both tokens into one Secret Manager secret, and `deploy/gke/fetch_tokens.py` on the host copies them into the two files.
 
 ## Cloud IAM check
 
