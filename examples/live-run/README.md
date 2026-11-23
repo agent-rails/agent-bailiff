@@ -163,6 +163,17 @@ No read-only run is recorded yet.
 
 `launch.py --script kubernetes` (above) also builds the webhook image and passes it by `name@sha256:<digest>`; the Deployment runs that reference. With `--catalog kubernetes-read` the launcher builds no webhook image and passes the catalog instead.
 
+Besides `orbstack`, the launcher accepts only a GKE context for a cluster named `bailiff-probe` (`gke_<project>_<zone>_bailiff-probe`), and runs it with `--platform gke`, which allows the read catalog only. The GKE kubeconfig uses a credential plugin the container does not have, so the applier is a service account in that cluster with a one-hour token, passed in the stdin bundle in place of the plugin:
+
+```sh
+kubectl --context <gke context> -n default create serviceaccount bailiff-applier
+kubectl --context <gke context> create clusterrolebinding bailiff-applier --clusterrole=cluster-admin --serviceaccount=default:bailiff-applier
+kubectl --context <gke context> -n default create token bailiff-applier --duration=1h > applier.token
+.venv/bin/python examples/live-run/launch.py --script kubernetes --catalog kubernetes-read --context <gke context> --applier-token-file applier.token --out live-run-gke.json
+```
+
+Delete the cluster afterwards; the service account and its binding go with it.
+
 The run takes a cluster-scoped lock first, the Namespace `agent-bailiff-lock` annotated with the run id, and labels everything it creates `agent-bailiff/run=<run id>`. A second run against the same cluster fails while the lock exists. `docker stop` (and the launcher's 3600 s limit) sends SIGTERM, and teardown runs within one 240 s deadline, inside the container's 300 s stop timeout; the lock is deleted last, and kept if any cleanup step failed.
 
 After `docker kill` or a host crash the lock stays. The launcher reports the owner run id and whether container `bl-<run id>` still runs; it never deletes the lock. Only when that container is not running, delete what the run labelled, then the lock:

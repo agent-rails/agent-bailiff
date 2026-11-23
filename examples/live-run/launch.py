@@ -20,6 +20,7 @@ IMAGE_TAG = "agent-bailiff-live-run:local"
 WEBHOOK_TAG = "agent-bailiff-webhook:live"
 DIGEST_REF = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 ALLOWED_CONTEXTS = frozenset({"orbstack"})
+GKE_PROBE = re.compile(r"gke_[a-z0-9-]+_[a-z0-9-]+_bailiff-probe")
 ORBSTACK_HOST = "k8s.orb.local"
 READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
@@ -40,6 +41,7 @@ class RunSpec:
     docker_context: str
     webhook_image: str | None = None
     catalog: str = "kubernetes"
+    platform: str = "upstream"
 
 
 def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | None = None) -> str:
@@ -67,9 +69,17 @@ def resolve_digest(docker_context: str, tag: str) -> str:
     return str(digests[0])
 
 
-def minify_kubeconfig(context: str, allowed: frozenset[str] = ALLOWED_CONTEXTS) -> dict[str, Any]:
-    if context not in allowed:
-        raise RuntimeError(f"context {context!r} is not a disposable cluster; allowed: {sorted(allowed)}")
+def platform_of(context: str) -> str:
+    return "gke" if GKE_PROBE.fullmatch(context) else "upstream"
+
+
+def minify_kubeconfig(
+    context: str, allowed: frozenset[str] = ALLOWED_CONTEXTS, applier_token: str | None = None
+) -> dict[str, Any]:
+    if context not in allowed and not GKE_PROBE.fullmatch(context):
+        raise RuntimeError(
+            f"context {context!r} is not a disposable cluster; allowed: {sorted(allowed)} or a GKE bailiff-probe"
+        )
     output = subprocess.run(
         ["kubectl", "config", "view", "--minify", "--flatten", "--context", context, "-o", "json"],
         capture_output=True,
@@ -83,6 +93,8 @@ def minify_kubeconfig(context: str, allowed: frozenset[str] = ALLOWED_CONTEXTS) 
             raise RuntimeError(f"the minified kubeconfig must hold exactly one of {key}")
     if view["contexts"][0]["name"] != context:
         raise RuntimeError(f"the minified kubeconfig names context {view['contexts'][0]['name']!r}, not {context!r}")
+    if applier_token is not None:
+        view["users"][0]["user"] = {"token": applier_token}
     user = view["users"][0].get("user") or {}
     if "exec" in user or "auth-provider" in user:
         raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
@@ -123,7 +135,9 @@ def container_command(spec: RunSpec, image: str) -> list[str]:
     if spec.context is None:
         raise RuntimeError("the kubernetes run needs a context")
     if spec.catalog == READ_CATALOG:
-        return [*command, "--context", spec.context, "--catalog", READ_CATALOG]
+        return [*command, "--context", spec.context, "--catalog", READ_CATALOG, "--platform", spec.platform]
+    if spec.platform != "upstream":
+        raise RuntimeError(f"platform {spec.platform} supports the {READ_CATALOG} catalog only")
     if spec.webhook_image is None:
         raise RuntimeError("the kubernetes catalog needs a webhook image")
     return [*command, "--context", spec.context, "--webhook-image", spec.webhook_image]
@@ -180,6 +194,7 @@ def main() -> None:
     parser.add_argument("--archiver-uid", type=int, default=10009)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--catalog", choices=("kubernetes", READ_CATALOG), default="kubernetes")
+    parser.add_argument("--applier-token-file", type=Path, help="static applier token for a context that uses exec")
     args = parser.parse_args()
     if args.out.exists():
         raise SystemExit(f"{args.out} already exists")
@@ -187,7 +202,8 @@ def main() -> None:
         raise SystemExit(f"{args.out} is inside the repo, which is the image build context; write it elsewhere")
     token = read_token()
     kubernetes = args.script == "kubernetes"
-    kubeconfig = minify_kubeconfig(args.context) if kubernetes else None
+    applier_token = args.applier_token_file.read_text().strip() if args.applier_token_file else None
+    kubeconfig = minify_kubeconfig(args.context, applier_token=applier_token) if kubernetes else None
     webhook = None
     if kubernetes and args.catalog != READ_CATALOG:
         build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
@@ -205,6 +221,7 @@ def main() -> None:
         docker_context=args.docker_context,
         webhook_image=webhook,
         catalog=args.catalog,
+        platform=platform_of(args.context),
     )
     process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
