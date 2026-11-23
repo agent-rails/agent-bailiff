@@ -41,7 +41,7 @@ from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.platform import PLATFORMS
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
-from agent_bailiff.keys import PublicKeyRecord
+from agent_bailiff.keys import PublicKeyRecord, load_signing_key
 from agent_bailiff.proxy.agent_key import AgentKeyError, generate_agent_key
 from agent_bailiff.service import run
 from agent_bailiff.service.init import (
@@ -63,6 +63,16 @@ from agent_bailiff.service.settings import (
     load_effector,
 )
 from agent_bailiff.signing import MAX_TOKEN_CHARS
+from agent_bailiff.strict_json import parse_strict_json
+from agent_bailiff.task.issue import (
+    DEFAULT_PRINCIPAL,
+    DEFAULT_TENANT,
+    DEFAULT_TTL_SECONDS,
+    TaskIssueError,
+    TaskRequest,
+    issue_task,
+    write_task_file,
+)
 
 PROG = "agent-bailiff"
 EXIT_REFUSED = 1
@@ -242,7 +252,31 @@ def _parser() -> argparse.ArgumentParser:
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
     _add_proxy(commands)
+    _add_task(commands)
     return parser
+
+
+def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    task = commands.add_parser("task", help="issue task roots; run as the issuer's uid, never the agent's")
+    actions = task.add_subparsers(dest="action", required=True)
+    issue = actions.add_parser("issue", help="issue a task root to an agent key and write task.json")
+    issue.add_argument("--issuer-key", type=Path, required=True, help="the issuer's 0600 signing key")
+    issue.add_argument("--issuer", required=True, help="the issuer name decide trusts")
+    issue.add_argument("--decider-id", required=True, help="decide's name")
+    issue.add_argument("--tenant", default=DEFAULT_TENANT)
+    issue.add_argument("--principal", default=DEFAULT_PRINCIPAL)
+    issue.add_argument("--purpose", required=True)
+    issue.add_argument(
+        "--scope", required=True, help='JSON: {"tools": [...], "resources": [...], "max_cost_per_call": n}'
+    )
+    issue.add_argument("--budget", type=int, required=True)
+    issue.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS, help="seconds, at most 86400")
+    issue.add_argument("--max-depth", type=int, default=0, help="delegation depth below the agent, at most 2")
+    issue.add_argument("--subject", required=True, help="the agent's public key from proxy keygen")
+    issue.add_argument(
+        "--out-dir", type=Path, required=True, help="task directory owned by this uid, not group or other writable"
+    )
+    issue.set_defaults(handler=_task_issue)
 
 
 def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -636,6 +670,27 @@ def _proxy_keygen(args: argparse.Namespace) -> int:
     except AgentKeyError as exc:
         return _refused("proxy keygen", exc)
     print(subject)
+    return 0
+
+
+def _task_issue(args: argparse.Namespace) -> int:
+    try:
+        request = TaskRequest(
+            purpose=args.purpose,
+            scope=parse_strict_json(args.scope),
+            budget=args.budget,
+            subject=args.subject,
+            tenant=args.tenant,
+            principal=args.principal,
+            ttl=args.ttl,
+            max_depth=args.max_depth,
+        )
+        task = issue_task(load_signing_key(args.issuer_key), args.issuer, args.decider_id, request, int(time.time()))
+        path = write_task_file(args.out_dir, task)
+    except STARTUP_ERRORS + (TaskIssueError,) as exc:
+        return _refused("task issue", exc)
+    print(f"{PROG} task issue: wrote {path}, expires at {task.root.expires_at}", file=sys.stderr)
+    print(task.root.task_id)
     return 0
 
 
