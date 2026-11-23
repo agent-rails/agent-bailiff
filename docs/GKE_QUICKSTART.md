@@ -120,9 +120,11 @@ gcloud scheduler jobs create http bailiff-minter --location $REGION --schedule '
   --http-method POST --oauth-service-account-email $TRIGGER --project $PROJECT
 ```
 
-Each run checks that both tokens name the right account and live at most 600 s (GKE issued exactly 600 s), adds one version, and destroys only versions numbered below its own, so a late run never destroys a newer one. A run that fails before adding its version destroys nothing; one that fails while destroying leaves older versions enabled until the next run. Each run has a 10 s timeout per request.
+Each run checks that both tokens name the right account and live at most 600 s (GKE issued exactly 600 s), adds one version, and destroys only versions numbered below its own, so a late run never destroys a newer one. A run that fails before adding its version destroys nothing; one that fails while destroying leaves older versions enabled until the next run. Each socket operation times out after 10 s, and the job's `--task-timeout 120s` bounds the whole run.
 
-The fetcher refuses a token with under 60 s left, so a token is usable for about 540 s after minting. At every 2 minutes, three runs in a row can fail and the fourth still lands before the last token expires; at every 5 minutes, one failed run stops the effector. Alert on the fetcher's exit status and on the job's failed executions.
+The effector uses an installed token until it expires, 600 s after minting; the fetcher refuses to install one with under 60 s left. At every 2 minutes, three runs in a row can fail and the effector keeps working if the fourth publishes within about 60 s of its schedule tick; a slower fourth run (up to the 120 s task timeout) can leave a gap. At every 5 minutes, one failed run stops the effector. Alert on the job's failed executions and on the age of the installed tokens (for example, over 360 s); the fetcher also exits non-zero once the newest published token has under 60 s left.
+
+The fetcher never replaces an installed token with one issued earlier, so a run that minted first but published last cannot shorten the effector's tokens.
 
 ## 6. Host
 
@@ -145,7 +147,7 @@ It refuses a secret unless each token names its own service account, lives at mo
 
 ## Stop
 
-- Stop minting: pause the schedule and cancel any running execution. The effector stops within 600 s.
+- Stop minting: pause the schedule, then cancel executions until `executions list` shows none running. The effector stops within 600 s of the last publish.
 
   ```sh
   gcloud scheduler jobs pause bailiff-minter --location $REGION --project $PROJECT
@@ -153,7 +155,7 @@ It refuses a secret unless each token names its own service account, lives at mo
   gcloud run jobs executions cancel <execution> --region $REGION --project $PROJECT
   ```
 
-- Host lost or suspected: remove its read grant, then stop minting as above.
+- Host lost or suspected: remove its read grant, then stop minting as above. IAM changes are not immediate, and tokens already fetched stay valid until they expire, at most 600 s after minting.
 
   ```sh
   gcloud secrets remove-iam-policy-binding bailiff-tokens --member <host principal> \
