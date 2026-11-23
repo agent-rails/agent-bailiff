@@ -81,6 +81,8 @@ nodes:
 
 
 class StubAuthorizer(ThreadingHTTPServer):
+    request_queue_size = 128
+
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _AuthorizerHandler)
         self.allowed: set[tuple[str, str, str, str | None]] = set()
