@@ -26,17 +26,21 @@ def _actions(verbs: tuple[str, ...], group: str, resources: tuple[str, ...], **k
 
 
 AUTHENTICATION = "authentication.k8s.io"
-WRITES = ("create", "update", "patch", "delete")
+WRITES = ("create", "update", "patch", "delete", "deletecollection")
+PROXY = ("get", "create", "update", "patch", "delete")
 CLUSTER: dict[str, Any] = {"namespaced": False}
 DANGEROUS_ACTIONS: tuple[Action, ...] = (
     *_actions(("*",), "*", ("*",)),
     *_actions(("get", "list", "watch"), "", ("secrets",)),
-    *_actions(WRITES, "", ("pods", "replicationcontrollers")),
-    *_actions(("get", *WRITES), "", ("pods", "services"), subresource="proxy"),
+    *_actions(WRITES, "", ("pods", "replicationcontrollers", "services", "endpoints", "configmaps", "secrets")),
+    *_actions(WRITES, "discovery.k8s.io", ("endpointslices",)),
+    *_actions(PROXY, "", ("pods", "services"), subresource="proxy"),
     *_actions(("get", "create"), "", ("pods",), subresource="exec"),
     *_actions(("get", "create"), "", ("pods",), subresource="attach"),
     *_actions(("get", "create"), "", ("pods",), subresource="portforward"),
     *_actions(("update", "patch"), "", ("pods",), subresource="ephemeralcontainers"),
+    *_actions(("create",), "", ("pods",), subresource="eviction"),
+    *_actions(("create",), "", ("pods",), subresource="binding"),
     *_actions(("create",), "", ("serviceaccounts",), subresource="token"),
     *_actions(WRITES, "apps", ("deployments",)),
     *_actions(("update", "patch"), "apps", ("deployments",), subresource="scale"),
@@ -56,7 +60,7 @@ DANGEROUS_ACTIONS: tuple[Action, ...] = (
     *_actions(("impersonate", "impersonate:user-info"), AUTHENTICATION, ("users", "groups", "uids"), **CLUSTER),
     *_actions(("impersonate",), AUTHENTICATION, ("userextras",), **CLUSTER),
     *_actions(("impersonate:arbitrary-node", "impersonate:associated-node"), AUTHENTICATION, ("nodes",), **CLUSTER),
-    *_actions(("get", "create"), "", ("nodes",), subresource="proxy", **CLUSTER),
+    *_actions(PROXY, "", ("nodes",), subresource="proxy", **CLUSTER),
     *_actions(("update", "patch"), "", ("nodes",), **CLUSTER),
     *_actions(("delete",), "", ("namespaces",), **CLUSTER),
     *_actions(("create",), "", ("persistentvolumes",), **CLUSTER),
@@ -76,7 +80,8 @@ DANGEROUS_ACTIONS: tuple[Action, ...] = (
         ),
         **CLUSTER,
     ),
-    *_actions(("create",), "apiextensions.k8s.io", ("customresourcedefinitions",), **CLUSTER),
+    *_actions(WRITES, "apiextensions.k8s.io", ("customresourcedefinitions",), **CLUSTER),
+    *_actions(WRITES, "apiregistration.k8s.io", ("apiservices",), **CLUSTER),
 )
 ACCEPTED_INCOMPLETE: Mapping[Platform, frozenset[str]] = {
     "upstream": frozenset(),
