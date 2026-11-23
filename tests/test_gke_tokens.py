@@ -130,6 +130,21 @@ def test_the_minter_destroys_older_versions_on_every_page():
     assert cloud.enabled == {8}
 
 
+def test_the_minter_refuses_more_pages_than_it_reads():
+    cloud = Cloud(enabled=range(1, 13), page_size=1)
+    with pytest.raises(minter.MintError, match="more than 10 pages"):
+        minter.destroy_older(cloud, "google-token", SECRET, version(12))
+    assert cloud.destroyed() == []
+
+
+def test_the_minter_refuses_a_listing_that_is_not_an_object():
+    def listing(method, url, headers, body):
+        return 200, b"[]"
+
+    with pytest.raises(minter.MintError, match="did not answer an object"):
+        minter.destroy_older(listing, "google-token", SECRET, version(3))
+
+
 @pytest.mark.parametrize(
     ("token", "message"),
     [
@@ -214,6 +229,21 @@ def test_the_fetcher_replaces_a_token_with_a_new_file(token_dir):
     newer = account_token("effector", issued=int(time.time()) + 1)
     assert fetch(token_dir, secret(effector=newer)) == ["effector"]
     assert token_dir["effector"].read_text() == newer
+
+
+def test_the_fetcher_never_replaces_a_token_with_an_older_one(token_dir):
+    now = int(time.time())
+    newer = account_token("effector", issued=now)
+    fetch(token_dir, secret(effector=newer))
+    older = account_token("effector", issued=now - 30)
+    assert fetch(token_dir, secret(effector=older)) == []
+    assert token_dir["effector"].read_text() == newer
+
+
+def test_the_fetcher_replaces_an_unreadable_installed_token(token_dir):
+    token_dir["effector"].write_text("garbage")
+    token_dir["effector"].chmod(0o600)
+    assert fetch(token_dir, secret()) == ["effector", "audit"]
 
 
 @pytest.mark.parametrize(

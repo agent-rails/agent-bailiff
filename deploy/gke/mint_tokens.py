@@ -123,10 +123,14 @@ def destroy_older(transport: Send, bearer: str, secret: str, keep: str) -> list[
         if status != 200:
             raise MintError(f"listing the versions of {secret} answered {status}")
         listed = json.loads(answer)
+        if not isinstance(listed, dict):
+            raise MintError(f"listing the versions of {secret} did not answer an object")
         names += [version["name"] for version in listed.get("versions", [])]
         page = listed.get("nextPageToken", "")
         if not page:
             break
+    if page:
+        raise MintError(f"{secret} has more than {MAX_PAGES} pages of versions")
     destroyed = []
     for name in sorted(names, key=version_number):
         if version_number(name) >= newest:

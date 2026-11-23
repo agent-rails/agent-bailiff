@@ -81,6 +81,14 @@ def tokens(content: bytes, subjects: Mapping[str, str], now: float) -> dict[str,
     return {field: check(field, decoded[field], subjects[field], now) for field in FIELDS}
 
 
+def issued_at(token: str) -> int:
+    try:
+        issued = claims(token).get("iat")
+    except FetchError:
+        return 0
+    return issued if type(issued) is int else 0
+
+
 def current(path: Path) -> str | None:
     if not os.path.lexists(path):
         return None
@@ -99,11 +107,14 @@ def replace(path: Path, token: str) -> None:
         if os.path.lexists(temporary):
             os.unlink(temporary)
         raise FetchError(f"{path}: {exc}") from None
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        raise FetchError(f"{path.parent}: {exc}") from None
 
 
 def run(
@@ -112,7 +123,8 @@ def run(
     found = tokens(fetch(project, secret), subjects, time.time())
     written = []
     for field in FIELDS:
-        if current(paths[field]) == found[field]:
+        installed = current(paths[field])
+        if installed is not None and issued_at(installed) >= issued_at(found[field]):
             continue
         replace(paths[field], found[field])
         written.append(field)
