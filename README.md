@@ -69,7 +69,7 @@ Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roo
 - [agentgateway](https://github.com/agentgateway/agentgateway) v1.7.0 for the gateway adapter
 - For the effector: Kubernetes v1.36 or later (constrained impersonation, beta in v1.36); tested on OrbStack v1.36.5 and kind v1.36.4. On v1.34 the effector's calls are refused (28 of 36 cluster tests fail with 403 on kind v1.34.3).
 - Managed clusters, reads only (`kubernetes-read` catalog, nothing from bailiff runs in the cluster), see [docs/MANAGED_CLUSTERS.md](docs/MANAGED_CLUSTERS.md):
-  - GKE Standard 1.36: probed on 1.36.4-gke.2377000 on 2026-11-22; no recorded effector run yet. Pod logs reach the agent unfiltered.
+  - GKE Standard 1.36: probed on 1.36.4-gke.2377000 on 2026-11-22; read-only effector run recorded on 2026-11-23 at d673325, later revisions not re-run on GKE. Pod logs reach the agent unfiltered.
   - EKS: not supported; not probed.
   - GKE Autopilot: not tested.
 
