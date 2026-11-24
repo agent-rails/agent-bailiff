@@ -30,6 +30,7 @@ EXPIRY_DEADLINE_SECONDS = 10
 AGENT_USER = os.environ.get("AGENT_BAILIFF_TEST_AGENT_USER")
 AGENT_PYTHON = os.environ.get("AGENT_BAILIFF_TEST_AGENT_PYTHON", sys.executable)
 AS_AGENT = ["sudo", "-n", "-u", AGENT_USER] if AGENT_USER else []
+SHARED_USER_FLAG = [] if AGENT_USER else ["--allow-shared-user"]
 DOCKER_SOCKET = "/var/run/docker.sock"
 OPEN_PROBE = """
 import socket, sys
@@ -102,6 +103,7 @@ class Proxy:
                 "agent_bailiff.cli",
                 "proxy",
                 "run",
+                *SHARED_USER_FLAG,
                 "--task-file",
                 str(adopter.task_file),
                 "--key-dir",
