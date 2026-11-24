@@ -61,6 +61,16 @@ def cli(*arguments, check=True):
     return agent_python("-m", "agent_bailiff.cli", *arguments, check=check)
 
 
+def operator_cli(*arguments):
+    return subprocess.run(
+        [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)],
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=True,
+    )
+
+
 def own_directory(path, uid):
     script = (
         "import os, sys\n"
@@ -213,7 +223,7 @@ def test_routes_generate_drafts_every_upstream_tool(adopter, proxy, tmp_path):
                  "--gateway-url", adopter.gateway_url).stdout  # fmt: skip
     tools.write_text(output)
     draft = tmp_path / "routes.json"
-    cli("routes", "generate", "--tools", tools, "--service", UPSTREAM.service, "--out", draft)
+    operator_cli("routes", "generate", "--tools", tools, "--service", UPSTREAM.service, "--out", draft)
     routes = json.loads(draft.read_text())["routes"]
     assert [(route["name"], route["tool"], route["resource"]) for route in routes] == [
         ("delete_all_notes", "stub.delete_all_notes", ""),
