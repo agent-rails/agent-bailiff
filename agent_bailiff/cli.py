@@ -279,7 +279,11 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     issue.add_argument("--budget", type=int, required=True)
     issue.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS, help="seconds, at most 86400")
     issue.add_argument("--max-depth", type=int, default=0, help="delegation depth below the agent, at most 2")
-    issue.add_argument("--subject", required=True, help="the agent's public key from proxy keygen")
+    issue.add_argument(
+        "--subject",
+        required=True,
+        help="the agent's public key from proxy keygen; pass as --subject=KEY, it may start with -",
+    )
     issue.add_argument(
         "--out-dir", type=Path, required=True, help="task directory owned by this uid, not group or other writable"
     )
