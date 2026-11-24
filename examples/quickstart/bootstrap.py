@@ -34,7 +34,7 @@ from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
 from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
-from agent_bailiff.scope_pattern import is_bounded
+from agent_bailiff.scope_pattern import is_bounded_resource
 from agent_bailiff.service.init import InitError, read_pin
 from agent_bailiff.service.settings import ConfigError, load_control, load_custodian, load_decide, load_docket
 from agent_bailiff.strict_json import parse_strict_json
@@ -177,7 +177,7 @@ def load_upstream(path: Path) -> Upstream:
     check_upstream_url(path, text["url"])
     if not HEADER_NAME.fullmatch(text["credential_header"]):
         raise BootstrapError(f"{path}: credential_header must be an HTTP field name token")
-    if not is_bounded(text["binding_resource"]):
+    if not is_bounded_resource(text["binding_resource"]):
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
     ca_pem = load_upstream_ca(path, text["ca_file"], text["url"]) if "ca_file" in text else None
