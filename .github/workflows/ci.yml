@@ -73,7 +73,7 @@ jobs:
       - run: python -m pip install --no-deps --no-build-isolation -e .
       - run: python -m pip check
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
-      - run: pytest -q -rs tests/test_quickstart_default.py | tee "$RUNNER_TEMP/pytest.out"
+      - run: pytest -q -rs tests/test_quickstart_default.py tests/test_adopt_stack.py | tee "$RUNNER_TEMP/pytest.out"
         env:
           AGENT_BAILIFF_TEST_QUICKSTART: "1"
       - run: docker compose --profile gitea --profile spike up --detach --wait

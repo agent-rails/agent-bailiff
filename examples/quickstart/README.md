@@ -192,7 +192,7 @@ $ rm -f run.json inject.json
 $ docker compose --profile "*" down --volumes --remove-orphans
 ```
 
-`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the Gitea stack, and `tests/test_quickstart_default.py` the default stub stack, under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
+`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the Gitea stack, `tests/test_quickstart_default.py` the default stub stack, and `tests/test_adopt_stack.py` the adopter path on it (credential, route draft, agent key, task issue, stdio proxy), under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
 
 ## What this shows
 
