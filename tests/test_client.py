@@ -710,6 +710,38 @@ def test_a_bad_gateway_url_is_rejected(url):
         BailiffClient(url, holder(), ROUTES)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://gateway.example.com/mcp",
+        "http://10.0.0.5:8080/mcp",
+        "http://[2001:db8::1]:8080/mcp",
+        "http://127.0.0.1.evil.example/mcp",
+        "http://167772165:8080/mcp",
+        "http://0xa000005:8080/mcp",
+        "http://gateway@10.0.0.5:8080/mcp",
+    ],
+)
+def test_an_http_gateway_url_to_a_remote_host_is_rejected(url):
+    with pytest.raises(ValueError, match="https"):
+        BailiffClient(url, holder(), ROUTES)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://gateway.example.com/mcp",
+        "https://10.0.0.5:8443/mcp",
+        "http://127.0.0.1:8080/mcp",
+        "http://localhost:8080/mcp",
+        "http://[::1]:8080/mcp",
+        "http://gateway:8080/mcp",
+    ],
+)
+def test_an_https_loopback_or_service_name_gateway_url_is_accepted(url):
+    BailiffClient(url, holder(), ROUTES).close()
+
+
 PROBE = """
 import sys
 from importlib.abc import MetaPathFinder

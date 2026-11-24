@@ -339,6 +339,37 @@ def test_a_name_routed_on_two_services_is_refused():
         route_services(routes)
 
 
+@pytest.mark.parametrize("url", ["http://gateway.example.com/mcp", "http://10.0.0.5:8080/mcp"])
+def test_a_proxy_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, gateway, url):
+    with pytest.raises(ValueError, match="https"):
+        StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+
+
+def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, monkeypatch, capsys):
+    from agent_bailiff.cli import main
+
+    issue(task_file, key_dir, now=int(time.time()))
+    monkeypatch.setattr("agent_bailiff.client.client.BailiffClient.list_tools", lambda self: pytest.fail("contacted"))
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", "http://10.0.0.5/mcp"]
+    assert main(["proxy", "tools", *arguments]) == 1
+    assert "proxy tools refused" in capsys.readouterr().err
+
+
+def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_file, key_dir):
+    routes = tmp_path / "routes.json"
+    routes.write_text(json.dumps(ROUTE_DOCUMENT))
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--routes", str(routes)]
+    result = subprocess.run(
+        [sys.executable, "-m", "agent_bailiff.cli", "proxy", "run", *arguments, "--gateway-url", "http://10.0.0.5/mcp"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert "proxy run refused" in result.stderr and "https" in result.stderr
+
+
 class SlowGateway(BaseHTTPRequestHandler):
     called = threading.Event()
 

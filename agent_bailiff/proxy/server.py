@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from agent_bailiff.client import BailiffClient, GatewayError, Holder, OutcomeUnknown
-from agent_bailiff.client.client import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, Clock, system_clock
+from agent_bailiff.client.client import (
+    PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    Clock,
+    check_gateway_url,
+    system_clock,
+)
 from agent_bailiff.proxy.agent_key import AgentKeyError, prune
 from agent_bailiff.proxy.guidance import GATEWAY_UNAVAILABLE, NO_TASK, OUTCOME_UNKNOWN, TASK_EXPIRED, mcp_result, text
 from agent_bailiff.proxy.task_state import NoTask, TaskState, TaskUnavailable, read_task_bytes
@@ -59,6 +65,7 @@ class StdioProxy:
         clock: Clock = system_clock,
         client_factory: ClientFactory = BailiffClient,
     ) -> None:
+        check_gateway_url(gateway_url)
         self._task_file = task_file
         self._key_dir = key_dir
         self._gateway_url = gateway_url
