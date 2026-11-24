@@ -20,7 +20,7 @@ CREDENTIAL_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
 import bootstrap
-print(bootstrap.stored_credential())
+print(bootstrap.stored_credential(bootstrap.load_upstream(bootstrap.UPSTREAM_FILE)))
 """
 VOLUME_SCAN = """
 import json, os, stat, sys

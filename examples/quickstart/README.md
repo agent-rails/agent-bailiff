@@ -27,7 +27,7 @@ Every bailiff container and gitea-mcp is read-only, drops all capabilities and s
 
 Every service has a memory and process limit (`mem_limit`, `pids_limit`), with swap capped at the memory limit (`memswap_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
 
-The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/repos/quickstart/demo/*`, budget 20, one hour. Three routes exist (`routes.json`): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include. Each route builds its resource from the call's `owner` and `repo` arguments, for example `gitea/repos/quickstart/demo/issues`, so the scope names one repository. The custodian bindings cover `gitea/repos/quickstart/*`.
+The task scope is `gitea.issues.list` and `gitea.issues.read` on `gitea/repos/quickstart/demo/*`, budget 20, one hour. Three routes exist (`upstreams/gitea-routes.json`, named by the upstream config `upstreams/gitea.json`, see [`upstreams/schema.md`](upstreams/schema.md)): `list_issues`, `issue_read`, and `get_file_contents`, which the task scope does not include. Each route builds its resource from the call's `owner` and `repo` arguments, for example `gitea/repos/quickstart/demo/issues`, so the scope names one repository. The custodian bindings cover `gitea/repos/quickstart/*`.
 
 ## Run it
 

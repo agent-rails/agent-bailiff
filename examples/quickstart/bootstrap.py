@@ -7,6 +7,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -15,18 +16,25 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from agent_warrant.identity import encode_public_key, is_valid_public_key
 from agent_warrant.task_root import issue_task_root
 
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
+from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
+from agent_bailiff.route_generation import service_problem
+from agent_bailiff.routes import ToolRoutes
+from agent_bailiff.scope_pattern import is_bounded
 from agent_bailiff.service.init import InitError, read_pin
 from agent_bailiff.service.settings import ConfigError, load_control, load_custodian, load_decide, load_docket
+from agent_bailiff.strict_json import parse_strict_json
 
 DOCKET_UID = 10001
 DECIDE_UID = 10002
@@ -69,11 +77,18 @@ NAMES = {
     "issuer": "issuer.quickstart",
 }
 WRITERS = ("decide", "custodian", "control", "rule")
-CREDENTIAL_ID = "gitea-token"
-TARGET = "gitea"
-CREDENTIAL_HEADER = "Authorization"
-BINDING_RESOURCE = "gitea/repos/quickstart/*"
-ROUTES = json.loads((Path(__file__).resolve().parent / "routes.json").read_text())["routes"]
+QUICKSTART_UPSTREAMS = Path(__file__).resolve().parent / "upstreams"
+UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "gitea.json"))
+UPSTREAM_VERSION = 1
+MAX_UPSTREAM_BYTES = 64 * 1024
+MAX_ROUTES_BYTES = 1 << 20
+UPSTREAM_FIELDS = frozenset(
+    {
+        "version", "service", "url", "credential_id", "credential_header", "target", "binding_resource",
+        "routes_file",
+    }
+)  # fmt: skip
+COMPOSE_SERVICE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 TASK_SCOPE = {
     "tools": ["gitea.issues.list", "gitea.issues.read"],
     "resources": ["gitea/repos/quickstart/demo/*"],
@@ -84,7 +99,6 @@ TASK_TTL_SECONDS = 3600
 ISSUER_MAX_BUDGET = 100
 LOAD_TASKS = 32
 POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "rules": []}}
-COSTS = {"version": 1, "tools": {route["tool"]: 1 for route in ROUTES}}
 
 GITEA = os.environ.get("GITEA_URL", "http://gitea:3000")
 GITEA_HEALTH_SECONDS = 120
@@ -106,6 +120,97 @@ INJECTION_BODY = (
 
 class BootstrapError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class Upstream:
+    service: str
+    url: str
+    credential_id: str
+    credential_header: str
+    target: str
+    binding_resource: str
+    routes: tuple[dict[str, Any], ...]
+
+    @property
+    def costs(self) -> dict[str, Any]:
+        return {"version": 1, "tools": {route["tool"]: 1 for route in self.routes}}
+
+
+def load_upstream(path: Path) -> Upstream:
+    document = read_strict(path, MAX_UPSTREAM_BYTES)
+    if not isinstance(document, dict) or set(document) != UPSTREAM_FIELDS:
+        raise BootstrapError(f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}")
+    version = document["version"]
+    if isinstance(version, bool) or version != UPSTREAM_VERSION:
+        raise BootstrapError(f"{path}: version must be {UPSTREAM_VERSION}")
+    text = {name: document[name] for name in UPSTREAM_FIELDS - {"version"}}
+    for name, value in text.items():
+        if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
+            raise BootstrapError(f"{path}: {name} must be a non-empty ASCII printable string without whitespace")
+    problem = service_problem(text["service"])
+    if problem:
+        raise BootstrapError(f"{path}: {problem}")
+    check_upstream_url(path, text["url"])
+    if not HEADER_NAME.fullmatch(text["credential_header"]):
+        raise BootstrapError(f"{path}: credential_header must be an HTTP field name token")
+    if not is_bounded(text["binding_resource"]):
+        raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
+    routes_file = text["routes_file"]
+    if "/" in routes_file or routes_file in (".", ".."):
+        raise BootstrapError(f"{path}: routes_file must name a file beside the upstream config")
+    routes = load_upstream_routes(path.parent / routes_file, text["service"])
+    return Upstream(
+        text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
+        text["binding_resource"], routes,
+    )  # fmt: skip
+
+
+def read_strict(path: Path, limit: int) -> Any:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as error:
+        raise BootstrapError(f"cannot open {path}: {error.strerror}") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise BootstrapError(f"{path} is not a regular file")
+        raw = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > limit:
+        raise BootstrapError(f"{path} is larger than {limit} bytes")
+    try:
+        return parse_strict_json(raw)
+    except (UnicodeDecodeError, ValueError) as error:
+        raise BootstrapError(f"{path} is not strict JSON: {error}") from None
+
+
+def check_upstream_url(path: Path, url: str) -> None:
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise BootstrapError(f"{path}: url {error}") from None
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        raise BootstrapError(f"{path}: url must carry no credentials, query or fragment")
+    if parts.scheme == "https" and parts.hostname:
+        return
+    if parts.scheme == "http" and COMPOSE_SERVICE.fullmatch(parts.hostname or "") and port:
+        return
+    raise BootstrapError(f"{path}: url must be http://<compose-service>:<port> or https://")
+
+
+def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]:
+    document = read_strict(path, MAX_ROUTES_BYTES)
+    if not isinstance(document, dict) or set(document) != {"routes"} or not document["routes"]:
+        raise BootstrapError(f"{path} must hold a non-empty routes list and nothing else")
+    try:
+        routes = ToolRoutes.from_document(document)
+    except (TypeError, ValueError) as error:
+        raise BootstrapError(f"{path}: {error}") from None
+    if routes.services != {service}:
+        raise BootstrapError(f"{path}: every route must be on service {service!r}")
+    return tuple(document["routes"])
 
 
 def cli(*arguments: object, stdin: str | None = None) -> str:
@@ -185,17 +290,17 @@ def issuers() -> dict[str, Any]:
     }
 
 
-def bindings(**extra: Any) -> list[dict[str, Any]]:
+def bindings(upstream: Upstream, **extra: Any) -> list[dict[str, Any]]:
     return [
         {
             "tenant": TENANT,
             "tool": route["tool"],
-            "resource": BINDING_RESOURCE,
-            "credential_id": CREDENTIAL_ID,
-            "target": TARGET,
+            "resource": upstream.binding_resource,
+            "credential_id": upstream.credential_id,
+            "target": upstream.target,
             **extra,
         }
-        for route in ROUTES
+        for route in upstream.routes
     ]
 
 
@@ -215,13 +320,14 @@ def init_decide() -> str:
         "--custodian", NAMES["custodian"], "--ledger", LEDGER, "--ledger-group", LEDGER_GID,
         *gateway_client("decide"), *docket_client(),
     ]  # fmt: skip
+    upstream = load_upstream(UPSTREAM_FILE)
     outcome = ensure_component("decide", load_decide, arguments)
     config = DIRS["decide"] / "config.json"
     document = json.loads(config.read_text())
-    desired = {**document, "issuers": issuers(), "policy": POLICY, "costs": COSTS}
-    desired["bindings"] = bindings(custodian=NAMES["custodian"])
+    desired = {**document, "issuers": issuers(), "policy": POLICY, "costs": upstream.costs}
+    desired["bindings"] = bindings(upstream, custodian=NAMES["custodian"])
     changed = replace_owned(config, desired)
-    changed = replace_owned(DIRS["decide"] / "routes.json", {"routes": ROUTES}) or changed
+    changed = replace_owned(DIRS["decide"] / "routes.json", {"routes": list(upstream.routes)}) or changed
     load_decide(config)
     return "updated" if changed and outcome == "kept" else outcome
 
@@ -231,11 +337,12 @@ def init_custodian() -> str:
         "--decide-pin", pin_path("decide"), "--ledger", LEDGER, "--ledger-uid", DECIDE_UID,
         "--ledger-group", LEDGER_GID, *gateway_client("custodian"), *docket_client(),
     ]  # fmt: skip
+    upstream = load_upstream(UPSTREAM_FILE)
     outcome = ensure_component("custodian", load_custodian, arguments)
     config = DIRS["custodian"] / "config.json"
     changed = replace_owned(config, {**json.loads(config.read_text()), "issuers": issuers()})
-    changed = replace_owned(DIRS["custodian"] / "routes.json", {"routes": ROUTES}) or changed
-    custodian_bindings = {"bindings": bindings(header_name=CREDENTIAL_HEADER, canary=False)}
+    changed = replace_owned(DIRS["custodian"] / "routes.json", {"routes": list(upstream.routes)}) or changed
+    custodian_bindings = {"bindings": bindings(upstream, header_name=upstream.credential_header, canary=False)}
     changed = replace_owned(DIRS["custodian"] / "bindings.json", custodian_bindings) or changed
     load_custodian(config)
     return "updated" if changed and outcome == "kept" else outcome
@@ -390,11 +497,11 @@ def seed(gitea: Gitea, admin: str) -> list[str]:
     return created
 
 
-def stored_credential() -> str | None:
+def stored_credential(upstream: Upstream) -> str | None:
     settings = load_custodian(DIRS["custodian"] / "config.json")
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
-        return store.get(TENANT, CREDENTIAL_ID, TARGET).decode()
+        return store.get(TENANT, upstream.credential_id, upstream.target).decode()
     except CredentialUnavailable:
         return None
     finally:
@@ -406,7 +513,7 @@ def credential_works(gitea: Gitea, credential: str) -> bool:
     return status == 200 and isinstance(document, dict) and document.get("permissions", {}).get("pull") is True
 
 
-def issue_credential(gitea: Gitea, admin: str) -> None:
+def issue_credential(gitea: Gitea, admin: str, upstream: Upstream) -> None:
     password = secrets.token_urlsafe(32)
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
@@ -418,7 +525,7 @@ def issue_credential(gitea: Gitea, admin: str) -> None:
     created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
     cli(
         "custodian", "put-credential", "--config", DIRS["custodian"] / "config.json", "--tenant", TENANT,
-        "--credential-id", CREDENTIAL_ID, "--target", TARGET, stdin=f"token {created['sha1']}",
+        "--credential-id", upstream.credential_id, "--target", upstream.target, stdin=f"token {created['sha1']}",
     )  # fmt: skip
 
 
@@ -452,6 +559,7 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
 
 
 def bootstrap_gitea() -> str:
+    upstream = load_upstream(UPSTREAM_FILE)
     gitea = Gitea(GITEA)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
@@ -460,11 +568,11 @@ def bootstrap_gitea() -> str:
     for item in created:
         print(f"gitea: created {item}")
     outcome = "kept"
-    credential = stored_credential()
+    credential = stored_credential(upstream)
     if credential is None or not credential_works(gitea, credential):
-        issue_credential(gitea, admin)
+        issue_credential(gitea, admin, upstream)
         outcome = "created"
-        credential = stored_credential()
+        credential = stored_credential(upstream)
     if credential is None or not credential_works(gitea, credential):
         raise BootstrapError(f"the stored credential cannot read {ORG}/demo")
     print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
