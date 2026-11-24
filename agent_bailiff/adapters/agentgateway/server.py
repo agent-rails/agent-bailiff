@@ -5,6 +5,7 @@ import os
 import socket
 import stat
 import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ from typing import Any, Protocol
 import grpc
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
+from agent_bailiff.custodian.config import DEFAULT_RESPONSE_WORKERS, MAX_RESPONSE_WORKERS
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.socket_dir import (
     SOCKET_MODE,
@@ -24,10 +26,12 @@ from agent_bailiff.docket.socket_dir import (
 
 SERVICE = "agentgateway.dev.ext_mcp.ExtMcp"
 GRPC_SOCKET_NAME = "grpc.sock"
+RESPONSE_GRPC_SOCKET_NAME = "grpc-response.sock"
 PRIVATE_DIR_FORBIDDEN_BITS = 0o077
 DEFAULT_WORKERS = 8
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_MAX_CONCURRENT_RPCS = 256
+RESPONSE_MAX_CONCURRENT_RPCS = 16
 ACCEPT_POLL_SECONDS = 0.2
 CHUNK_BYTES = 65536
 
@@ -38,6 +42,10 @@ class ExtMcpProcessor(Protocol):
     def check_request(self, message: ext_mcp_pb2.McpRequest) -> ext_mcp_pb2.McpRequestResult: ...
 
 
+class ExtMcpResponseProcessor(Protocol):
+    def check_response(self, message: ext_mcp_pb2.McpResponse) -> ext_mcp_pb2.McpResponseResult: ...
+
+
 class ProcessorLocked(Exception):
     pass
 
@@ -45,7 +53,7 @@ class ProcessorLocked(Exception):
 class ProcessorServer:
     def __init__(
         self,
-        processor: ExtMcpProcessor,
+        handlers: Mapping[str, grpc.RpcMethodHandler],
         socket_path: Path,
         private_dir: Path,
         *,
@@ -54,12 +62,13 @@ class ProcessorServer:
         workers: int = DEFAULT_WORKERS,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         max_concurrent_rpcs: int = DEFAULT_MAX_CONCURRENT_RPCS,
+        grpc_socket_name: str = GRPC_SOCKET_NAME,
     ) -> None:
         if isinstance(gateway_uid, bool) or not isinstance(gateway_uid, int) or gateway_uid < 0:
             raise ValueError("gateway_uid must be a non-negative integer")
-        self._processor = processor
+        self._handlers = dict(handlers)
         self._socket_path = socket_path
-        self._grpc_path = private_dir / GRPC_SOCKET_NAME
+        self._grpc_path = private_dir / grpc_socket_name
         self._private_dir = private_dir
         self._gateway_uid = gateway_uid
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
@@ -113,7 +122,7 @@ class ProcessorServer:
         if not try_lock(self._lock_fd):
             raise ProcessorLocked(f"{lock_path} is held by another processor")
         remove_stale_socket(self._grpc_path)
-        self._grpc = _grpc_server(self._processor, self._grpc_path, self._workers, self._max_concurrent_rpcs)
+        self._grpc = _grpc_server(self._handlers, self._grpc_path, self._workers, self._max_concurrent_rpcs)
         remove_stale_socket(self._socket_path)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener = listener
@@ -204,22 +213,57 @@ class ProcessorServer:
             connection.close()
 
 
-def _grpc_server(processor: ExtMcpProcessor, path: Path, workers: int, max_concurrent_rpcs: int) -> Any:
+def request_handlers(processor: ExtMcpProcessor) -> dict[str, grpc.RpcMethodHandler]:
+    return {
+        "CheckRequest": grpc.unary_unary_rpc_method_handler(
+            lambda message, _context: processor.check_request(message),
+            request_deserializer=ext_mcp_pb2.McpRequest.FromString,
+            response_serializer=ext_mcp_pb2.McpRequestResult.SerializeToString,
+        )
+    }
+
+
+def response_handlers(processor: ExtMcpResponseProcessor) -> dict[str, grpc.RpcMethodHandler]:
+    return {
+        "CheckResponse": grpc.unary_unary_rpc_method_handler(
+            lambda message, _context: processor.check_response(message),
+            request_deserializer=ext_mcp_pb2.McpResponse.FromString,
+            response_serializer=ext_mcp_pb2.McpResponseResult.SerializeToString,
+        )
+    }
+
+
+def response_server(
+    processor: ExtMcpResponseProcessor,
+    socket_path: Path,
+    private_dir: Path,
+    *,
+    gateway_uid: int,
+    socket_gid: int | None = None,
+    workers: int = DEFAULT_RESPONSE_WORKERS,
+) -> ProcessorServer:
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= MAX_RESPONSE_WORKERS:
+        raise ValueError(f"response workers must be an integer between 1 and {MAX_RESPONSE_WORKERS}")
+    return ProcessorServer(
+        response_handlers(processor),
+        socket_path,
+        private_dir,
+        gateway_uid=gateway_uid,
+        socket_gid=socket_gid,
+        workers=workers,
+        max_concurrent_rpcs=RESPONSE_MAX_CONCURRENT_RPCS,
+        grpc_socket_name=RESPONSE_GRPC_SOCKET_NAME,
+    )
+
+
+def _grpc_server(
+    handlers: Mapping[str, grpc.RpcMethodHandler], path: Path, workers: int, max_concurrent_rpcs: int
+) -> Any:
     server = grpc.server(
         ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ext-mcp"),
         maximum_concurrent_rpcs=max_concurrent_rpcs,
     )
-    handler = grpc.method_handlers_generic_handler(
-        SERVICE,
-        {
-            "CheckRequest": grpc.unary_unary_rpc_method_handler(
-                lambda message, _context: processor.check_request(message),
-                request_deserializer=ext_mcp_pb2.McpRequest.FromString,
-                response_serializer=ext_mcp_pb2.McpRequestResult.SerializeToString,
-            )
-        },
-    )
-    server.add_generic_rpc_handlers((handler,))
+    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(SERVICE, dict(handlers)),))
     server.add_insecure_port(f"unix:{path}")
     server.start()
     return server

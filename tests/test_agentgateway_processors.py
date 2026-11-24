@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import test_custodian
 from google.protobuf import struct_pb2
@@ -7,8 +9,10 @@ from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.calls import read_call
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.custodian import Refused, Released
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.custodian import Refused, Released, ResponseChecked, ResponseRefused
+from agent_bailiff.custodian.custodian import RESPONSE_REASONS
+from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.decide import Decision
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.routes import ToolRoute, ToolRoutes
@@ -309,3 +313,91 @@ def test_custodian_never_removes_the_header_it_releases():
 def test_custodian_processor_needs_valid_credential_header_names(headers):
     with pytest.raises(ValueError):
         CustodianProcessor(FakeCustodian(), ROUTES, headers)
+
+
+class FakeChecker:
+    def __init__(self, result=None, error=None):
+        self.result = result or ResponseChecked(None)
+        self.error = error
+        self.calls = []
+
+    def check_response(self, clearance_token, result, now):
+        self.calls.append((clearance_token, result, now))
+        if self.error:
+            raise self.error
+        return self.result
+
+
+CALL_RESULT = b'{"content":[{"type":"text","text":"done"}]}'
+
+
+def call_response(method="tools/call", clearance="clearance.token", body=CALL_RESULT):
+    response = ext_mcp_pb2.McpResponse(service_names=["deploy"], method=method, mcp_response=body)
+    if clearance is not None:
+        response.metadata_context.update({"clearance": clearance})
+    return response
+
+
+@pytest.mark.parametrize("method", ["initialize", "ping", "tools/list", "resources/read"])
+def test_redactor_passes_results_of_other_methods_without_a_check(method):
+    checker = FakeChecker()
+    result = RedactorProcessor(checker, clock=lambda: NOW).check_response(call_response(method, clearance=None))
+    assert result_kind(result) == "pass"
+    assert checker.calls == []
+
+
+def test_redactor_passes_an_unchanged_result():
+    checker = FakeChecker()
+    result = RedactorProcessor(checker, clock=lambda: NOW).check_response(call_response())
+    assert result_kind(result) == "pass"
+    assert checker.calls == [("clearance.token", CALL_RESULT, NOW)]
+
+
+def test_redactor_replaces_a_redacted_result():
+    checker = FakeChecker(ResponseChecked(b'{"content":[]}'))
+    result = RedactorProcessor(checker, clock=lambda: NOW).check_response(call_response())
+    assert (result_kind(result), result.mutated) == ("mutated", b'{"content":[]}')
+
+
+@pytest.mark.parametrize("context", ["absent", "empty", 7])
+def test_redactor_refuses_a_call_result_without_a_clearance(context):
+    checker = FakeChecker()
+    response = call_response(clearance=None)
+    if context == "empty":
+        response.metadata_context.update({"clearance": ""})
+    elif context == 7:
+        response.metadata_context.update({"clearance": 7})
+    result = RedactorProcessor(checker, clock=lambda: NOW).check_response(response)
+    assert (result_kind(result), result.error.code) == ("error", DENIED)
+    assert result.error.reason == "response_clearance_missing"
+    assert checker.calls == []
+
+
+@pytest.mark.parametrize("reason", sorted(RESPONSE_REASONS))
+def test_redactor_refusals_carry_the_custodian_reason(reason):
+    result = RedactorProcessor(FakeChecker(ResponseRefused(reason)), clock=lambda: NOW).check_response(call_response())
+    assert (result_kind(result), result.error.code, result.error.reason) == ("error", DENIED, reason)
+
+
+def test_redactor_internal_error_refuses():
+    checker = FakeChecker(error=RuntimeError("boom"))
+    result = RedactorProcessor(checker, clock=lambda: NOW).check_response(call_response())
+    assert (result_kind(result), result.error.reason) == ("error", "response_internal_error")
+
+
+def test_a_released_credential_echoed_in_the_call_result_is_redacted(make_decider, make_custodian, workdir):
+    request = make_request(trace_id="")
+    custodian = make_custodian()
+    decide = DecideProcessor(make_decider(), GATEWAY_ROUTES, clock=lambda: NOW)
+    releaser = CustodianProcessor(custodian, GATEWAY_ROUTES, frozenset({"Authorization"}), clock=lambda: NOW + 1)
+    redactor = RedactorProcessor(custodian, clock=lambda: NOW + 2)
+    decided = decide.check_request(gateway_call(request))
+    assert result_kind(releaser.check_request(gateway_call(request, metadata=decided.metadata))) == "pass"
+    echo = json.dumps({"content": [{"type": "text", "text": f"sent {DEPLOY_SECRET.decode()}"}]}).encode()
+    response = ext_mcp_pb2.McpResponse(method="tools/call", mcp_response=echo)
+    response.metadata_context.CopyFrom(decided.metadata)
+    result = redactor.check_response(response)
+    assert result_kind(result) == "mutated"
+    assert json.loads(result.mutated)["content"][0]["text"] == f"sent {MARKER}"
+    release, alert = custodian_entries(workdir)
+    assert (alert.decision, alert.reason, alert.parent_entry) == ("alert", "credential_echo", release.entry_id)

@@ -26,7 +26,7 @@ from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
@@ -284,13 +284,13 @@ def stack(binary, workdir, private, make_decider, make_custodian):
     sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
     servers = {
         "decide": ProcessorServer(
-            DecideProcessor(make_decider(), ROUTES, clock=lambda: NOW),
+            request_handlers(DecideProcessor(make_decider(), ROUTES, clock=lambda: NOW)),
             sockets["decide"],
             private("decide-grpc"),
             gateway_uid=os.geteuid(),
         ),
         "custodian": ProcessorServer(
-            CustodianProcessor(make_custodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1),
+            request_handlers(CustodianProcessor(make_custodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1)),
             sockets["custodian"],
             private("custodian-grpc"),
             gateway_uid=os.geteuid(),

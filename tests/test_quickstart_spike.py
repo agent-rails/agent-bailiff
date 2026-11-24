@@ -12,7 +12,7 @@ from test_decide import CUSTODIAN_ID, TENANT, make_request, make_root
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers
 from agent_bailiff.custodian import CredentialBinding, CredentialStore, LocalBackend
 from agent_bailiff.decide import CostTable, TargetBinding
 from agent_bailiff.routes import ToolRoute, ToolRoutes
@@ -67,13 +67,15 @@ def stack(binary, workdir, private, state, token, make_decider, make_custodian):
     sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
     servers = [
         ProcessorServer(
-            DecideProcessor(decider, ROUTES, clock=lambda: NOW),
+            request_handlers(DecideProcessor(decider, ROUTES, clock=lambda: NOW)),
             sockets["decide"],
             private("decide-grpc"),
             gateway_uid=os.geteuid(),
         ),
         ProcessorServer(
-            CustodianProcessor(custodian, ROUTES, frozenset({"Authorization"}), clock=lambda: NOW + 1),
+            request_handlers(
+                CustodianProcessor(custodian, ROUTES, frozenset({"Authorization"}), clock=lambda: NOW + 1)
+            ),
             sockets["custodian"],
             private("custodian-grpc"),
             gateway_uid=os.geteuid(),

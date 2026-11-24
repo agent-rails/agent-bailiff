@@ -158,6 +158,7 @@ class Deployment:
             raise RuntimeError(f"the archiver uid {self.archiver_uid} is the harness's own uid")
         self.run_dir = self.root / "run"
         self.sockets = {name: self.run_dir / name[0] / f"{name}.sock" for name in ("docket", "decide", "custodian")}
+        self.sockets["redactor"] = self.run_dir / "c" / "redactor.sock"
         self.ledger = self.root / "ledger" / "ledger.db"
         self.logs = private(self.root / "logs")
         self.upstream_log = self.logs / "upstream.jsonl"
@@ -219,6 +220,8 @@ class Deployment:
                 GID,
                 "--socket",
                 self.sockets["custodian"],
+                "--response-socket",
+                self.sockets["redactor"],
                 *docket,
                 *gateway,
             )  # fmt: skip

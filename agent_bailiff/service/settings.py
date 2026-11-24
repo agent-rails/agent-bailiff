@@ -11,6 +11,7 @@ from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.control.suspension import suspension_directory
+from agent_bailiff.custodian.config import MAX_RESPONSE_WORKERS
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
@@ -39,6 +40,7 @@ CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
     | {"docket", "gateway", "inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant"}
+    | {"response_socket", "response_workers"}
 )
 DOCKET_KEYS = frozenset(
     {
@@ -187,6 +189,8 @@ class CustodianSettings:
     inflight_max: int
     inflight_max_bytes: int
     inflight_per_tenant: int
+    response_socket: Path
+    response_workers: int
     issuers: Issuers
     bindings: Path
     kek: Path
@@ -370,6 +374,10 @@ def parse_custodian(document: object) -> CustodianSettings:
     except ValueError as exc:
         raise config.wrap("decide_keys", exc) from None
     ledger = config.section("ledger", frozenset({"path", "writer_uid", "group"}))
+    gateway = _gateway(config)
+    response_socket = config.path("response_socket")
+    if response_socket == gateway.socket:
+        raise ConfigError("custodian.response_socket must not be the custodian's gateway socket")
     return CustodianSettings(
         name=config.component("name"),
         key=config.path("key"),
@@ -384,6 +392,8 @@ def parse_custodian(document: object) -> CustodianSettings:
         inflight_max=config.integer("inflight_max", 1),
         inflight_max_bytes=config.integer("inflight_max_bytes", 1),
         inflight_per_tenant=config.integer("inflight_per_tenant", 1),
+        response_socket=response_socket,
+        response_workers=config.integer("response_workers", 1, MAX_RESPONSE_WORKERS),
         issuers=_issuers(config),
         bindings=config.path("bindings"),
         kek=config.path("kek"),
@@ -393,7 +403,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         suspension_dir=suspension_directory(ledger.path("path")),
         routes=config.path("routes"),
         docket=_docket_client(config),
-        gateway=_gateway(config),
+        gateway=gateway,
     )
 
 

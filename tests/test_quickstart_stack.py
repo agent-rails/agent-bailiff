@@ -128,6 +128,8 @@ EXPECTED_ENTRIES = {
     "custodian-run": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o750, DIRECTORY),
     "custodian-run/custodian.sock": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o660, SOCKET),
     "custodian-run/custodian.sock.lock": (*CUSTODIAN, 0o600, FILE),
+    "custodian-run/redactor.sock": (b.CUSTODIAN_UID, b.GATEWAY_SOCKETS_GID, 0o660, SOCKET),
+    "custodian-run/redactor.sock.lock": (*CUSTODIAN, 0o600, FILE),
     "agent-data": (b.AGENT_UID, b.AGENT_UID, 0o700, DIRECTORY),
     "agent-data/agent.key": (b.AGENT_UID, b.AGENT_UID, 0o600, FILE),
     "agent-public": (b.AGENT_UID, b.AGENT_UID, 0o755, DIRECTORY),

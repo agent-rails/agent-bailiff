@@ -11,7 +11,13 @@ import pytest
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.processors import passed, refuse
-from agent_bailiff.adapters.agentgateway.server import ProcessorLocked, ProcessorServer
+from agent_bailiff.adapters.agentgateway.server import (
+    RESPONSE_MAX_CONCURRENT_RPCS,
+    ProcessorLocked,
+    ProcessorServer,
+    request_handlers,
+    response_server,
+)
 
 UID = os.geteuid()
 GID = os.getegid()
@@ -50,7 +56,7 @@ def running(workdir, private_dir):
 
     def start(processor, *, gateway_uid=UID, socket_path=None, private=None, **limits):
         server = ProcessorServer(
-            processor,
+            request_handlers(processor),
             socket_path or workdir / "s" / "decide.sock",
             private or private_dir,
             gateway_uid=gateway_uid,
@@ -64,6 +70,47 @@ def running(workdir, private_dir):
     yield start
     for server in servers:
         server.close()
+
+
+class RecordingRedactor:
+    def __init__(self):
+        self.messages = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+
+    def check_response(self, message):
+        self.messages.append(message)
+        self.entered.set()
+        self.release.wait(10)
+        return ext_mcp_pb2.McpResponseResult(mutated=b'{"content":[]}')
+
+
+@pytest.fixture
+def responding(workdir, private_dir):
+    servers = []
+
+    def start(processor, **options):
+        server = response_server(
+            processor, workdir / "s" / "redactor.sock", private_dir, gateway_uid=UID, socket_gid=GID, **options
+        )
+        server.start()
+        servers.append(server)
+        return server
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+def check_response(socket_path, timeout=5):
+    return call(
+        socket_path,
+        method=CHECK_RESPONSE,
+        message=ext_mcp_pb2.McpResponse(method="tools/call", mcp_response=b"{}"),
+        response=ext_mcp_pb2.McpResponseResult,
+        timeout=timeout,
+    )
 
 
 def call(socket_path, method=CHECK_REQUEST, message=None, response=ext_mcp_pb2.McpRequestResult, timeout=5):
@@ -214,7 +261,70 @@ def test_a_directory_with_the_wrong_group_is_refused(workdir, private_dir):
     directory.mkdir(mode=0o750)
     os.chmod(directory, 0o750)
     server = ProcessorServer(
-        RecordingProcessor(), directory / "decide.sock", private_dir, gateway_uid=UID, socket_gid=GID + 1
+        request_handlers(RecordingProcessor()),
+        directory / "decide.sock",
+        private_dir,
+        gateway_uid=UID,
+        socket_gid=GID + 1,
     )
     with pytest.raises(PermissionError):
         server.start()
+
+
+def test_the_response_server_serves_only_check_response(responding, workdir):
+    redactor = RecordingRedactor()
+    responding(redactor)
+    assert check_response(workdir / "s" / "redactor.sock").mutated == b'{"content":[]}'
+    with pytest.raises(grpc.RpcError) as caught:
+        call(workdir / "s" / "redactor.sock")
+    assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert [message.method for message in redactor.messages] == ["tools/call"]
+
+
+def test_request_and_response_servers_share_one_private_directory(running, responding, workdir):
+    running(RecordingProcessor())
+    responding(RecordingRedactor())
+    assert call(workdir / "s" / "decide.sock").error.reason == "out_of_scope"
+    assert check_response(workdir / "s" / "redactor.sock").mutated == b'{"content":[]}'
+    with pytest.raises(grpc.RpcError) as caught:
+        check_response(workdir / "s" / "decide.sock")
+    assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
+
+
+def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, workdir):
+    redactor = RecordingRedactor()
+    redactor.release.clear()
+    responding(redactor)
+    socket_path = workdir / "s" / "redactor.sock"
+    waiting = []
+    for _ in range(RESPONSE_MAX_CONCURRENT_RPCS):
+        thread = threading.Thread(target=lambda: _ignore_errors(lambda: check_response(socket_path, timeout=20)))
+        thread.start()
+        waiting.append(thread)
+    assert redactor.entered.wait(5)
+    codes = set()
+    deadline = time.monotonic() + 10
+    while grpc.StatusCode.RESOURCE_EXHAUSTED not in codes and time.monotonic() < deadline:
+        try:
+            check_response(socket_path, timeout=0.5)
+        except grpc.RpcError as error:
+            codes.add(error.code())
+    assert grpc.StatusCode.RESOURCE_EXHAUSTED in codes
+    assert len(redactor.messages) == 1
+    redactor.release.set()
+    for thread in waiting:
+        thread.join(30)
+    assert check_response(socket_path).mutated == b'{"content":[]}'
+
+
+@pytest.mark.parametrize("workers", [0, 3])
+def test_response_workers_are_one_or_two(responding, workers):
+    with pytest.raises(ValueError):
+        responding(RecordingRedactor(), workers=workers)
+
+
+def _ignore_errors(function):
+    try:
+        function()
+    except grpc.RpcError:
+        pass

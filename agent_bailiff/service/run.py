@@ -11,8 +11,13 @@ from typing import Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ExtMcpProcessor, ProcessorServer
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.server import (
+    ExtMcpProcessor,
+    ProcessorServer,
+    request_handlers,
+    response_server,
+)
 from agent_bailiff.control.control import Control
 from agent_bailiff.control.suspension import Suspension, SuspensionView
 from agent_bailiff.custodian.backend import LocalBackend
@@ -102,7 +107,7 @@ def docket_client(settings: DocketClientSettings, writer: str, key: Ed25519Priva
 
 def processor_server(processor: ExtMcpProcessor, settings: GatewaySettings) -> ProcessorServer:
     return ProcessorServer(
-        processor,
+        request_handlers(processor),
         settings.socket,
         settings.private_dir,
         gateway_uid=settings.uid,
@@ -184,6 +189,16 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
             suspension=SuspensionView(settings.suspension_dir, settings.ledger.writer_uid, settings.ledger.group),
             release_signer=ReleaseSigner(settings.name, key, key_id(settings.name, key.public_key())),
         )
+        redactor = response_server(
+            RedactorProcessor(custodian),
+            settings.response_socket,
+            settings.gateway.private_dir,
+            gateway_uid=settings.gateway.uid,
+            socket_gid=settings.gateway.socket_group,
+            workers=settings.response_workers,
+        )
+        redactor.start()
+        opened.append(redactor)
         headers = frozenset(binding.header_name for binding in bindings.credential_bindings)
         server = processor_server(CustodianProcessor(custodian, routes, headers), settings.gateway)
         server.start()
