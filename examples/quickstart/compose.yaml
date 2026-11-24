@@ -32,7 +32,7 @@ x-once: &once
 x-offline: &offline
   network_mode: none
 
-x-upstreams: &upstreams ./upstreams:/etc/bailiff/upstreams:ro
+x-upstreams: &upstreams ${BAILIFF_UPSTREAMS:-./upstreams}:/etc/bailiff/upstreams:ro
 
 x-gitea-limits: &gitea-limits
   mem_limit: 768m

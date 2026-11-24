@@ -80,7 +80,7 @@ jobs:
           /opt/bailiff-agent/bin/python -m pip install --require-hashes -r requirements-ci.txt
           /opt/bailiff-agent/bin/python -m pip install --no-deps --no-build-isolation .
           /opt/bailiff-agent/bin/python -m pip check
-      - run: pytest -q -rs tests/test_quickstart_default.py tests/test_adopt_stack.py | tee "$RUNNER_TEMP/pytest.out"
+      - run: pytest -q -rs tests/test_quickstart_default.py tests/test_adopt_stack.py tests/test_quickstart_tls.py | tee "$RUNNER_TEMP/pytest.out"
         env:
           AGENT_BAILIFF_TEST_QUICKSTART: "1"
           AGENT_BAILIFF_TEST_AGENT_USER: bailiff-agent
