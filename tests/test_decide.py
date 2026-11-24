@@ -421,6 +421,51 @@ def test_a_resource_grant_that_stops_inside_a_segment_is_refused_even_when_it_co
         ledger.task_budget(TENANT, "task-1", NOW)
 
 
+@pytest.mark.parametrize(
+    ("tools", "tool"),
+    [
+        (["gitea.issues_*"], "gitea.issues_delete"),
+        (["gitea.issues-*"], "gitea.issues-delete"),
+        (["gitea:*"], "gitea:delete"),
+        (["gitea/*"], "gitea/delete"),
+        (["deploy.service", "gitea.issues_*"], "deploy.service"),
+    ],
+)
+def test_a_tool_grant_that_stops_inside_a_name_is_refused_even_when_it_covers(
+    make_decider, ledger, docket_paths, tools, tool
+):
+    root = make_root(scope={**SCOPE, "tools": tools})
+    decision = make_decider().check(make_request(root, tool=tool), NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.tool) == ("refuse", "unbounded_scope", tool)
+    with pytest.raises(LedgerRefused, match="unknown task"):
+        ledger.task_budget(TENANT, "task-1", NOW)
+
+
+@pytest.mark.parametrize("tools", [["deploy.service"], ["deploy.*"]])
+def test_an_exact_or_dot_tool_grant_is_allowed(make_decider, tools):
+    root = make_root(scope={**SCOPE, "tools": tools})
+    decision = make_decider().check(make_request(root), NOW)
+    assert (decision.allowed, decision.reason) == (True, "ok")
+
+
+def test_an_unbounded_tool_grant_in_a_delegated_leaf_is_refused(make_decider):
+    root = make_root(scope={**SCOPE, "tools": ["deploy.*"]})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    decision = make_decider().check(make_request(root, (link,), CHILD_KEY, tool="deploy.serv_api"), NOW)
+    assert decision.reason == "unbounded_scope"
+
+
 def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
     root = make_root(scope={**SCOPE, "resources": ["env/*"]})
     link = delegate(
