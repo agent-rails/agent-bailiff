@@ -5,6 +5,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,7 @@ pytestmark = [
 _spec = importlib.util.spec_from_file_location("quickstart_bootstrap", QUICKSTART / "bootstrap.py")
 assert _spec is not None and _spec.loader is not None
 b = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = b
 _spec.loader.exec_module(b)
 
 VOLUMES = {

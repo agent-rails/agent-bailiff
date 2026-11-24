@@ -10,7 +10,7 @@ __pycache__
 !examples/quickstart/bootstrap.py
 !examples/quickstart/agent.py
 !examples/quickstart/rule.py
-!examples/quickstart/routes.json
+!examples/quickstart/upstreams/*.json
 !examples/quickstart/trace-requirements.txt
 !examples/live-run/run.py
 !examples/live-run/kubernetes.py

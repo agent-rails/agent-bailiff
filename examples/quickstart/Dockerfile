@@ -9,8 +9,8 @@ RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.t
     && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY agent_bailiff /app/agent_bailiff
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"
-COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/rule.py \
-    examples/quickstart/routes.json /app/quickstart/
+COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/rule.py /app/quickstart/
+COPY examples/quickstart/upstreams /app/quickstart/upstreams
 RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10001 -g 10001 -m 0700 /var/lib/bailiff/docket \
     && install -d -o 10002 -g 20001 -m 0700 /var/lib/bailiff/decide /var/lib/bailiff/control /var/lib/bailiff/rule \
