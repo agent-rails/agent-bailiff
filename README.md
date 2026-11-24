@@ -46,6 +46,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 - The suspension checks read mode bits, owner and group. The ledger's parent check, in agent-warrant, does not check the parent's owner. Neither inspects ACLs, and both check only the immediate parent directory.
 - Revocation works on a delegation link, a task, a tenant or a task root. There is no revocation of an agent key across every chain that uses it.
 - Control revokes the handles in a record signed by a pinned decide or custodian key. It checks that a tenant handle matches the record's tenant, but trusts that signer for the root and link bindings, so a compromised decide or custodian key can name any binding.
+- Deployment is single host: gateway, bailiff and upstreams on one Docker host or machine. Plain `http` is allowed only to loopback or a single-label service name on that host; any hop that leaves the host must use `https://`. Multi-host needs TLS on every non-loopback hop (#86).
 - agentgateway v1.7.0 cannot check client notifications. See [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md) for this and the other adapter limits.
 
 ## Packages
