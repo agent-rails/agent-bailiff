@@ -365,6 +365,7 @@ def test_a_duplicate_target_name_is_refused():
         {"host": "gitea-mcp:8080"},
         {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
         {"host": "[::1]", "port": 8080, "path": "/mcp"},
+        {"host": "[::1]:8080"},
     ],
 )
 def test_a_gateway_bound_target_over_https_loopback_or_a_service_name_is_accepted(target):
@@ -390,6 +391,25 @@ def test_a_gateway_bound_target_over_https_loopback_or_a_service_name_is_accepte
         {"host": "mcp.example.com", "port": 443, "path": "/mcp"},
         {"host": "10.0.0.5", "port": 8080, "path": "/mcp"},
         {"host": 7},
+        {"host": "gateway#@evil.com"},
+        {"host": "gateway?@evil.com"},
+        {"host": "gateway/@evil.com"},
+        {"host": "gateway:abc"},
+        {"host": "gateway:99999"},
+        {"host": "gate\tway"},
+        {"host": "gate way"},
+        {"host": "gateway\n"},
+        {"host": "gateway\x00"},
+        {"host": "http://gateway:abc/mcp"},
+        {"host": "http://gateway:99999/mcp"},
+        {"host": "http://gate\tway/mcp"},
+        {"host": "http://gateway/mcp?@evil.com"},
+        {"host": "http://gateway/mcp#@evil.com"},
+        {"host": "http://gateway/mcp?"},
+        {"host": "http://gateway/mcp\r\n"},
+        {"host": "https://x", "port": 443, "path": "/"},
+        {"host": "http://gateway", "port": 8080, "path": "/mcp"},
+        {"host": "https://mcp.example.com", "path": "/mcp"},
     ],
 )
 def test_a_gateway_bound_target_over_cleartext_to_a_remote_host_is_refused(target):

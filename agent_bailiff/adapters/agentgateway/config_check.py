@@ -12,7 +12,7 @@ from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPAR
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.release import RELEASE_HEADER
-from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http
+from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
 TOP_LEVEL_KEYS = frozenset({"config", "mcp"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
@@ -157,30 +157,29 @@ def _check_backend_tls(problems: list[str], name: str, backend_tls: object) -> N
         problems.append(f"mcp target {name!r} policies.backendTLS root must be a non-empty string")
 
 
-def _is_protected_transport(target: Mapping[str, Any]) -> bool:
+def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult | None:
     host = target.get("host")
     if not isinstance(host, str):
-        return False
+        return None
+    has_scheme = "://" in host
+    if has_scheme and ("port" in target or "path" in target):
+        return None
     try:
-        url = urllib.parse.urlsplit(host if "://" in host else f"http://{host}")
+        return parse_transport_url(host, bare_host=not has_scheme)
     except ValueError:
+        return None
+
+
+def _is_protected_transport(target: Mapping[str, Any]) -> bool:
+    url = _parse_target_host(target)
+    if url is None or url.hostname is None:
         return False
-    if url.username is not None or url.password is not None or not url.hostname:
-        return False
-    return url.scheme == "https" or (url.scheme == "http" and allows_plain_http(url.hostname))
+    return url.scheme == "https" or allows_plain_http(url.hostname)
 
 
 def _is_loopback_http(target: Mapping[str, Any]) -> bool:
-    host = target.get("host")
-    if not isinstance(host, str):
-        return False
-    if "://" not in host:
-        return host.removeprefix("[").removesuffix("]") in LOOPBACK_HOSTS
-    try:
-        url = urllib.parse.urlsplit(host)
-        return url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
-    except ValueError:
-        return False
+    url = _parse_target_host(target)
+    return url is not None and url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
 
 
 def _check_policies(problems: list[str], policies: object, expected: GatewayExpectations) -> None:
