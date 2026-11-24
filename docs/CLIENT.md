@@ -56,10 +56,10 @@ sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_i
 
 | Outcome | Meaning |
 | --- | --- |
-| `Result(result)` | The upstream answered. `is_error` is the MCP tool-error flag. |
+| `Result(result)` | The upstream answered. `is_error` is the MCP tool-error flag. Where the upstream echoed the released credential, the result holds `[redacted by agent-bailiff]` instead. |
 | `Refused(reason)` | The gateway refused the call (`REFUSAL_REASONS`) and did not forward it upstream. |
 | `NeedsApproval()` | The gateway refused the call with `needs_approval`: the policy requires a human. The call was not forwarded upstream. |
-| `OutcomeUnknown(detail)` | Timeout, dropped connection, oversized or non-UTF-8 response, response id not matching the request, non-200 status, JSON-RPC error (including an upstream answer the refusal guard rejected) or expired session. The credential may have been released and the target may have acted. |
+| `OutcomeUnknown(detail)` | Timeout, dropped connection, oversized or non-UTF-8 response, response id not matching the request, non-200 status, JSON-RPC error (including an upstream answer the refusal guard rejected and a result the redactor refused with a `response_*` reason) or expired session. The credential may have been released and the target may have acted. |
 
 - `Refused` and `NeedsApproval` carry `action` and `retryable`, fixed per reason by `refusal_action`, so an agent knows what to do next without parsing the reason:
   - `retry_later` (`retryable` true): `docket_unavailable`, `ledger_unavailable`, `internal_error`. A component was unavailable and the gateway did not forward the call; a later call may pass. Budget for the refused attempt may already be spent: decide refuses with `docket_unavailable` after it reserved and issued the operation, and its `ledger_unavailable` does not say how far the reservation got. A retry is a new operation with a new nonce and spends budget again, so bound retries and back off.
@@ -72,6 +72,7 @@ sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_i
   - `stop`: every other reason, including one the client does not know. `effector_outcome_unknown` means Kubernetes may have acted; treat it like `OutcomeUnknown`.
 - On managed clusters the effector serves the `kubernetes-read` catalog, so `tools/list` offers no write tools and `effector_restart_unverified` and `effector_webhook_unverified` do not occur. The effector's tool annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`) are hints; decide and the effector enforce what a call may do. `read_pod_log` returns untrusted text.
 - A gateway refusal is an HTTP 200 tool error whose only content is one text item equal to the reason. An upstream cannot deliver that shape to the client through a gateway running a checked config: check-config requires a response-phase refusal guard on `tools/call` that turns any upstream tool error whose only content is a bailiff reason into a JSON-RPC error, which the client classifies as `OutcomeUnknown`. Gateway refusals never reach a response-phase processor.
+- `OutcomeUnknown` from a JSON-RPC error carries only the error code (`jsonrpc_error_<code>`), never the error text, and event-stream messages for other ids are dropped. Neither passes the gateway's echo redaction, so this keeps an echoed credential from the agent.
 - The classification relies on the gateway running a config that passed check-config. A client pointed at a gateway without the guard cannot tell an upstream's text from a refusal.
 - A non-200 status after the gateway forwarded the call, such as an upstream rejecting the released credential, is `OutcomeUnknown`.
 - After `OutcomeUnknown`, do not assume the call failed. Preparing the call again is a new operation with a new nonce and spends budget again.

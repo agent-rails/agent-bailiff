@@ -31,7 +31,7 @@ flowchart LR
 ```
 
 1. **decide** verifies the agent's delegation chain and its proof for this exact call, checks scope, cost, policy and suspension, reserves the operation in the ledger, and returns a signed single-use clearance. It holds no credentials.
-2. **custodian** re-verifies the chain, proof and reservation on its own, applies canary checks, decrypts the credential, checks suspension, then claims the operation once under a per-task rate limit and sets the credential as a header on the upstream request. It removes every agent header except `accept`, `content-type`, `mcp-protocol-version` and the trace headers.
+2. **custodian** re-verifies the chain, proof and reservation on its own, applies canary checks, decrypts the credential, checks suspension, then claims the operation once under a per-task rate limit and sets the credential as a header on the upstream request. It removes every agent header except `accept`, `content-type`, `mcp-protocol-version` and the trace headers. When the result comes back, its redactor replaces any echo of that credential with a marker and records an alert.
 3. **docket** is a separate process that appends a signed, hash-chained entry for each allow, release and verified refusal. Refusals before the chain verifies, and verified refusals past a per-task budget, are logged instead; passing the budget is itself recorded once (see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)).
 4. **effector** (catalog tools only, Kubernetes today) is the gateway's upstream instead of a third-party MCP server. The custodian signs a single-use release rather than releasing a credential. The effector verifies the release and decide's clearance, rebuilds the request from the operation catalog, records an attempt, and calls the API server under constrained impersonation as `bailiff:<tenant>:<identity>`. Generated RBAC and admission policies bound what that identity can do, and a drift check stops the effector if the cluster holds anything else. See [docs/EFFECTOR.md](docs/EFFECTOR.md).
 
@@ -40,6 +40,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 ## What it does not protect
 
 - For credential bindings, the upstream MCP server receives the credential and is trusted. Catalog tools go to the effector instead; its limits are in [docs/EFFECTOR.md](docs/EFFECTOR.md).
+- Echo redaction covers the call's own result. JSON-RPC error text, event-stream side messages, credentials under 12 characters and transformed or split echoes are not redacted; see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 - Root on the host can read every component's keys.
 - A completed effect is not undone.
 - Suspension is checked by decide before it issues a clearance and by the custodian just before it claims a release. A release that has already passed the custodian's check completes.
@@ -86,10 +87,11 @@ python -m agent_bailiff.adapters.agentgateway check-config \
   --routes routes.json \
   --bindings bindings.json \
   --decide-socket /run/bailiff/decide/decide.sock \
-  --custodian-socket /run/bailiff/custodian/custodian.sock
+  --custodian-socket /run/bailiff/custodian/custodian.sock \
+  --redactor-socket /run/bailiff/custodian/redactor.sock
 ```
 
-It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order or a TCP processor target.
+It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts or a TCP processor target.
 
 Each component has its own commands, run as that component's uid:
 

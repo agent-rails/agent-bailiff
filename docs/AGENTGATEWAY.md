@@ -1,6 +1,6 @@
 # agentgateway adapter
 
-Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then custodian, both on every method's request phase (`{"*": "request"}`), both `failClosed`.
+Three ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then custodian, both on every method's request phase (`{"*": "request"}`), and the custodian's redactor on `tools/call` responses only (`{"tools/call": "response"}`), on its own socket. All three are `failClosed`.
 
 ## Method surface
 
@@ -14,10 +14,18 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 
 ## Refusal guard
 
-- check-config requires exactly one processor that runs on responses: the refusal guard (`config_check.REFUSAL_GUARD`), an expression processor on `tools/call` responses. A processor with any method phase other than `request` or `off`, including `full`, counts as running on responses, so no later processor can rewrite an upstream answer into the refusal shape after the guard. When an upstream answer is a tool error whose only content item has `text` equal to a bailiff refusal reason, it rejects the answer, and agentgateway returns a JSON-RPC error (`-32001`) to the agent instead.
+- check-config requires exactly two processors that run on responses, in list order: the redactor, then the refusal guard (`config_check.REFUSAL_GUARD`), an expression processor on `tools/call` responses. agentgateway runs response processors in list order, so the guard sees the redacted result. A processor with any method phase other than `request` or `off`, including `full`, counts as running on responses, so no other processor can rewrite an upstream answer into the refusal shape after the guard. When an upstream answer is a tool error whose only content item has `text` equal to a bailiff refusal reason, it rejects the answer, and agentgateway returns a JSON-RPC error (`-32001`) to the agent instead.
 - Without it, an upstream that acted and then answered `needs_approval` or `out_of_scope` would be classified by the client as not executed, and preparing the call again would run it twice.
 - agentgateway fails an expression evaluation error closed. A malformed upstream error answer therefore also becomes a JSON-RPC error.
 - Gateway refusals are written by the request path and never pass through a response-phase processor, so they still reach the agent as tool errors.
+
+## Credential echo redaction
+
+- check-config requires one remote processor on the redactor socket (`--redactor-socket`) with methods exactly `{"tools/call": "response"}`, `failClosed`, metadata `{"clearance": "mcpGuardrails.clearance"}` and no `requestHeaders`. Decide and the custodian must be the last two request-phase processors, in that order; request-phase and response-phase processors may interleave in the list.
+- The redactor reads the clearance from the metadata, takes the custodian's in-flight entry for it, and replaces each echo of the released credential in the result's strings and keys with `[redacted by agent-bailiff]`. A result without an echo passes unchanged. It also runs on tool error results. See [DECISIONS.md](DECISIONS.md) D20 for the forms it matches.
+- It refuses with a `response_*` reason (`response_unmatched`, `response_unreadable`, `response_oversize`, `response_clearance_missing`, `response_internal_error`); agentgateway returns a JSON-RPC error and the client reports `OutcomeUnknown`. These reasons are disjoint from `REFUSAL_REASONS`, and the upstream has already acted.
+- check-config requires `mcp.policies.timeout` with `requestTimeout` and `backendRequestTimeout`, each an integer with `ms`, `s` or `m` and at most 120 s; `responseIdleTimeout` is allowed. A timed-out call never reaches the redactor, and the in-flight entry expires after `inflight_ttl`. Neither timeout bounds an event-stream body.
+- agentgateway v1.7.0 sends no JSON-RPC error and no event-stream message other than the result through a response processor, so the redactor cannot see an echo there.
 
 ## Clearance visibility
 
@@ -31,6 +39,7 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 - The relay holds at most 64 connections and has no idle timeout. A connection over the cap is closed.
 - A refused, closed or unreachable processor fails the call closed, because check-config requires `failClosed`.
 - Each gRPC server runs 8 workers and admits at most 256 concurrent calls; a call past that is refused with `RESOURCE_EXHAUSTED`, which fails it closed. The limit is fixed. At the quickstart's measured rate (about 115 calls a second at 32 clients), 256 queued calls drain well inside the gateway's 10-second processor timeout.
+- The redactor's gRPC server runs `response_workers` workers (default 1, at most 2) and admits at most 16 concurrent calls, so releases never wait behind a large result. A call past that is refused with `RESOURCE_EXHAUSTED` after the upstream acted.
 - agentgateway abandons a processor call after 10 seconds. grpcio drops a call the gateway abandoned while it was still queued, so the processor never sees it and it never reserves a ledger slot or claims an op_id. A call already inside the processor runs to completion; its result is discarded and its op_id stays claimed.
 
 ## check-config
