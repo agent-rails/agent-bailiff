@@ -1,4 +1,5 @@
 import pytest
+from agent_warrant.scope import covers
 
 from agent_bailiff.scope_pattern import is_bounded_resource, is_bounded_tool
 
@@ -21,3 +22,16 @@ def test_exact_tools_and_dot_patterns_are_bounded_tools(entry):
 @pytest.mark.parametrize("entry", ["gitea.issues_*", "gitea.issues-*", "gitea:*", "gitea/*"])
 def test_tool_patterns_that_stop_inside_a_name_are_unbounded(entry):
     assert not is_bounded_tool(entry)
+
+
+@pytest.mark.parametrize("tool", ["notes.x_y", "notes.x/y", "notes.x-y", "notes.x:y", "notes.x.y"])
+def test_a_dot_tool_grant_covers_every_valid_suffix_across_separators(tool):
+    scope = {"tools": ["notes.*"], "resources": ["r"], "max_cost_per_call": 1}
+    assert is_bounded_tool("notes.*")
+    assert covers(scope, tool, "r")
+
+
+@pytest.mark.parametrize("tool", ["notes", "notesx", "notes_x"])
+def test_a_dot_tool_grant_does_not_cover_the_stem_or_a_longer_name(tool):
+    scope = {"tools": ["notes.*"], "resources": ["r"], "max_cost_per_call": 1}
+    assert not covers(scope, tool, "r")
