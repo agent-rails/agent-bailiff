@@ -397,6 +397,38 @@ def test_a_gateway_bound_target_over_cleartext_to_a_remote_host_is_refused(targe
     assert any("deploy" in problem and "cleartext" in problem for problem in problems), problems
 
 
+def test_backend_tls_with_only_a_root_is_accepted():
+    def change(config):
+        config["mcp"]["targets"][0].update(
+            mcp={"host": "https://mcp.example.com/mcp"}, policies={"backendTLS": {"root": "/etc/gateway/ca.pem"}}
+        )
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    "backend_tls",
+    [
+        {"root": "/etc/gateway/ca.pem", "insecure": True},
+        {"root": "/etc/gateway/ca.pem", "insecureHost": True},
+        {"root": "/etc/gateway/ca.pem", "hostname": "other.example"},
+        {"insecure": True},
+        {"root": ""},
+        {"root": 1},
+        {},
+        "/etc/gateway/ca.pem",
+        None,
+    ],
+)
+def test_backend_tls_beyond_a_non_empty_root_is_refused(backend_tls):
+    def change(config):
+        config["mcp"]["targets"][0].update(
+            mcp={"host": "https://mcp.example.com/mcp"}, policies={"backendTLS": backend_tls}
+        )
+
+    assert any("backendTLS" in problem for problem in problems_after(change))
+
+
 @pytest.mark.parametrize(
     "change",
     [

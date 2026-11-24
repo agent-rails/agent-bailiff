@@ -26,6 +26,7 @@ MCP_POLICY_KEYS = frozenset(
 )
 TARGET_KEYS = frozenset({"name", "mcp", "sse", "stdio", "openapi", "policies"})
 TARGET_POLICY_KEYS = frozenset({"backendTLS"})
+TARGET_TLS_KEYS = frozenset({"root"})
 HTTP_TARGET_KEYS = frozenset({"host", "port", "path"})
 BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "requestHeaders", "metadata"})
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
@@ -118,6 +119,8 @@ def _check_targets(
             problems.append(f"mcp target {name!r} policies must be an object")
         else:
             _only_keys(problems, f"mcp target {name!r} policies", policies, TARGET_POLICY_KEYS)
+            if "backendTLS" in policies:
+                _check_backend_tls(problems, name, policies["backendTLS"])
     for service in sorted(services):
         target = seen.get(service)
         if target is None:
@@ -142,6 +145,16 @@ def _check_targets(
                 f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
                 "a host without a scheme is http, and the released credential must not cross the network in cleartext"
             )
+
+
+def _check_backend_tls(problems: list[str], name: str, backend_tls: object) -> None:
+    if not isinstance(backend_tls, dict):
+        problems.append(f"mcp target {name!r} policies.backendTLS must be an object with a root")
+        return
+    _only_keys(problems, f"mcp target {name!r} policies.backendTLS", backend_tls, TARGET_TLS_KEYS)
+    root = backend_tls.get("root")
+    if not isinstance(root, str) or not root:
+        problems.append(f"mcp target {name!r} policies.backendTLS root must be a non-empty string")
 
 
 def _is_protected_transport(target: Mapping[str, Any]) -> bool:
