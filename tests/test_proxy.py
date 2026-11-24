@@ -339,9 +339,21 @@ def test_a_name_routed_on_two_services_is_refused():
         route_services(routes)
 
 
-@pytest.mark.parametrize("url", ["http://gateway.example.com/mcp", "http://10.0.0.5:8080/mcp"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://gateway.example.com/mcp",
+        "http://10.0.0.5:8080/mcp",
+    ],
+)
 def test_a_proxy_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, gateway, url):
     with pytest.raises(ValueError, match="https"):
+        StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+
+
+@pytest.mark.parametrize("url", ["http://gateway:abc/mcp", "http://gate\tway/mcp", "http://gateway/mcp?x=1"])
+def test_a_proxy_refuses_a_malformed_gateway_url(task_file, key_dir, gateway, url):
+    with pytest.raises(ValueError, match="url"):
         StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
 
 

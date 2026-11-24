@@ -704,7 +704,24 @@ def _capture(errors, function, *args):
         errors.append(error)
 
 
-@pytest.mark.parametrize("url", ["ftp://gateway/mcp", "http:///mcp", "http://gateway/mcp?x=1"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://gateway/mcp",
+        "http:///mcp",
+        "http://gateway/mcp?x=1",
+        "http://gateway/mcp#x",
+        "http://gateway/mcp?",
+        "http://gateway:abc/mcp",
+        "http://gateway:99999/mcp",
+        "http://gate\tway/mcp",
+        "http://gate way/mcp",
+        "http://gateway/mcp\n",
+        "https://gateway:abc/mcp",
+        "https://gate\tway/mcp",
+        "http://::1/mcp",
+    ],
+)
 def test_a_bad_gateway_url_is_rejected(url):
     with pytest.raises(ValueError, match="url"):
         BailiffClient(url, holder(), ROUTES)
