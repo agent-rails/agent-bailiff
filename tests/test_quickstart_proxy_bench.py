@@ -34,7 +34,8 @@ for line in sys.stdin:
     elif method == "tools/list":
         result = {"tools": [{"name": "list_issues"}]}
     elif message["params"]["arguments"]["repo"] == "payroll":
-        result = {"content": [{"type": "text", "text": "out_of_scope"}], "isError": True}
+        text = "out_of_scope: agent-bailiff refused this call"
+        result = {"content": [{"type": "text", "text": text}], "isError": True}
     else:
         result = {"content": [{"type": "text", "text": "[]"}], "isError": False}
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\\n")
@@ -150,3 +151,19 @@ def test_retries_from_each_closed_client_are_added():
 
 def test_the_json_the_benchmark_prints_is_serializable(fake_proxy):
     json.dumps(bench.run_session(fake_proxy, 20, 20))
+
+
+def test_a_proxy_refusal_is_told_from_an_error_that_is_not_one():
+    refusal = {
+        "content": [{"type": "text", "text": "release_refused: agent-bailiff refused this call"}],
+        "isError": True,
+    }
+    failure = {"content": [{"type": "text", "text": "upstream exploded"}], "isError": True}
+    assert bench.classify(refusal) == "refused: release_refused"
+    assert bench.classify(failure).startswith("error result: ")
+    assert bench.classify({"content": [], "isError": False}) == "result"
+
+
+def test_a_schedule_that_would_hit_the_custodian_rate_limit_is_refused(fake_proxy):
+    with pytest.raises(bench.BenchFailed, match="releases per minute"):
+        bench.run_session(fake_proxy, 100, 20)

@@ -21,7 +21,7 @@ from typing import Any, BinaryIO
 from agent_warrant.task_root import TaskRoot
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from agent_bailiff.client.client import refusal_reason
+from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.proxy.agent_key import KEY_DIR_MODE, KEY_MODE, KEY_SUFFIX
 from agent_bailiff.task.task_file import TaskFile
 
@@ -36,6 +36,7 @@ IN_SCOPE = {"owner": ORG, "repo": "demo"}
 OUT_OF_SCOPE = {"owner": ORG, "repo": "payroll"}
 PROTOCOL_VERSION = "2025-06-18"
 SHUTDOWN_SECONDS = 30
+RELEASES_PER_MINUTE = 60
 RETRIES_LOGGED = re.compile(r"gateway client closed after (\d+) setup retries")
 
 
@@ -111,10 +112,14 @@ class Host:
 
 
 def classify(result: dict[str, Any]) -> str:
-    reason = refusal_reason(result)
-    if reason is not None:
-        return f"refused: {reason}"
-    return "error result" if result.get("isError") is True else "result"
+    if result.get("isError") is not True:
+        return "result"
+    content = json.dumps(result.get("content"))
+    for part in result.get("content") or []:
+        reason = str(part.get("text", "")).split(":", 1)[0]
+        if reason in REFUSAL_REASONS:
+            return f"refused: {reason}"
+    return f"error result: {content[:160]}"
 
 
 def percentile(latencies: list[float], fraction: float) -> float:
@@ -163,6 +168,10 @@ def run_session(command: Sequence[str], calls: int, percent: int) -> dict[str, A
     scripted = out_of_scope_calls(calls, percent)
     if scripted[0] or all(scripted[1:]) or not any(scripted[1:]):
         raise BenchFailed(f"{calls} calls at {percent}% out of scope leave no warm call of one of the two kinds")
+    if calls - sum(scripted) > RELEASES_PER_MINUTE:
+        raise BenchFailed(
+            f"{calls - sum(scripted)} in-scope calls exceed the {RELEASES_PER_MINUTE} releases per minute"
+        )
     with tempfile.TemporaryFile() as stderr:
         host = Host(command, stderr)
         try:
@@ -217,7 +226,7 @@ def run_bench(calls: int, percent: int) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--calls", type=int, default=100)
+    parser.add_argument("--calls", type=int, default=60)
     parser.add_argument("--out-of-scope-percent", type=int, default=20)
     args = parser.parse_args(argv)
     if args.calls < 3 or not 1 <= args.out_of_scope_percent <= 90:

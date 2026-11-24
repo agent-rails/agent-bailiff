@@ -19,7 +19,7 @@ stack = test_quickstart_stack.stack
 PROFILES = ("gitea",)
 
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
-CALLS = 100
+CALLS = 60
 OUT_OF_SCOPE_PERCENT = 20
 ACCEPTED = {"result", "refused: out_of_scope"}
 
@@ -48,7 +48,7 @@ def test_quickstart_proxy_latency(stack):
         )
     )
     assert report["calls"] == CALLS
-    assert set(report["outcomes"]) <= ACCEPTED, report
+    assert set(report["outcomes"]) <= ACCEPTED, report["outcomes"]
     assert report["refusals_per_100_calls"] == OUT_OF_SCOPE_PERCENT, report
     now = datetime.now(UTC)
     document = {
