@@ -37,6 +37,8 @@ Two ExtMcp processors for agentgateway v1.7.0 (`mcpGuardrails`): decide, then cu
 
 - `python -m agent_bailiff.adapters.agentgateway check-config` validates a JSON gateway config at startup only.
 - agentgateway watches its config file and reloads it on change, so a later edit is not checked. The config file must be writable only by its owner, and that owner must be neither the gateway's user nor an agent's user.
+- The mcp target `host` of a gateway-bound service must be `https`, or `http` only to `127.0.0.1`, `localhost`, `[::1]` or a single-label service name. A host without a scheme, alone or with `port` and `path`, is `http`, as agentgateway v1.7.0 treats it. A host with user info is refused. check-config cannot see where a single-label name resolves.
+- A target's `backendTLS` may hold only a non-empty string `root`. `insecure`, `insecureHost`, `hostname` and every other key are refused.
 
 ## tools/call params
 
