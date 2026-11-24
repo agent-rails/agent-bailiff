@@ -12,6 +12,7 @@ from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPAR
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.release import RELEASE_HEADER
+from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http
 
 TOP_LEVEL_KEYS = frozenset({"config", "mcp"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
@@ -50,8 +51,6 @@ REFUSAL_GUARD = {
     "condition": REFUSAL_SHAPE,
     "reject": "the upstream answer has the shape of a bailiff refusal",
 }
-
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 @dataclass(frozen=True)
@@ -132,11 +131,30 @@ def _check_targets(
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
-        if service in effector_services and not _is_loopback_http(target["mcp"]):
+        if service in effector_services:
+            if not _is_loopback_http(target["mcp"]):
+                problems.append(
+                    f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or "
+                    "[::1]; releases and clearances must not leave the host"
+                )
+        elif not _is_protected_transport(target["mcp"]):
             problems.append(
-                f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or [::1]; "
-                "releases and clearances must not leave the host"
+                f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
+                "a host without a scheme is http, and the released credential must not cross the network in cleartext"
             )
+
+
+def _is_protected_transport(target: Mapping[str, Any]) -> bool:
+    host = target.get("host")
+    if not isinstance(host, str):
+        return False
+    try:
+        url = urllib.parse.urlsplit(host if "://" in host else f"http://{host}")
+    except ValueError:
+        return False
+    if url.username is not None or url.password is not None or not url.hostname:
+        return False
+    return url.scheme == "https" or (url.scheme == "http" and allows_plain_http(url.hostname))
 
 
 def _is_loopback_http(target: Mapping[str, Any]) -> bool:

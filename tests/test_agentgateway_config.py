@@ -353,6 +353,51 @@ def test_a_duplicate_target_name_is_refused():
 
 
 @pytest.mark.parametrize(
+    "target",
+    [
+        {"host": "https://mcp.example.com/mcp"},
+        {"host": "https://10.0.0.5:8443/mcp"},
+        {"host": "http://127.0.0.1:8080/mcp"},
+        {"host": "http://localhost:8080/mcp"},
+        {"host": "http://[::1]:8080/mcp"},
+        {"host": "http://gitea-mcp:8080/mcp"},
+        {"host": "127.0.0.1"},
+        {"host": "gitea-mcp:8080"},
+        {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
+        {"host": "[::1]", "port": 8080, "path": "/mcp"},
+    ],
+)
+def test_a_gateway_bound_target_over_https_loopback_or_a_service_name_is_accepted(target):
+    assert problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target)) == ()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"host": "http://mcp.example.com/mcp"},
+        {"host": "http://mcp.example.com:8080/mcp"},
+        {"host": "http://10.0.0.5:8080/mcp"},
+        {"host": "http://[2001:db8::1]:8080/mcp"},
+        {"host": "http://127.0.0.1.evil.example/mcp"},
+        {"host": "http://167772165:8080/mcp"},
+        {"host": "http://0xa000005:8080/mcp"},
+        {"host": "http://gitea-mcp@10.0.0.5:8080/mcp"},
+        {"host": "http://user@gitea-mcp:8080/mcp"},
+        {"host": "ftp://gitea-mcp:21/mcp"},
+        {"host": "https:///mcp"},
+        {"host": "mcp.example.com:443"},
+        {"host": "10.0.0.5"},
+        {"host": "mcp.example.com", "port": 443, "path": "/mcp"},
+        {"host": "10.0.0.5", "port": 8080, "path": "/mcp"},
+        {"host": 7},
+    ],
+)
+def test_a_gateway_bound_target_over_cleartext_to_a_remote_host_is_refused(target):
+    problems = problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target))
+    assert any("deploy" in problem and "cleartext" in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
     "change",
     [
         lambda config: config.update(binds=[]),
