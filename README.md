@@ -96,6 +96,7 @@ Each component has its own commands, run as that component's uid:
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
 - `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
 - `agent-bailiff docket verify` checks every record on the host against pinned writer keys, and with `--archive` every record from the first; `docket archive` copies sealed segments to an archive directory on another file system and writes the receipt the sink needs before it removes one; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
+- Allow, release and recorded refuse entries carry `latency_ms`, the time decide or the custodian spent on the call. Measured overhead on one host is in [docs/DOCKET.md](docs/DOCKET.md#latency); rerun it with the opt-in quickstart benchmarks.
 
 ## Documentation
 
