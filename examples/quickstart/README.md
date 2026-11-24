@@ -2,9 +2,17 @@
 
 A Docker Compose stack in which a scripted agent calls Gitea through agentgateway and gitea-mcp. The agent holds a task chain and its own signing key, never the Gitea token. Decide checks each `tools/call` against the task's scope, budget and replay ledger; the custodian injects the Gitea token only for an allowed call; allows, releases, revokes and most refusals go to a signed docket that an operator verifies.
 
-Requirements: Docker with Compose v2.20 or later and `jq`. Run every command from this directory.
+Requirements: Docker Engine 28.3.3 or later with Compose v2.20 or later, and `jq`. Older engines let other hosts on the network reach ports published on `127.0.0.1` (moby/moby#49325, CVE-2025-54388). Run every command from this directory.
 
-The upstream is chosen by `UPSTREAM`, which names a config in `upstreams/`, or in the directory `BAILIFF_UPSTREAMS` names (see [`upstreams/schema.md`](upstreams/schema.md)). Plain `docker compose up` runs `stub`: `stub-upstream`, an in-repo Streamable HTTP MCP server with in-memory notes, and no Gitea. The walkthrough below uses Gitea, which runs only under the `gitea` profile, so first:
+The upstream is chosen by `UPSTREAM`, which names a config in `upstreams/`, or in the directory `BAILIFF_UPSTREAMS` names (see [`upstreams/schema.md`](upstreams/schema.md)). Plain `docker compose up` runs `stub`: `stub-upstream`, an in-repo Streamable HTTP MCP server with in-memory notes, and no Gitea. The stub stack stores no credential, so every call fails until the operator stores one; the stub accepts any value:
+
+```console
+$ head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' \
+    | docker compose run --rm --no-deps -T custodian -m agent_bailiff.cli custodian put-credential \
+      --config /var/lib/bailiff/custodian/config.json --tenant quickstart --credential-id stub-token --target stub
+```
+
+The walkthrough below uses Gitea, which runs only under the `gitea` profile, so first:
 
 ```console
 $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
@@ -32,7 +40,7 @@ $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
 | `gitea-secret`, `gitea-admin`, `bootstrap`, `agent-key`, `gitea-task` | per component | `gitea` profile: seed Gitea, store its token, issue the walkthrough task |
 | `task-issuer` | 10007 | `operator` profile: `agent-bailiff task issue` into the bind-mounted `BAILIFF_TASK_DIR` (default `./tasks`), which must exist, owned by uid 10007 and not group or other writable |
 
-Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. The upstream servers, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too. Only the gateway also joins `egress`, a routable network, so it can reach an `https://` upstream, and it publishes its MCP port on `127.0.0.1` only (`GATEWAY_PORT`, default 18090). Any local user can connect to that port; the task chain and the agent's key gate calls, not the port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
+Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. The upstream servers, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too. Only the gateway also joins `egress`, a routable network with no destination filter: Docker publishes a port only for a container on a routable network, and an `https://` upstream needs it. Bootstrap refuses an upstream URL that names a stack service, `localhost`, or a loopback, link-local, unspecified or multicast address. The gateway publishes its MCP port on `127.0.0.1` only (`GATEWAY_PORT`, default 18090). Any local user can connect to that port; the task chain and the agent's key gate calls, not the port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
 
 Every service has a memory and process limit (`mem_limit`, `pids_limit`), with swap capped at the memory limit (`memswap_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
 
