@@ -28,6 +28,7 @@ TARGET_KEYS = frozenset({"name", "mcp", "sse", "stdio", "openapi", "policies"})
 TARGET_POLICY_KEYS = frozenset({"backendTLS"})
 TARGET_TLS_KEYS = frozenset({"root"})
 HTTP_TARGET_KEYS = frozenset({"host", "port", "path"})
+TARGET_PATH = re.compile(r"/(?!/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]*")
 BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "requestHeaders", "metadata"})
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
 BAILIFF_METHODS = {"*": "request"}
@@ -164,10 +165,22 @@ def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult | 
     has_scheme = "://" in host
     if has_scheme and ("port" in target or "path" in target):
         return None
+    if "port" in target and not _is_valid_target_port(target["port"]):
+        return None
+    if "path" in target and not _is_valid_target_path(target["path"]):
+        return None
     try:
         return parse_transport_url(host, bare_host=not has_scheme)
     except ValueError:
         return None
+
+
+def _is_valid_target_port(port: object) -> bool:
+    return isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535
+
+
+def _is_valid_target_path(path: object) -> bool:
+    return isinstance(path, str) and TARGET_PATH.fullmatch(path) is not None
 
 
 def _is_protected_transport(target: Mapping[str, Any]) -> bool:
