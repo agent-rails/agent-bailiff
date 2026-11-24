@@ -13,6 +13,8 @@ def allows_plain_http(host: str) -> bool:
 
 
 def parse_transport_url(text: str, *, bare_host: bool = False) -> SplitResult:
+    if not text.isascii():
+        raise ValueError("url must be ASCII; write an internationalized host in its IDNA form")
     if any(char.isspace() or ord(char) < 32 or ord(char) == 127 or char == "\\" for char in text):
         raise ValueError("url must not contain whitespace, control characters or backslashes")
     if any(char in text for char in "?#"):
@@ -34,7 +36,9 @@ def parse_transport_url(text: str, *, bare_host: bool = False) -> SplitResult:
     if ":" in parts.hostname and not parts.netloc.startswith("["):
         raise ValueError("an IPv6 host must be in brackets")
     try:
-        _ = parts.port
+        port = parts.port
     except ValueError:
-        raise ValueError("url port must be a number from 0 to 65535") from None
+        raise ValueError("url port must be a number from 1 to 65535") from None
+    if port == 0 or parts.netloc.endswith(":"):
+        raise ValueError("url port must be a number from 1 to 65535")
     return parts

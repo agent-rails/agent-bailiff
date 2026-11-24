@@ -61,6 +61,13 @@ def test_a_well_formed_transport_url_is_parsed(text, bare_host, host, port):
         ("http://::1/mcp", False),
         ("ftp://gateway/mcp", False),
         ("gateway", False),
+        ("gateway:", True),
+        ("gateway:0", True),
+        ("http://gateway:/mcp", False),
+        ("http://gateway:0/mcp", False),
+        ("https://gateway/\x80", False),
+        ("https://gateway/\u00e9", False),
+        ("https://g\u00e9teway/mcp", False),
     ],
 )
 def test_a_malformed_transport_url_is_refused(text, bare_host):
