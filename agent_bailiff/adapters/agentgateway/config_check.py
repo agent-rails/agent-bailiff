@@ -257,9 +257,8 @@ def _check_timeouts(problems: list[str], timeout: object) -> None:
         )
         return
     _only_keys(problems, "mcp.policies.timeout", timeout, TIMEOUT_KEYS)
-    if "responseIdleTimeout" in timeout and _duration_ms(timeout["responseIdleTimeout"]) is None:
-        problems.append('mcp.policies.timeout.responseIdleTimeout must be a duration with a unit, such as "30s"')
-    for key in BOUNDED_TIMEOUTS:
+    optional = ("responseIdleTimeout",) if "responseIdleTimeout" in timeout else ()
+    for key in (*BOUNDED_TIMEOUTS, *optional):
         milliseconds = _duration_ms(timeout.get(key))
         if milliseconds is None or milliseconds > MAX_UPSTREAM_TIMEOUT_MS:
             problems.append(

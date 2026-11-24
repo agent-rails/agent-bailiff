@@ -248,7 +248,7 @@ def test_upstream_timeouts_up_to_two_minutes_are_accepted(value):
 
 def test_a_response_idle_timeout_is_accepted():
     def change(config):
-        config["mcp"]["policies"]["timeout"]["responseIdleTimeout"] = "10m"
+        config["mcp"]["policies"]["timeout"]["responseIdleTimeout"] = "2m"
 
     assert problems_after(change) == ()
 
@@ -270,6 +270,7 @@ def test_a_response_idle_timeout_is_accepted():
         {"requestTimeout": "1m30s", "backendRequestTimeout": "30s"},
         {"requestTimeout": " 30s", "backendRequestTimeout": "30s"},
         {"requestTimeout": "30s", "backendRequestTimeout": "30s", "responseIdleTimeout": "soon"},
+        {"requestTimeout": "30s", "backendRequestTimeout": "30s", "responseIdleTimeout": "121s"},
         {"requestTimeout": "30s", "backendRequestTimeout": "30s", "idleTimeout": "30s"},
     ],
 )
