@@ -18,6 +18,7 @@ from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_BODY_BYTES = 1 << 20
+READ_TIMEOUT_SECONDS = 10
 MAX_NOTES = 1024
 MAX_NOTE_BYTES = 4096
 NOTE = {"type": "string", "pattern": "^[a-z0-9-]{1,64}$"}
@@ -80,6 +81,7 @@ class StubUpstream(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     server: StubUpstream
+    timeout = READ_TIMEOUT_SECONDS
 
     def log_message(self, *args: object) -> None:
         pass
