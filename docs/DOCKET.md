@@ -203,6 +203,28 @@ It does not detect:
 - a rollback that another instance of the same writer, using a different state directory, has already appended past the stored `seq`;
 - anything after the state file is lost or rewritten. The client requires the state directory to be owned by its own uid and not writable by group or others; if the client runs as the sink uid, the sink uid can rewrite the state file too.
 
+## Latency
+
+Three different numbers exist. Each answers a different question, and each was measured on one host only.
+
+- Per-hop `latency_ms` on a docket entry: milliseconds from the start of `Decider.check` or `Custodian.release` to the moment the entry is built, on a monotonic clock. Decide's allow and refuse entries and the custodian's release (both credential tiers) and refuse entries carry it. It is not the time at the gateway processor: the clock starts inside `check` or `release`, so request parsing before that call and transport after it are excluded. Each entry is stamped when it is built, before its own docket append, so that append is not included. Outcome, reconcile and canary-alert entries carry none (reconcile is timer-driven and has no request). The field is optional and non-negative in the signed format and the OTLP exporter uses it as the span start.
+- `added_p50_ms` and `added_p99_ms` in `benchmarks/quickstart-<date>.json`: for each client level, the load benchmark's p50 and p99 through the gateway minus the same percentile for the same calls sent straight to the upstream (`baseline_*`). The baseline runs first, so the upstream is warmer for it than for the proxied run, and a gitea warm-up effect is not separated out. Each level has 20 calls per client, so the p99 of the small levels is close to the slowest call; the difference of two noisy p99 values can be negative.
+- `benchmarks/proxy-<date>.json`: what an agent sees. A harness in the agent container plays an MCP host against `agent-bailiff proxy run` over stdio (initialize, tools/list, then `list_issues` calls, a scripted share out of scope) and times each request to its response line. `first_call_ms` is reported apart from `p50_ms` and `p99_ms`, which cover the remaining calls. `refusals_per_100_calls` counts proxy refusals in the run. `setup_retries` is read from the proxy's close log; tool calls are never retried, so `retries_per_call` is setup retries divided by calls and is not a count of retried tool calls.
+
+Measured on one host (arm64 macOS, Docker 29.6.2, quickstart stack on gitea-mcp, 2026-11-24, one run each):
+
+- Load benchmark, added p50 over direct upstream: 23.0 ms at 1 client, 36.1 ms at 4, 102.8 ms at 16, 144.7 ms at 32. Added p99: 80.4 ms, -45.3 ms, 551.2 ms, 747.9 ms. The negative value is the direct baseline's p99 (250.6 ms) exceeding the proxied p99 (205.3 ms) in that sample; it shows the noise, not a speedup. Throughput peaked at 60.0 calls/s at 4 clients.
+- Perceived latency, 60 sequential calls, 20 percent out of scope: p50 25.6 ms and p99 152.4 ms over the 59 warm calls (p99 of 59 samples is near the slowest call), first call 45.0 ms, in-scope p50 26.5 ms, out-of-scope p50 6.9 ms, initialize 523.8 ms, tools/list 33.9 ms, 0 setup retries, 20.0 refusals per 100 calls.
+
+Limits of these numbers:
+
+- One run, one host, no repeats, so there is no variance estimate. Other hardware, a remote upstream or a loaded docket will differ.
+- The perceived-latency run is sequential and short. A session is capped at 60 releases per minute by the custodian's `rate_limit`, so the harness refuses a schedule with more in-scope calls than that.
+- A task records at most 16 refusals per 60 s window; later refusals are still refused but not docketed, which can make a refused call faster than one that is recorded.
+- Not measured: concurrent agents through the proxy, other tools, a cold gateway, or credentials other than the quickstart's.
+
+Re-run with `AGENT_BAILIFF_TEST_QUICKSTART=1 AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1` for the load benchmark and `AGENT_BAILIFF_TEST_QUICKSTART=1 AGENT_BAILIFF_TEST_QUICKSTART_PROXY=1` for the proxy benchmark (`tests/test_quickstart_load.py`, `tests/test_quickstart_proxy.py`).
+
 ## Disk full
 
 `free_space_floor` (required in the docket config; at least two frames, 131074 bytes; `agent-bailiff init docket` writes 256 MiB) keeps the sink from filling its file system. Below it, decide refuses calls as `docket_unavailable` and the custodian does not release credentials: without disk there is no record, so there is no call. When the floor is reached first, appends resume once space returns, with no restart.
