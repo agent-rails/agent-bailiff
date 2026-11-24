@@ -244,7 +244,7 @@ class Decider:
     ) -> Decision:
         operation_args_digest = snapshot.digest
         leaf_binding = links[-1].binding() if links else root.binding()
-        if not is_bounded_scope(scope):
+        if not all(is_bounded_scope(granted) for granted in (root.scope, *(link.scope for link in links))):
             raise _Refusal("unbounded_scope", entry)
         if not covers(scope, request.tool, request.resource):
             raise _Refusal("out_of_scope", entry)
