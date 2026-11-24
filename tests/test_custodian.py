@@ -452,6 +452,28 @@ def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(m
     assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
 
 
+@pytest.mark.parametrize(
+    ("tools", "tool"),
+    [
+        (["gitea.issues_*"], "gitea.issues_delete"),
+        (["gitea.issues-*"], "gitea.issues-delete"),
+        (["gitea:*"], "gitea:delete"),
+        (["gitea/*"], "gitea/delete"),
+        (["deploy.service", "gitea.issues_*"], "deploy.service"),
+    ],
+)
+def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_clearance(
+    make_custodian, workdir, tools, tool
+):
+    root = make_root(scope={"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    request = make_request(root, tool=tool)
+    token = sign_clearance(clearance_for(request, root))
+    binding = CredentialBinding(TENANT, tool, "env/*", "deploy-api", "deploy.example", "Authorization", False)
+    custodian = make_custodian(bindings=(binding,))
+    assert custodian.release(token, request, NOW + 1) == Refused("unbounded_scope")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
+
+
 def test_revoked_chain_is_refused(make_custodian, issue, writer):
     request, token = issue()
     writer.revoke_task(TENANT, "task-1", NOW)
