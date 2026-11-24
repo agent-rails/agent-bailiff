@@ -417,10 +417,10 @@ class Custodian:
 
 
 def _check_scope(verified: _Verified) -> None:
-    scope = verified.leaf_scope
-    if not is_bounded_scope(scope):
+    chain_scopes = (verified.root.scope, *(link.scope for link in verified.links))
+    if not all(is_bounded_scope(granted) for granted in chain_scopes):
         raise _Refusal("unbounded_scope")
-    if not covers(scope, verified.clearance.tool, verified.clearance.resource):
+    if not covers(verified.leaf_scope, verified.clearance.tool, verified.clearance.resource):
         raise _Refusal("out_of_scope")
 
 
