@@ -16,6 +16,12 @@ from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.custodian.files import OwnedFileError, replace_at
+from agent_bailiff.scope_pattern import (
+    RESOURCE_PATTERN_SUFFIX,
+    TOOL_PATTERN_SUFFIX,
+    is_bounded_resource,
+    is_bounded_tool,
+)
 from agent_bailiff.task.task_file import MAX_TASK_FILE_BYTES, TaskFile, TaskFileError, check_id
 
 DEFAULT_TENANT = "quickstart"
@@ -49,6 +55,12 @@ class TaskRequest:
         refusal = validate_scope(self.scope)
         if refusal:
             raise ValueError(f"scope: {refusal}")
+        for tool in self.scope["tools"]:
+            if not is_bounded_tool(tool):
+                raise ValueError(f"scope: tool grant {tool} must be exact or end at {TOOL_PATTERN_SUFFIX}")
+        for resource in self.scope["resources"]:
+            if not is_bounded_resource(resource):
+                raise ValueError(f"scope: resource grant {resource} must be exact or end at {RESOURCE_PATTERN_SUFFIX}")
         _check_integer("budget", self.budget, 1, None)
         _check_integer("ttl", self.ttl, 1, MAX_TTL_SECONDS)
         _check_integer("max_depth", self.max_depth, 0, MAX_DELEGATION_DEPTH)
