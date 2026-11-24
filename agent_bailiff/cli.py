@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -45,6 +46,7 @@ from agent_bailiff.effector.platform import PLATFORMS
 from agent_bailiff.effector.rbac import EffectorIdentity, generate_manifests, parse_tenants, render
 from agent_bailiff.keys import PublicKeyRecord, load_signing_key
 from agent_bailiff.proxy.agent_key import AgentKeyError, generate_agent_key
+from agent_bailiff.proxy.authority import SharedAuthority, check_two_user
 from agent_bailiff.proxy.server import StdioProxy, Stop, load_routes, read_routes
 from agent_bailiff.proxy.task_state import NoTask, TaskState, TaskUnavailable
 from agent_bailiff.route_generation import MAX_TOOLS_BYTES, generate_routes, write_new
@@ -302,6 +304,11 @@ def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     serve = actions.add_parser("run", help="serve MCP on stdin and stdout until EOF, SIGINT or SIGTERM")
     _add_task_source(serve)
     serve.add_argument("--routes", type=Path, required=True, help="the route table the gateway enforces")
+    serve.add_argument(
+        "--allow-shared-user",
+        action="store_true",
+        help="start although this user can reach the Docker daemon; single-user development only",
+    )
     serve.set_defaults(handler=_proxy_run)
 
 
@@ -725,10 +732,13 @@ def _proxy_tools(args: argparse.Namespace) -> int:
 
 def _proxy_run(args: argparse.Namespace) -> int:
     try:
+        warning = check_two_user(os.environ, allow_shared_user=args.allow_shared_user)
         raw = read_routes(args.routes)
         proxy = StdioProxy(args.task_file, args.key_dir, args.gateway_url, load_routes(raw))
-    except (OSError, ValueError) as exc:
+    except (SharedAuthority, OSError, ValueError) as exc:
         return _refused("proxy run", exc)
+    if warning:
+        print(f"{PROG} proxy run warning: {warning}", file=sys.stderr)
     _stop_proxy_on_signals(proxy)
     logging.getLogger(__name__).info("proxy routes sha256 %s", hashlib.sha256(raw).hexdigest())
     proxy.run(sys.stdin.buffer, sys.stdout.buffer)
