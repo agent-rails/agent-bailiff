@@ -122,6 +122,8 @@ class InflightReleases:
         return slot
 
     def _sweep(self) -> int:
+        if not self._expiry:
+            return 0
         now = self._monotonic_ns()
         expired = []
         for key, expires_at in self._expiry.items():

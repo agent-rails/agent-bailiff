@@ -6,6 +6,12 @@ from types import MappingProxyType
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+DEFAULT_INFLIGHT_TTL = 60
+DEFAULT_INFLIGHT_MAX = 4096
+DEFAULT_INFLIGHT_MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_INFLIGHT_PER_TENANT = 1024
+INFLIGHT_FIELDS = ("inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant")
+
 
 @dataclass(frozen=True)
 class CustodianConfig:
@@ -18,6 +24,10 @@ class CustodianConfig:
     skew_seconds: int
     rate_limit: int
     rate_window: int
+    inflight_ttl: int = DEFAULT_INFLIGHT_TTL
+    inflight_max: int = DEFAULT_INFLIGHT_MAX
+    inflight_max_bytes: int = DEFAULT_INFLIGHT_MAX_BYTES
+    inflight_per_tenant: int = DEFAULT_INFLIGHT_PER_TENANT
 
     def __post_init__(self) -> None:
         for name in ("custodian_id", "decider_id", "docket_writer"):
@@ -30,7 +40,7 @@ class CustodianConfig:
             if not isinstance(kid, str) or not kid or not isinstance(key, Ed25519PublicKey):
                 raise ValueError("decide_keys must map non-empty str key ids to Ed25519 public keys")
         object.__setattr__(self, "decide_keys", MappingProxyType(dict(self.decide_keys)))
-        for name in ("max_proof_age", "max_clearance_lifetime", "rate_limit", "rate_window"):
+        for name in ("max_proof_age", "max_clearance_lifetime", "rate_limit", "rate_window", *INFLIGHT_FIELDS):
             _require_int(name, getattr(self, name), minimum=1)
         _require_int("skew_seconds", self.skew_seconds, minimum=0)
         if self.max_clearance_lifetime > self.max_proof_age:

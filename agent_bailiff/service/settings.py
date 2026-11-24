@@ -24,6 +24,7 @@ from agent_bailiff.strict_json import parse_strict_json
 
 MAX_CONFIG_BYTES = 1 << 20
 MAX_OS_ID = 2**32 - 2
+MAX_INFLIGHT_TTL = 3600
 
 DOCKET_CLIENT_KEYS = frozenset({"socket", "sink_uid", "state_dir"})
 GATEWAY_KEYS = frozenset({"uid", "socket", "socket_group", "private_dir"})
@@ -37,7 +38,7 @@ DECIDE_KEYS = frozenset(
 CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
-    | {"docket", "gateway"}
+    | {"docket", "gateway", "inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant"}
 )
 DOCKET_KEYS = frozenset(
     {
@@ -182,6 +183,10 @@ class CustodianSettings:
     skew_seconds: int
     rate_limit: int
     rate_window: int
+    inflight_ttl: int
+    inflight_max: int
+    inflight_max_bytes: int
+    inflight_per_tenant: int
     issuers: Issuers
     bindings: Path
     kek: Path
@@ -375,6 +380,10 @@ def parse_custodian(document: object) -> CustodianSettings:
         skew_seconds=config.integer("skew_seconds", 0, 300),
         rate_limit=config.integer("rate_limit", 1),
         rate_window=config.integer("rate_window", 1),
+        inflight_ttl=config.integer("inflight_ttl", 1, MAX_INFLIGHT_TTL),
+        inflight_max=config.integer("inflight_max", 1),
+        inflight_max_bytes=config.integer("inflight_max_bytes", 1),
+        inflight_per_tenant=config.integer("inflight_per_tenant", 1),
         issuers=_issuers(config),
         bindings=config.path("bindings"),
         kek=config.path("kek"),

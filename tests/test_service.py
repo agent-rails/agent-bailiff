@@ -190,6 +190,10 @@ class Deployment:
             "skew_seconds": 5,
             "rate_limit": 10,
             "rate_window": 60,
+            "inflight_ttl": 60,
+            "inflight_max": 64,
+            "inflight_max_bytes": 65536,
+            "inflight_per_tenant": 16,
             "issuers": ISSUERS,
             "bindings": str(self.custodian / "bindings.json"),
             "kek": str(self.custodian / "kek"),
@@ -299,6 +303,8 @@ def test_the_example_documents_parse(deployment):
     control = load_control(deployment.paths["control"])
     assert decide.name == "decide.example" and decide.custodians == {"custodian.example"}
     assert list(custodian.decide_keys) == [deployment.keys["decide.example"].kid]
+    assert (custodian.inflight_ttl, custodian.inflight_max) == (60, 64)
+    assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (65536, 16)
     assert docket.allowed_uids == {UID} and set(docket.writers) == set(deployment.keys)
     assert control.name == "control" and set(control.writers) == {"decide.example", "custodian.example"}
 
@@ -349,6 +355,11 @@ BAD_CUSTODIAN = {
     "no_decide_keys": lambda doc: doc.update(decide_keys={}),
     "excess_skew": lambda doc: doc.update(skew_seconds=301),
     "zero_rate_limit": lambda doc: doc.update(rate_limit=0),
+    "zero_inflight_max": lambda doc: doc.update(inflight_max=0),
+    "bool_inflight_max_bytes": lambda doc: doc.update(inflight_max_bytes=True),
+    "zero_inflight_per_tenant": lambda doc: doc.update(inflight_per_tenant=0),
+    "inflight_ttl_over_an_hour": lambda doc: doc.update(inflight_ttl=3601),
+    "missing_inflight_ttl": lambda doc: doc.pop("inflight_ttl"),
     "ledger_without_writer": lambda doc: doc["ledger"].pop("writer_uid"),
     "decide_keys_not_an_object": lambda doc: doc.update(decide_keys=["x"]),
 }
