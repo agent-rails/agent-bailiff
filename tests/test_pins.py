@@ -106,12 +106,19 @@ def test_every_ci_job_installs_from_the_hash_lock_and_the_smoke_job_only_adds_uv
         "- uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3",
         "python -m pip install --require-hashes -r requirements-ci.txt",
     ]
+    locked = [
+        "python -m pip install --require-hashes -r requirements-ci.txt",
+        "python -m pip install --no-deps --no-build-isolation -e .",
+        "python -m pip check",
+    ]
+    assert jobs.pop("quickstart-integration") == [
+        *locked,
+        "/opt/bailiff-agent/bin/python -m pip install --require-hashes -r requirements-ci.txt",
+        "/opt/bailiff-agent/bin/python -m pip install --no-deps --no-build-isolation .",
+        "/opt/bailiff-agent/bin/python -m pip check",
+    ]
     for name, installs in jobs.items():
-        assert installs == [
-            "python -m pip install --require-hashes -r requirements-ci.txt",
-            "python -m pip install --no-deps --no-build-isolation -e .",
-            "python -m pip check",
-        ], name
+        assert installs == locked, name
 
 
 def test_the_install_smoke_resolves_runtime_and_build_deps_within_the_ci_lock():

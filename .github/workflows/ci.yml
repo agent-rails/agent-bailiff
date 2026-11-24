@@ -73,9 +73,18 @@ jobs:
       - run: python -m pip install --no-deps --no-build-isolation -e .
       - run: python -m pip check
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
+      - run: sudo useradd --no-create-home --user-group bailiff-agent
+      - run: |
+          sudo install -d -o "$(id -un)" -m 0755 /opt/bailiff-agent
+          python -m venv /opt/bailiff-agent
+          /opt/bailiff-agent/bin/python -m pip install --require-hashes -r requirements-ci.txt
+          /opt/bailiff-agent/bin/python -m pip install --no-deps --no-build-isolation .
+          /opt/bailiff-agent/bin/python -m pip check
       - run: pytest -q -rs tests/test_quickstart_default.py tests/test_adopt_stack.py | tee "$RUNNER_TEMP/pytest.out"
         env:
           AGENT_BAILIFF_TEST_QUICKSTART: "1"
+          AGENT_BAILIFF_TEST_AGENT_USER: bailiff-agent
+          AGENT_BAILIFF_TEST_AGENT_PYTHON: /opt/bailiff-agent/bin/python
       - run: docker compose --profile gitea --profile spike up --detach --wait
         env:
           UPSTREAM: gitea
