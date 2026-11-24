@@ -73,14 +73,19 @@ jobs:
       - run: python -m pip install --no-deps --no-build-isolation -e .
       - run: python -m pip check
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
-      - run: docker compose --profile spike up --detach --wait
+      - run: pytest -q -rs tests/test_quickstart_default.py | tee "$RUNNER_TEMP/pytest.out"
+        env:
+          AGENT_BAILIFF_TEST_QUICKSTART: "1"
+      - run: docker compose --profile gitea --profile spike up --detach --wait
+        env:
+          UPSTREAM: gitea
       - run: |
-          docker compose exec -T gitea gitea admin user create --username agentops \
+          docker compose --profile gitea exec -T gitea gitea admin user create --username agentops \
             --password "$(openssl rand -hex 16)" --email agentops@example.invalid --must-change-password=false
           umask 077
-          docker compose exec -T gitea gitea admin user generate-access-token --username agentops \
+          docker compose --profile gitea exec -T gitea gitea admin user generate-access-token --username agentops \
             --token-name quickstart --raw --scopes read:user > "$RUNNER_TEMP/gitea-token"
-      - run: pytest -q -rs tests/test_quickstart_spike.py | tee "$RUNNER_TEMP/pytest.out"
+      - run: pytest -q -rs tests/test_quickstart_spike.py | tee --append "$RUNNER_TEMP/pytest.out"
         env:
           AGENT_BAILIFF_TEST_GITEA_MCP_URL: http://127.0.0.1:18080/mcp
           AGENT_BAILIFF_TEST_GITEA_TOKEN_FILE: ${{ runner.temp }}/gitea-token
@@ -96,6 +101,8 @@ jobs:
       - run: "! grep -q skipped \"$RUNNER_TEMP/pytest.out\""
       - if: always()
         run: docker compose --profile "*" down --volumes --remove-orphans
+        env:
+          UPSTREAM: gitea
 
   live-run-image:
     runs-on: ubuntu-latest

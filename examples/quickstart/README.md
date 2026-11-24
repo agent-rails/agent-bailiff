@@ -2,13 +2,20 @@
 
 A Docker Compose stack in which a scripted agent calls Gitea through agentgateway and gitea-mcp. The agent holds a task chain and its own signing key, never the Gitea token. Decide checks each `tools/call` against the task's scope, budget and replay ledger; the custodian injects the Gitea token only for an allowed call; allows, releases, revokes and most refusals go to a signed docket that an operator verifies.
 
-Requirements: Docker with Compose v2 and `jq`. Run every command from this directory.
+Requirements: Docker with Compose v2.20 or later and `jq`. Run every command from this directory.
+
+The upstream is chosen by `UPSTREAM`, which names a config in `upstreams/` (see [`upstreams/schema.md`](upstreams/schema.md)). Plain `docker compose up` runs `stub`: `stub-upstream`, an in-repo Streamable HTTP MCP server with in-memory notes, and no Gitea. The walkthrough below uses Gitea, which runs only under the `gitea` profile, so first:
+
+```console
+$ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
+```
 
 ## What runs
 
 | Service | uid | Role |
 | --- | --- | --- |
-| `gitea`, `gitea-mcp` | image default | Upstream Git service and its MCP server (`gitea-mcp-server:1.13.0`) |
+| `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server, refuses a `tools/call` without an `Authorization` header |
+| `gitea`, `gitea-mcp` | image default | `gitea` profile: upstream Git service and its MCP server (`gitea-mcp-server:1.13.0`) |
 | `gateway` | 10004 | agentgateway v1.7.0 with the decide and custodian processors, `failClosed` |
 | `decide` | 10002 | Verifies the chain, checks scope and budget, writes the ledger |
 | `custodian` | 10003 | Holds the encrypted Gitea token, releases it per allowed call |
@@ -21,9 +28,11 @@ Requirements: Docker with Compose v2 and `jq`. Run every command from this direc
 | `archiver` | 10009 | `archive` profile: `agent-bailiff docket archive`, sealed segments to tmpfs and receipts |
 | `agent` | 10006 | Scripted agent on the internal `edge` network only |
 | `gitea-mcp-spike` | image default | `spike` profile: a second gitea-mcp with a host port, for the spike test only |
-| `*-init`, `bootstrap`, `task-issuer`, `agent-key` | per component | One-shot setup |
+| `*-init`, `gateway-init` | per component | One-shot setup; `gateway-init` writes the gateway config with the upstream config's target |
+| `gitea-secret`, `gitea-admin`, `bootstrap`, `agent-key`, `gitea-task` | per component | `gitea` profile: seed Gitea, store its token, issue the walkthrough task |
+| `task-issuer` | 10007 | `operator` profile: `agent-bailiff task issue` into the bind-mounted `BAILIFF_TASK_DIR` (default `./tasks`), which must exist, owned by uid 10007 and not group or other writable |
 
-Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. Only `gitea`, `gitea-mcp`, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too, so no container in the default stack can reach outside the host or publish a port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
+Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. The upstream servers, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too. Only the gateway also joins `egress`, a routable network, so it can reach an `https://` upstream, and it publishes its MCP port on `127.0.0.1` only (`GATEWAY_PORT`, default 18090). Any local user can connect to that port; the task chain and the agent's key gate calls, not the port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
 
 Every service has a memory and process limit (`mem_limit`, `pids_limit`), with swap capped at the memory limit (`memswap_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
 
@@ -127,7 +136,7 @@ The `revoke` record is the operator's; the agent container mounts neither the co
 Two optional profiles. `trace` runs Jaeger and `agent-bailiff docket export`; `rule` runs `rule.py`, a rule (not detection) that revokes a task when decide refuses one of its `gitea.contents.read` calls as `out_of_scope` or records `refusals_capped` for it.
 
 ```console
-$ docker compose --profile trace --profile rule up --build --detach --wait
+$ COMPOSE_PROFILES=gitea,trace,rule docker compose up --build --detach --wait
 $ docker compose run --rm -T agent inject | tee inject.json
 {
   "task_id": "task-90033a566373be1b",
@@ -165,7 +174,7 @@ $ docker compose run --rm -T agent after-revoke
 The `archive` profile runs `agent-bailiff docket archive` as uid 10009 in the docket reader group, with no network. It reads the docket read-only, copies each sealed segment and writes a receipt for it to `docket-receipts`, which the docket reads before it removes a segment.
 
 ```console
-$ docker compose --profile archive up --build --detach --wait
+$ COMPOSE_PROFILES=gitea,archive docker compose up --build --detach --wait
 $ docker compose run --rm -T reader --receipts /var/lib/bailiff/receipts
 ...
 agent-bailiff docket verify: 8 records verified, 8 printed
@@ -183,7 +192,7 @@ $ rm -f run.json inject.json
 $ docker compose --profile "*" down --volumes --remove-orphans
 ```
 
-`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the same stack under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
+`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the Gitea stack, and `tests/test_quickstart_default.py` the default stub stack, under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
 
 ## What this shows
 

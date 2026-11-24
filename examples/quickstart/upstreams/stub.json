@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "service": "stub",
+  "url": "http://stub-upstream:8080/mcp",
+  "credential_id": "stub-token",
+  "credential_header": "Authorization",
+  "target": "stub",
+  "binding_resource": "stub/notes/*",
+  "routes_file": "stub-routes.json"
+}

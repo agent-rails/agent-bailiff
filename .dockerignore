@@ -11,6 +11,8 @@ __pycache__
 !examples/quickstart/agent.py
 !examples/quickstart/rule.py
 !examples/quickstart/upstreams/*.json
+!examples/quickstart/gateway.json
+!examples/quickstart/stub-upstream/server.py
 !examples/quickstart/trace-requirements.txt
 !examples/live-run/run.py
 !examples/live-run/kubernetes.py

@@ -1,0 +1,6 @@
+{
+  "routes": [
+    {"service": "stub", "name": "read_note", "tool": "stub.read_note", "resource": "stub/notes/{note}", "schema": [{"name": "note", "kind": "identifier"}]},
+    {"service": "stub", "name": "write_note", "tool": "stub.write_note", "resource": "stub/notes/{note}", "schema": [{"name": "note", "kind": "identifier"}]}
+  ]
+}

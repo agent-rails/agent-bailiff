@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "examples" / "quickstart" / "compose.yaml"
-EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}}
-PUBLISHED = {"jaeger", "gitea-mcp-spike"}
+EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}, "gateway": {"egress"}}
+PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
+GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -25,7 +26,7 @@ def config():
     return json.loads(result.stdout)
 
 
-def test_only_jaeger_and_the_spike_reach_a_routable_network(config):
+def test_only_jaeger_the_spike_and_the_gateway_reach_a_routable_network(config):
     internal = {name for name, network in config["networks"].items() if network.get("internal")}
     routable = {
         name: set(service.get("networks", {})) - internal
@@ -36,7 +37,7 @@ def test_only_jaeger_and_the_spike_reach_a_routable_network(config):
     assert config["networks"]["upstream"]["internal"] is True
 
 
-def test_only_jaeger_and_the_spike_publish_a_port(config):
+def test_only_jaeger_the_spike_and_the_gateway_publish_a_loopback_port(config):
     published = {name for name, service in config["services"].items() if service.get("ports")}
     assert published == PUBLISHED
     for name in PUBLISHED:
@@ -45,7 +46,46 @@ def test_only_jaeger_and_the_spike_publish_a_port(config):
 
 def test_the_spike_runs_only_under_its_profile(config):
     assert config["services"]["gitea-mcp-spike"]["profiles"] == ["spike"]
-    assert "profiles" not in config["services"]["gitea-mcp"]
+
+
+@pytest.mark.parametrize("name", GITEA_ONLY)
+def test_gitea_runs_only_under_its_profile(config, name):
+    assert config["services"][name]["profiles"] == ["gitea"]
+
+
+def test_the_stub_upstream_is_the_default(config):
+    assert "profiles" not in config["services"]["stub-upstream"]
+    assert config["services"]["stub-upstream"]["networks"].keys() == {"upstream"}
+    upstream = config["services"]["decide-init"]["environment"]["BAILIFF_UPSTREAM"]
+    assert upstream == "/etc/bailiff/upstreams/stub.json"
+
+
+def test_the_gateway_depends_on_gitea_only_when_its_profile_runs(config):
+    depends = config["services"]["gateway"]["depends_on"]
+    assert {name for name, condition in depends.items() if not condition.get("required", True)} == {
+        "gitea-mcp",
+        "gitea-task",
+    }
+    assert config["services"]["custodian"]["depends_on"]["bootstrap"]["required"] is False
+
+
+def test_the_task_issuer_reads_the_issuer_key_and_writes_only_the_task_directory(config):
+    service = config["services"]["task-issuer"]
+    assert service["profiles"] == ["operator"]
+    assert service["network_mode"] == "none"
+    volumes = {volume["target"]: volume for volume in service["volumes"]}
+    assert volumes.keys() == {"/var/lib/bailiff/issuer", "/out"}
+    assert volumes["/var/lib/bailiff/issuer"]["source"] == "issuer-data"
+    assert volumes["/var/lib/bailiff/issuer"]["read_only"] is True
+    assert volumes["/out"]["type"] == "bind"
+    assert volumes["/out"]["bind"]["create_host_path"] is False
+    assert service["entrypoint"][-2:] == ["--out-dir", "/out"]
+
+
+def test_the_gateway_reads_its_config_read_only(config):
+    for name in ("gateway", "gateway-check"):
+        mounts = {volume["source"]: volume for volume in config["services"][name]["volumes"]}
+        assert mounts["gateway-config"]["read_only"] is True
 
 
 @pytest.mark.parametrize("name", GITEA_MCP)

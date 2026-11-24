@@ -13,6 +13,8 @@ x-bailiff: &bailiff
   mem_limit: 256m
   memswap_limit: 256m
   pids_limit: 128
+  environment:
+    BAILIFF_UPSTREAM: /etc/bailiff/upstreams/${UPSTREAM:-stub}.json
 
 x-trace: &trace
   <<: *bailiff
@@ -29,6 +31,8 @@ x-once: &once
 
 x-offline: &offline
   network_mode: none
+
+x-upstreams: &upstreams ./upstreams:/etc/bailiff/upstreams:ro
 
 x-gitea-limits: &gitea-limits
   mem_limit: 768m
@@ -50,8 +54,15 @@ x-gitea-mcp: &gitea-mcp
       condition: service_healthy
 
 services:
+  stub-upstream:
+    <<: *bailiff
+    user: "10011:10011"
+    command: ["/app/quickstart/stub-upstream/server.py", "--port", "8080"]
+    networks: [upstream]
+
   gitea:
     <<: *gitea-limits
+    profiles: [gitea]
     image: gitea/gitea:28.4-rootless@sha256:15ab7fadb44981a2b781f40c712cad07066197f395100ea1c6326e14e5bb073a
     environment:
       GITEA__database__DB_TYPE: sqlite3
@@ -70,6 +81,7 @@ services:
 
   gitea-mcp:
     <<: *gitea-mcp
+    profiles: [gitea]
     networks: [upstream]
 
   gitea-mcp-spike:
@@ -81,6 +93,7 @@ services:
 
   gitea-secret:
     <<: [*bailiff, *once, *offline]
+    profiles: [gitea]
     user: "10003:10003"
     group_add: ["20004"]
     command: ["/app/quickstart/bootstrap.py", "admin-secret"]
@@ -89,6 +102,7 @@ services:
 
   gitea-admin:
     <<: [*once, *gitea-limits]
+    profiles: [gitea]
     image: gitea/gitea:28.4-rootless@sha256:15ab7fadb44981a2b781f40c712cad07066197f395100ea1c6326e14e5bb073a
     user: "1000:1000"
     group_add: ["20004"]
@@ -126,6 +140,7 @@ services:
     user: "10002:20001"
     command: ["/app/quickstart/bootstrap.py", "decide"]
     volumes:
+      - *upstreams
       - decide-data:/var/lib/bailiff/decide
       - ledger:/var/lib/bailiff/ledger
       - pins:/pins
@@ -138,6 +153,7 @@ services:
     user: "10003:10003"
     command: ["/app/quickstart/bootstrap.py", "custodian"]
     volumes:
+      - *upstreams
       - custodian-data:/var/lib/bailiff/custodian
       - pins:/pins
     depends_on:
@@ -180,13 +196,23 @@ services:
       rule-init:
         condition: service_completed_successfully
 
+  gateway-init:
+    <<: [*bailiff, *once, *offline]
+    user: "10003:10003"
+    command: ["/app/quickstart/bootstrap.py", "gateway"]
+    volumes:
+      - *upstreams
+      - gateway-config:/var/lib/bailiff/gateway
+
   bootstrap:
     <<: [*bailiff, *once]
+    profiles: [gitea]
     user: "10003:10003"
     group_add: ["20004"]
     networks: [upstream]
     command: ["/app/quickstart/bootstrap.py", "gitea"]
     volumes:
+      - *upstreams
       - custodian-data:/var/lib/bailiff/custodian
       - gitea-admin:/var/lib/bailiff/gitea-admin:ro
     depends_on:
@@ -197,6 +223,7 @@ services:
 
   agent-key:
     <<: [*bailiff, *once, *offline]
+    profiles: [gitea]
     user: "10006:10006"
     command: ["/app/quickstart/agent.py", "key"]
     volumes:
@@ -205,6 +232,24 @@ services:
 
   task-issuer:
     <<: [*bailiff, *once, *offline]
+    profiles: [operator]
+    user: "10007:10007"
+    entrypoint: ["python", "-m", "agent_bailiff.cli", "task", "issue", "--issuer-key", "/var/lib/bailiff/issuer/issuer.key",
+                 "--issuer", "issuer.quickstart", "--decider-id", "decide.quickstart", "--out-dir", "/out"]
+    volumes:
+      - issuer-data:/var/lib/bailiff/issuer:ro
+      - type: bind
+        source: ${BAILIFF_TASK_DIR:-./tasks}
+        target: /out
+        bind:
+          create_host_path: false
+    depends_on:
+      issuer-init:
+        condition: service_completed_successfully
+
+  gitea-task:
+    <<: [*bailiff, *once, *offline]
+    profiles: [gitea]
     user: "10007:10007"
     command: ["/app/quickstart/bootstrap.py", "issue"]
     volumes:
@@ -274,6 +319,7 @@ services:
         condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
+        required: false
 
   gateway-check:
     <<: [*bailiff, *once, *offline]
@@ -283,7 +329,7 @@ services:
       - agent_bailiff.adapters.agentgateway
       - check-config
       - --gateway-config
-      - /etc/bailiff/gateway.json
+      - /var/lib/bailiff/gateway/gateway.json
       - --routes
       - /var/lib/bailiff/custodian/routes.json
       - --bindings
@@ -292,13 +338,13 @@ services:
       - /run/bailiff/decide/decide.sock
       - --custodian-socket
       - /run/bailiff/custodian/custodian.sock
-    configs:
-      - source: gateway
-        target: /etc/bailiff/gateway.json
     volumes:
       - custodian-data:/var/lib/bailiff/custodian:ro
+      - gateway-config:/var/lib/bailiff/gateway:ro
     depends_on:
       custodian-init:
+        condition: service_completed_successfully
+      gateway-init:
         condition: service_completed_successfully
 
   gateway:
@@ -311,14 +357,14 @@ services:
     mem_limit: 256m
     memswap_limit: 256m
     pids_limit: 128
-    command: ["-f", "/etc/bailiff/gateway.json"]
-    configs:
-      - source: gateway
-        target: /etc/bailiff/gateway.json
+    command: ["-f", "/var/lib/bailiff/gateway/gateway.json"]
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-18090}:8080"
     volumes:
+      - gateway-config:/var/lib/bailiff/gateway:ro
       - decide-run:/run/bailiff/decide
       - custodian-run:/run/bailiff/custodian
-    networks: [edge, upstream]
+    networks: [edge, upstream, egress]
     depends_on:
       gateway-check:
         condition: service_completed_successfully
@@ -326,10 +372,14 @@ services:
         condition: service_healthy
       custodian:
         condition: service_healthy
+      stub-upstream:
+        condition: service_started
       gitea-mcp:
         condition: service_started
-      task-issuer:
+        required: false
+      gitea-task:
         condition: service_completed_successfully
+        required: false
 
   agent:
     <<: *bailiff
@@ -444,10 +494,6 @@ services:
       decide:
         condition: service_healthy
 
-configs:
-  gateway:
-    file: ./gateway.json
-
 networks:
   edge:
     internal: true
@@ -457,6 +503,7 @@ networks:
   trace:
     internal: true
   trace-ui: {}
+  egress: {}
 
 volumes:
   gitea-data: {}
@@ -477,4 +524,5 @@ volumes:
   agent-data: {}
   agent-public: {}
   tasks: {}
+  gateway-config: {}
   exporter-data: {}
