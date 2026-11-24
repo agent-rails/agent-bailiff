@@ -123,6 +123,14 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 **Why:** emitting spans on the call path would add a dependency that can slow or fail calls, and would produce a second, unsigned record that could disagree with the docket. Building spans from verified records keeps one source of truth, and a stopped exporter changes no decision. A separate writer for automation avoids two processes sharing one writer sequence, which the docket client does not lock across processes.
 
+## D19. Authority travels with the call, not with the component holding the credential
+
+**Decision:** no component acts on a call with authority of its own. The agent presents a task root signed by the issuer and bound to the agent's key, plus a proof for this exact call. Decide checks that the task covers the tool and the resource its route gives the call, fixed or built from the call's arguments. The custodian re-checks the same chain and proof before it releases a credential for that one operation (D2). A delegated link can only narrow scope, budget and depth (agent-warrant `chain.py`). For catalog tools the effector acts as `bailiff:<tenant>:<identity>`, not as its own service account (D14).
+
+**Why:** this is the confused deputy problem described by Norm Hardy ([The Confused Deputy](https://doi.org/10.1145/54289.871709), ACM SIGOPS Operating Systems Review 22(4), 1988): a component that holds a credential is tricked into using it for a requester who lacks the authority. A gateway that injects a credential into any call it forwards is such a deputy. Binding the authority to the request, as a capability, removes the ambient authority. Splitting decision from release (D1) and recording each allow and release in the docket (D6) go further than a capability check alone: a compromised decide cannot release on its own, and every use is traceable and revocable.
+
+The defence stops at what the call designates. Arguments that do not build the route's resource reach the upstream unchecked, so a route with a coarse resource leaves the upstream able to act on objects the task did not name. The upstream MCP server holds the credential on every allowed call and is a deputy agent-bailiff does not constrain. An agent steered by injected instructions is itself a confused deputy for its user; the task scope bounds it but does not stop a call in scope. See [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
