@@ -1,6 +1,6 @@
 # Adopting agent-bailiff
 
-This guide puts one agent host (Claude Code, Cursor or any client that launches stdio MCP servers) in front of one Streamable HTTP MCP server through agent-bailiff. The agent gets a short-lived task: a scope, a budget and an expiry, bound to a key only the agent holds. Decide checks every call against that task, and the custodian adds the server's credential to allowed calls only, so the credential never reaches the agent host.
+This guide puts one agent host (Claude Code, Cursor or any client that launches stdio MCP servers) in front of one Streamable HTTP MCP server through agent-bailiff. The agent gets a short-lived task: a scope, a budget and an expiry, bound to a key only the agent holds. Decide checks every call against that task, and the custodian adds the server's credential to allowed calls only, so the agent host never holds it. The server receives the credential on every allowed call and its results reach the agent unchanged, so the server must be trusted not to return it.
 
 Linux and macOS only.
 
@@ -13,11 +13,11 @@ Two OS users take part, and the separation between them is what the guide depend
 
 The agent user must not reach the Docker daemon. Anyone who can reach it can read the issuer key and the encrypted credential store from the stack's volumes, mint their own tasks and get the credential, bypassing decide. On Linux, keep the agent user out of the `docker` group. On macOS, Docker Desktop and OrbStack give the socket to the logged-in user, so run the agent host as a separate macOS user, in a VM or in a devcontainer. CI runs the proxy as a second Linux user that cannot open the Docker socket or the issuer key (`tests/test_adopt_stack.py`).
 
-Every directory above the task directory must be owned by the operator or root and must not be writable by the agent user. `task issue` refuses a symlink only as the last path component.
+Every directory above the task directory must be owned by the operator or root and must not be writable by the agent user. `task issue` refuses a symlink only as the last path component. The agent user must still be able to search every one of those directories, or the proxy cannot open `task.json`. A task directory under the operator's home works only if the home allows that; check with `sudo -u agent test -r <task dir>/task.json` after step 4.
 
 ## Requirements
 
-- Operator: Docker Engine 28.3.3 or later, Compose v2.20 or later, `git`, `jq`. Older engines let other hosts on the network reach ports published on `127.0.0.1` (CVE-2025-54388).
+- Operator: Docker Engine 28.3.3 or later, Compose v2.20 or later, `git`, `jq`. On Linux, Engine 28.2.0 to 28.3.2 stops isolating published ports after a firewalld reload, so a host with a route to the bridge network can reach ports published on `127.0.0.1` (CVE-2025-54388).
 - Agent user: Python 3.13 and [uv](https://docs.astral.sh/uv/).
 - The upstream: one Streamable HTTP MCP server that takes one static credential in one request header. It runs either as a service you add to the stack or at an `https://` URL. stdio and SSE servers, OAuth token refresh and more than one upstream are not supported.
 
@@ -65,14 +65,14 @@ The stack needs at least one route to start. Until the routes are drafted from t
 As the operator, from `examples/quickstart`:
 
 ```console
-$ mkdir -m 0755 "$HOME/bailiff/tasks"
-$ export UPSTREAM=notes BAILIFF_UPSTREAMS="$HOME/bailiff/upstreams" BAILIFF_TASK_DIR="$HOME/bailiff/tasks"
+$ mkdir -p -m 0755 "$HOME/bailiff/tasks"
+$ printf 'UPSTREAM=notes\nBAILIFF_UPSTREAMS=%s\nBAILIFF_TASK_DIR=%s\n' "$HOME/bailiff/upstreams" "$HOME/bailiff/tasks" > .env
 $ docker compose up --build --detach --wait
 ```
 
-Every later `docker compose` command needs the same three variables. The gateway listens on `127.0.0.1:18090` (`GATEWAY_PORT`). Any local user can connect to that port, but a call goes through only with a valid task and the agent's key.
+Compose reads `.env` from this directory for every later command. Without these variables it falls back to the bundled stub upstream and `./tasks` without an error, so keep the file. The gateway listens on `127.0.0.1:18090` (`GATEWAY_PORT`). Any local user can connect to that port, but a call goes through only with a valid task and the agent's key.
 
-Store the credential. It is read from stdin and never written to a file the agent user can read:
+Store the credential. The custodian reads it from stdin. Keep the token file mode 0600, owned by the operator, and delete it once the command prints `stored`, or pipe the token from a secret manager:
 
 ```console
 $ docker compose run --rm --no-deps -T custodian -m agent_bailiff.cli custodian put-credential \
@@ -131,7 +131,7 @@ agent-bailiff routes generate: wrote 3 route(s) to draft-routes.json; fill each 
 
 `tools.json` comes from the upstream, so treat it as untrusted input. The generator rejects tool names that are not valid scope ids and lists them on stderr. It routes nothing on its own: every resource in the draft is empty, and decide refuses to load the file until each one is filled. Then:
 
-- Delete each tool the agent should not have. A tool without a route is refused as `unknown_tool`.
+- Delete each tool the agent should not have. The proxy does not list a tool missing from its routes and rejects a call to it; a tool missing only from decide's routes is refused as `unknown_tool`.
 - Give each remaining tool a resource. A fixed resource such as `notes/all` scopes only by tool. A template filled from named arguments, such as `notes/{note}` with `"schema": [{"name": "note", "kind": "identifier"}]`, scopes per object. Arguments that do not build the resource reach the upstream unchecked.
 
 Replace `notes-routes.json` with the edited draft and apply it. Compose reruns the setup steps and restarts decide and the custodian:
@@ -173,15 +173,16 @@ A call that does not return a result comes back as a tool error. The error start
 | `out_of_scope`, `reservation_refused`, `unknown_tool`, `chain_invalid` and other refusals | The call was refused and the gateway did not forward it. The model is told to stop and not retry | Widen the scope, raise the budget or add the route if the call should be allowed |
 | `needs_approval` | Policy asks for a human approval, which this stack cannot grant | None in this release |
 | `suspended` | An operator suspended agent-bailiff. The model is told not to retry until it resumes | `control resume` when ready |
-| `docket_unavailable`, `ledger_unavailable`, `internal_error` | A component was unavailable. The model may retry twice | Check `docker compose ps` and the service logs |
+| `docket_unavailable`, `ledger_unavailable`, `internal_error` | A component was unavailable and budget for the attempt may already be spent. The model may retry twice | Check `docker compose ps` and the service logs |
 | `task_expired` | The task's expiry has passed and nothing was sent | Renew (step 7) |
 | `no_task` | `task.json` does not exist | Issue a task (step 4) |
 | `outcome_unknown` | The call was sent and may have taken effect. The model is told not to retry, and the proxy never retries a call | Check the upstream's state |
-| `gateway_unavailable` | The gateway did not answer and nothing was sent | Check `docker compose ps` |
+| `gateway_unavailable` | The gateway did not answer and nothing was sent. The model may retry twice | Check `docker compose ps` |
+| No reason prefix | `task.json` is unreadable or invalid, the key directory has no key for the task, or the arguments do not fit the route | Check the file permissions, the key directory and the route's schema |
 
 ## 7. Renew and revoke
 
-To renew, run step 4 again: the agent user makes a new key, and the operator issues a new task to it. The proxy reads `task.json` again before each call, switches to the new task, and keeps only its key and the newest one. Neither the agent host nor the proxy needs a restart. The old task stays valid until it expires.
+To renew, run step 4 again: the agent user makes a new key, and the operator issues a new task to it. The proxy reads `task.json` again before each call, switches to the new task, and deletes every key in the key directory except the new task's key and the newest one. Give each agent host its own key directory, or one proxy can delete another's key. Neither the agent host nor the proxy needs a restart. Deleting a key is cleanup, not revocation: the old task stays valid until it expires, and a copy of its key still works.
 
 To stop a task now, the operator revokes it from the signed docket:
 
@@ -208,7 +209,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 
 - The upstream server receives the credential on every allowed call and is trusted with it.
 - Upstream tool names, descriptions and results reach the model, and any of them can carry instructions. The task scope bounds what an instructed agent can do. It cannot stop a call that is in scope.
-- The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names a stack service or a local address, but it does not check a hostname that resolves to one.
+- The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names a stack service, `localhost`, or a loopback, link-local, unspecified or multicast IP address written in standard form. It does not refuse private ranges, other spellings of an IPv4 address such as `2130706433`, or a hostname that resolves to a local address.
 - With `ca_file` in the upstream config, the gateway trusts only those certificates for the upstream, not the system roots.
 - The agent user can read its own key and `task.json`, so anything running as that user can make calls within the task until it expires or is revoked.
 
