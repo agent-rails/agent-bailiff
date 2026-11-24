@@ -195,6 +195,7 @@ class BailiffClient:
         self._session: str | None = None
         self._expired = False
         self._next_id = 1
+        self._retries = 0
 
     def prepare(
         self, service: str, name: str, arguments: dict[str, Any], traceparent: str | None = None
@@ -278,6 +279,10 @@ class BailiffClient:
         return self._protocol
 
     @property
+    def retries(self) -> int:
+        return self._retries
+
+    @property
     def session_id(self) -> str | None:
         return self._session
 
@@ -340,6 +345,7 @@ class BailiffClient:
                 if exchange.status not in RETRYABLE_STATUSES or number == SETUP_ATTEMPTS - 1:
                     return exchange
                 self._drop_connection()
+            self._retries += 1
             self._sleep(self._jitter() * min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * 2**number))
         raise AssertionError("unreachable")
 

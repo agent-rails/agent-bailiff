@@ -82,6 +82,7 @@ class StdioProxy:
 
     def close(self) -> None:
         if self._client is not None:
+            logger.info("gateway client closed after %d setup retries", self._client.retries)
             self._client.close()
             self._client = None
 

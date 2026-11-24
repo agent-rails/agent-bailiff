@@ -45,6 +45,7 @@ class FakeClient:
         self.gateway = gateway
         self.holder = holder
         self.closed = False
+        self.retries = gateway.retries
 
     def list_tools(self):
         self.gateway.listed += 1
@@ -73,6 +74,7 @@ class FakeGateway:
         self.outcome = RESULT
         self.sent = []
         self.listed = 0
+        self.retries = 0
         self.clients = []
 
     def factory(self, url, holder, routes):
@@ -329,6 +331,14 @@ def test_eof_closes_the_client(proxy, task_file, key_dir, gateway):
     issue(task_file, key_dir)
     serve(proxy, call())
     assert gateway.clients[0].closed
+
+
+def test_closing_the_client_logs_how_many_setup_retries_it_made(proxy, task_file, key_dir, gateway, caplog):
+    gateway.retries = 2
+    issue(task_file, key_dir)
+    with caplog.at_level(logging.INFO):
+        serve(proxy, call())
+    assert "gateway client closed after 2 setup retries" in caplog.text
 
 
 def test_a_name_routed_on_two_services_is_refused():

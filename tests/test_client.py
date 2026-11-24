@@ -487,6 +487,27 @@ def test_initialize_recovers_after_a_transient_failure(client, stub, sleeps):
     assert stub.methods() == ["initialize", "initialize", "notifications/initialized", "tools/call"]
 
 
+def test_retries_counts_each_repeated_setup_attempt(client, stub):
+    assert client.retries == 0
+    stub.responders["initialize"] = [reply(status=503), reply(status=503), initialized()]
+    client.call("deploy", "deploy_service", ARGS)
+    assert client.retries == 2
+
+
+def test_retries_stays_zero_without_a_failure_and_a_tool_call_adds_none(client, stub):
+    client.call("deploy", "deploy_service", ARGS)
+    stub.responders["tools/call"] = [reply(status=503)]
+    client.call("deploy", "deploy_service", ARGS)
+    assert client.retries == 0
+
+
+def test_retries_counts_the_attempts_of_an_unanswered_setup_request(client, stub):
+    stub.responders["initialize"] = [reply(status=503)]
+    with pytest.raises(GatewayError):
+        client.call("deploy", "deploy_service", ARGS)
+    assert client.retries == client_module.SETUP_ATTEMPTS - 1
+
+
 def test_tools_list_is_returned(client):
     assert client.list_tools() == [{"name": "deploy_service"}]
 
