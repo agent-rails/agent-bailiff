@@ -116,3 +116,13 @@ def test_no_service_swaps_past_its_memory_limit(config):
         name for name, service in config["services"].items() if service.get("memswap_limit") != service.get("mem_limit")
     }
     assert swapping == set()
+
+
+def test_the_gateway_check_names_every_processor_socket(config):
+    command = config["services"]["gateway-check"]["command"]
+    sockets = {flag: command[command.index(flag) + 1] for flag in command if flag.endswith("-socket")}
+    assert sockets == {
+        "--decide-socket": str(b.SOCKETS["decide"]),
+        "--custodian-socket": str(b.SOCKETS["custodian"]),
+        "--redactor-socket": str(b.SOCKETS["redactor"]),
+    }

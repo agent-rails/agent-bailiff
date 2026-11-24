@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from test_agentgateway_calls import message
-from test_agentgateway_config import gateway_config, problems_after
+from test_agentgateway_config import REDACTOR_SOCKET, gateway_config, problems_after
 
 from agent_bailiff.adapters.agentgateway.calls import CallRefused, read_call
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
@@ -103,6 +103,7 @@ def test_an_effector_only_deployment_can_start_without_credential_headers():
     GatewayExpectations(
         decide_socket=Path("/run/d/decide.sock"),
         custodian_socket=Path("/run/c/custodian.sock"),
+        redactor_socket=Path("/run/c/redactor.sock"),
         services=frozenset({"k8s"}),
         credential_headers=frozenset(),
     )
@@ -193,6 +194,7 @@ def test_check_config_requires_catalog_services_to_target_a_loopback_effector(ho
     expected = GatewayExpectations(
         Path("/run/bailiff/d/decide.sock"),
         Path("/run/bailiff/c/custodian.sock"),
+        REDACTOR_SOCKET,
         frozenset({"k8s"}),
         frozenset(),
         frozenset({"k8s"}),

@@ -11,8 +11,8 @@ from test_custodian import NOW, docket_entries
 from test_decide import CUSTODIAN_ID, TENANT, make_request, make_root
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.custodian import CredentialBinding, CredentialStore, LocalBackend
 from agent_bailiff.decide import CostTable, TargetBinding
 from agent_bailiff.routes import ToolRoute, ToolRoutes
@@ -64,7 +64,11 @@ def stack(binary, workdir, private, state, token, make_decider, make_custodian):
     custodian = make_custodian(
         bindings=(CredentialBinding(TENANT, TOOL, "gitea/user/*", CREDENTIAL, TARGET, "Authorization", False),)
     )
-    sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
+    sockets = {
+        "decide": workdir / "d" / "decide.sock",
+        "custodian": workdir / "c" / "custodian.sock",
+        "redactor": workdir / "c" / "redactor.sock",
+    }
     servers = [
         ProcessorServer(
             request_handlers(DecideProcessor(decider, ROUTES, clock=lambda: NOW)),
@@ -80,10 +84,18 @@ def stack(binary, workdir, private, state, token, make_decider, make_custodian):
             private("custodian-grpc"),
             gateway_uid=os.geteuid(),
         ),
+        response_server(
+            RedactorProcessor(custodian, clock=lambda: NOW + 2),
+            sockets["redactor"],
+            private("redactor-grpc"),
+            gateway_uid=os.geteuid(),
+        ),
     ]
     for server in servers:
         server.start()
-    config = gateway_config(sockets["decide"], sockets["custodian"], GITEA_MCP_URL, ["Authorization"])
+    config = gateway_config(
+        sockets["decide"], sockets["custodian"], GITEA_MCP_URL, ["Authorization"], sockets["redactor"]
+    )
     config["mcp"]["targets"][0]["name"] = "gitea"
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
@@ -92,7 +104,7 @@ def stack(binary, workdir, private, state, token, make_decider, make_custodian):
         "readinessAddr": f"127.0.0.1:{readiness}",
     }
     expected = GatewayExpectations(
-        sockets["decide"], sockets["custodian"], ROUTES.services, frozenset({"Authorization"})
+        sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset({"Authorization"})
     )
     assert validate_gateway_config(config, expected) == ()
     gateway = Gateway(binary, config, workdir)

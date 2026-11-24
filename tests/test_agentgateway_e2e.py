@@ -18,15 +18,15 @@ from pathlib import Path
 
 import pytest
 import test_custodian
-from test_agentgateway_config import gateway_config
+from test_agentgateway_config import CUSTODIAN, DECIDE, REDACTOR, gateway_config
 from test_control import MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
@@ -281,7 +281,12 @@ def agent_headers(request):
 @pytest.fixture
 def stack(binary, workdir, private, make_decider, make_custodian):
     upstream = Upstream()
-    sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
+    custodian = make_custodian()
+    sockets = {
+        "decide": workdir / "d" / "decide.sock",
+        "custodian": workdir / "c" / "custodian.sock",
+        "redactor": workdir / "c" / "redactor.sock",
+    }
     servers = {
         "decide": ProcessorServer(
             request_handlers(DecideProcessor(make_decider(), ROUTES, clock=lambda: NOW)),
@@ -290,15 +295,23 @@ def stack(binary, workdir, private, make_decider, make_custodian):
             gateway_uid=os.geteuid(),
         ),
         "custodian": ProcessorServer(
-            request_handlers(CustodianProcessor(make_custodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1)),
+            request_handlers(CustodianProcessor(custodian, ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1)),
             sockets["custodian"],
             private("custodian-grpc"),
+            gateway_uid=os.geteuid(),
+        ),
+        "redactor": response_server(
+            RedactorProcessor(custodian, clock=lambda: NOW + 2),
+            sockets["redactor"],
+            private("redactor-grpc"),
             gateway_uid=os.geteuid(),
         ),
     }
     for server in servers.values():
         server.start()
-    config = gateway_config(sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS))
+    config = gateway_config(
+        sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS), sockets["redactor"]
+    )
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
         "adminAddr": f"127.0.0.1:{admin}",
@@ -306,7 +319,7 @@ def stack(binary, workdir, private, make_decider, make_custodian):
         "readinessAddr": f"127.0.0.1:{readiness}",
     }
     expected = GatewayExpectations(
-        sockets["decide"], sockets["custodian"], ROUTES.services, frozenset({"Authorization"})
+        sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset({"Authorization"})
     )
     assert validate_gateway_config(config, expected) == ()
     gateway = Gateway(binary, config, workdir)
@@ -561,14 +574,18 @@ def test_a_call_without_chain_headers_is_refused(stack):
 
 
 UNSAFE = {
-    "fail_open": lambda policies, processors: processors[2].update(failureMode="failOpen"),
-    "no_header_allowlist": lambda policies, processors: processors[1].pop("requestHeaders"),
-    "custodian_header_filter": lambda policies, processors: processors[2].update(
+    "fail_open": lambda policies, processors: processors[CUSTODIAN].update(failureMode="failOpen"),
+    "no_header_allowlist": lambda policies, processors: processors[DECIDE].pop("requestHeaders"),
+    "custodian_header_filter": lambda policies, processors: processors[CUSTODIAN].update(
         requestHeaders={"allowed": ["x-bailiff-nonce"]}
     ),
-    "custodian_before_decide": lambda policies, processors: processors.insert(1, processors.pop(2)),
-    "custodian_over_tcp": lambda policies, processors: processors[2].update(host="127.0.0.1:9"),
-    "tools_call_only": lambda policies, processors: processors[1].update(methods={"tools/call": "request"}),
+    "custodian_before_decide": lambda policies, processors: processors.insert(DECIDE, processors.pop(CUSTODIAN)),
+    "custodian_over_tcp": lambda policies, processors: processors[CUSTODIAN].update(host="127.0.0.1:9"),
+    "tools_call_only": lambda policies, processors: processors[DECIDE].update(methods={"tools/call": "request"}),
+    "redactor_after_guard": lambda policies, processors: processors.append(processors.pop(REDACTOR)),
+    "redactor_fail_open": lambda policies, processors: processors[REDACTOR].update(failureMode="failOpen"),
+    "redactor_on_every_method": lambda policies, processors: processors[REDACTOR].update(methods={"*": "response"}),
+    "no_upstream_timeout": lambda policies, processors: policies.pop("timeout"),
     "no_method_rule": lambda policies, processors: policies.pop("mcpAuthorization"),
     "header_modifier_sets": lambda policies, processors: policies["requestHeaderModifier"].update(set={"x-a": "1"}),
     "chain_headers_stripped": lambda policies, processors: policies["requestHeaderModifier"]["remove"].append(

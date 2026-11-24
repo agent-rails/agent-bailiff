@@ -19,10 +19,14 @@ from agent_bailiff.client.client import REFUSAL_REASONS
 
 DECIDE_SOCKET = Path("/run/bailiff-decide/decide.sock")
 CUSTODIAN_SOCKET = Path("/run/bailiff-custodian/custodian.sock")
+REDACTOR_SOCKET = Path("/run/bailiff-custodian/redactor.sock")
+DECIDE, CUSTODIAN, REDACTOR, GUARD = range(4)
+TIMEOUTS = {"requestTimeout": "30s", "backendRequestTimeout": "30s"}
 CHAIN_HEADERS = ["x-bailiff-task-root", "x-bailiff-links", "x-bailiff-leaf-proof", "x-bailiff-nonce", "traceparent"]
 EXPECTED = GatewayExpectations(
     decide_socket=DECIDE_SOCKET,
     custodian_socket=CUSTODIAN_SOCKET,
+    redactor_socket=REDACTOR_SOCKET,
     services=frozenset({"deploy"}),
     credential_headers=frozenset({"X-Api-Key"}),
 )
@@ -37,6 +41,7 @@ def gateway_config(
     custodian_socket=CUSTODIAN_SOCKET,
     upstream="http://127.0.0.1:8080/mcp",
     credential_headers=("X-Api-Key",),
+    redactor_socket=REDACTOR_SOCKET,
 ):
     return {
         "config": {"adminAddr": "127.0.0.1:15000"},
@@ -47,9 +52,9 @@ def gateway_config(
             "policies": {
                 "mcpAuthorization": {"rules": [METHOD_RULE]},
                 "requestHeaderModifier": {"remove": [*AGENT_CREDENTIALS, *credential_headers]},
+                "timeout": dict(TIMEOUTS),
                 "mcpGuardrails": {
                     "processors": [
-                        dict(REFUSAL_GUARD),
                         {
                             "kind": "remote",
                             "host": f"unix:{decide_socket}",
@@ -63,6 +68,14 @@ def gateway_config(
                             "methods": {"*": "request"},
                             "metadata": {"clearance": "mcpGuardrails.clearance"},
                         },
+                        {
+                            "kind": "remote",
+                            "host": f"unix:{redactor_socket}",
+                            "methods": {"tools/call": "response"},
+                            "failureMode": "failClosed",
+                            "metadata": {"clearance": "mcpGuardrails.clearance"},
+                        },
+                        dict(REFUSAL_GUARD),
                     ]
                 },
             },
@@ -95,7 +108,7 @@ def test_a_gateway_not_in_stateless_mode_is_refused(mode):
     assert any("statefulMode" in problem for problem in problems_after(change))
 
 
-@pytest.mark.parametrize("index", [1, 2])
+@pytest.mark.parametrize("index", [DECIDE, CUSTODIAN, REDACTOR])
 def test_fail_open_is_refused(index):
     problems = problems_after(lambda config: processors(config)[index].update(failureMode="failOpen"))
     assert any("failClosed" in problem for problem in problems)
@@ -108,9 +121,9 @@ def test_fail_open_is_refused(index):
 def test_a_missing_or_empty_decide_header_allowlist_is_refused(headers):
     def change(config):
         if headers is None:
-            del processors(config)[1]["requestHeaders"]
+            del processors(config)[DECIDE]["requestHeaders"]
         else:
-            processors(config)[1]["requestHeaders"] = headers
+            processors(config)[DECIDE]["requestHeaders"] = headers
 
     assert any("allowlist" in problem for problem in problems_after(change))
 
@@ -119,29 +132,29 @@ def test_a_missing_or_empty_decide_header_allowlist_is_refused(headers):
     "headers", [{}, {"allowed": list(CHAIN_HEADERS)}, {"disallowed": ["sudo"]}, {"allowed": ["x-bailiff-nonce"]}]
 )
 def test_a_custodian_header_filter_is_refused(headers):
-    problems = problems_after(lambda config: processors(config)[2].update(requestHeaders=headers))
+    problems = problems_after(lambda config: processors(config)[CUSTODIAN].update(requestHeaders=headers))
     assert any("custodian processor must not filter requestHeaders" in problem for problem in problems)
 
 
 @pytest.mark.parametrize("extra", ["authorization", "Authorization", "cookie", ":authority"])
 def test_an_allowlist_beyond_the_chain_headers_is_refused(extra):
-    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"]["allowed"].append(extra))
+    problems = problems_after(lambda config: processors(config)[DECIDE]["requestHeaders"]["allowed"].append(extra))
     assert any(extra in problem for problem in problems)
 
 
 @pytest.mark.parametrize("missing", ["x-bailiff-task-root", "x-bailiff-leaf-proof", "x-bailiff-nonce"])
 def test_an_allowlist_without_a_required_chain_header_is_refused(missing):
-    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"]["allowed"].remove(missing))
+    problems = problems_after(lambda config: processors(config)[DECIDE]["requestHeaders"]["allowed"].remove(missing))
     assert any(missing in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
     "change",
     [
-        lambda processors: processors.pop(0),
-        lambda processors: processors[0].update(condition="false"),
-        lambda processors: processors[0].update(methods={"*": "response"}),
-        lambda processors: processors[0].pop("reject"),
+        lambda processors: processors.pop(GUARD),
+        lambda processors: processors[GUARD].update(condition="false"),
+        lambda processors: processors[GUARD].update(methods={"*": "response"}),
+        lambda processors: processors[GUARD].pop("reject"),
         lambda processors: processors.insert(
             1,
             {
@@ -151,8 +164,8 @@ def test_an_allowlist_without_a_required_chain_header_is_refused(missing):
                 "transform": "mcp.result",
             },
         ),
-        lambda processors: processors[1].update(methods={"*": "request", "tools/call": "response"}),
-        lambda processors: processors[0].update(methods={"tools/call": "full"}),
+        lambda processors: processors[DECIDE].update(methods={"*": "request", "tools/call": "response"}),
+        lambda processors: processors[GUARD].update(methods={"tools/call": "full"}),
         lambda processors: processors.insert(
             1,
             {
@@ -177,6 +190,105 @@ def test_every_refusal_reason_is_a_plain_cel_string():
     assert all(re.fullmatch("[a-z_]+", reason) for reason in REFUSAL_REASONS)
 
 
+def test_the_response_phase_may_come_before_the_request_phase():
+    def change(config):
+        decide, custodian, redactor, guard = processors(config)
+        processors(config)[:] = [redactor, guard, decide, custodian]
+
+    assert problems_after(change) == ()
+
+
+def test_a_request_phase_processor_before_decide_is_accepted():
+    extra = {"kind": "expression", "methods": {"tools/call": "request"}, "reject": "no"}
+    assert problems_after(lambda config: processors(config).insert(DECIDE, extra)) == ()
+
+
+def test_a_request_phase_processor_after_the_custodian_is_refused_even_past_the_response_phase():
+    extra = {"kind": "expression", "methods": {"tools/call": "request"}, "reject": "no"}
+    problems = problems_after(lambda config: processors(config).insert(GUARD, extra))
+    assert any("order" in problem for problem in problems)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda processors: processors.pop(REDACTOR),
+        lambda processors: processors.append(processors.pop(REDACTOR)),
+        lambda processors: processors.insert(0, copy.deepcopy(processors[REDACTOR])),
+        lambda processors: processors[REDACTOR].update(host="unix:/run/other.sock"),
+        lambda processors: processors[REDACTOR].update(methods={"tools/call": "full"}),
+        lambda processors: processors[REDACTOR].update(methods={"*": "response"}),
+        lambda processors: processors[REDACTOR].update(methods={"tools/call": "response", "tools/list": "response"}),
+        lambda processors: processors[REDACTOR].update(failureMode="failOpen"),
+        lambda processors: processors[REDACTOR].pop("metadata"),
+        lambda processors: processors[REDACTOR].update(metadata={"clearance": "mcpGuardrails.other"}),
+        lambda processors: processors[REDACTOR].update(requestHeaders={"allowed": ["x-bailiff-nonce"]}),
+        lambda processors: processors[REDACTOR].update(kind="expression"),
+    ],
+)
+def test_a_missing_misplaced_or_weakened_redactor_is_refused(change):
+    problems = problems_after(lambda config: change(processors(config)))
+    assert any("redactor" in problem for problem in problems), problems
+
+
+def test_a_redactor_on_the_custodian_socket_is_refused():
+    def change(config):
+        processors(config)[REDACTOR]["host"] = f"unix:{CUSTODIAN_SOCKET}"
+
+    assert any("redactor" in problem for problem in problems_after(change))
+
+
+@pytest.mark.parametrize("value", ["30s", "120s", "2m", "500ms", "1s"])
+def test_upstream_timeouts_up_to_two_minutes_are_accepted(value):
+    def change(config):
+        config["mcp"]["policies"]["timeout"] = {"requestTimeout": value, "backendRequestTimeout": value}
+
+    assert problems_after(change) == ()
+
+
+def test_a_response_idle_timeout_is_accepted():
+    def change(config):
+        config["mcp"]["policies"]["timeout"]["responseIdleTimeout"] = "10m"
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        None,
+        {},
+        "30s",
+        {"requestTimeout": "30s"},
+        {"backendRequestTimeout": "30s"},
+        {"requestTimeout": "30s", "backendRequestTimeout": "121s"},
+        {"requestTimeout": "3m", "backendRequestTimeout": "30s"},
+        {"requestTimeout": "30", "backendRequestTimeout": "30s"},
+        {"requestTimeout": 30, "backendRequestTimeout": "30s"},
+        {"requestTimeout": "0s", "backendRequestTimeout": "30s"},
+        {"requestTimeout": "30s", "backendRequestTimeout": "1h"},
+        {"requestTimeout": "1m30s", "backendRequestTimeout": "30s"},
+        {"requestTimeout": " 30s", "backendRequestTimeout": "30s"},
+        {"requestTimeout": "30s", "backendRequestTimeout": "30s", "responseIdleTimeout": "soon"},
+        {"requestTimeout": "30s", "backendRequestTimeout": "30s", "idleTimeout": "30s"},
+    ],
+)
+def test_missing_or_unbounded_upstream_timeouts_are_refused(timeout):
+    def change(config):
+        if timeout is None:
+            del config["mcp"]["policies"]["timeout"]
+        else:
+            config["mcp"]["policies"]["timeout"] = timeout
+
+    assert any("timeout" in problem for problem in problems_after(change))
+
+
+def test_check_config_refuses_a_redactor_on_another_socket(owned_files):
+    result = run_check(owned_files, gateway_config(redactor_socket=Path("/run/other/redactor.sock")))
+    assert result.returncode == 1
+    assert "redactor" in result.stderr
+
+
 def test_custodian_before_decide_is_refused():
     problems = problems_after(lambda config: processors(config).reverse())
     assert any("order" in problem for problem in problems)
@@ -184,13 +296,13 @@ def test_custodian_before_decide_is_refused():
 
 def test_a_processor_after_the_custodian_is_refused():
     extra = {"kind": "expression", "methods": {"tools/call": "request"}, "reject": "no"}
-    problems = problems_after(lambda config: processors(config).append(extra))
+    problems = problems_after(lambda config: processors(config).insert(REDACTOR, extra))
     assert any("order" in problem for problem in problems)
 
 
 def test_a_processor_between_decide_and_custodian_is_refused():
     extra = {"kind": "expression", "methods": {"tools/call": "request"}, "transform": "mcp.params"}
-    problems = problems_after(lambda config: processors(config).insert(2, extra))
+    problems = problems_after(lambda config: processors(config).insert(CUSTODIAN, extra))
     assert any("order" in problem for problem in problems)
 
 
@@ -198,17 +310,17 @@ def test_a_processor_between_decide_and_custodian_is_refused():
     "host", ["127.0.0.1:9000", "unix:/tmp/other.sock", "unix:run/bailiff-custodian/custodian.sock"]
 )
 def test_a_custodian_not_on_its_unix_socket_is_refused(host):
-    problems = problems_after(lambda config: processors(config)[2].update(host=host))
+    problems = problems_after(lambda config: processors(config)[CUSTODIAN].update(host=host))
     assert any("custodian" in problem for problem in problems)
 
 
 def test_a_missing_decide_processor_is_refused():
-    problems = problems_after(lambda config: processors(config).pop(1))
+    problems = problems_after(lambda config: processors(config).pop(DECIDE))
     assert any("decide" in problem for problem in problems)
 
 
 def test_a_duplicate_custodian_processor_is_refused():
-    problems = problems_after(lambda config: processors(config).insert(0, copy.deepcopy(processors(config)[2])))
+    problems = problems_after(lambda config: processors(config).insert(0, copy.deepcopy(processors(config)[CUSTODIAN])))
     assert any("exactly one" in problem for problem in problems)
 
 
@@ -224,7 +336,7 @@ def test_a_duplicate_custodian_processor_is_refused():
     ],
 )
 def test_processor_methods_must_be_exactly_every_method_request(methods):
-    problems = problems_after(lambda config: processors(config)[1].update(methods=methods))
+    problems = problems_after(lambda config: processors(config)[DECIDE].update(methods=methods))
     assert any("methods" in problem for problem in problems)
 
 
@@ -235,28 +347,28 @@ def test_processor_methods_must_be_exactly_every_method_request(methods):
 def test_the_custodian_clearance_expression_is_required(metadata):
     def change(config):
         if metadata is None:
-            del processors(config)[2]["metadata"]
+            del processors(config)[CUSTODIAN]["metadata"]
         else:
-            processors(config)[2]["metadata"] = metadata
+            processors(config)[CUSTODIAN]["metadata"] = metadata
 
     assert any("clearance" in problem for problem in problems_after(change))
 
 
 def test_decide_takes_no_metadata():
-    problems = problems_after(lambda config: processors(config)[1].update(metadata={"x": "request.headers"}))
+    problems = problems_after(lambda config: processors(config)[DECIDE].update(metadata={"x": "request.headers"}))
     assert any("metadata" in problem for problem in problems)
 
 
 @pytest.mark.parametrize("key", ["policies", "service", "backend"])
 def test_unknown_bailiff_processor_fields_are_refused(key):
-    problems = problems_after(lambda config: processors(config)[2].update({key: {}}))
+    problems = problems_after(lambda config: processors(config)[CUSTODIAN].update({key: {}}))
     assert any(key in problem for problem in problems)
 
 
 @pytest.mark.parametrize(
     "where",
     [
-        lambda config: processors(config)[0].update(condition='request.headers["x-api-key"] != ""'),
+        lambda config: processors(config)[GUARD].update(condition='request.headers["x-api-key"] != ""'),
         lambda config: config["mcp"]["policies"].update(
             mcpAuthorization={"rules": ['has(request.headers["X-API-KEY"])']}
         ),
@@ -270,7 +382,9 @@ def test_the_credential_header_name_anywhere_in_the_config_is_refused(where):
 
 
 def test_a_header_name_inside_a_longer_token_or_the_remove_list_is_not_a_match():
-    expected = GatewayExpectations(DECIDE_SOCKET, CUSTODIAN_SOCKET, frozenset({"deploy"}), frozenset({"authorization"}))
+    expected = GatewayExpectations(
+        DECIDE_SOCKET, CUSTODIAN_SOCKET, REDACTOR_SOCKET, frozenset({"deploy"}), frozenset({"authorization"})
+    )
     assert validate_gateway_config(gateway_config(credential_headers=()), expected) == ()
 
 
@@ -493,6 +607,9 @@ def test_malformed_documents_are_refused(document):
         {"decide_socket": Path("relative.sock")},
         {"custodian_socket": Path("relative.sock")},
         {"custodian_socket": DECIDE_SOCKET},
+        {"redactor_socket": Path("relative.sock")},
+        {"redactor_socket": DECIDE_SOCKET},
+        {"redactor_socket": CUSTODIAN_SOCKET},
         {"services": frozenset()},
         {"credential_headers": frozenset({"bad header"})},
     ],
@@ -501,6 +618,7 @@ def test_expectations_are_validated(options):
     fields = {
         "decide_socket": DECIDE_SOCKET,
         "custodian_socket": CUSTODIAN_SOCKET,
+        "redactor_socket": REDACTOR_SOCKET,
         "services": frozenset({"deploy"}),
         "credential_headers": frozenset({"X-Api-Key"}),
     }
@@ -560,6 +678,8 @@ def run_check(owned_files, config_document, routes=(ROUTE,)):
         str(DECIDE_SOCKET),
         "--custodian-socket",
         str(CUSTODIAN_SOCKET),
+        "--redactor-socket",
+        str(REDACTOR_SOCKET),
     ]
     return subprocess.run(command, capture_output=True, text=True, timeout=60)
 
@@ -571,7 +691,7 @@ def test_check_config_accepts_the_reference_config(owned_files):
 
 def test_check_config_refuses_and_lists_problems(owned_files):
     config = gateway_config()
-    processors(config)[2]["failureMode"] = "failOpen"
+    processors(config)[CUSTODIAN]["failureMode"] = "failOpen"
     result = run_check(owned_files, config)
     assert result.returncode == 1
     assert "failClosed" in result.stderr
@@ -595,18 +715,18 @@ def test_check_config_refuses_one_tool_and_resource_routed_from_two_services(own
 
 @pytest.mark.parametrize("name", CHAIN_HEADERS + ["X-Bailiff-Nonce"])
 def test_a_chain_header_in_disallowed_is_refused(name):
-    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=[name]))
+    problems = problems_after(lambda config: processors(config)[DECIDE]["requestHeaders"].update(disallowed=[name]))
     assert any("disallowed" in problem and name in problem for problem in problems)
 
 
 def test_an_unrelated_disallowed_header_is_accepted():
-    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=["cookie"]))
+    problems = problems_after(lambda config: processors(config)[DECIDE]["requestHeaders"].update(disallowed=["cookie"]))
     assert problems == ()
 
 
 @pytest.mark.parametrize("disallowed", ["cookie", [1], {}])
 def test_a_malformed_disallowed_list_is_refused(disallowed):
-    problems = problems_after(lambda config: processors(config)[1]["requestHeaders"].update(disallowed=disallowed))
+    problems = problems_after(lambda config: processors(config)[DECIDE]["requestHeaders"].update(disallowed=disallowed))
     assert any("disallowed" in problem for problem in problems)
 
 

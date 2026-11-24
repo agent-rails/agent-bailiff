@@ -712,7 +712,7 @@ def test_put_credential_refuses_an_empty_or_oversized_secret(deployment, stdin, 
 
 def test_check_config_runs_the_adapter_check_unchanged(tmp_path, capsys):
     arguments = ["check-config", "--gateway-config", str(tmp_path / "missing.json"), "--routes", "r", "--bindings", "b"]
-    arguments += ["--decide-socket", "/d.sock", "--custodian-socket", "/c.sock"]
+    arguments += ["--decide-socket", "/d.sock", "--custodian-socket", "/c.sock", "--redactor-socket", "/r.sock"]
     assert cli.main(arguments) == 1
     assert "check-config refused" in capsys.readouterr().err
 

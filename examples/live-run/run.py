@@ -314,6 +314,7 @@ class Deployment:
                 "--gateway-config", str(self.gateway_config), "--routes", str(self.root / "custodian" / "routes.json"),
                 "--bindings", str(self.root / "custodian" / "bindings.json"),
                 "--decide-socket", str(self.sockets["decide"]), "--custodian-socket", str(self.sockets["custodian"]),
+                "--redactor-socket", str(self.sockets["redactor"]),
             ],
             check=True,
         )  # fmt: skip
@@ -340,9 +341,9 @@ class Deployment:
                             CREDENTIAL_HEADER,
                         ]
                     },
+                    "timeout": {"requestTimeout": "30s", "backendRequestTimeout": "30s"},
                     "mcpGuardrails": {
                         "processors": [
-                            dict(REFUSAL_GUARD),
                             {
                                 "kind": "remote",
                                 "host": f"unix:{self.sockets['decide']}",
@@ -356,6 +357,14 @@ class Deployment:
                                 "methods": {"*": "request"},
                                 "metadata": {"clearance": "mcpGuardrails.clearance"},
                             },
+                            {
+                                "kind": "remote",
+                                "host": f"unix:{self.sockets['redactor']}",
+                                "methods": {"tools/call": "response"},
+                                "failureMode": "failClosed",
+                                "metadata": {"clearance": "mcpGuardrails.clearance"},
+                            },
+                            dict(REFUSAL_GUARD),
                         ]
                     },
                 },
