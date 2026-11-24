@@ -12,6 +12,7 @@ from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
 from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
+from agent_bailiff.custodian.config import MAX_UPSTREAM_TIMEOUT
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
@@ -36,7 +37,7 @@ BAILIFF_METHODS = {"*": "request"}
 REDACTOR_METHODS = {"tools/call": "response"}
 TIMEOUT_KEYS = frozenset({"requestTimeout", "backendRequestTimeout", "responseIdleTimeout"})
 BOUNDED_TIMEOUTS = ("requestTimeout", "backendRequestTimeout")
-MAX_UPSTREAM_TIMEOUT_MS = 120_000
+MAX_UPSTREAM_TIMEOUT_MS = MAX_UPSTREAM_TIMEOUT * 1000
 DURATION = re.compile(r"([1-9][0-9]{0,8})(ms|s|m)")
 DURATION_UNIT_MS = {"ms": 1, "s": 1000, "m": 60_000}
 METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
@@ -262,7 +263,7 @@ def _check_timeouts(problems: list[str], timeout: object) -> None:
         milliseconds = _duration_ms(timeout.get(key))
         if milliseconds is None or milliseconds > MAX_UPSTREAM_TIMEOUT_MS:
             problems.append(
-                f"mcp.policies.timeout.{key} must be a duration with a unit, at most {MAX_UPSTREAM_TIMEOUT_MS // 1000}s"
+                f"mcp.policies.timeout.{key} must be a duration with a unit, at most {MAX_UPSTREAM_TIMEOUT}s"
             )
 
 

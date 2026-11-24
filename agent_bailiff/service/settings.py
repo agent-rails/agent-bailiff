@@ -11,7 +11,7 @@ from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.control.suspension import suspension_directory
-from agent_bailiff.custodian.config import MAX_RESPONSE_WORKERS
+from agent_bailiff.custodian.config import MAX_RESPONSE_WORKERS, MIN_INFLIGHT_TTL
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
@@ -388,7 +388,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         skew_seconds=config.integer("skew_seconds", 0, 300),
         rate_limit=config.integer("rate_limit", 1),
         rate_window=config.integer("rate_window", 1),
-        inflight_ttl=config.integer("inflight_ttl", 1, MAX_INFLIGHT_TTL),
+        inflight_ttl=config.integer("inflight_ttl", MIN_INFLIGHT_TTL, MAX_INFLIGHT_TTL),
         inflight_max=config.integer("inflight_max", 1),
         inflight_max_bytes=config.integer("inflight_max_bytes", 1),
         inflight_per_tenant=config.integer("inflight_per_tenant", 1),

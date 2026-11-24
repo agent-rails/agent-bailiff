@@ -16,6 +16,7 @@ from agent_bailiff.custodian.config import (
     DEFAULT_INFLIGHT_MAX_BYTES,
     DEFAULT_INFLIGHT_PER_TENANT,
     DEFAULT_INFLIGHT_TTL,
+    MAX_UPSTREAM_TIMEOUT,
 )
 from agent_bailiff.custodian.custodian import RESPONSE_REASONS, ResponseChecked, ResponseRefused
 from agent_bailiff.custodian.echo import MARKER
@@ -79,7 +80,14 @@ def test_the_in_flight_defaults_hold_a_client_deadline_with_margin():
         DEFAULT_INFLIGHT_MAX_BYTES,
         DEFAULT_INFLIGHT_PER_TENANT,
     )
-    assert DEFAULT_INFLIGHT_TTL == 60
+    assert DEFAULT_INFLIGHT_TTL == 180
+
+
+def test_the_in_flight_ttl_outlasts_the_upstream_timeout_cap_by_thirty_seconds():
+    assert MAX_UPSTREAM_TIMEOUT == 120
+    with pytest.raises(ValueError, match="inflight_ttl"):
+        CustodianConfig(**config_options(inflight_ttl=149))
+    assert CustodianConfig(**config_options(inflight_ttl=150)).inflight_ttl == 150
 
 
 @pytest.mark.parametrize("name", ["inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant"])

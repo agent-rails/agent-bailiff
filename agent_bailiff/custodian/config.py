@@ -6,7 +6,10 @@ from types import MappingProxyType
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-DEFAULT_INFLIGHT_TTL = 60
+MAX_UPSTREAM_TIMEOUT = 120
+INFLIGHT_TTL_MARGIN = 30
+MIN_INFLIGHT_TTL = MAX_UPSTREAM_TIMEOUT + INFLIGHT_TTL_MARGIN
+DEFAULT_INFLIGHT_TTL = 180
 DEFAULT_INFLIGHT_MAX = 4096
 DEFAULT_INFLIGHT_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_INFLIGHT_PER_TENANT = 1024
@@ -45,6 +48,7 @@ class CustodianConfig:
         for name in ("max_proof_age", "max_clearance_lifetime", "rate_limit", "rate_window", *INFLIGHT_FIELDS):
             _require_int(name, getattr(self, name), minimum=1)
         _require_int("skew_seconds", self.skew_seconds, minimum=0)
+        _require_int("inflight_ttl", self.inflight_ttl, minimum=MIN_INFLIGHT_TTL)
         if self.max_clearance_lifetime > self.max_proof_age:
             raise ValueError("max_clearance_lifetime must not exceed max_proof_age")
 

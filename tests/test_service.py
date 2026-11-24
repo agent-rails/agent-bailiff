@@ -193,7 +193,7 @@ class Deployment:
             "skew_seconds": 5,
             "rate_limit": 10,
             "rate_window": 60,
-            "inflight_ttl": 60,
+            "inflight_ttl": 150,
             "inflight_max": 64,
             "inflight_max_bytes": 65536,
             "inflight_per_tenant": 16,
@@ -308,7 +308,7 @@ def test_the_example_documents_parse(deployment):
     control = load_control(deployment.paths["control"])
     assert decide.name == "decide.example" and decide.custodians == {"custodian.example"}
     assert list(custodian.decide_keys) == [deployment.keys["decide.example"].kid]
-    assert (custodian.inflight_ttl, custodian.inflight_max) == (60, 64)
+    assert (custodian.inflight_ttl, custodian.inflight_max) == (150, 64)
     assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (65536, 16)
     assert (custodian.response_socket, custodian.response_workers) == (deployment.sockets["redactor"], 2)
     assert docket.allowed_uids == {UID} and set(docket.writers) == set(deployment.keys)
@@ -365,6 +365,7 @@ BAD_CUSTODIAN = {
     "bool_inflight_max_bytes": lambda doc: doc.update(inflight_max_bytes=True),
     "zero_inflight_per_tenant": lambda doc: doc.update(inflight_per_tenant=0),
     "inflight_ttl_over_an_hour": lambda doc: doc.update(inflight_ttl=3601),
+    "inflight_ttl_inside_the_upstream_timeout_margin": lambda doc: doc.update(inflight_ttl=149),
     "missing_inflight_ttl": lambda doc: doc.pop("inflight_ttl"),
     "missing_response_socket": lambda doc: doc.pop("response_socket"),
     "relative_response_socket": lambda doc: doc.update(response_socket="c/redactor.sock"),
