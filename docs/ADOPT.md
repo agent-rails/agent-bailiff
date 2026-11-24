@@ -13,6 +13,15 @@ Two OS users take part, and the separation between them is what the guide depend
 
 The agent user must not reach the Docker daemon. Anyone who can reach it can read the issuer key and the encrypted credential store from the stack's volumes, mint their own tasks and get the credential, bypassing decide. On Linux, keep the agent user out of the `docker` group. On macOS, Docker Desktop and OrbStack give the socket to the logged-in user, so run the agent host as a separate macOS user, in a VM or in a devcontainer. CI runs the proxy as a second Linux user that cannot open the Docker socket or the issuer key (`tests/test_adopt_stack.py`).
 
+`agent-bailiff proxy run` checks this when it starts. It tries to connect to the Docker daemon at `DOCKER_HOST` when that is a `unix://` URL, `/var/run/docker.sock`, `$HOME/.docker/run/docker.sock`, `$HOME/.orbstack/run/docker.sock`, `$HOME/.colima/default/docker.sock` and `$XDG_RUNTIME_DIR/docker.sock`, and refuses to start if any connect succeeds, times out or fails with an error other than a missing file, a permission error, a refused connection or a path that is not a socket. A `DOCKER_HOST` that is not a `unix://` URL (`tcp://`, `ssh://`) is not tested and counts as reachable. The error names each endpoint. The check does not cover:
+
+- a Docker daemon at another socket path, or one reached through a Docker context, a wrapper or a remote host;
+- a user who is added to the `docker` group, or gets `sudo`, after the proxy started;
+- a user who can read the issuer key or the stack's volumes by another route: the issuer key lives in the Docker volume `issuer-data`, whose host path the proxy cannot know, so the proxy does not check it;
+- the other proxy commands, `keygen` and `tools`, which do not run the check.
+
+For single-user development, `proxy run --allow-shared-user` skips the refusal and prints one warning on stderr naming what was reachable. With that flag the agent can mint its own tasks, so the task scope does not bind it. There is no environment variable for it. In the agent host config, add `"--allow-shared-user"` to `args` only on a development machine.
+
 Every directory above the task directory must be owned by the operator or root and must not be writable by the agent user. `task issue` refuses a symlink only as the last path component. The agent user must still be able to search every one of those directories, or the proxy cannot open `task.json`. A task directory under the operator's home works only if the home allows that; check with `sudo -u agent test -r <task dir>/task.json` after step 4.
 
 ## Requirements
