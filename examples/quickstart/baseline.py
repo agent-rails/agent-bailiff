@@ -1,7 +1,7 @@
 """Quickstart latency baseline. It calls the upstream MCP server directly, with the credential the custodian would
 inject, so the same tool and call counts as `agent.py load` run without the gateway, decide and custodian. The
-difference between the two is the time bailiff adds. It runs as the bootstrap service because only that service can
-read both the stored credential and the upstream network."""
+difference between the two at each percentile is what bailiff adds at that percentile. It runs as the bootstrap
+service because only that service can read both the stored credential and the upstream network."""
 
 from __future__ import annotations
 
