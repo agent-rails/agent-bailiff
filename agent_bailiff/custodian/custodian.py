@@ -408,7 +408,7 @@ class Custodian:
                 self._recorded_refusals.pop(key, None)
 
     def _elapsed_ms(self, started: int) -> int:
-        return (self._monotonic_ns() - started) // 1_000_000
+        return max(0, (self._monotonic_ns() - started) // 1_000_000)
 
     def _mark_refusal(self, key: tuple[str, str, str, str]) -> bool:
         with self._refusals_lock:

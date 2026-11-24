@@ -25,6 +25,7 @@ from test_decide import (
     PRINCIPAL,
     SIGNER_CUSTODIAN_ID,
     TENANT,
+    BackwardsClock,
     ExplodingSuspension,
     RunningSink,
     SteppingClock,
@@ -842,6 +843,15 @@ def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodi
     make_custodian(monotonic_ns=SteppingClock(9)).release(token, request, NOW + 1)
     [entry] = custodian_entries(workdir)
     assert (entry.decision, entry.reason, entry.latency_ms) == ("refuse", "out_of_scope", 9)
+
+
+def test_a_clock_that_steps_back_still_records_the_refusal(make_custodian, workdir):
+    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    make_custodian(monotonic_ns=BackwardsClock()).release(token, request, NOW + 1)
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.reason, entry.latency_ms) == ("refuse", "out_of_scope", 0)
 
 
 def test_the_default_clock_records_a_non_negative_integer_on_release(make_custodian, issue, workdir):

@@ -440,7 +440,7 @@ class Decider:
         return Decision(allowed=False, reason=reason, entry_id=entry_id, op_id=entry.op_id)
 
     def _elapsed_ms(self, started: int) -> int:
-        return (self._monotonic_ns() - started) // 1_000_000
+        return max(0, (self._monotonic_ns() - started) // 1_000_000)
 
     def _append(self, entry: Entry) -> str:
         entry_id = uuid.uuid4().hex

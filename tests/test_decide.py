@@ -154,6 +154,16 @@ class SteppingClock:
         return reading
 
 
+class BackwardsClock:
+    def __init__(self):
+        self.now = 10_000_000
+
+    def __call__(self):
+        reading = self.now
+        self.now -= 1_000_000
+        return reading
+
+
 class AckDocket:
     def __init__(self, inner, ack):
         self.inner = inner
@@ -973,6 +983,13 @@ def test_a_refusal_after_the_allow_entry_is_timed_from_the_start_of_the_check(
     decider = make_decider(docket=AckLostDocket(inner), monotonic_ns=SteppingClock(5))
     assert decider.check(make_request(), NOW).reason == "docket_unavailable"
     assert {entry.decision: entry.latency_ms for entry in docket_entries(docket_paths)} == {"allow": 5, "refuse": 11}
+
+
+def test_a_clock_that_steps_back_records_zero_and_still_allows(make_decider, docket_paths):
+    decision = make_decider(monotonic_ns=BackwardsClock()).check(make_request(), NOW)
+    assert decision.allowed
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.latency_ms) == ("allow", 0)
 
 
 def test_each_check_is_timed_from_its_own_start(make_decider, docket_paths):
