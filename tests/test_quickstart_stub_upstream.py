@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import socket
 import ssl
 import sys
 import threading
@@ -96,6 +97,15 @@ def test_an_oversized_body_is_refused(server):
     with pytest.raises(urllib.error.HTTPError) as error:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == 413
+
+
+def test_a_stalled_connection_is_closed(server, monkeypatch):
+    assert stub.Handler.timeout == stub.READ_TIMEOUT_SECONDS
+    monkeypatch.setattr(stub.Handler, "timeout", 0.2)
+    port = int(server.rsplit(":", 1)[1].split("/")[0])
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as connection:
+        connection.sendall(b"POST /mcp HTTP/1.1\r\ncontent-length: 10\r\n\r\n{")
+        assert connection.recv(1024) == b""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
