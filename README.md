@@ -76,7 +76,7 @@ Built on [agent-warrant](https://github.com/agent-rails/agent-warrant) (task roo
 
 ## Usage
 
-Not yet on PyPI; install from source (see Development).
+Not yet on PyPI. To put an agent host in front of one MCP server, follow [docs/ADOPT.md](docs/ADOPT.md), which installs from a git tag; to work on agent-bailiff itself, install from source (see Development).
 
 Check a gateway config before starting agentgateway. Run it as the custodian's user, because it reads the credential binding table:
 
@@ -100,6 +100,7 @@ Each component has its own commands, run as that component's uid:
 
 ## Documentation
 
+- [docs/ADOPT.md](docs/ADOPT.md): put one agent host in front of one MCP server: install, credential, task issue, routes, proxy, renew and revoke
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, one call end to end, data and signed records
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): assets, attackers, mitigations and residual risks
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits

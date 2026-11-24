@@ -426,12 +426,26 @@ def start_proxy(tmp_path, task_file, key_dir, gateway_url):
     routes.write_text(json.dumps(ROUTE_DOCUMENT))
     arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", gateway_url]
     process = subprocess.Popen(
-        [sys.executable, "-m", "agent_bailiff.cli", "proxy", "run", *arguments, "--routes", str(routes)],
+        [
+            sys.executable,
+            "-m",
+            "agent_bailiff.cli",
+            "proxy",
+            "run",
+            "--allow-shared-user",
+            *arguments,
+            "--routes",
+            str(routes),
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert b"proxy routes sha256" in process.stderr.readline()
+    line = process.stderr.readline()
+    while line and b"proxy routes sha256" not in line:
+        assert b"--allow-shared-user" in line, line
+        line = process.stderr.readline()
+    assert b"proxy routes sha256" in line
     return process
 
 
