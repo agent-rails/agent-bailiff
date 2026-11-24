@@ -16,6 +16,7 @@ from agent_bailiff.custodian.echo import (
     UnreadableResult,
     needles,
     redact,
+    too_short_to_redact,
 )
 
 TOKEN = "s3cr3t-T0ken/with+chars=="
@@ -109,6 +110,22 @@ def test_short_needles_are_dropped():
     assert needles("tok-1234") == ()
     assert "short" not in needles("Bearer short")
     assert all(len(needle) >= MIN_NEEDLE_LENGTH for needle in needles(HEADER))
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["tok-1234", "Bearer short-key", "Basic dXNlcjpzaG9ydHB3"],
+)
+def test_a_credential_with_any_form_under_the_needle_length_is_too_short_to_redact(header):
+    assert too_short_to_redact(header) is True
+
+
+@pytest.mark.parametrize(
+    "header",
+    [HEADER, f"Basic {base64.b64encode(b'user-long-name:password-long').decode()}", "Bearer long-enough-token"],
+)
+def test_a_credential_with_every_form_at_the_needle_length_is_redactable(header):
+    assert too_short_to_redact(header) is False
 
 
 def test_no_hit_returns_none():

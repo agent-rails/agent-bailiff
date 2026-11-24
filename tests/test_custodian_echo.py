@@ -163,6 +163,18 @@ def test_a_credential_too_short_to_redact_is_released_with_a_warning(make_custod
     assert "short-key" not in caplog.text
 
 
+def test_a_short_basic_password_is_released_with_a_warning(make_custodian, issue, state, caplog):
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    store.put(TENANT, "deploy-api", "deploy.example", b"Basic dXNlcjpzaG9ydHB3")
+    store.close()
+    request, token = issue()
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert isinstance(make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1), Released)
+    assert "cannot be redacted" in caplog.text
+    assert "dXNlcjpzaG9ydHB3" not in caplog.text
+    assert "shortpw" not in caplog.text
+
+
 def test_a_long_credential_is_released_without_a_warning(make_custodian, issue, caplog):
     request, token = issue()
     with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):

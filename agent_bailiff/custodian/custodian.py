@@ -18,7 +18,14 @@ from agent_warrant.trust import IssuerTrustPolicy
 from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBinding, EffectorBinding
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
-from agent_bailiff.custodian.echo import MIN_NEEDLE_LENGTH, Oversize, UnreadableResult, needles, redact
+from agent_bailiff.custodian.echo import (
+    MIN_NEEDLE_LENGTH,
+    Oversize,
+    UnreadableResult,
+    needles,
+    redact,
+    too_short_to_redact,
+)
 from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, InflightReleases
 from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
@@ -545,9 +552,10 @@ def _check_scope(verified: _Verified) -> None:
 
 
 def _warn_unredactable(header_value: str) -> None:
-    if len(header_value.split(None, 1)[-1]) < MIN_NEEDLE_LENGTH:
+    if too_short_to_redact(header_value):
         logger.warning(
-            "released credential is shorter than %d characters after its scheme and cannot be redacted from results",
+            "released credential, or its decoded basic password, is shorter than %d characters"
+            " and cannot be redacted from results",
             MIN_NEEDLE_LENGTH,
         )
 

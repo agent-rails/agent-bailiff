@@ -46,6 +46,10 @@ def needles(header_value: str) -> tuple[str, ...]:
     return tuple(sorted(kept, key=lambda needle: (-len(needle), needle)))
 
 
+def too_short_to_redact(header_value: str) -> bool:
+    return any(len(form) < MIN_NEEDLE_LENGTH for form in _forms(header_value) if form)
+
+
 def redact(result: bytes, needles: Sequence[str]) -> Redaction | None:
     if len(result) > MAX_RESULT_BYTES:
         raise UnreadableResult("result exceeds the size cap")
