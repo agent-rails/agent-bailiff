@@ -9,7 +9,7 @@ from test_quickstart_trace import jaeger, spans_in, wait_for_export
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
-PROFILES = ("trace",)
+PROFILES = ("gitea", "trace")
 JAEGER_TIMEOUT_SECONDS = 60
 
 ALLOWED_LOG_SERVICES = {"gitea"}

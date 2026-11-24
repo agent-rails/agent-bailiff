@@ -18,7 +18,7 @@ pytestmark = [
     ),
 ]
 stack = test_quickstart_stack.stack
-PROFILES = ("trace",)
+PROFILES = ("gitea", "trace")
 
 BENCHMARKS = Path(__file__).resolve().parents[1] / "benchmarks"
 CLIENTS = (1, 4, 16, 32)
@@ -31,7 +31,7 @@ MAX_LOGGED_LINES = 60
 
 
 def measure(stack, clients):
-    stack.compose("run", "--rm", "--no-deps", "task-issuer", "/app/quickstart/bootstrap.py", "issue-load")
+    stack.compose("run", "--rm", "--no-deps", "gitea-task", "/app/quickstart/bootstrap.py", "issue-load")
     arguments = ["--clients", str(clients), "--calls", str(CALLS_PER_CLIENT)]
     level = json.loads(stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "load", *arguments))
     export = wait_for_export(stack)

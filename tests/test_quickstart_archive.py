@@ -6,7 +6,7 @@ from test_quickstart_stack import COMPOSE_FILE, RUN_TIMEOUT_SECONDS, b, identity
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
-PROFILES = ("archive",)
+PROFILES = ("gitea", "archive")
 DOCKET = "/var/lib/bailiff/docket/docket.log"
 RECEIPTS = "/var/lib/bailiff/receipts"
 PINS = [arg for name in ("decide", "custodian", "control", "rule") for arg in ("--pin", f"/pins/{name}/{name}.json")]

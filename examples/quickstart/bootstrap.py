@@ -78,7 +78,10 @@ NAMES = {
 }
 WRITERS = ("decide", "custodian", "control", "rule")
 QUICKSTART_UPSTREAMS = Path(__file__).resolve().parent / "upstreams"
-UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "gitea.json"))
+UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "stub.json"))
+GATEWAY_TEMPLATE = Path(__file__).resolve().parent / "gateway.json"
+GATEWAY_CONFIG = STATE / "gateway" / "gateway.json"
+MAX_GATEWAY_BYTES = 64 * 1024
 UPSTREAM_VERSION = 1
 MAX_UPSTREAM_BYTES = 64 * 1024
 MAX_ROUTES_BYTES = 1 << 20
@@ -346,6 +349,25 @@ def init_custodian() -> str:
     changed = replace_owned(DIRS["custodian"] / "bindings.json", custodian_bindings) or changed
     load_custodian(config)
     return "updated" if changed and outcome == "kept" else outcome
+
+
+def gateway_document(upstream: Upstream) -> dict[str, Any]:
+    document = read_strict(GATEWAY_TEMPLATE, MAX_GATEWAY_BYTES)
+    if document["mcp"]["targets"] != []:
+        raise BootstrapError(f"{GATEWAY_TEMPLATE} must leave mcp.targets empty for the upstream config to fill")
+    document["mcp"]["targets"] = [{"name": upstream.target, "mcp": {"host": upstream.url}}]
+    return document
+
+
+def init_gateway() -> str:
+    document = gateway_document(load_upstream(UPSTREAM_FILE))
+    outcome = "created"
+    if GATEWAY_CONFIG.exists():
+        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document:
+            return "kept"
+        outcome = "updated"
+    write_public(GATEWAY_CONFIG, document)
+    return outcome
 
 
 def control_arguments() -> list[object]:
@@ -637,6 +659,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "control": init_control,
     "rule": init_rule,
     "docket": init_docket,
+    "gateway": init_gateway,
     "admin-secret": admin_secret,
     "gitea": bootstrap_gitea,
     "issue": issue_task,

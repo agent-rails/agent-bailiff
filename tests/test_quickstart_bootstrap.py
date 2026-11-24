@@ -54,9 +54,35 @@ def test_the_gitea_upstream_loads_with_one_unit_of_cost_per_routed_tool():
     assert upstream.costs == {"version": 1, "tools": {route["tool"]: 1 for route in routes}}
 
 
-def test_the_gateway_targets_the_gitea_upstream_url():
-    gateway = json.loads((b.QUICKSTART_UPSTREAMS.parent / "gateway.json").read_text())
-    assert [target["mcp"]["host"] for target in gateway["mcp"]["targets"]] == [b.load_upstream(GITEA_UPSTREAM).url]
+@pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
+def test_the_gateway_config_targets_only_the_upstream_url(name):
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / name)
+    template = json.loads(b.GATEWAY_TEMPLATE.read_text())
+    document = b.gateway_document(upstream)
+    assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}}]
+    assert {**document, "mcp": {**document["mcp"], "targets": []}} == template
+
+
+def test_a_gateway_template_with_a_target_is_refused(tmp_path, monkeypatch):
+    template = json.loads(b.GATEWAY_TEMPLATE.read_text())
+    template["mcp"]["targets"] = [{"name": "other", "mcp": {"host": "http://other:8080/mcp"}}]
+    path = tmp_path / "gateway.json"
+    path.write_text(json.dumps(template))
+    monkeypatch.setattr(b, "GATEWAY_TEMPLATE", path)
+    with pytest.raises(b.BootstrapError, match="must leave mcp.targets empty"):
+        b.gateway_document(b.load_upstream(GITEA_UPSTREAM))
+
+
+def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert b.init_gateway() == "created"
+    assert (tmp_path / "gateway.json").stat().st_mode & 0o777 == 0o644
+    assert b.init_gateway() == "kept"
+    monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
+    assert b.init_gateway() == "updated"
+    written = json.loads((tmp_path / "gateway.json").read_text())
+    assert written["mcp"]["targets"][0]["mcp"]["host"] == "http://gitea-mcp:8080/mcp"
 
 
 @pytest.mark.parametrize(

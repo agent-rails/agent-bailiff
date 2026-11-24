@@ -5,6 +5,7 @@ from test_quickstart_stack import b
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
+PROFILES = ("gitea",)
 
 DECIDE = b.NAMES["decide"]
 CONTROL = b.NAMES["control"]

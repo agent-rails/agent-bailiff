@@ -13,7 +13,7 @@ from agent_bailiff.docket.otlp import span_id_for, trace_id_for
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
-PROFILES = ("trace", "rule")
+PROFILES = ("gitea", "trace", "rule")
 DECIDE = b.NAMES["decide"]
 RULE = b.NAMES["rule"]
 RULE_TIMEOUT_SECONDS = 60

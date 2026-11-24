@@ -24,6 +24,8 @@ pytestmark = [
     pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed"),
 ]
 
+PROFILES = ("gitea",)
+
 _spec = importlib.util.spec_from_file_location("quickstart_bootstrap", QUICKSTART / "bootstrap.py")
 assert _spec is not None and _spec.loader is not None
 b = importlib.util.module_from_spec(_spec)
@@ -47,6 +49,7 @@ VOLUMES = {
     "agent-public": "/var/lib/bailiff/agent-public",
     "tasks": "/var/lib/bailiff/tasks",
     "docket-receipts": "/var/lib/bailiff/receipts",
+    "gateway-config": "/var/lib/bailiff/gateway",
 }
 PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
@@ -131,6 +134,8 @@ EXPECTED_ENTRIES = {
     "tasks": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
     "tasks/task.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
     "docket-receipts": (b.ARCHIVER_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
+    "gateway-config": (*CUSTODIAN, 0o755, DIRECTORY),
+    "gateway-config/gateway.json": (*CUSTODIAN, 0o644, FILE),
 }
 TRANSIENT_ENTRIES = {
     re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
@@ -152,6 +157,7 @@ ONE_SHOTS = (
     "control-init",
     "rule-init",
     "docket-init",
+    "gateway-init",
     "gitea-secret",
     "gitea-admin",
     "bootstrap",
@@ -219,12 +225,14 @@ class Stack:
     def __init__(self, project, profiles=()):
         self.project = project
         self.profiles = tuple(profiles)
-        self.jaeger_port, gitea_mcp_port = free_ports(2)
+        self.jaeger_port, gitea_mcp_port, self.gateway_port = free_ports(3)
         self.env = {
             **os.environ,
             "COMPOSE_PROJECT_NAME": project,
             "GITEA_MCP_PORT": str(gitea_mcp_port),
             "JAEGER_PORT": str(self.jaeger_port),
+            "GATEWAY_PORT": str(self.gateway_port),
+            "UPSTREAM": "gitea" if "gitea" in self.profiles else "stub",
         }
         self.volumes = {
             **VOLUMES,
@@ -310,7 +318,13 @@ def test_uid_matrix(stack):
 def test_the_agent_uid_reads_no_bailiff_state(stack):
     denied = stack.probe(READ_PROBE, user=f"{b.AGENT_UID}:{b.AGENT_UID}")
     assert {name for name, refused in denied.items() if refused} == set(PRIVATE_VOLUMES)
-    assert {name for name, refused in denied.items() if not refused} == {"pins", "agent-data", "agent-public", "tasks"}
+    assert {name for name, refused in denied.items() if not refused} == {
+        "pins",
+        "agent-data",
+        "agent-public",
+        "tasks",
+        "gateway-config",
+    }
 
 
 def test_the_agent_mounts_no_bailiff_state(stack):
@@ -351,6 +365,7 @@ def test_bootstrap_rerun_idempotent(stack):
         ("control-init", "control"),
         ("rule-init", "rule"),
         ("docket-init", "docket"),
+        ("gateway-init", "gateway"),
         ("gitea-secret", "admin-secret"),
         ("agent-key", "key"),
     ]:
