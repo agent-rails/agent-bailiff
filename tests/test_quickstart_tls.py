@@ -62,6 +62,14 @@ def calls(stack, host):
     return [line for line in lines if line["method"] == "tools/call"]
 
 
+def point_gateway(stack, upstream):
+    stack.env["UPSTREAM"] = upstream
+    stack.compose("run", "--rm", "--no-deps", "-T", "gateway-init")
+    stack.compose("run", "--rm", "--no-deps", "-T", "gateway-check")
+    stack.compose("restart", "gateway", timeout=RUN_TIMEOUT_SECONDS)
+    wait_for_gateway(stack)
+
+
 def wait_for_gateway(stack):
     deadline = time.monotonic() + GATEWAY_START_SECONDS
     while True:
@@ -111,16 +119,16 @@ def test_a_redirect_to_another_host_is_not_followed(stack, proxy):
 
 
 def test_an_upstream_outside_the_configured_ca_is_refused(stack, adopter):
-    stack.env["UPSTREAM"] = "stranger"
-    stack.compose("run", "--rm", "--no-deps", "-T", "gateway-init")
-    stack.compose("restart", "gateway", timeout=RUN_TIMEOUT_SECONDS)
-    wait_for_gateway(stack)
-    adopter.issue()
-    stranger = Proxy(adopter, adopter.routes)
+    point_gateway(stack, "stranger")
     try:
-        result = stranger.call("write_note", note="allowed", text="never")
-        assert result["isError"] is True, result
-        assert calls(stack, "tls-stranger") == []
-        assert "invalid peer certificate: UnknownIssuer" in stack.compose("logs", "--no-log-prefix", "gateway")
+        adopter.issue()
+        stranger = Proxy(adopter, adopter.routes)
+        try:
+            result = stranger.call("write_note", note="allowed", text="never")
+            assert result["isError"] is True, result
+            assert calls(stack, "tls-stranger") == []
+            assert "invalid peer certificate: UnknownIssuer" in stack.compose("logs", "--no-log-prefix", "gateway")
+        finally:
+            stranger.close()
     finally:
-        stranger.close()
+        point_gateway(stack, "tls")
