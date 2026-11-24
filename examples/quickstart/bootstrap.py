@@ -8,7 +8,6 @@ import base64
 import ipaddress
 import json
 import os
-import re
 import secrets
 import stat
 import subprocess
@@ -32,6 +31,7 @@ from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
+from agent_bailiff.plain_http import allows_plain_http
 from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.scope_pattern import is_bounded
@@ -96,7 +96,6 @@ UPSTREAM_FIELDS = frozenset(
         "routes_file",
     }
 )  # fmt: skip
-COMPOSE_SERVICE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 STACK_HOSTS = frozenset(
     {
         "localhost", "issuer-init", "decide-init", "custodian-init", "control-init", "rule-init", "docket-init",
@@ -238,7 +237,7 @@ def check_upstream_url(path: Path, url: str) -> None:
     check_upstream_host(path, (parts.hostname or "").rstrip("."))
     if parts.scheme == "https" and parts.hostname:
         return
-    if parts.scheme == "http" and COMPOSE_SERVICE.fullmatch(parts.hostname or "") and port:
+    if parts.scheme == "http" and allows_plain_http(parts.hostname or "") and port:
         return
     raise BootstrapError(f"{path}: url must be http://<compose-service>:<port> or https://")
 

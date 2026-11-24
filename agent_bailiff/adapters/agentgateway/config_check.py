@@ -12,6 +12,7 @@ from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPAR
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.release import RELEASE_HEADER
+from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
 TOP_LEVEL_KEYS = frozenset({"config", "mcp"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
@@ -25,7 +26,9 @@ MCP_POLICY_KEYS = frozenset(
 )
 TARGET_KEYS = frozenset({"name", "mcp", "sse", "stdio", "openapi", "policies"})
 TARGET_POLICY_KEYS = frozenset({"backendTLS"})
+TARGET_TLS_KEYS = frozenset({"root"})
 HTTP_TARGET_KEYS = frozenset({"host", "port", "path"})
+TARGET_PATH = re.compile(r"/(?!/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]*")
 BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "requestHeaders", "metadata"})
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
 BAILIFF_METHODS = {"*": "request"}
@@ -50,8 +53,6 @@ REFUSAL_GUARD = {
     "condition": REFUSAL_SHAPE,
     "reject": "the upstream answer has the shape of a bailiff refusal",
 }
-
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,8 @@ def _check_targets(
             problems.append(f"mcp target {name!r} policies must be an object")
         else:
             _only_keys(problems, f"mcp target {name!r} policies", policies, TARGET_POLICY_KEYS)
+            if "backendTLS" in policies:
+                _check_backend_tls(problems, name, policies["backendTLS"])
     for service in sorted(services):
         target = seen.get(service)
         if target is None:
@@ -132,24 +135,64 @@ def _check_targets(
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
-        if service in effector_services and not _is_loopback_http(target["mcp"]):
+        if service in effector_services:
+            if not _is_loopback_http(target["mcp"]):
+                problems.append(
+                    f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or "
+                    "[::1]; releases and clearances must not leave the host"
+                )
+        elif not _is_protected_transport(target["mcp"]):
             problems.append(
-                f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or [::1]; "
-                "releases and clearances must not leave the host"
+                f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
+                "a host without a scheme is http, and the released credential must not cross the network in cleartext"
             )
 
 
-def _is_loopback_http(target: Mapping[str, Any]) -> bool:
+def _check_backend_tls(problems: list[str], name: str, backend_tls: object) -> None:
+    if not isinstance(backend_tls, dict):
+        problems.append(f"mcp target {name!r} policies.backendTLS must be an object with a root")
+        return
+    _only_keys(problems, f"mcp target {name!r} policies.backendTLS", backend_tls, TARGET_TLS_KEYS)
+    root = backend_tls.get("root")
+    if not isinstance(root, str) or not root:
+        problems.append(f"mcp target {name!r} policies.backendTLS root must be a non-empty string")
+
+
+def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult | None:
     host = target.get("host")
     if not isinstance(host, str):
-        return False
-    if "://" not in host:
-        return host.removeprefix("[").removesuffix("]") in LOOPBACK_HOSTS
+        return None
+    has_scheme = "://" in host
+    if has_scheme and ("port" in target or "path" in target):
+        return None
+    if "port" in target and not _is_valid_target_port(target["port"]):
+        return None
+    if "path" in target and not _is_valid_target_path(target["path"]):
+        return None
     try:
-        url = urllib.parse.urlsplit(host)
-        return url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
+        return parse_transport_url(host, bare_host=not has_scheme)
     except ValueError:
+        return None
+
+
+def _is_valid_target_port(port: object) -> bool:
+    return isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535
+
+
+def _is_valid_target_path(path: object) -> bool:
+    return isinstance(path, str) and TARGET_PATH.fullmatch(path) is not None
+
+
+def _is_protected_transport(target: Mapping[str, Any]) -> bool:
+    url = _parse_target_host(target)
+    if url is None or url.hostname is None:
         return False
+    return url.scheme == "https" or allows_plain_http(url.hostname)
+
+
+def _is_loopback_http(target: Mapping[str, Any]) -> bool:
+    url = _parse_target_host(target)
+    return url is not None and url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
 
 
 def _check_policies(problems: list[str], policies: object, expected: GatewayExpectations) -> None:

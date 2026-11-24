@@ -353,6 +353,116 @@ def test_a_duplicate_target_name_is_refused():
 
 
 @pytest.mark.parametrize(
+    "target",
+    [
+        {"host": "https://mcp.example.com/mcp"},
+        {"host": "https://10.0.0.5:8443/mcp"},
+        {"host": "http://127.0.0.1:8080/mcp"},
+        {"host": "http://localhost:8080/mcp"},
+        {"host": "http://[::1]:8080/mcp"},
+        {"host": "http://gitea-mcp:8080/mcp"},
+        {"host": "127.0.0.1"},
+        {"host": "gitea-mcp:8080"},
+        {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
+        {"host": "[::1]", "port": 8080, "path": "/mcp"},
+        {"host": "[::1]:8080"},
+    ],
+)
+def test_a_gateway_bound_target_over_https_loopback_or_a_service_name_is_accepted(target):
+    assert problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target)) == ()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"host": "http://mcp.example.com/mcp"},
+        {"host": "http://mcp.example.com:8080/mcp"},
+        {"host": "http://10.0.0.5:8080/mcp"},
+        {"host": "http://[2001:db8::1]:8080/mcp"},
+        {"host": "http://127.0.0.1.evil.example/mcp"},
+        {"host": "http://167772165:8080/mcp"},
+        {"host": "http://0xa000005:8080/mcp"},
+        {"host": "http://gitea-mcp@10.0.0.5:8080/mcp"},
+        {"host": "http://user@gitea-mcp:8080/mcp"},
+        {"host": "ftp://gitea-mcp:21/mcp"},
+        {"host": "https:///mcp"},
+        {"host": "mcp.example.com:443"},
+        {"host": "10.0.0.5"},
+        {"host": "mcp.example.com", "port": 443, "path": "/mcp"},
+        {"host": "10.0.0.5", "port": 8080, "path": "/mcp"},
+        {"host": 7},
+        {"host": "gateway#@evil.com"},
+        {"host": "gateway?@evil.com"},
+        {"host": "gateway/@evil.com"},
+        {"host": "gateway:abc"},
+        {"host": "gateway:99999"},
+        {"host": "gate\tway"},
+        {"host": "gate way"},
+        {"host": "gateway\n"},
+        {"host": "gateway\x00"},
+        {"host": "http://gateway:abc/mcp"},
+        {"host": "http://gateway:99999/mcp"},
+        {"host": "http://gate\tway/mcp"},
+        {"host": "http://gateway/mcp?@evil.com"},
+        {"host": "http://gateway/mcp#@evil.com"},
+        {"host": "http://gateway/mcp?"},
+        {"host": "http://gateway/mcp\r\n"},
+        {"host": "https://x", "port": 443, "path": "/"},
+        {"host": "http://gateway", "port": 8080, "path": "/mcp"},
+        {"host": "https://mcp.example.com", "path": "/mcp"},
+        {"host": "gateway", "port": 8080, "path": "@evil.com"},
+        {"host": "gateway", "port": 8080, "path": "mcp"},
+        {"host": "gateway", "port": 8080, "path": "//evil.com/mcp"},
+        {"host": "gateway", "port": 8080, "path": "/mcp?x=1"},
+        {"host": "gateway", "port": 8080, "path": "/mcp#x"},
+        {"host": "gateway", "port": 8080, "path": "/m\\cp"},
+        {"host": "gateway", "port": 8080, "path": "/m cp"},
+        {"host": "gateway", "port": 8080, "path": "/m\u00e9"},
+        {"host": "gateway", "port": 8080, "path": 7},
+        {"host": "gateway", "port": "8080", "path": "/mcp"},
+        {"host": "gateway", "port": True, "path": "/mcp"},
+        {"host": "gateway", "port": 0, "path": "/mcp"},
+        {"host": "gateway", "port": 65536, "path": "/mcp"},
+    ],
+)
+def test_a_gateway_bound_target_over_cleartext_to_a_remote_host_is_refused(target):
+    problems = problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target))
+    assert any("deploy" in problem and "cleartext" in problem for problem in problems), problems
+
+
+def test_backend_tls_with_only_a_root_is_accepted():
+    def change(config):
+        config["mcp"]["targets"][0].update(
+            mcp={"host": "https://mcp.example.com/mcp"}, policies={"backendTLS": {"root": "/etc/gateway/ca.pem"}}
+        )
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    "backend_tls",
+    [
+        {"root": "/etc/gateway/ca.pem", "insecure": True},
+        {"root": "/etc/gateway/ca.pem", "insecureHost": True},
+        {"root": "/etc/gateway/ca.pem", "hostname": "other.example"},
+        {"insecure": True},
+        {"root": ""},
+        {"root": 1},
+        {},
+        "/etc/gateway/ca.pem",
+        None,
+    ],
+)
+def test_backend_tls_beyond_a_non_empty_root_is_refused(backend_tls):
+    def change(config):
+        config["mcp"]["targets"][0].update(
+            mcp={"host": "https://mcp.example.com/mcp"}, policies={"backendTLS": backend_tls}
+        )
+
+    assert any("backendTLS" in problem for problem in problems_after(change))
+
+
+@pytest.mark.parametrize(
     "change",
     [
         lambda config: config.update(binds=[]),

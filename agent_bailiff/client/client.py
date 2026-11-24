@@ -11,12 +11,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult
 
 from agent_warrant.ledger import STATES
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.client.contract import Holder, PreparedCall, TokenBytes, prepare_call
+from agent_bailiff.plain_http import PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 from agent_bailiff.routes import ToolRoutes
 
 PROTOCOL_VERSION = "2025-11-25"
@@ -79,6 +80,13 @@ EFFECTOR_ERROR_ACTIONS: Mapping[str, Action] = MappingProxyType(
 
 def system_clock() -> int:
     return int(time.time())
+
+
+def check_gateway_url(url: str) -> SplitResult:
+    parts = parse_transport_url(url)
+    if parts.scheme == "http" and not allows_plain_http(parts.hostname or ""):
+        raise ValueError(f"an http gateway url must name {PLAIN_HTTP_HOSTS}; use https for any other host")
+    return parts
 
 
 @dataclass(frozen=True)
@@ -175,9 +183,7 @@ class BailiffClient:
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
     ) -> None:
-        parts = urlsplit(url)
-        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.query or parts.fragment:
-            raise ValueError("url must be an http or https URL without a query or fragment")
+        parts = check_gateway_url(url)
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self._parts = parts

@@ -110,6 +110,8 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"service": "k8s"}, r"k8s\.\* tools are routed only from their catalog"),
         ({"url": "http://mcp.example.com:8080/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "http://gitea-mcp/mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "http://167772165:8080/mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "http://0xa000005:8080/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "ftp://gitea-mcp:21/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "https:///mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "https://user:secret@mcp.example.com/mcp"}, "no credentials, query or fragment"),
