@@ -81,6 +81,7 @@ def test_the_in_flight_defaults_hold_a_client_deadline_with_margin():
         DEFAULT_INFLIGHT_PER_TENANT,
     )
     assert DEFAULT_INFLIGHT_TTL == 180
+    assert (DEFAULT_INFLIGHT_MAX, DEFAULT_INFLIGHT_PER_TENANT) == (4096, 512)
 
 
 def test_the_in_flight_ttl_outlasts_the_upstream_timeout_cap_by_thirty_seconds():

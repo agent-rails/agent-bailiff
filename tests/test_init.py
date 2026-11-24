@@ -176,6 +176,7 @@ def test_init_writes_private_keys_and_configs_that_load(root, ledger_dir, capsys
         DEFAULT_INFLIGHT_MAX_BYTES,
         DEFAULT_INFLIGHT_PER_TENANT,
     )
+    assert custodian.inflight_per_tenant == 512
     assert (custodian.response_socket, custodian.response_workers) == (sockets["redactor"], DEFAULT_RESPONSE_WORKERS)
     assert set(docket.writers) == {"decide.example", "custodian.example", "control"}
     assert set(control.writers) == {"decide.example", "custodian.example"}
