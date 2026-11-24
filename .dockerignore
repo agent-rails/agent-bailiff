@@ -9,6 +9,8 @@ examples
 __pycache__
 !examples/quickstart/bootstrap.py
 !examples/quickstart/agent.py
+!examples/quickstart/baseline.py
+!examples/quickstart/proxy_bench.py
 !examples/quickstart/rule.py
 !examples/quickstart/upstreams/*.json
 !examples/quickstart/gateway.json

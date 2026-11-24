@@ -27,8 +27,10 @@ from test_decide import (
     PRINCIPAL,
     SIGNER_CUSTODIAN_ID,
     TENANT,
+    BackwardsClock,
     ExplodingSuspension,
     RunningSink,
+    SteppingClock,
     Suspension,
     make_request,
     make_root,
@@ -248,7 +250,16 @@ def make_decider(open_docket, sink, writer):
 def make_custodian(open_docket, sink, reader, state):
     opened = []
 
-    def make(docket=None, ledger=None, claims=None, suspension=None, bindings=None, release_signer=None, **config):
+    def make(
+        docket=None,
+        ledger=None,
+        claims=None,
+        suspension=None,
+        bindings=None,
+        release_signer=None,
+        monotonic_ns=None,
+        **config,
+    ):
         options = {
             "custodian_id": CUSTODIAN_ID,
             "decider_id": DECIDER_ID,
@@ -275,6 +286,7 @@ def make_custodian(open_docket, sink, reader, state):
             docket=docket or open_docket("custodian", "custodian-1", CUSTODIAN_KEY),
             suspension=suspension or Suspension(),
             release_signer=release_signer,
+            **({} if monotonic_ns is None else {"monotonic_ns": monotonic_ns}),
         )
 
     yield make
@@ -868,3 +880,35 @@ def test_an_unreadable_suspension_state_refuses_the_release(make_custodian, issu
     result = make_custodian(suspension=ExplodingSuspension()).release(token, request, NOW + 1)
     assert not result.ok
     assert [entry for entry in custodian_entries(workdir) if entry.decision == "release"] == []
+
+
+def test_the_release_entry_records_the_time_the_release_took_in_whole_milliseconds(make_custodian, issue, workdir):
+    request, token = issue()
+    make_custodian(monotonic_ns=SteppingClock(6)).release(token, request, NOW + 1)
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.latency_ms) == ("release", 6)
+
+
+def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodian, workdir):
+    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    make_custodian(monotonic_ns=SteppingClock(9)).release(token, request, NOW + 1)
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.reason, entry.latency_ms) == ("refuse", "out_of_scope", 9)
+
+
+def test_a_clock_that_steps_back_still_records_the_refusal(make_custodian, workdir):
+    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    make_custodian(monotonic_ns=BackwardsClock()).release(token, request, NOW + 1)
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.reason, entry.latency_ms) == ("refuse", "out_of_scope", 0)
+
+
+def test_the_default_clock_records_a_non_negative_integer_on_release(make_custodian, issue, workdir):
+    request, token = issue()
+    make_custodian().release(token, request, NOW + 1)
+    [entry] = custodian_entries(workdir)
+    assert isinstance(entry.latency_ms, int) and entry.latency_ms >= 0

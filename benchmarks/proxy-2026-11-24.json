@@ -1,0 +1,27 @@
+{
+  "recorded_at": "2026-11-24T12:42:04+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "docker": "29.6.2"
+  },
+  "tool": "list_issues",
+  "measured_at": "the agent container, over the stdio pipes of `agent-bailiff proxy run`",
+  "calls": 60,
+  "scripted_out_of_scope_percent": 20,
+  "initialize_ms": 523.8,
+  "tools_list_ms": 33.9,
+  "first_call_ms": 45.0,
+  "warm_calls": 59,
+  "p50_ms": 25.6,
+  "p99_ms": 152.4,
+  "in_scope_p50_ms": 26.5,
+  "out_of_scope_p50_ms": 6.9,
+  "outcomes": {
+    "refused: out_of_scope": 12,
+    "result": 48
+  },
+  "refusals_per_100_calls": 20.0,
+  "setup_retries": 0,
+  "retries_per_call": 0.0
+}

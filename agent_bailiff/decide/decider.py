@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -84,6 +86,7 @@ class Decider:
         signing_key: Ed25519PrivateKey,
         costs: CostTable,
         refusal_budget: RefusalBudget | None = None,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self._config = config
         self._ledger = ledger
@@ -95,11 +98,13 @@ class Decider:
         self._signing_key = signing_key
         self._costs = costs
         self._refusal_budget = refusal_budget or RefusalBudget()
+        self._monotonic_ns = monotonic_ns
         self._issued: dict[str, _Issued] = {}
         self._in_flight: set[str] = set()
         self._lock = threading.Lock()
 
     def check(self, request: OperationRequest, now: int) -> Decision:
+        started = self._monotonic_ns()
         entry = Entry(
             entry_id=HOP,
             trace_id=_trace_id(getattr(request, "trace_id", None)),
@@ -109,12 +114,12 @@ class Decider:
             at=now if isinstance(now, int) and not isinstance(now, bool) and now >= 0 else 0,
         )
         try:
-            return self._check(request, now, entry)
+            return self._check(request, now, entry, started)
         except _Refusal as refusal:
-            return self._refuse(refusal.reason, refusal.entry)
+            return self._refuse(refusal.reason, refusal.entry, started)
         except Exception:
             logger.exception("decide failed with an internal error")
-            return self._refuse("internal_error", entry)
+            return self._refuse("internal_error", entry, started)
 
     def record_outcome(self, op_id: str, outcome: str, receipt_digest: str | None = None, *, now: int) -> str:
         if outcome not in OUTCOMES:
@@ -193,7 +198,7 @@ class Decider:
             reconciled.append(reservation.op_id)
         return tuple(reconciled)
 
-    def _check(self, request: OperationRequest, now: int, entry: Entry) -> Decision:
+    def _check(self, request: OperationRequest, now: int, entry: Entry, started: int) -> Decision:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
             raise ValueError("now must be a non-negative integer")
         try:
@@ -222,7 +227,16 @@ class Decider:
         entry = _with_who(entry, chain.root, chain.links, chain.leaf_subject)
         try:
             return self._decide(
-                request, now, entry, snapshot, digest, chain.root, chain.links, chain.leaf_scope, chain.leaf_subject
+                request,
+                now,
+                entry,
+                snapshot,
+                digest,
+                chain.root,
+                chain.links,
+                chain.leaf_scope,
+                chain.leaf_subject,
+                started,
             )
         except _Refusal:
             raise
@@ -241,6 +255,7 @@ class Decider:
         links: tuple[ChainLink, ...],
         scope: dict[str, Any],
         agent_key: str,
+        started: int,
     ) -> Decision:
         operation_args_digest = snapshot.digest
         leaf_binding = links[-1].binding() if links else root.binding()
@@ -313,7 +328,12 @@ class Decider:
         with self._lock:
             self._issued[op_id] = _Issued(root.tenant_id, root.task_id, expires_at, linked)
         allow_entry = replace(
-            entry, entry_id=entry_id, decision="allow", reason="ok", clearance_digest=token_hash(token)
+            entry,
+            entry_id=entry_id,
+            decision="allow",
+            reason="ok",
+            clearance_digest=token_hash(token),
+            latency_ms=self._elapsed_ms(started),
         )
         try:
             record = self._docket.append(allow_entry)
@@ -378,7 +398,7 @@ class Decider:
             and bool(record.token)
         )
 
-    def _refuse(self, reason: str, entry: Entry) -> Decision:
+    def _refuse(self, reason: str, entry: Entry, started: int) -> Decision:
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
             logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
@@ -409,13 +429,18 @@ class Decider:
             )
         entry_id: str | None
         try:
-            entry_id = self._append(replace(entry, decision="refuse", reason=recorded))
+            entry_id = self._append(
+                replace(entry, decision="refuse", reason=recorded, latency_ms=self._elapsed_ms(started))
+            )
         except Exception as error:
             logger.warning("docket entry for a refusal may not have been written", exc_info=True)
             if isinstance(error, DocketError) and error.reason not in UNACKNOWLEDGED:
                 self._refusal_budget.refund(tenant, task, root, reason, admission)
             entry_id = None
         return Decision(allowed=False, reason=reason, entry_id=entry_id, op_id=entry.op_id)
+
+    def _elapsed_ms(self, started: int) -> int:
+        return max(0, (self._monotonic_ns() - started) // 1_000_000)
 
     def _append(self, entry: Entry) -> str:
         entry_id = uuid.uuid4().hex

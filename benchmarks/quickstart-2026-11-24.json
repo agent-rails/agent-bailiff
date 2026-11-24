@@ -1,0 +1,96 @@
+{
+  "recorded_at": "2026-11-24T12:36:57+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "docker": "29.6.2"
+  },
+  "calls_per_client": 20,
+  "tool": "list_issues",
+  "levels": [
+    {
+      "clients": 1,
+      "calls": 20,
+      "seconds": 0.785,
+      "calls_per_second": 25.5,
+      "p50_ms": 33.8,
+      "p99_ms": 95.5,
+      "outcomes": {
+        "result": 20
+      },
+      "docket_unavailable_rate": 0.0,
+      "baseline_p50_ms": 10.8,
+      "baseline_p99_ms": 15.1,
+      "added_p50_ms": 23.0,
+      "added_p99_ms": 80.4,
+      "baseline_outcomes": {
+        "result": 20
+      },
+      "exporter_backlog_records": 32,
+      "exporter_catchup_seconds": 1.7
+    },
+    {
+      "clients": 4,
+      "calls": 80,
+      "seconds": 1.333,
+      "calls_per_second": 60.0,
+      "p50_ms": 51.3,
+      "p99_ms": 205.3,
+      "outcomes": {
+        "result": 80
+      },
+      "docket_unavailable_rate": 0.0,
+      "baseline_p50_ms": 15.2,
+      "baseline_p99_ms": 250.6,
+      "added_p50_ms": 36.1,
+      "added_p99_ms": -45.3,
+      "baseline_outcomes": {
+        "result": 80
+      },
+      "exporter_backlog_records": 64,
+      "exporter_catchup_seconds": 1.7
+    },
+    {
+      "clients": 16,
+      "calls": 320,
+      "seconds": 5.995,
+      "calls_per_second": 53.4,
+      "p50_ms": 151.6,
+      "p99_ms": 1597.2,
+      "outcomes": {
+        "result": 320
+      },
+      "docket_unavailable_rate": 0.0,
+      "baseline_p50_ms": 48.8,
+      "baseline_p99_ms": 1046.0,
+      "added_p50_ms": 102.8,
+      "added_p99_ms": 551.2,
+      "baseline_outcomes": {
+        "result": 320
+      },
+      "exporter_backlog_records": 17,
+      "exporter_catchup_seconds": 1.7
+    },
+    {
+      "clients": 32,
+      "calls": 640,
+      "seconds": 14.188,
+      "calls_per_second": 45.1,
+      "p50_ms": 324.5,
+      "p99_ms": 3270.0,
+      "outcomes": {
+        "result": 640
+      },
+      "docket_unavailable_rate": 0.0,
+      "baseline_p50_ms": 179.8,
+      "baseline_p99_ms": 2522.1,
+      "added_p50_ms": 144.7,
+      "added_p99_ms": 747.9,
+      "baseline_outcomes": {
+        "result": 640
+      },
+      "exporter_backlog_records": 0,
+      "exporter_catchup_seconds": 0.3
+    }
+  ]
+}

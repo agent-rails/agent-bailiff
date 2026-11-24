@@ -30,13 +30,27 @@ LOGGED_LEVELS = (" WARNING ", " ERROR ", "\twarn\t", "\terror\t", "Z Error: ", "
 MAX_LOGGED_LINES = 60
 
 
+def added_latency(level, direct):
+    return {
+        "baseline_p50_ms": direct["p50_ms"],
+        "baseline_p99_ms": direct["p99_ms"],
+        "added_p50_ms": round(level["p50_ms"] - direct["p50_ms"], 1),
+        "added_p99_ms": round(level["p99_ms"] - direct["p99_ms"], 1),
+    }
+
+
 def measure(stack, clients):
     stack.compose("run", "--rm", "--no-deps", "gitea-task", "/app/quickstart/bootstrap.py", "issue-load")
     arguments = ["--clients", str(clients), "--calls", str(CALLS_PER_CLIENT)]
+    direct = json.loads(
+        stack.compose("run", "--rm", "--no-deps", "bootstrap", "/app/quickstart/baseline.py", *arguments)
+    )
     level = json.loads(stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "load", *arguments))
     export = wait_for_export(stack)
     return {
         **level,
+        **added_latency(level, direct),
+        "baseline_outcomes": direct["outcomes"],
         "exporter_backlog_records": export["backlog"],
         "exporter_catchup_seconds": round(export["seconds"], 1),
     }
@@ -59,6 +73,7 @@ def test_quickstart_load(stack):
     levels = [measure(stack, clients) for clients in CLIENTS]
     for level in levels:
         assert level["calls"] == level["clients"] * CALLS_PER_CLIENT
+        assert level["baseline_outcomes"] == {"result": level["calls"]}, level
         assert set(level["outcomes"]) <= ACCEPTED, f"{level}\n{service_problems(stack)}"
         assert level["docket_unavailable_rate"] <= MAX_DOCKET_UNAVAILABLE_RATE, f"{level}\n{service_problems(stack)}"
     now = datetime.now(UTC)
