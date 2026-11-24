@@ -370,7 +370,15 @@ def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key
 def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_file, key_dir):
     routes = tmp_path / "routes.json"
     routes.write_text(json.dumps(ROUTE_DOCUMENT))
-    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--routes", str(routes)]
+    arguments = [
+        "--allow-shared-user",
+        "--task-file",
+        str(task_file),
+        "--key-dir",
+        str(key_dir),
+        "--routes",
+        str(routes),
+    ]
     result = subprocess.run(
         [sys.executable, "-m", "agent_bailiff.cli", "proxy", "run", *arguments, "--gateway-url", "http://10.0.0.5/mcp"],
         stdin=subprocess.DEVNULL,
