@@ -1,0 +1,42 @@
+x-tls-stub: &tls-stub
+  image: agent-bailiff-quickstart:dev
+  user: "10011:10011"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 128m
+  pids_limit: 64
+  volumes:
+    - ${BAILIFF_TEST_CERTS:?set BAILIFF_TEST_CERTS}:/certs:ro
+  networks: [egress]
+
+services:
+  tls-upstream:
+    <<: *tls-stub
+    command:
+      - /app/quickstart/stub-upstream/server.py
+      - --port=8443
+      - --certificate=/certs/tls-upstream.pem
+      - --private-key=/certs/tls-upstream.key
+      - --redirect=read_note=https://tls-other:8443/mcp
+
+  tls-other:
+    <<: *tls-stub
+    command:
+      - /app/quickstart/stub-upstream/server.py
+      - --port=8443
+      - --certificate=/certs/tls-other.pem
+      - --private-key=/certs/tls-other.key
+
+  tls-stranger:
+    <<: *tls-stub
+    command:
+      - /app/quickstart/stub-upstream/server.py
+      - --port=8443
+      - --certificate=/certs/tls-stranger.pem
+      - --private-key=/certs/tls-stranger.key
+
+  gateway:
+    depends_on:
+      tls-upstream:
+        condition: service_started

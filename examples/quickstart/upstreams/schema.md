@@ -1,6 +1,6 @@
 # Upstream config, version 1
 
-Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (default `upstreams/gitea.json`), in the `decide`, `custodian` and `bootstrap` steps. It sets the routes, the cost table, and the credential bindings for one Streamable HTTP MCP server.
+Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-stub}.json`; set `BAILIFF_UPSTREAMS` to mount another directory as `upstreams/`), in the `decide`, `custodian` and `bootstrap` steps. It sets the routes, the cost table, and the credential bindings for one Streamable HTTP MCP server.
 
 ```json
 {
@@ -23,6 +23,9 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (default `upstreams/gite
 | `credential_id`, `target` | The custodian credential the gateway injects for every route. Store it with `agent-bailiff custodian put-credential --tenant quickstart --credential-id <id> --target <target>`. |
 | `credential_header` | HTTP field name the custodian sets, for example `Authorization`. |
 | `binding_resource` | Resource the credential binding covers; a wildcard only as a final `/*` segment. |
+| `ca_file` | Optional, `https://` only. PEM certificates beside this file; the gateway trusts only these for the upstream, not the system roots. Bootstrap keeps the certificates alone, so a bundled private key is dropped, and fails on a file with none. Without it the gateway uses its system roots. |
 | `routes_file` | Route table beside this file: `{"routes": [...]}`, non-empty, every route on `service`, every resource filled. `agent-bailiff routes generate` drafts one from the server's `tools/list`. |
 
-The file is strict JSON of at most 64 KiB with exactly these fields; duplicate keys, symlinks and unknown fields fail bootstrap. Every routed tool costs 1 unit of task budget.
+The file is strict JSON of at most 64 KiB with exactly these fields, `ca_file` optional; duplicate keys, symlinks and unknown fields fail bootstrap. Every routed tool costs 1 unit of task budget.
+
+The gateway reaches only the one configured upstream. It does not follow redirects: a `307` comes back to the agent as `outcome_unknown: http_307`, and the redirect target receives nothing.

@@ -4,7 +4,7 @@ A Docker Compose stack in which a scripted agent calls Gitea through agentgatewa
 
 Requirements: Docker with Compose v2.20 or later and `jq`. Run every command from this directory.
 
-The upstream is chosen by `UPSTREAM`, which names a config in `upstreams/` (see [`upstreams/schema.md`](upstreams/schema.md)). Plain `docker compose up` runs `stub`: `stub-upstream`, an in-repo Streamable HTTP MCP server with in-memory notes, and no Gitea. The walkthrough below uses Gitea, which runs only under the `gitea` profile, so first:
+The upstream is chosen by `UPSTREAM`, which names a config in `upstreams/`, or in the directory `BAILIFF_UPSTREAMS` names (see [`upstreams/schema.md`](upstreams/schema.md)). Plain `docker compose up` runs `stub`: `stub-upstream`, an in-repo Streamable HTTP MCP server with in-memory notes, and no Gitea. The walkthrough below uses Gitea, which runs only under the `gitea` profile, so first:
 
 ```console
 $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
@@ -192,7 +192,7 @@ $ rm -f run.json inject.json
 $ docker compose --profile "*" down --volumes --remove-orphans
 ```
 
-`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the Gitea stack, `tests/test_quickstart_default.py` the default stub stack, and `tests/test_adopt_stack.py` the adopter path on it (credential, route draft, agent key, task issue, stdio proxy), under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
+`tests/test_quickstart_stack.py`, `tests/test_quickstart.py`, `tests/test_quickstart_trace.py`, `tests/test_quickstart_canary.py` and `tests/test_quickstart_load.py` run the Gitea stack, `tests/test_quickstart_default.py` the default stub stack, `tests/test_adopt_stack.py` the adopter path on it (credential, route draft, agent key, task issue, stdio proxy), and `tests/test_quickstart_tls.py` an `https://` upstream behind a configured CA, under `AGENT_BAILIFF_TEST_QUICKSTART=1` (load also needs `AGENT_BAILIFF_TEST_QUICKSTART_LOAD=1`).
 
 ## What this shows
 

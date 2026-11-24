@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import ssl
 import sys
 import threading
 import urllib.error
@@ -95,3 +96,56 @@ def test_an_oversized_body_is_refused(server):
     with pytest.raises(urllib.error.HTTPError) as error:
         urllib.request.urlopen(request, timeout=5)
     assert error.value.code == 413
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def start(upstream):
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    return upstream
+
+
+def test_a_redirected_tool_answers_307_and_other_tools_still_work():
+    upstream = start(stub.StubUpstream(0, {"delete_all_notes": "https://elsewhere.example/mcp"}))
+    url = f"http://127.0.0.1:{upstream.server_address[1]}/mcp"
+    try:
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "delete_all_notes"}}
+        request = urllib.request.Request(url, json.dumps(body).encode(), {"content-type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.build_opener(NoRedirect).open(request, timeout=5)
+        assert (error.value.code, error.value.headers["location"]) == (307, "https://elsewhere.example/mcp")
+        assert call(url, "read_note", {"note": "x"})["isError"] is False
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+
+
+def test_it_serves_tls_with_the_given_certificate(tmp_path):
+    from test_quickstart_bootstrap import issue_certificate, pem, private_pem
+
+    ca = issue_certificate("stub test ca")
+    leaf, key = issue_certificate("localhost", issuer=ca, dns_name="localhost")
+    (tmp_path / "server.pem").write_bytes(pem(leaf))
+    (tmp_path / "server.key").write_bytes(private_pem(key))
+    upstream = stub.StubUpstream(0)
+    upstream.serve_tls(tmp_path / "server.pem", tmp_path / "server.key")
+    start(upstream)
+    try:
+        context = ssl.create_default_context(cadata=pem(ca[0]).decode())
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        request = urllib.request.Request(
+            f"https://localhost:{upstream.server_address[1]}/mcp",
+            json.dumps(body).encode(),
+            {"content-type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5, context=context) as response:
+            assert response.status == 200
+        with pytest.raises(urllib.error.URLError, match="CERTIFICATE_VERIFY_FAILED"):
+            urllib.request.urlopen(request, timeout=5, context=ssl.create_default_context())
+    finally:
+        upstream.shutdown()
+        upstream.server_close()

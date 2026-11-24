@@ -23,6 +23,8 @@ from urllib.parse import urlsplit
 
 from agent_warrant.identity import encode_public_key, is_valid_public_key
 from agent_warrant.task_root import issue_task_root
+from cryptography import x509
+from cryptography.hazmat.primitives.serialization import Encoding
 
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.bindings import HEADER_NAME
@@ -81,10 +83,12 @@ QUICKSTART_UPSTREAMS = Path(__file__).resolve().parent / "upstreams"
 UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "stub.json"))
 GATEWAY_TEMPLATE = Path(__file__).resolve().parent / "gateway.json"
 GATEWAY_CONFIG = STATE / "gateway" / "gateway.json"
+GATEWAY_CA = STATE / "gateway" / "ca.pem"
 MAX_GATEWAY_BYTES = 64 * 1024
 UPSTREAM_VERSION = 1
 MAX_UPSTREAM_BYTES = 64 * 1024
 MAX_ROUTES_BYTES = 1 << 20
+MAX_CA_BYTES = 64 * 1024
 UPSTREAM_FIELDS = frozenset(
     {
         "version", "service", "url", "credential_id", "credential_header", "target", "binding_resource",
@@ -92,6 +96,7 @@ UPSTREAM_FIELDS = frozenset(
     }
 )  # fmt: skip
 COMPOSE_SERVICE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 TASK_SCOPE = {
     "tools": ["gitea.issues.list", "gitea.issues.read"],
     "resources": ["gitea/repos/quickstart/demo/*"],
@@ -134,6 +139,7 @@ class Upstream:
     target: str
     binding_resource: str
     routes: tuple[dict[str, Any], ...]
+    ca_pem: bytes | None = None
 
     @property
     def costs(self) -> dict[str, Any]:
@@ -142,12 +148,17 @@ class Upstream:
 
 def load_upstream(path: Path) -> Upstream:
     document = read_strict(path, MAX_UPSTREAM_BYTES)
-    if not isinstance(document, dict) or set(document) != UPSTREAM_FIELDS:
-        raise BootstrapError(f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}")
+    if (
+        not isinstance(document, dict)
+        or not UPSTREAM_FIELDS <= set(document) <= UPSTREAM_FIELDS | UPSTREAM_OPTIONAL_FIELDS
+    ):
+        raise BootstrapError(
+            f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}, and optionally ca_file"
+        )
     version = document["version"]
     if isinstance(version, bool) or version != UPSTREAM_VERSION:
         raise BootstrapError(f"{path}: version must be {UPSTREAM_VERSION}")
-    text = {name: document[name] for name in UPSTREAM_FIELDS - {"version"}}
+    text = {name: document[name] for name in set(document) - {"version"}}
     for name, value in text.items():
         if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
             raise BootstrapError(f"{path}: {name} must be a non-empty ASCII printable string without whitespace")
@@ -159,17 +170,39 @@ def load_upstream(path: Path) -> Upstream:
         raise BootstrapError(f"{path}: credential_header must be an HTTP field name token")
     if not is_bounded(text["binding_resource"]):
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
-    routes_file = text["routes_file"]
-    if "/" in routes_file or routes_file in (".", ".."):
-        raise BootstrapError(f"{path}: routes_file must name a file beside the upstream config")
-    routes = load_upstream_routes(path.parent / routes_file, text["service"])
+    routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
+    ca_pem = load_upstream_ca(path, text["ca_file"], text["url"]) if "ca_file" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
-        text["binding_resource"], routes,
+        text["binding_resource"], routes, ca_pem,
     )  # fmt: skip
 
 
+def beside(path: Path, field: str, name: str) -> Path:
+    if "/" in name or name in (".", ".."):
+        raise BootstrapError(f"{path}: {field} must name a file beside the upstream config")
+    return path.parent / name
+
+
+def load_upstream_ca(path: Path, ca_file: str, url: str) -> bytes:
+    if urlsplit(url).scheme != "https":
+        raise BootstrapError(f"{path}: ca_file needs an https:// url")
+    ca_path = beside(path, "ca_file", ca_file)
+    try:
+        certificates = x509.load_pem_x509_certificates(read_bounded(ca_path, MAX_CA_BYTES))
+    except ValueError as error:
+        raise BootstrapError(f"{ca_path} must hold PEM certificates: {error}") from None
+    return b"".join(certificate.public_bytes(Encoding.PEM) for certificate in certificates)
+
+
 def read_strict(path: Path, limit: int) -> Any:
+    try:
+        return parse_strict_json(read_bounded(path, limit))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise BootstrapError(f"{path} is not strict JSON: {error}") from None
+
+
+def read_bounded(path: Path, limit: int) -> bytes:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as error:
@@ -182,10 +215,7 @@ def read_strict(path: Path, limit: int) -> Any:
         os.close(fd)
     if len(raw) > limit:
         raise BootstrapError(f"{path} is larger than {limit} bytes")
-    try:
-        return parse_strict_json(raw)
-    except (UnicodeDecodeError, ValueError) as error:
-        raise BootstrapError(f"{path} is not strict JSON: {error}") from None
+    return raw
 
 
 def check_upstream_url(path: Path, url: str) -> None:
@@ -355,18 +385,27 @@ def gateway_document(upstream: Upstream) -> dict[str, Any]:
     document = read_strict(GATEWAY_TEMPLATE, MAX_GATEWAY_BYTES)
     if document["mcp"]["targets"] != []:
         raise BootstrapError(f"{GATEWAY_TEMPLATE} must leave mcp.targets empty for the upstream config to fill")
-    document["mcp"]["targets"] = [{"name": upstream.target, "mcp": {"host": upstream.url}}]
+    target: dict[str, Any] = {"name": upstream.target, "mcp": {"host": upstream.url}}
+    if upstream.ca_pem is not None:
+        target["policies"] = {"backendTLS": {"root": str(GATEWAY_CA)}}
+    document["mcp"]["targets"] = [target]
     return document
 
 
 def init_gateway() -> str:
-    document = gateway_document(load_upstream(UPSTREAM_FILE))
+    upstream = load_upstream(UPSTREAM_FILE)
+    document = gateway_document(upstream)
+    current_ca = read_bounded(GATEWAY_CA, MAX_CA_BYTES) if GATEWAY_CA.exists() else None
     outcome = "created"
     if GATEWAY_CONFIG.exists():
-        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document:
+        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document and current_ca == upstream.ca_pem:
             return "kept"
         outcome = "updated"
+    if upstream.ca_pem is not None:
+        write_public_bytes(GATEWAY_CA, upstream.ca_pem)
     write_public(GATEWAY_CONFIG, document)
+    if upstream.ca_pem is None and current_ca is not None:
+        GATEWAY_CA.unlink()
     return outcome
 
 
@@ -630,10 +669,14 @@ def task_document(subject: str, purpose: str, budget: int) -> dict[str, str]:
 
 
 def write_public(path: Path, document: Any) -> None:
+    write_public_bytes(path, json.dumps(document).encode())
+
+
+def write_public_bytes(path: Path, data: bytes) -> None:
     staged = path.with_name(f".{path.name}.new")
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
-    with os.fdopen(fd, "w") as target:
-        target.write(json.dumps(document))
+    with os.fdopen(fd, "wb") as target:
+        target.write(data)
         target.flush()
         os.fsync(target.fileno())
     os.replace(staged, path)

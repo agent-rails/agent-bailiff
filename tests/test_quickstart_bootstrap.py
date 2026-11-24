@@ -1,7 +1,13 @@
+import datetime
 import json
 import os
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+from cryptography.x509.oid import NameOID
 from test_quickstart_stack import b
 
 
@@ -179,3 +185,113 @@ ROUTE = {"service": "gitea", "name": "list_issues", "tool": "gitea.issues.list",
 def test_invalid_upstream_routes_fail_bootstrap(tmp_path, routes, message):
     with pytest.raises(b.BootstrapError, match=message):
         b.load_upstream(write_upstream(tmp_path, routes=routes))
+
+
+KEY_USAGES = (
+    "digital_signature", "content_commitment", "key_encipherment", "data_encipherment", "key_agreement",
+    "key_cert_sign", "crl_sign", "encipher_only", "decipher_only",
+)  # fmt: skip
+
+
+def issue_certificate(common_name, issuer=None, dns_name=None):
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    signer_name, signer_key = (issuer[0].subject, issuer[1]) if issuer else (subject, key)
+    now = datetime.datetime.now(datetime.UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(signer_name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=issuer is None, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(signer_key.public_key()), critical=False)
+    )
+    if issuer is None:
+        usage = {name: False for name in KEY_USAGES}
+        builder = builder.add_extension(
+            x509.KeyUsage(**{**usage, "key_cert_sign": True, "crl_sign": True}), critical=True
+        )
+    if dns_name:
+        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+    return builder.sign(signer_key, hashes.SHA256()), key
+
+
+def pem(certificate):
+    return certificate.public_bytes(Encoding.PEM)
+
+
+def private_pem(key):
+    return key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+
+
+HTTPS_URL = "https://mcp.example.com/mcp"
+
+
+def write_ca(tmp_path, data, url=HTTPS_URL):
+    (tmp_path / "ca.pem").write_bytes(data)
+    return write_upstream(tmp_path, url=url, ca_file="ca.pem")
+
+
+def test_a_ca_file_is_kept_as_its_certificates_only(tmp_path):
+    ca, key = issue_certificate("quickstart test ca")
+    upstream = b.load_upstream(write_ca(tmp_path, private_pem(key) + pem(ca)))
+    assert upstream.ca_pem == pem(ca)
+    assert b"PRIVATE KEY" not in upstream.ca_pem
+
+
+def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
+    ca, _ = issue_certificate("quickstart test ca")
+    upstream = b.load_upstream(write_ca(tmp_path, pem(ca)))
+    assert b.gateway_document(upstream)["mcp"]["targets"] == [
+        {"name": upstream.target, "mcp": {"host": HTTPS_URL}, "policies": {"backendTLS": {"root": str(b.GATEWAY_CA)}}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "data, url, message",
+    [
+        (b"not a certificate", HTTPS_URL, "must hold PEM certificates"),
+        (b"", HTTPS_URL, "must hold PEM certificates"),
+        (b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", HTTPS_URL, "must hold PEM certificates"),
+        (b"x" * (64 * 1024 + 1), HTTPS_URL, "larger than 65536 bytes"),
+        (None, "http://stub-upstream:8080/mcp", "ca_file needs an https:// url"),
+    ],
+)
+def test_an_invalid_ca_file_fails_bootstrap(tmp_path, data, url, message):
+    if data is None:
+        data = pem(issue_certificate("quickstart test ca")[0])
+    with pytest.raises(b.BootstrapError, match=message):
+        b.load_upstream(write_ca(tmp_path, data, url))
+
+
+@pytest.mark.parametrize("name", ["../ca.pem", "..", "link.pem", "absent.pem"])
+def test_a_ca_file_outside_the_upstream_directory_or_symlinked_fails_bootstrap(tmp_path, name):
+    (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
+    (tmp_path / "link.pem").symlink_to(tmp_path / "ca.pem")
+    with pytest.raises(b.BootstrapError, match="a file beside the upstream config|cannot open"):
+        b.load_upstream(write_upstream(tmp_path, url=HTTPS_URL, ca_file=name))
+
+
+def test_init_gateway_writes_keeps_and_removes_the_ca(tmp_path, monkeypatch):
+    upstreams = tmp_path / "upstreams"
+    upstreams.mkdir()
+    ca, _ = issue_certificate("quickstart test ca")
+    monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
+    monkeypatch.setattr(b, "GATEWAY_CA", tmp_path / "ca.pem")
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_ca(upstreams, pem(ca)))
+    assert b.init_gateway() == "created"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(ca)
+    assert (tmp_path / "ca.pem").stat().st_mode & 0o777 == 0o644
+    assert b.init_gateway() == "kept"
+    other, _ = issue_certificate("another test ca")
+    (upstreams / "ca.pem").write_bytes(pem(other))
+    assert b.init_gateway() == "updated"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(other)
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert b.init_gateway() == "updated"
+    assert not (tmp_path / "ca.pem").exists()
+    assert "policies" not in json.loads((tmp_path / "gateway.json").read_text())["mcp"]["targets"][0]

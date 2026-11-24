@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import json
 import os
@@ -222,9 +223,10 @@ def free_ports(count):
 
 
 class Stack:
-    def __init__(self, project, profiles=()):
+    def __init__(self, project, profiles=(), files=(), env=None):
         self.project = project
         self.profiles = tuple(profiles)
+        self.files = (COMPOSE_FILE, *files)
         self.jaeger_port, gitea_mcp_port, self.gateway_port = free_ports(3)
         self.env = {
             **os.environ,
@@ -233,6 +235,7 @@ class Stack:
             "JAEGER_PORT": str(self.jaeger_port),
             "GATEWAY_PORT": str(self.gateway_port),
             "UPSTREAM": "gitea" if "gitea" in self.profiles else "stub",
+            **(env or {}),
         }
         self.volumes = {
             **VOLUMES,
@@ -241,12 +244,15 @@ class Stack:
 
     def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS, stdin=None, expect=0):
         selected = [arg for profile in self.profiles for arg in ("--profile", profile)]
-        command = ["docker", "compose", "--file", str(COMPOSE_FILE), *selected, *arguments]
+        command = ["docker", "compose", *self.file_arguments(), *selected, *arguments]
         result = subprocess.run(
             command, env=self.env, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
         )
         assert result.returncode == expect, f"{' '.join(arguments)} failed:\n{result.stdout}\n{result.stderr}"
         return result.stdout
+
+    def file_arguments(self):
+        return [arg for path in self.files for arg in ("--file", str(path))]
 
     def container(self, service):
         return self.compose("ps", "--all", "--quiet", service).strip()
@@ -263,30 +269,25 @@ class Stack:
         return json.loads(result.stdout)
 
 
-@pytest.fixture(scope="module")
-def stack(request):
-    stack = Stack(f"bailiff-qs-{uuid.uuid4().hex[:8]}", getattr(request.module, "PROFILES", ()))
+@contextlib.contextmanager
+def started(stack):
     try:
         stack.compose("up", "--build", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
         yield stack
     finally:
         subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--file",
-                str(COMPOSE_FILE),
-                "--profile",
-                "*",
-                "down",
-                "--volumes",
-                "--remove-orphans",
-            ],
+            ["docker", "compose", *stack.file_arguments(), "--profile", "*", "down", "--volumes", "--remove-orphans"],
             env=stack.env,
             capture_output=True,
             timeout=RUN_TIMEOUT_SECONDS,
             check=False,
         )
+
+
+@pytest.fixture(scope="module")
+def stack(request):
+    with started(Stack(f"bailiff-qs-{uuid.uuid4().hex[:8]}", getattr(request.module, "PROFILES", ()))) as running:
+        yield running
 
 
 def identity(container):
