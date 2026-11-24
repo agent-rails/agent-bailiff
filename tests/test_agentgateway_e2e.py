@@ -1,3 +1,4 @@
+import base64
 import copy
 import hashlib
 import http.client
@@ -28,6 +29,7 @@ from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations
 from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
+from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.effector.catalog import Argument
@@ -360,6 +362,28 @@ def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(st
     assert release.trace_id == TRACE
     assert release.credential_tier == "gateway-bound"
     assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
+
+
+def test_an_echoed_credential_is_redacted_before_the_agent_sees_it(stack, workdir):
+    echo = f"token {DEPLOY_SECRET.decode()} and {base64.b64encode(DEPLOY_SECRET).decode()}"
+    stack["upstream"].call_result = {"content": [{"type": "text", "text": echo}]}
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    assert status == 200, body
+    [content] = body["result"]["content"]
+    assert content["text"].startswith(f"token {MARKER} and {MARKER}"), body
+    assert DEPLOY_SECRET.decode() not in json.dumps(body)
+    assert base64.b64encode(DEPLOY_SECRET).decode() not in json.dumps(body)
+    entries = docket_entries(workdir)
+    [release] = [entry for entry in entries if entry.hop == "custodian" and entry.decision == "release"]
+    [alert] = [entry for entry in entries if entry.decision == "alert"]
+    assert (alert.reason, alert.parent_entry, alert.op_id) == ("credential_echo", release.entry_id, release.op_id)
+
+
+def test_a_result_without_an_echo_reaches_the_agent_unchanged(stack):
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    assert status == 200 and body["result"] == {"content": [{"type": "text", "text": "deployed"}]}, body
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])

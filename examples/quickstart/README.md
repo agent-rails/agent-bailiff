@@ -22,11 +22,11 @@ $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
 
 | Service | uid | Role |
 | --- | --- | --- |
-| `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server, refuses a `tools/call` without an `Authorization` header |
+| `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server, refuses a `tools/call` without an `Authorization` header; its `echo_auth` tool returns the credential it received, raw and in base64, so the custodian's redaction can be seen |
 | `gitea`, `gitea-mcp` | image default | `gitea` profile: upstream Git service and its MCP server (`gitea-mcp-server:1.13.0`) |
-| `gateway` | 10004 | agentgateway v1.7.0 with the decide and custodian processors, `failClosed` |
+| `gateway` | 10004 | agentgateway v1.7.0 with the decide, custodian and redactor processors and the refusal guard, `failClosed` |
 | `decide` | 10002 | Verifies the chain, checks scope and budget, writes the ledger |
-| `custodian` | 10003 | Holds the encrypted Gitea token, releases it per allowed call |
+| `custodian` | 10003 | Holds the encrypted Gitea token, releases it per allowed call, and redacts it from that call's result on its own response socket |
 | `docket` | 10001 | Signed append-only record sink |
 | `reader` | 10005 | `agent-bailiff docket verify`, read-only, docket reader group |
 | `control` | 10002 | Operator revoke, run on demand |
