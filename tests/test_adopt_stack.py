@@ -3,8 +3,10 @@ import json
 import os
 import secrets
 import select
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,16 +26,39 @@ ALLOWED = "stub/notes/allowed"
 SCOPE = {"tools": ["stub.read_note", "stub.write_note"], "resources": [ALLOWED], "max_cost_per_call": 1}
 REPLY_TIMEOUT_SECONDS = 30
 EXPIRY_DEADLINE_SECONDS = 10
+AGENT_USER = os.environ.get("AGENT_BAILIFF_TEST_AGENT_USER")
+AGENT_PYTHON = os.environ.get("AGENT_BAILIFF_TEST_AGENT_PYTHON", sys.executable)
+AS_AGENT = ["sudo", "-n", "-u", AGENT_USER] if AGENT_USER else []
+DOCKER_SOCKET = "/var/run/docker.sock"
+OPEN_PROBE = """
+import socket, sys
+try:
+    open(sys.argv[2], "rb").close()
+    key = "opened"
+except PermissionError:
+    key = "denied"
+connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    connection.connect(sys.argv[1])
+    daemon = "connected"
+except PermissionError:
+    daemon = "denied"
+print(daemon, key)
+"""
 
 
-def cli(*arguments, check=True):
+def agent_python(*arguments, check=True):
     return subprocess.run(
-        [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)],
+        [*AS_AGENT, AGENT_PYTHON, "-I", *map(str, arguments)],
         capture_output=True,
         text=True,
         timeout=RUN_TIMEOUT_SECONDS,
         check=check,
     )
+
+
+def cli(*arguments, check=True):
+    return agent_python("-m", "agent_bailiff.cli", *arguments, check=check)
 
 
 def own_directory(path, uid):
@@ -54,7 +79,9 @@ class Proxy:
     def __init__(self, adopter, routes):
         self.process = subprocess.Popen(
             [
-                sys.executable,
+                *AS_AGENT,
+                AGENT_PYTHON,
+                "-I",
                 "-m",
                 "agent_bailiff.cli",
                 "proxy",
@@ -96,14 +123,33 @@ class Proxy:
 class Adopter:
     def __init__(self, stack, root):
         self.stack = stack
+        self.root = root
         self.key_dir = root / "keys"
         self.task_dir = root / "tasks"
         self.task_file = self.task_dir / "task.json"
+        self.routes = root / "routes.json"
         self.gateway_url = f"http://127.0.0.1:{stack.gateway_port}/mcp"
-        self.key_dir.mkdir(mode=0o700)
+        os.chmod(root, 0o755)
+        if AGENT_USER:
+            subprocess.run(
+                ["sudo", "-n", "install", "-d", "-o", AGENT_USER, "-m", "0700", str(self.key_dir)], check=True
+            )
+        else:
+            self.key_dir.mkdir(mode=0o700)
         self.task_dir.mkdir(mode=0o755)
         os.chmod(self.task_dir, 0o755)
+        shutil.copyfile(ROUTES, self.routes)
         stack.env["BAILIFF_TASK_DIR"] = str(self.task_dir)
+
+    def remove(self):
+        if AGENT_USER:
+            subprocess.run(["sudo", "-n", "rm", "-rf", str(self.key_dir)], check=True)
+        shutil.rmtree(self.root)
+
+    def key_subjects(self):
+        script = "import os, sys; print(' '.join(sorted(os.listdir(sys.argv[1]))))"
+        names = agent_python("-c", script, self.key_dir).stdout.split()
+        return sorted(name.removesuffix(".key") for name in names if name.endswith(".key"))
 
     def keygen(self):
         return cli("proxy", "keygen", "--key-dir", self.key_dir).stdout.strip()
@@ -136,19 +182,20 @@ def secret(stack):
 
 
 @pytest.fixture(scope="module")
-def adopter(stack, secret, tmp_path_factory):
-    adopter = Adopter(stack, tmp_path_factory.mktemp("adopt"))
+def adopter(stack, secret):
+    adopter = Adopter(stack, Path(tempfile.mkdtemp(prefix="bailiff-adopt-")))
     own_directory(adopter.task_dir, ISSUER_UID)
     try:
         yield adopter
     finally:
         own_directory(adopter.task_dir, os.getuid())
+        adopter.remove()
 
 
 @pytest.fixture(scope="module")
 def proxy(adopter):
     adopter.issue()
-    proxy = Proxy(adopter, ROUTES)
+    proxy = Proxy(adopter, adopter.routes)
     try:
         yield proxy
     finally:
@@ -228,9 +275,9 @@ def test_a_renewed_task_succeeds_and_prunes_the_old_key(adopter, proxy):
     _, old = adopter.issue()
     assert proxy.call("read_note", note="allowed")["isError"] is False
     _, new = adopter.issue()
-    assert sorted(path.stem for path in adopter.key_dir.glob("*.key")) == sorted([old, new])
+    assert adopter.key_subjects() == sorted([old, new])
     assert proxy.call("read_note", note="allowed")["isError"] is False
-    assert [path.stem for path in adopter.key_dir.glob("*.key")] == [new]
+    assert adopter.key_subjects() == [new]
 
 
 def test_a_revoked_task_is_refused(adopter, proxy):
@@ -241,9 +288,9 @@ def test_a_revoked_task_is_refused(adopter, proxy):
     assert refusal(proxy.call("read_note", note="allowed"), "chain_invalid")
 
 
-def test_a_route_the_gateway_lacks_is_refused(adopter, proxy, tmp_path):
+def test_a_route_the_gateway_lacks_is_refused(adopter, proxy):
     adopter.issue(scope={**SCOPE, "tools": [*SCOPE["tools"], "stub.delete_all_notes"], "resources": ["stub/notes"]})
-    drifted = tmp_path / "routes.json"
+    drifted = adopter.root / "drifted-routes.json"
     document = json.loads(ROUTES.read_text())
     document["routes"].append({"service": "stub", "name": "delete_all_notes", "tool": "stub.delete_all_notes",
                                "resource": "stub/notes"})  # fmt: skip
@@ -270,3 +317,17 @@ def test_the_task_directory_is_not_created_for_the_operator(adopter, tmp_path):
         assert not Path(tmp_path / "missing").exists()
     finally:
         adopter.stack.env["BAILIFF_TASK_DIR"] = str(adopter.task_dir)
+
+
+@pytest.mark.skipif(not AGENT_USER, reason="set AGENT_BAILIFF_TEST_AGENT_USER to a user outside the docker group")
+def test_the_agent_user_reaches_neither_the_docker_daemon_nor_the_issuer_key(adopter):
+    volume = f"{adopter.stack.project}_issuer-data"
+    mountpoint = subprocess.run(
+        ["docker", "volume", "inspect", "--format", "{{.Mountpoint}}", volume],
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=True,
+    ).stdout.strip()
+    probe = agent_python("-c", OPEN_PROBE, DOCKER_SOCKET, f"{mountpoint}/issuer.key")
+    assert probe.stdout.split() == ["denied", "denied"], probe
