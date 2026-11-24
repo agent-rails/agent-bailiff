@@ -166,7 +166,7 @@ The agent host launches the proxy over stdio. For Claude Code, add it to `.mcp.j
 
 The config holds paths only, with no key or token. The proxy lists only routed tools, with their upstream names and descriptions, and removes tool annotations. It reads the tool list once per process, so restart the agent host after a route change.
 
-A call that does not return a result comes back as a tool error. The error starts with a reason and tells the model what to do next:
+A call to a tool the proxy has no route for is rejected as a JSON-RPC error. Any other call that does not return a result comes back as a tool error, which starts with a reason and tells the model what to do next:
 
 | Reason | Meaning | Operator's next step |
 | --- | --- | --- |
@@ -209,7 +209,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 
 - The upstream server receives the credential on every allowed call and is trusted with it.
 - Upstream tool names, descriptions and results reach the model, and any of them can carry instructions. The task scope bounds what an instructed agent can do. It cannot stop a call that is in scope.
-- The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names a stack service, `localhost`, or a loopback, link-local, unspecified or multicast IP address written in standard form. It does not refuse private ranges, other spellings of an IPv4 address such as `2130706433`, or a hostname that resolves to a local address.
+- The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names one of the stack's own components, `localhost`, or a loopback, link-local, unspecified or multicast IP address written in standard form. It does not refuse private ranges, other spellings of an IPv4 address such as `2130706433`, or a hostname that resolves to a local address.
 - With `ca_file` in the upstream config, the gateway trusts only those certificates for the upstream, not the system roots.
 - The agent user can read its own key and `task.json`, so anything running as that user can make calls within the task until it expires or is revoked.
 
