@@ -143,6 +143,17 @@ class FakeClock:
         return self.now
 
 
+class SteppingClock:
+    def __init__(self, step_ms):
+        self.step_ns = step_ms * 1_000_000 + 999_999
+        self.now = 0
+
+    def __call__(self):
+        reading = self.now
+        self.now += self.step_ns
+        return reading
+
+
 class AckDocket:
     def __init__(self, inner, ack):
         self.inner = inner
@@ -941,3 +952,50 @@ def test_a_docket_failure_leaves_the_operation_for_the_next_reconcile(make_decid
     assert reasons == ["untracked_issued_expired"]
     traces = {entry.trace_id for entry in docket_entries(docket_paths) if entry.decision == "reconcile"}
     assert traces == {hashlib.sha256(f"reconcile:{first.op_id}".encode()).hexdigest()[:32]}
+
+
+def test_the_allow_entry_records_the_time_the_decision_took_in_whole_milliseconds(make_decider, docket_paths):
+    make_decider(monotonic_ns=SteppingClock(3)).check(make_request(), NOW)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.latency_ms) == ("allow", 3)
+
+
+def test_a_verified_refusal_entry_records_the_time_the_decision_took(make_decider, docket_paths):
+    make_decider(monotonic_ns=SteppingClock(7)).check(make_request(resource="env/prod/api"), NOW)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.latency_ms) == ("refuse", "out_of_scope", 7)
+
+
+def test_a_refusal_after_the_allow_entry_is_timed_from_the_start_of_the_check(
+    make_decider, docket_paths, client_options
+):
+    inner = DocketClient(docket_paths[1], "decide", "decide-1", DECIDE_KEY, **client_options)
+    decider = make_decider(docket=AckLostDocket(inner), monotonic_ns=SteppingClock(5))
+    assert decider.check(make_request(), NOW).reason == "docket_unavailable"
+    assert {entry.decision: entry.latency_ms for entry in docket_entries(docket_paths)} == {"allow": 5, "refuse": 11}
+
+
+def test_each_check_is_timed_from_its_own_start(make_decider, docket_paths):
+    decider = make_decider(monotonic_ns=SteppingClock(2))
+    decider.check(make_request(make_root(task_id="task-1"), nonce="n-1"), NOW)
+    decider.check(make_request(make_root(task_id="task-2"), nonce="n-2"), NOW)
+    assert [entry.latency_ms for entry in docket_entries(docket_paths)] == [2, 2]
+
+
+def test_the_default_clock_records_a_non_negative_integer(make_decider, docket_paths):
+    make_decider().check(make_request(), NOW)
+    [entry] = docket_entries(docket_paths)
+    assert isinstance(entry.latency_ms, int) and entry.latency_ms >= 0
+
+
+def test_outcome_and_reconcile_entries_carry_no_latency(make_decider, docket_paths):
+    decider = make_decider(monotonic_ns=SteppingClock(4))
+    first = decider.check(make_request(make_root(task_id="task-1"), nonce="n-1"), NOW)
+    decider.check(make_request(make_root(task_id="task-2"), nonce="n-2"), NOW)
+    decider.record_outcome(first.op_id, "done", now=NOW + 1)
+    decider.reconcile(NOW + MAX_PROOF_AGE)
+    assert {entry.decision: entry.latency_ms for entry in docket_entries(docket_paths)} == {
+        "allow": 4,
+        "outcome": None,
+        "reconcile": None,
+    }

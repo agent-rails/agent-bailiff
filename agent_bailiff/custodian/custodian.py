@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -110,6 +112,7 @@ class Custodian:
         docket: DocketWriter,
         suspension: SuspensionCheck,
         release_signer: ReleaseSigner | None = None,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         self._config = config
         self._bindings = bindings
@@ -121,21 +124,23 @@ class Custodian:
         self._docket = docket
         self._suspension = suspension
         self._release_signer = release_signer
+        self._monotonic_ns = monotonic_ns
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
         self._refusals_lock = threading.Lock()
 
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult:
+        started = self._monotonic_ns()
         try:
-            return self._release(clearance_token, request, now)
+            return self._release(clearance_token, request, now, started)
         except _Refusal as refusal:
             return Refused(refusal.reason)
         except Exception:
             logger.exception("custodian release failed with an internal error")
             return Refused("internal_error")
 
-    def _release(self, clearance_token: object, request: object, now: int) -> Released:
+    def _release(self, clearance_token: object, request: object, now: int, started: int) -> Released:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
             raise ValueError("now must be a non-negative integer")
         try:
@@ -145,24 +150,24 @@ class Custodian:
             raise
         entry = self._entry(verified, now)
         try:
-            return self._release_verified(verified, entry, now)
+            return self._release_verified(verified, entry, now, started)
         except _UnacknowledgedRelease:
             raise
         except _Refusal as refusal:
-            self._record_refusal(verified.clearance, entry, refusal.reason)
+            self._record_refusal(verified.clearance, entry, refusal.reason, started)
             raise
         except Exception:
             logger.exception("custodian release failed with an internal error")
-            self._record_refusal(verified.clearance, entry, "internal_error")
+            self._record_refusal(verified.clearance, entry, "internal_error", started)
             raise _Refusal("internal_error") from None
 
-    def _release_verified(self, verified: _Verified, entry: Entry, now: int) -> Released:
+    def _release_verified(self, verified: _Verified, entry: Entry, now: int, started: int) -> Released:
         clearance = verified.clearance
         _check_scope(verified)
         binding = self._binding(verified)
         self._check_reservation(verified, now)
         if isinstance(binding, EffectorBinding):
-            return self._release_to_effector(verified, binding, entry, now)
+            return self._release_to_effector(verified, binding, entry, now, started)
         if binding.canary:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
@@ -178,6 +183,7 @@ class Custodian:
             reason="ok",
             performed=True,
             credential_tier=TIER,
+            latency_ms=self._elapsed_ms(started),
         )
         self._record(release_entry)
         return Released(binding.header_name, header_value, TIER, clearance.op_id, release_entry.entry_id)
@@ -241,7 +247,9 @@ class Custodian:
             clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token, chain.leaf_scope
         )
 
-    def _release_to_effector(self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int) -> Released:
+    def _release_to_effector(
+        self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int, started: int
+    ) -> Released:
         clearance = verified.clearance
         if self._release_signer is None:
             raise _Refusal("release_unavailable")
@@ -255,6 +263,7 @@ class Custodian:
             reason="ok",
             performed=True,
             credential_tier=EFFECTOR_TIER,
+            latency_ms=self._elapsed_ms(started),
         )
         try:
             token = self._release_signer.sign(
@@ -379,16 +388,27 @@ class Custodian:
             raise _Refusal("credential_unavailable")
         return value
 
-    def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str) -> None:
+    def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str, started: int) -> None:
         key = (clearance.tenant, clearance.task, clearance.op_id, reason)
         if reason in ONCE_REFUSALS and not self._mark_refusal(key):
             return
         try:
-            self._docket.append(replace(entry, entry_id=uuid.uuid4().hex, decision="refuse", reason=reason))
+            self._docket.append(
+                replace(
+                    entry,
+                    entry_id=uuid.uuid4().hex,
+                    decision="refuse",
+                    reason=reason,
+                    latency_ms=self._elapsed_ms(started),
+                )
+            )
         except Exception:
             logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
             with self._refusals_lock:
                 self._recorded_refusals.pop(key, None)
+
+    def _elapsed_ms(self, started: int) -> int:
+        return (self._monotonic_ns() - started) // 1_000_000
 
     def _mark_refusal(self, key: tuple[str, str, str, str]) -> bool:
         with self._refusals_lock:
