@@ -4,9 +4,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_quickstart_stack import b
 
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "examples" / "quickstart" / "compose.yaml"
 EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}, "gateway": {"egress"}}
+UPSTREAM_SERVERS = {"stub-upstream", "gitea", "gitea-mcp", "gitea-mcp-spike"}
 PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
 GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
@@ -35,6 +37,10 @@ def test_only_jaeger_the_spike_and_the_gateway_reach_a_routable_network(config):
     }
     assert {name: networks for name, networks in routable.items() if networks} == EGRESS
     assert config["networks"]["upstream"]["internal"] is True
+
+
+def test_an_upstream_url_may_name_no_stack_service_but_the_upstream_servers(config):
+    assert b.STACK_HOSTS == set(config["services"]) - UPSTREAM_SERVERS | {"localhost"}
 
 
 def test_only_jaeger_the_spike_and_the_gateway_publish_a_loopback_port(config):

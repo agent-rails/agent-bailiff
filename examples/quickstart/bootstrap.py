@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -96,6 +97,14 @@ UPSTREAM_FIELDS = frozenset(
     }
 )  # fmt: skip
 COMPOSE_SERVICE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+STACK_HOSTS = frozenset(
+    {
+        "localhost", "issuer-init", "decide-init", "custodian-init", "control-init", "rule-init", "docket-init",
+        "gateway-init", "bootstrap", "agent-key", "task-issuer", "gitea-task", "gitea-secret", "gitea-admin",
+        "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
+        "jaeger", "exporter", "rule",
+    }
+)  # fmt: skip
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 TASK_SCOPE = {
     "tools": ["gitea.issues.list", "gitea.issues.read"],
@@ -226,11 +235,23 @@ def check_upstream_url(path: Path, url: str) -> None:
         raise BootstrapError(f"{path}: url {error}") from None
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
         raise BootstrapError(f"{path}: url must carry no credentials, query or fragment")
+    check_upstream_host(path, (parts.hostname or "").rstrip("."))
     if parts.scheme == "https" and parts.hostname:
         return
     if parts.scheme == "http" and COMPOSE_SERVICE.fullmatch(parts.hostname or "") and port:
         return
     raise BootstrapError(f"{path}: url must be http://<compose-service>:<port> or https://")
+
+
+def check_upstream_host(path: Path, host: str) -> None:
+    if host in STACK_HOSTS:
+        raise BootstrapError(f"{path}: url must not name the stack's own {host}")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast:
+        raise BootstrapError(f"{path}: url must not name a loopback, link-local, unspecified or multicast address")
 
 
 def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]:

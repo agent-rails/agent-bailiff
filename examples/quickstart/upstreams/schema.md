@@ -19,7 +19,7 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-
 | --- | --- |
 | `version` | `1` |
 | `service` | Route service name: ASCII printable, no whitespace or `*`. `k8s` is reserved for catalogs. |
-| `url` | `http://<compose-service>:<port>[/path]` for a server in the stack, or `https://<host>[:port][/path]`. No credentials, query or fragment. |
+| `url` | `http://<compose-service>:<port>[/path]` for a server in the stack, or `https://<host>[:port][/path]`. No credentials, query or fragment. Not `localhost`, a stack service other than the upstream servers, or a loopback, link-local, unspecified or multicast address; a hostname that resolves to one is not checked. |
 | `credential_id`, `target` | The custodian credential the gateway injects for every route. Store it with `agent-bailiff custodian put-credential --tenant quickstart --credential-id <id> --target <target>`. |
 | `credential_header` | HTTP field name the custodian sets, for example `Authorization`. |
 | `binding_resource` | Resource the credential binding covers; a wildcard only as a final `/*` segment. |
