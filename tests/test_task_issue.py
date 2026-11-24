@@ -27,6 +27,14 @@ def new_subject():
     return encode_public_key(Ed25519PrivateKey.generate().public_key())
 
 
+def dash_subject():
+    for _ in range(10_000):
+        subject = new_subject()
+        if subject.startswith("-"):
+            return subject
+    raise AssertionError("no public key starting with a dash in 10000 tries")
+
+
 def request(**overrides):
     fields = {"purpose": "triage", "scope": SCOPE, "budget": 10, "subject": new_subject()} | overrides
     return TaskRequest(**fields)
@@ -215,13 +223,27 @@ def test_the_cli_issues_and_prints_the_task_id(out_dir, tmp_path, capsys):
     arguments = [
         "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
         "--purpose", "triage", "--scope", json.dumps(SCOPE), "--budget", "5", "--ttl", "60",
-        "--subject", subject, "--out-dir", str(out_dir),
+        f"--subject={subject}", "--out-dir", str(out_dir),
     ]  # fmt: skip
     assert main(arguments) == 0
     task = TaskFile.decode((out_dir / "task.json").read_bytes())
     assert capsys.readouterr().out == f"{task.root.task_id}\n"
     assert (task.root.subject, task.root.budget, task.root.max_depth) == (subject, 5, 0)
     assert task.root.expires_at - task.root.issued_at == 60
+
+
+def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
+    key_dir = tmp_path / "issuer"
+    key_dir.mkdir(mode=0o700)
+    generate_signing_key(key_dir / "issuer.key", "issuer")
+    subject = dash_subject()
+    arguments = [
+        "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
+        "--purpose", "triage", "--scope", json.dumps(SCOPE), "--budget", "5", f"--subject={subject}",
+        "--out-dir", str(out_dir),
+    ]  # fmt: skip
+    assert main(arguments) == 0
+    assert TaskFile.decode((out_dir / "task.json").read_bytes()).root.subject == subject
 
 
 @pytest.mark.parametrize("scope", ["not json", '{"tools": [], "tools": []}', "[]"])
@@ -231,7 +253,8 @@ def test_the_cli_refuses_a_bad_scope(out_dir, tmp_path, scope, capsys):
     generate_signing_key(key_dir / "issuer.key", "issuer")
     arguments = [
         "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
-        "--purpose", "triage", "--scope", scope, "--budget", "5", "--subject", new_subject(), "--out-dir", str(out_dir),
+        "--purpose", "triage", "--scope", scope, "--budget", "5", f"--subject={new_subject()}",
+        "--out-dir", str(out_dir),
     ]  # fmt: skip
     assert main(arguments) == 1
     assert "task issue refused" in capsys.readouterr().err
