@@ -1,5 +1,7 @@
+import errno
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -47,6 +49,8 @@ def isolated(sockets, monkeypatch):
     home.mkdir()
     monkeypatch.setattr(authority, "SYSTEM_SOCKET", str(sockets.directory / "absent.sock"))
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(authority, "USER_RUNTIME_DIR", str(sockets.directory / "run-user-{uid}"))
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: pwd.struct_passwd(("u", "x", uid, 0, "", str(home), "sh")))
     monkeypatch.delenv("DOCKER_HOST", raising=False)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
 
@@ -85,9 +89,66 @@ def test_no_socket_means_nothing_is_reachable(isolated):
     assert reachable_endpoints(os.environ) == []
 
 
-def test_a_socket_file_with_no_listener_is_not_reachable(sockets, isolated):
-    sockets("home/.docker/run/docker.sock", listening=False)
+def test_a_socket_file_with_no_listener_is_reachable_because_a_daemon_can_start_later(sockets, isolated):
+    path = sockets("home/.docker/run/docker.sock", listening=False)
+    assert reachable_endpoints(os.environ) == named(path)
+
+
+def test_the_passwd_home_is_probed_when_home_points_elsewhere(sockets, isolated, monkeypatch):
+    path = sockets("passwd-home/.docker/run/docker.sock", listening=True)
+    passwd_home = str(sockets.directory / "passwd-home")
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: pwd.struct_passwd(("u", "x", uid, 0, "", passwd_home, "sh")))
+    assert reachable_endpoints(os.environ) == named(path)
+
+
+def test_the_uid_runtime_dir_is_probed_when_xdg_runtime_dir_is_unset(sockets, isolated):
+    path = sockets(f"run-user-{os.getuid()}/docker.sock", listening=True)
+    assert reachable_endpoints(os.environ) == named(path)
+
+
+def test_the_uid_runtime_dir_is_probed_when_xdg_runtime_dir_points_elsewhere(sockets, isolated, monkeypatch):
+    path = sockets(f"run-user-{os.getuid()}/docker.sock", listening=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(sockets.directory / "elsewhere"))
+    assert reachable_endpoints(os.environ) == named(path)
+
+
+def refuse_connect(monkeypatch, path, code):
+    real_connect = socket.socket.connect
+
+    def refuse(self, address):
+        if address == str(path):
+            raise OSError(code, os.strerror(code)) if code is not None else OSError("no errno")
+        real_connect(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.ENOTDIR, errno.ENOTSOCK])
+def test_an_absent_path_is_not_reachable(sockets, isolated, monkeypatch, code):
+    path = sockets("home/.docker/run/docker.sock", listening=True)
+    refuse_connect(monkeypatch, path, code)
     assert reachable_endpoints(os.environ) == []
+
+
+def test_a_permission_error_on_an_unwritable_socket_is_not_reachable(sockets, isolated, monkeypatch):
+    path = sockets("home/.docker/run/docker.sock", listening=True)
+    refuse_connect(monkeypatch, path, errno.EACCES)
+    monkeypatch.setattr(os, "access", lambda target, mode: False)
+    assert reachable_endpoints(os.environ) == []
+
+
+def test_a_permission_error_on_a_writable_socket_is_reachable(sockets, isolated, monkeypatch):
+    path = sockets("home/.docker/run/docker.sock", listening=True)
+    refuse_connect(monkeypatch, path, errno.EACCES)
+    monkeypatch.setattr(os, "access", lambda target, mode: True)
+    assert reachable_endpoints(os.environ) == named(path)
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EAGAIN, errno.ECONNREFUSED, errno.EINVAL, None])
+def test_any_other_connect_error_on_a_socket_is_reachable(sockets, isolated, monkeypatch, code):
+    path = sockets("home/.docker/run/docker.sock", listening=True)
+    refuse_connect(monkeypatch, path, code)
+    assert reachable_endpoints(os.environ) == named(path)
 
 
 def test_a_regular_file_at_a_candidate_path_is_not_reachable(sockets, isolated):
@@ -120,9 +181,10 @@ def test_a_connect_that_times_out_is_reachable(sockets, isolated, monkeypatch):
     assert reachable_endpoints(os.environ) == named(path)
 
 
-def test_a_path_too_long_for_a_socket_is_not_reachable(isolated, monkeypatch):
-    monkeypatch.setenv("DOCKER_HOST", "unix://" + "/x" * 200)
-    assert reachable_endpoints(os.environ) == []
+def test_a_path_too_long_for_a_socket_is_reachable(isolated, monkeypatch):
+    long_path = "/x" * 200
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{long_path}")
+    assert reachable_endpoints(os.environ) == named(long_path)
 
 
 def test_one_socket_named_twice_is_reported_once(sockets, isolated, monkeypatch):
