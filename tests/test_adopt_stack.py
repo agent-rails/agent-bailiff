@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import select
 import shutil
@@ -44,6 +45,11 @@ try:
 except PermissionError:
     daemon = "denied"
 print(daemon, key)
+"""
+ISSUER_KEY_MODE = """
+import json, os, stat
+info = os.stat("/v/issuer-data/issuer.key")
+print(json.dumps([info.st_uid, stat.S_IMODE(info.st_mode)]))
 """
 
 
@@ -341,3 +347,5 @@ def test_the_agent_user_reaches_neither_the_docker_daemon_nor_the_issuer_key(ado
     ).stdout.strip()
     probe = agent_python("-c", OPEN_PROBE, DOCKER_SOCKET, f"{mountpoint}/issuer.key")
     assert probe.stdout.split() == ["denied", "denied"], probe
+    assert pwd.getpwnam(AGENT_USER).pw_uid != b.ISSUER_UID
+    assert adopter.stack.probe(ISSUER_KEY_MODE) == [b.ISSUER_UID, 0o600]
