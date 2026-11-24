@@ -101,19 +101,25 @@ class InflightReleases:
 
     def take(self, key: str) -> InflightRelease | None:
         with self._lock:
-            slot = self._slots.get(key)
-            if slot is None or slot.release is None:
-                return None
-            self._remove(key)
-            if slot.release.expires_at <= self._monotonic_ns():
-                return None
-            return slot.release
+            expired = self._sweep()
+            release = self._take(key)
+        _warn_expired(expired)
+        return release
 
     def sweep(self) -> int:
         with self._lock:
             expired = self._sweep()
         _warn_expired(expired)
         return expired
+
+    def _take(self, key: str) -> InflightRelease | None:
+        slot = self._slots.get(key)
+        if slot is None or slot.release is None:
+            return None
+        self._remove(key)
+        if slot.release.expires_at <= self._monotonic_ns():
+            return None
+        return slot.release
 
     def _pending(self, reservation: Reservation) -> _Slot:
         slot = self._slots.get(reservation.key)

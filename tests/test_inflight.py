@@ -177,3 +177,17 @@ def test_a_reserve_sweeps_and_warns_with_the_count(clock, caplog):
         inflight.reserve("k3", "tenant-a", "Bearer secret-value-1")
     assert "2 in-flight releases expired unmatched" in caplog.text
     assert "secret-value" not in caplog.text
+
+
+def test_a_take_sweeps_expired_releases_and_warns_with_the_count(clock, caplog):
+    inflight = make(clock, max_entries=3)
+    committed(inflight, "k1")
+    clock.now += 5
+    committed(inflight, "k2")
+    clock.now += TTL - 5
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.inflight"):
+        assert inflight.take("k2") is not None
+    assert "1 in-flight releases expired unmatched" in caplog.text
+    assert inflight.sweep() == 0
+    committed(inflight, "k1", entry_id="release-2")
+    assert inflight.take("k1").release_entry_id == "release-2"
