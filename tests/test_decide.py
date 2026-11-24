@@ -421,6 +421,51 @@ def test_a_resource_grant_that_stops_inside_a_segment_is_refused_even_when_it_co
         ledger.task_budget(TENANT, "task-1", NOW)
 
 
+@pytest.mark.parametrize(
+    ("tools", "tool"),
+    [
+        (["gitea.issues_*"], "gitea.issues_delete"),
+        (["gitea.issues-*"], "gitea.issues-delete"),
+        (["gitea:*"], "gitea:delete"),
+        (["gitea/*"], "gitea/delete"),
+        (["deploy.service", "gitea.issues_*"], "deploy.service"),
+    ],
+)
+def test_a_tool_grant_that_stops_inside_a_name_is_refused_even_when_it_covers(
+    make_decider, ledger, docket_paths, tools, tool
+):
+    root = make_root(scope={**SCOPE, "tools": tools})
+    decision = make_decider().check(make_request(root, tool=tool), NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.tool) == ("refuse", "unbounded_scope", tool)
+    with pytest.raises(LedgerRefused, match="unknown task"):
+        ledger.task_budget(TENANT, "task-1", NOW)
+
+
+@pytest.mark.parametrize("tools", [["deploy.service"], ["deploy.*"]])
+def test_an_exact_or_dot_tool_grant_is_allowed(make_decider, tools):
+    root = make_root(scope={**SCOPE, "tools": tools})
+    decision = make_decider().check(make_request(root), NOW)
+    assert (decision.allowed, decision.reason) == (True, "ok")
+
+
+def test_an_unbounded_tool_grant_in_a_delegated_leaf_is_refused(make_decider):
+    root = make_root(scope={**SCOPE, "tools": ["deploy.*"]})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    decision = make_decider().check(make_request(root, (link,), CHILD_KEY, tool="deploy.serv_api"), NOW)
+    assert decision.reason == "unbounded_scope"
+
+
 def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
     root = make_root(scope={**SCOPE, "resources": ["env/*"]})
     link = delegate(
@@ -437,7 +482,7 @@ def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
     assert decision.reason == "unbounded_scope"
 
 
-def test_only_the_leaf_scope_must_end_at_a_segment(make_decider):
+def test_an_unbounded_resource_grant_above_a_bounded_leaf_is_refused(make_decider):
     root = make_root(scope={**SCOPE, "resources": ["env/staging-*"]})
     link = delegate(
         root,
@@ -450,7 +495,55 @@ def test_only_the_leaf_scope_must_end_at_a_segment(make_decider):
         now=NOW,
     )
     decision = make_decider().check(make_request(root, (link,), CHILD_KEY, resource="env/staging-x/api"), NOW)
-    assert decision.reason == "no_binding"
+    assert decision.reason == "unbounded_scope"
+
+
+def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused(make_decider, ledger, docket_paths):
+    root = make_root(scope={**SCOPE, "tools": ["gitea.issues_*"]})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["gitea.issues_delete"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    request = make_request(root, (link,), CHILD_KEY, tool="gitea.issues_delete")
+    decision = make_decider().check(request, NOW)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
+    [entry] = docket_entries(docket_paths)
+    assert (entry.decision, entry.reason, entry.tool) == ("refuse", "unbounded_scope", "gitea.issues_delete")
+    with pytest.raises(LedgerRefused, match="unknown task"):
+        ledger.task_budget(TENANT, "task-1", NOW)
+
+
+def test_an_unbounded_tool_grant_in_a_middle_link_is_refused(make_decider):
+    root = make_root(scope={**SCOPE, "tools": ["deploy.*"]})
+    middle = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    leaf_key = Ed25519PrivateKey.from_private_bytes(bytes(range(6, 38)))
+    leaf = delegate(
+        root,
+        middle,
+        CHILD_KEY,
+        child_subject=encode_public_key(leaf_key.public_key()),
+        scope={"tools": ["deploy.serv_api"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=5,
+        ttl=600,
+        now=NOW,
+    )
+    decision = make_decider().check(make_request(root, (middle, leaf), leaf_key, tool="deploy.serv_api"), NOW)
+    assert decision.reason == "unbounded_scope"
 
 
 @pytest.mark.parametrize(

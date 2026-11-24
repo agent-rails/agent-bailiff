@@ -24,7 +24,7 @@ from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
-from agent_bailiff.scope_pattern import is_bounded
+from agent_bailiff.scope_pattern import is_bounded_scope
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
 
@@ -417,10 +417,10 @@ class Custodian:
 
 
 def _check_scope(verified: _Verified) -> None:
-    scope = verified.leaf_scope
-    if not all(is_bounded(pattern) for pattern in scope["resources"]):
+    chain_scopes = (verified.root.scope, *(link.scope for link in verified.links))
+    if not all(is_bounded_scope(granted) for granted in chain_scopes):
         raise _Refusal("unbounded_scope")
-    if not covers(scope, verified.clearance.tool, verified.clearance.resource):
+    if not covers(verified.leaf_scope, verified.clearance.tool, verified.clearance.resource):
         raise _Refusal("out_of_scope")
 
 

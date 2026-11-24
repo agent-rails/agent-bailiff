@@ -2,6 +2,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import stat
 
 import pytest
@@ -74,6 +75,23 @@ def out_dir(tmp_path):
 def test_a_bad_request_is_refused(overrides):
     with pytest.raises(ValueError):
         request(**overrides)
+
+
+@pytest.mark.parametrize("tool", ["gitea.issues_*", "gitea.issues-*", "gitea:*", "gitea/*"])
+def test_a_tool_grant_that_stops_inside_a_name_is_refused(tool):
+    with pytest.raises(ValueError, match=rf"scope: tool grant {re.escape(tool)} must be exact or end at \.\*"):
+        request(scope={**SCOPE, "tools": ["notes.read_note", tool]})
+
+
+@pytest.mark.parametrize("resource", ["repo:demo-*", "repo:demo/a.*", "repo:*"])
+def test_a_resource_grant_that_stops_inside_a_segment_is_refused(resource):
+    with pytest.raises(ValueError, match=rf"scope: resource grant {re.escape(resource)} must be exact or end at /\*"):
+        request(scope={**SCOPE, "resources": ["repo:demo/*", resource]})
+
+
+@pytest.mark.parametrize("tools", [["notes.read_note"], ["notes.*"], ["notes.read_note", "notes.*"]])
+def test_exact_and_dot_tool_grants_are_issued(tools):
+    assert issued(scope={**SCOPE, "tools": tools}).root.scope["tools"] == tools
 
 
 def test_request_defaults_are_short_lived_and_undelegable():
@@ -246,7 +264,16 @@ def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
     assert TaskFile.decode((out_dir / "task.json").read_bytes()).root.subject == subject
 
 
-@pytest.mark.parametrize("scope", ["not json", '{"tools": [], "tools": []}', "[]"])
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "not json",
+        '{"tools": [], "tools": []}',
+        "[]",
+        json.dumps({**SCOPE, "tools": ["gitea.issues_*"]}),
+        json.dumps({**SCOPE, "resources": ["repo:demo-*"]}),
+    ],
+)
 def test_the_cli_refuses_a_bad_scope(out_dir, tmp_path, scope, capsys):
     key_dir = tmp_path / "issuer"
     key_dir.mkdir(mode=0o700)

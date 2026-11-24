@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from agent_warrant.chain import delegate
 from agent_warrant.identity import encode_public_key
 from agent_warrant.ledger import TaskLedger
 from agent_warrant.resolver import PinnedResolver
@@ -14,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_decide import (
     AGENT_KEY,
     BINDINGS,
+    CHILD_KEY,
     CUSTODIAN_ID,
     DECIDE_KEY,
     DECIDER_ID,
@@ -448,6 +450,57 @@ def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(m
     custodian = make_custodian(
         bindings=(binding,), release_signer=ReleaseSigner(CUSTODIAN_ID, Ed25519PrivateKey.generate(), "r-1")
     )
+    assert custodian.release(token, request, NOW + 1) == Refused("unbounded_scope")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
+
+
+@pytest.mark.parametrize(
+    ("tools", "tool"),
+    [
+        (["gitea.issues_*"], "gitea.issues_delete"),
+        (["gitea.issues-*"], "gitea.issues-delete"),
+        (["gitea:*"], "gitea:delete"),
+        (["gitea/*"], "gitea/delete"),
+        (["deploy.service", "gitea.issues_*"], "deploy.service"),
+    ],
+)
+def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_clearance(
+    make_custodian, workdir, tools, tool
+):
+    root = make_root(scope={"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    request = make_request(root, tool=tool)
+    token = sign_clearance(clearance_for(request, root))
+    binding = CredentialBinding(TENANT, tool, "env/*", "deploy-api", "deploy.example", "Authorization", False)
+    custodian = make_custodian(bindings=(binding,))
+    assert custodian.release(token, request, NOW + 1) == Refused("unbounded_scope")
+    assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
+
+
+def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused_and_recorded(make_custodian, workdir):
+    tool = "gitea.issues_delete"
+    root = make_root(scope={"tools": ["gitea.issues_*"], "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    link = delegate(
+        root,
+        root,
+        AGENT_KEY,
+        child_subject=encode_public_key(CHILD_KEY.public_key()),
+        scope={"tools": [tool], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        budget=10,
+        ttl=600,
+        now=NOW,
+    )
+    request = make_request(root, (link,), CHILD_KEY, tool=tool)
+    leaf_binding = link.binding()
+    token = sign_clearance(
+        clearance_for(
+            request,
+            root,
+            op_id=derive_op_id(TENANT, root.task_id, leaf_binding, request.digest()),
+            leaf_binding=leaf_binding,
+        )
+    )
+    binding = CredentialBinding(TENANT, tool, "env/*", "deploy-api", "deploy.example", "Authorization", False)
+    custodian = make_custodian(bindings=(binding,))
     assert custodian.release(token, request, NOW + 1) == Refused("unbounded_scope")
     assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
 
