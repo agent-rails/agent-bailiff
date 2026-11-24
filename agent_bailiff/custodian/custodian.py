@@ -18,8 +18,8 @@ from agent_warrant.trust import IssuerTrustPolicy
 from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBinding, EffectorBinding
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
-from agent_bailiff.custodian.echo import MIN_NEEDLE_LENGTH
-from agent_bailiff.custodian.inflight import InflightFull, InflightReleases
+from agent_bailiff.custodian.echo import MIN_NEEDLE_LENGTH, Oversize, UnreadableResult, needles, redact
+from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, InflightReleases
 from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
@@ -43,6 +43,15 @@ CLEARANCE_REFUSALS = {
     "not_yet_valid": "clearance_not_yet_valid",
 }
 ONCE_REFUSALS = frozenset({"already_issued", "task_denied"})
+RESPONSE_REASONS = frozenset(
+    {
+        "response_unmatched",
+        "response_unreadable",
+        "response_oversize",
+        "response_clearance_missing",
+        "response_internal_error",
+    }
+)
 MAX_RECORDED_REFUSALS = 65536
 
 logger = logging.getLogger(__name__)
@@ -77,6 +86,19 @@ class Refused:
 
 
 ReleaseResult = Released | Refused
+
+
+@dataclass(frozen=True)
+class ResponseChecked:
+    result: bytes | None
+
+
+@dataclass(frozen=True)
+class ResponseRefused:
+    reason: str
+
+
+ResponseResult = ResponseChecked | ResponseRefused
 
 
 @dataclass(frozen=True)
@@ -149,6 +171,53 @@ class Custodian:
         except Exception:
             logger.exception("custodian release failed with an internal error")
             return Refused("internal_error")
+
+    def check_response(self, clearance_token: object, result: bytes, now: int) -> ResponseResult:
+        try:
+            return self._check_response(clearance_token, result, now)
+        except Exception:
+            logger.exception("custodian response check failed with an internal error")
+            return ResponseRefused("response_internal_error")
+
+    def _check_response(self, clearance_token: object, result: bytes, now: int) -> ResponseResult:
+        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+            raise ValueError("now must be a non-negative integer")
+        if not isinstance(clearance_token, str) or not clearance_token:
+            return ResponseRefused("response_clearance_missing")
+        release = self._inflight.take(token_hash(clearance_token)) if clearance_token.isascii() else None
+        if release is None:
+            logger.warning("no in-flight release matches a call result")
+            return ResponseRefused("response_unmatched")
+        op_id = release.entry.op_id
+        try:
+            redaction = redact(result, needles(release.header_value))
+        except UnreadableResult:
+            logger.warning("call result for op %s is not a readable JSON object", op_id)
+            return ResponseRefused("response_unreadable")
+        except Oversize:
+            logger.warning("redacted call result for op %s is over the size cap", op_id)
+            return ResponseRefused("response_oversize")
+        if redaction is None:
+            return ResponseChecked(None)
+        logger.error(
+            "redacted %d echoes of the released credential from the call result for op %s", redaction.hits, op_id
+        )
+        self._alert_echo(release, now)
+        return ResponseChecked(redaction.result)
+
+    def _alert_echo(self, release: InflightRelease, now: int) -> None:
+        alert = replace(
+            release.entry,
+            entry_id=uuid.uuid4().hex,
+            decision="alert",
+            reason="credential_echo",
+            parent_entry=release.release_entry_id,
+            at=now,
+        )
+        try:
+            self._docket.append(alert)
+        except Exception:
+            logger.exception("credential echo alert entry for op %s was not acknowledged", release.entry.op_id)
 
     def _release(self, clearance_token: object, request: object, now: int, started: int) -> Released:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
