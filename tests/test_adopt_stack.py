@@ -115,19 +115,25 @@ class Proxy:
             ],  # fmt: skip
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             bufsize=0,
         )
         self.next_id = 0
+
+    def stderr_text(self):
+        os.set_blocking(self.process.stderr.fileno(), False)
+        return (self.process.stderr.read() or b"").decode(errors="replace")
 
     def request(self, method, params=None):
         self.next_id += 1
         message = {"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params or {}}
         self.process.stdin.write(json.dumps(message).encode() + b"\n")
         ready, _, _ = select.select([self.process.stdout], [], [], REPLY_TIMEOUT_SECONDS)
-        assert ready, f"no reply to {method} within {REPLY_TIMEOUT_SECONDS} s"
-        reply = json.loads(self.process.stdout.readline())
-        assert reply["id"] == self.next_id, reply
+        assert ready, f"no reply to {method} within {REPLY_TIMEOUT_SECONDS} s; stderr: {self.stderr_text()}"
+        line = self.process.stdout.readline()
+        assert line, f"proxy closed stdout during {method}; stderr: {self.stderr_text()}"
+        reply = json.loads(line)
+        assert reply["id"] == self.next_id, (reply, self.stderr_text())
         return reply
 
     def call(self, name, **arguments):
@@ -135,7 +141,12 @@ class Proxy:
 
     def close(self):
         self.process.stdin.close()
-        self.process.wait(timeout=RUN_TIMEOUT_SECONDS)
+        try:
+            self.process.wait(timeout=RUN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            raise AssertionError(f"proxy did not exit; stderr: {self.stderr_text()}") from None
+        self.process.stderr.close()
 
 
 class Adopter:
@@ -351,3 +362,22 @@ def test_the_agent_user_reaches_neither_the_docker_daemon_nor_the_issuer_key(ado
     assert probe.stdout.split() == ["denied", "denied"], probe
     assert pwd.getpwnam(AGENT_USER).pw_uid != b.ISSUER_UID
     assert adopter.stack.probe(ISSUER_KEY_MODE) == [b.ISSUER_UID, 0o600]
+
+
+def test_the_proxy_run_by_a_user_who_reaches_docker_refuses_without_the_flag(adopter):
+    environ = {key: value for key, value in os.environ.items() if key != "DOCKER_HOST"}
+    done = subprocess.run(
+        [
+            sys.executable, "-m", "agent_bailiff.cli", "proxy", "run",
+            "--task-file", str(adopter.task_file), "--key-dir", str(adopter.key_dir),
+            "--gateway-url", adopter.gateway_url, "--routes", str(adopter.routes),
+        ],
+        input=b"",
+        capture_output=True,
+        env=environ,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=False,
+    )  # fmt: skip
+    assert done.returncode == 1, done.stderr
+    assert b"proxy run refused" in done.stderr, done.stderr
+    assert DOCKER_SOCKET.encode() in done.stderr, done.stderr
