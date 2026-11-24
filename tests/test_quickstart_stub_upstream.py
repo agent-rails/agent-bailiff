@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import socket
@@ -47,7 +48,12 @@ def call(url, name, arguments, authorization="Bearer stub"):
 def test_it_lists_its_tools(server):
     status, reply = post(server, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert status == 200
-    assert [tool["name"] for tool in reply["result"]["tools"]] == ["read_note", "write_note", "delete_all_notes"]
+    assert [tool["name"] for tool in reply["result"]["tools"]] == [
+        "read_note",
+        "write_note",
+        "delete_all_notes",
+        "echo_auth",
+    ]
 
 
 def test_initialize_echoes_the_protocol_version(server):
@@ -70,6 +76,19 @@ def test_a_call_without_a_credential_is_refused(server):
 def test_a_written_note_reads_back(server):
     assert call(server, "write_note", {"note": "plan", "text": "ship it"})["isError"] is False
     assert call(server, "read_note", {"note": "plan"})["content"][0]["text"] == "ship it"
+
+
+def test_echo_auth_returns_the_credential_raw_and_in_base64(server):
+    result = call(server, "echo_auth", {"note": "a"}, authorization="Bearer secret-value")
+    encoded = base64.b64encode(b"Bearer secret-value").decode()
+    assert result == {
+        "content": [{"type": "text", "text": f"authorization: Bearer secret-value\nbase64: {encoded}"}],
+        "isError": False,
+    }
+
+
+def test_echo_auth_without_a_credential_is_refused(server):
+    assert call(server, "echo_auth", {"note": "a"}, authorization=None)["isError"] is True
 
 
 def test_an_unknown_tool_is_an_error(server):

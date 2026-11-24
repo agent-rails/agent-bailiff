@@ -11,6 +11,7 @@ from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.control.suspension import suspension_directory
+from agent_bailiff.custodian.config import MAX_RESPONSE_WORKERS, MIN_INFLIGHT_TTL
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.decide.config import PolicyRef, TargetBinding
 from agent_bailiff.decide.costs import CostTable
@@ -24,6 +25,7 @@ from agent_bailiff.strict_json import parse_strict_json
 
 MAX_CONFIG_BYTES = 1 << 20
 MAX_OS_ID = 2**32 - 2
+MAX_INFLIGHT_TTL = 3600
 
 DOCKET_CLIENT_KEYS = frozenset({"socket", "sink_uid", "state_dir"})
 GATEWAY_KEYS = frozenset({"uid", "socket", "socket_group", "private_dir"})
@@ -37,7 +39,8 @@ DECIDE_KEYS = frozenset(
 CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
-    | {"docket", "gateway"}
+    | {"docket", "gateway", "inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant"}
+    | {"response_socket", "response_workers"}
 )
 DOCKET_KEYS = frozenset(
     {
@@ -182,6 +185,12 @@ class CustodianSettings:
     skew_seconds: int
     rate_limit: int
     rate_window: int
+    inflight_ttl: int
+    inflight_max: int
+    inflight_max_bytes: int
+    inflight_per_tenant: int
+    response_socket: Path
+    response_workers: int
     issuers: Issuers
     bindings: Path
     kek: Path
@@ -365,6 +374,10 @@ def parse_custodian(document: object) -> CustodianSettings:
     except ValueError as exc:
         raise config.wrap("decide_keys", exc) from None
     ledger = config.section("ledger", frozenset({"path", "writer_uid", "group"}))
+    gateway = _gateway(config)
+    response_socket = config.path("response_socket")
+    if response_socket == gateway.socket:
+        raise ConfigError("custodian.response_socket must not be the custodian's gateway socket")
     return CustodianSettings(
         name=config.component("name"),
         key=config.path("key"),
@@ -375,6 +388,12 @@ def parse_custodian(document: object) -> CustodianSettings:
         skew_seconds=config.integer("skew_seconds", 0, 300),
         rate_limit=config.integer("rate_limit", 1),
         rate_window=config.integer("rate_window", 1),
+        inflight_ttl=config.integer("inflight_ttl", MIN_INFLIGHT_TTL, MAX_INFLIGHT_TTL),
+        inflight_max=config.integer("inflight_max", 1),
+        inflight_max_bytes=config.integer("inflight_max_bytes", 1),
+        inflight_per_tenant=config.integer("inflight_per_tenant", 1),
+        response_socket=response_socket,
+        response_workers=config.integer("response_workers", 1, MAX_RESPONSE_WORKERS),
         issuers=_issuers(config),
         bindings=config.path("bindings"),
         kek=config.path("kek"),
@@ -384,7 +403,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         suspension_dir=suspension_directory(ledger.path("path")),
         routes=config.path("routes"),
         docket=_docket_client(config),
-        gateway=_gateway(config),
+        gateway=gateway,
     )
 
 

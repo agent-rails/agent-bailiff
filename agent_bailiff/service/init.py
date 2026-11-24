@@ -12,6 +12,13 @@ from agent_warrant.identity import encode_public_key
 from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.claims import ClaimsStore
+from agent_bailiff.custodian.config import (
+    DEFAULT_INFLIGHT_MAX,
+    DEFAULT_INFLIGHT_MAX_BYTES,
+    DEFAULT_INFLIGHT_PER_TENANT,
+    DEFAULT_INFLIGHT_TTL,
+    DEFAULT_RESPONSE_WORKERS,
+)
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.docket.retention import DEFAULT_MAX_RECEIPT_AGE, DEFAULT_RETAINED_BYTES
@@ -114,6 +121,7 @@ def init_custodian(
     ledger_group: int,
     docket: Mapping[str, Any],
     gateway: Mapping[str, Any],
+    response_socket: str,
 ) -> PublicKeyRecord:
     check_component(name)
     files = (CONFIG, KEY, ROUTES, BINDINGS, "kek", "credentials.db", "claims.db", DOCKET_STATE, GRPC)
@@ -128,6 +136,12 @@ def init_custodian(
         "skew_seconds": DEFAULT_SKEW_SECONDS,
         "rate_limit": DEFAULT_RATE_LIMIT,
         "rate_window": DEFAULT_RATE_WINDOW,
+        "inflight_ttl": DEFAULT_INFLIGHT_TTL,
+        "inflight_max": DEFAULT_INFLIGHT_MAX,
+        "inflight_max_bytes": DEFAULT_INFLIGHT_MAX_BYTES,
+        "inflight_per_tenant": DEFAULT_INFLIGHT_PER_TENANT,
+        "response_socket": str(response_socket),
+        "response_workers": DEFAULT_RESPONSE_WORKERS,
         "issuers": {},
         "bindings": str(directory / BINDINGS),
         "kek": str(directory / "kek"),

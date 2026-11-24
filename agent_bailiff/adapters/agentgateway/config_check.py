@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import urllib.parse
 from collections.abc import Iterator, Mapping
@@ -11,6 +12,7 @@ from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY
 from agent_bailiff.chain_headers import CALL_HEADERS, REQUIRED_HEADERS, TRACEPARENT_HEADER
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.bindings import HEADER_NAME
+from agent_bailiff.custodian.config import MAX_UPSTREAM_TIMEOUT
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
@@ -32,6 +34,12 @@ TARGET_PATH = re.compile(r"/(?!/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]*")
 BAILIFF_PROCESSOR_KEYS = frozenset({"kind", "host", "methods", "failureMode", "requestHeaders", "metadata"})
 HEADER_FILTER_KEYS = frozenset({"allowed", "disallowed"})
 BAILIFF_METHODS = {"*": "request"}
+REDACTOR_METHODS = {"tools/call": "response"}
+TIMEOUT_KEYS = frozenset({"requestTimeout", "backendRequestTimeout", "responseIdleTimeout"})
+BOUNDED_TIMEOUTS = ("requestTimeout", "backendRequestTimeout")
+MAX_UPSTREAM_TIMEOUT_MS = MAX_UPSTREAM_TIMEOUT * 1000
+DURATION = re.compile(r"([1-9][0-9]{0,8})(ms|s|m)")
+DURATION_UNIT_MS = {"ms": 1, "s": 1000, "m": 60_000}
 METHOD_RULE = 'mcp.methodName == "tools/call" || mcp.methodName == "tools/list"'
 AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie", RELEASE_HEADER})
 CHAIN_HEADER_PREFIX = "x-bailiff-"
@@ -47,6 +55,7 @@ REFUSAL_SHAPE = (
     + "]"
 )
 REQUEST_ONLY_PHASES = frozenset({"request", "off"})
+RESPONSE_ONLY_PHASES = frozenset({"response", "off"})
 REFUSAL_GUARD = {
     "kind": "expression",
     "methods": {"tools/call": "response"},
@@ -59,17 +68,18 @@ REFUSAL_GUARD = {
 class GatewayExpectations:
     decide_socket: Path
     custodian_socket: Path
+    redactor_socket: Path
     services: frozenset[str]
     credential_headers: frozenset[str]
     effector_services: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        for name in ("decide_socket", "custodian_socket"):
-            value = getattr(self, name)
+        sockets = (self.decide_socket, self.custodian_socket, self.redactor_socket)
+        for name, value in zip(("decide_socket", "custodian_socket", "redactor_socket"), sockets, strict=True):
             if not isinstance(value, Path) or not value.is_absolute():
                 raise ValueError(f"{name} must be an absolute path")
-        if self.decide_socket == self.custodian_socket:
-            raise ValueError("decide and custodian must listen on different sockets")
+        if len(set(sockets)) != len(sockets):
+            raise ValueError("decide, custodian and redactor must listen on different sockets")
         if not self.services or not all(isinstance(item, str) and item for item in self.services):
             raise ValueError("services must be a non-empty set of non-empty str")
         if not all(isinstance(item, str) and HEADER_NAME.fullmatch(item) for item in self.credential_headers):
@@ -203,6 +213,7 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
     if policies.get("mcpAuthorization") != {"rules": [METHOD_RULE]}:
         problems.append(f"mcp.policies.mcpAuthorization must be exactly {{'rules': [{METHOD_RULE!r}]}}")
     _check_header_modifier(problems, policies.get("requestHeaderModifier"), expected.credential_headers)
+    _check_timeouts(problems, policies.get("timeout"))
     guardrails = policies.get("mcpGuardrails")
     if (
         not isinstance(guardrails, dict)
@@ -212,7 +223,7 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
         problems.append("mcp.policies.mcpGuardrails must be an object with only a processors list")
         return
     processors = guardrails["processors"]
-    _check_refusal_guard(problems, processors)
+    _check_response_phase(problems, processors, expected.redactor_socket)
     decide = _bailiff_processors(processors, expected.decide_socket)
     custodian = _bailiff_processors(processors, expected.custodian_socket)
     for label, found in (("decide", decide), ("custodian", custodian)):
@@ -220,11 +231,17 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
             problems.append(f"exactly one remote {label} processor must target its unix socket; found {len(found)}")
     if len(decide) != 1 or len(custodian) != 1:
         return
-    if decide != [len(processors) - 2] or custodian != [len(processors) - 1]:
-        problems.append("processor order: decide must run immediately before custodian, and custodian must be last")
-    _check_bailiff_processor(problems, "decide", processors[decide[0]], {})
+    requesting = [index for index, processor in enumerate(processors) if not _in_phase(processor, RESPONSE_ONLY_PHASES)]
+    if requesting[-2:] != [decide[0], custodian[0]]:
+        problems.append(
+            "processor order: decide must run immediately before custodian, "
+            "and custodian must be the last request-phase processor"
+        )
+    _check_bailiff_processor(problems, "decide", processors[decide[0]], BAILIFF_METHODS, {})
     _check_header_filter(problems, "decide", processors[decide[0]].get("requestHeaders"))
-    _check_bailiff_processor(problems, "custodian", processors[custodian[0]], {CLEARANCE_KEY: CLEARANCE_EXPRESSION})
+    _check_bailiff_processor(
+        problems, "custodian", processors[custodian[0]], BAILIFF_METHODS, {CLEARANCE_KEY: CLEARANCE_EXPRESSION}
+    )
     if "requestHeaders" in processors[custodian[0]]:
         problems.append(
             "the custodian processor must not filter requestHeaders; "
@@ -232,18 +249,59 @@ def _check_policies(problems: list[str], policies: object, expected: GatewayExpe
         )
 
 
-def _check_refusal_guard(problems: list[str], processors: list[Any]) -> None:
-    responding = [
-        processor
-        for processor in processors
-        if not isinstance(processor, dict)
-        or not isinstance(processor.get("methods"), dict)
-        or any(phase not in REQUEST_ONLY_PHASES for phase in processor["methods"].values())
-    ]
-    if responding != [REFUSAL_GUARD]:
+def _check_timeouts(problems: list[str], timeout: object) -> None:
+    if not isinstance(timeout, dict):
         problems.append(
-            "the only response-phase processor must be the refusal guard (config_check.REFUSAL_GUARD); "
-            "without it an upstream can answer with a bailiff refusal after acting"
+            "mcp.policies.timeout must set requestTimeout and backendRequestTimeout; "
+            "an unbounded upstream call outlives the in-flight release the redactor needs"
+        )
+        return
+    _only_keys(problems, "mcp.policies.timeout", timeout, TIMEOUT_KEYS)
+    optional = ("responseIdleTimeout",) if "responseIdleTimeout" in timeout else ()
+    for key in (*BOUNDED_TIMEOUTS, *optional):
+        milliseconds = _duration_ms(timeout.get(key))
+        if milliseconds is None or milliseconds > MAX_UPSTREAM_TIMEOUT_MS:
+            problems.append(
+                f"mcp.policies.timeout.{key} must be a duration with a unit, at most {MAX_UPSTREAM_TIMEOUT}s"
+            )
+
+
+def _duration_ms(value: object) -> int | None:
+    match = DURATION.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return None
+    return int(match.group(1)) * DURATION_UNIT_MS[match.group(2)]
+
+
+def _in_phase(processor: object, phases: frozenset[str]) -> bool:
+    return (
+        isinstance(processor, dict)
+        and isinstance(processor.get("methods"), dict)
+        and all(phase in phases for phase in processor["methods"].values())
+    )
+
+
+def _check_response_phase(problems: list[str], processors: list[Any], redactor_socket: Path) -> None:
+    redactor = _bailiff_processors(processors, redactor_socket)
+    if len(redactor) != 1:
+        problems.append(f"exactly one remote redactor processor must target its unix socket; found {len(redactor)}")
+    else:
+        _check_bailiff_processor(
+            problems, "redactor", processors[redactor[0]], REDACTOR_METHODS, {CLEARANCE_KEY: CLEARANCE_EXPRESSION}
+        )
+        if "requestHeaders" in processors[redactor[0]]:
+            problems.append("the redactor processor must not set requestHeaders; it runs only on call results")
+    responding = [index for index, processor in enumerate(processors) if not _in_phase(processor, REQUEST_ONLY_PHASES)]
+    if (
+        len(redactor) != 1
+        or len(responding) != 2
+        or responding[0] != redactor[0]
+        or processors[responding[1]] != REFUSAL_GUARD
+    ):
+        problems.append(
+            "the response-phase processors must be exactly the redactor then the refusal guard "
+            "(config_check.REFUSAL_GUARD); without the guard an upstream can answer with a bailiff refusal "
+            "after acting, and without the redactor an echoed credential reaches the agent"
         )
 
 
@@ -257,11 +315,15 @@ def _bailiff_processors(processors: list[Any], socket_path: Path) -> list[int]:
 
 
 def _check_bailiff_processor(
-    problems: list[str], label: str, processor: Mapping[str, Any], metadata: Mapping[str, str]
+    problems: list[str],
+    label: str,
+    processor: Mapping[str, Any],
+    methods: Mapping[str, str],
+    metadata: Mapping[str, str],
 ) -> None:
     _only_keys(problems, f"the {label} processor", processor, BAILIFF_PROCESSOR_KEYS)
-    if processor.get("methods") != BAILIFF_METHODS:
-        problems.append(f'the {label} processor methods must be exactly {{"*": "request"}}')
+    if processor.get("methods") != methods:
+        problems.append(f"the {label} processor methods must be exactly {json.dumps(methods)}")
     if processor.get("failureMode", "failClosed") != "failClosed":
         problems.append(f"the {label} processor must be failClosed")
     if processor.get("metadata", {}) != metadata:

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import test_quickstart
 import test_quickstart_stack
 from test_quickstart_stack import IMAGE, RUN_TIMEOUT_SECONDS, b
 
+from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.proxy.guidance import GUIDANCE, TASK_EXPIRED
 
 pytestmark = test_quickstart_stack.pytestmark
@@ -246,6 +248,7 @@ def test_routes_generate_drafts_every_upstream_tool(adopter, proxy, tmp_path):
     routes = json.loads(draft.read_text())["routes"]
     assert [(route["name"], route["tool"], route["resource"]) for route in routes] == [
         ("delete_all_notes", "stub.delete_all_notes", ""),
+        ("echo_auth", "stub.echo_auth", ""),
         ("read_note", "stub.read_note", ""),
         ("write_note", "stub.write_note", ""),
     ]
@@ -254,7 +257,7 @@ def test_routes_generate_drafts_every_upstream_tool(adopter, proxy, tmp_path):
 def test_the_proxy_lists_only_routed_tools(proxy):
     assert proxy.request("initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"]["name"]
     tools = proxy.request("tools/list")["result"]["tools"]
-    assert sorted(tool["name"] for tool in tools) == ["read_note", "write_note"]
+    assert sorted(tool["name"] for tool in tools) == ["echo_auth", "read_note", "write_note"]
 
 
 def test_an_in_scope_call_reaches_the_upstream_with_the_stored_credential(adopter, proxy, secret):
@@ -267,6 +270,30 @@ def test_an_in_scope_call_reaches_the_upstream_with_the_stored_credential(adopte
     calls = adopter.upstream_calls()[before:]
     assert [call["tool"] for call in calls] == ["write_note", "read_note"]
     assert {call["credential_sha256"] for call in calls} == {hashlib.sha256(secret.encode()).hexdigest()}
+
+
+def test_an_echoed_credential_is_redacted_and_alerted_against_its_release(adopter, proxy, secret):
+    task_id, _ = adopter.issue(scope={**SCOPE, "tools": [*SCOPE["tools"], "stub.echo_auth"]})
+    assert proxy.call("write_note", note="allowed", text="plain") == {
+        "content": [{"type": "text", "text": "wrote allowed"}],
+        "isError": False,
+    }
+    before = len(adopter.upstream_calls())
+    echoed = proxy.call("echo_auth", note="allowed")
+    assert echoed["isError"] is False, echoed
+    [content] = echoed["content"]
+    assert content["text"].count(MARKER) == 2, content
+    assert secret not in content["text"]
+    assert base64.b64encode(secret.encode()).decode() not in content["text"]
+    [upstream_call] = adopter.upstream_calls()[before:]
+    assert upstream_call["tool"] == "echo_auth"
+    entries = [row["entry"] for row in test_quickstart.verified_rows(adopter.stack, task_id)]
+    releases = {entry["entry_id"]: entry for entry in entries if entry["decision"] == "release"}
+    alerts = [entry for entry in entries if entry["decision"] == "alert"]
+    assert [(alert["reason"], alert["tool"], alert["op_id"]) for alert in alerts] == [
+        ("credential_echo", "stub.echo_auth", releases[alerts[0]["parent_entry"]]["op_id"])
+    ]
+    assert releases[alerts[0]["parent_entry"]]["tool"] == "stub.echo_auth"
 
 
 def test_an_out_of_scope_call_is_refused_with_guidance(adopter, proxy):

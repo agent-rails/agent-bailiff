@@ -18,6 +18,16 @@ from agent_warrant.trust import IssuerTrustPolicy
 from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBinding, EffectorBinding
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
+from agent_bailiff.custodian.echo import (
+    MIN_NEEDLE_LENGTH,
+    Oversize,
+    UnreadableResult,
+    needles,
+    redact,
+    too_short_to_redact,
+)
+from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, InflightReleases
+from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
@@ -40,6 +50,15 @@ CLEARANCE_REFUSALS = {
     "not_yet_valid": "clearance_not_yet_valid",
 }
 ONCE_REFUSALS = frozenset({"already_issued", "task_denied"})
+RESPONSE_REASONS = frozenset(
+    {
+        "response_unmatched",
+        "response_unreadable",
+        "response_oversize",
+        "response_clearance_missing",
+        "response_internal_error",
+    }
+)
 MAX_RECORDED_REFUSALS = 65536
 
 logger = logging.getLogger(__name__)
@@ -74,6 +93,19 @@ class Refused:
 
 
 ReleaseResult = Released | Refused
+
+
+@dataclass(frozen=True)
+class ResponseChecked:
+    result: bytes | None
+
+
+@dataclass(frozen=True)
+class ResponseRefused:
+    reason: str
+
+
+ResponseResult = ResponseChecked | ResponseRefused
 
 
 @dataclass(frozen=True)
@@ -126,6 +158,13 @@ class Custodian:
         self._release_signer = release_signer
         self._monotonic_ns = monotonic_ns
         self._limiter = TaskRateLimiter(config.rate_limit, config.rate_window)
+        self._inflight = InflightReleases(
+            max_entries=config.inflight_max,
+            max_bytes=config.inflight_max_bytes,
+            per_tenant=config.inflight_per_tenant,
+            ttl_ns=config.inflight_ttl * 1_000_000_000,
+            monotonic_ns=monotonic_ns,
+        )
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
         self._refusals_lock = threading.Lock()
@@ -139,6 +178,53 @@ class Custodian:
         except Exception:
             logger.exception("custodian release failed with an internal error")
             return Refused("internal_error")
+
+    def check_response(self, clearance_token: object, result: bytes, now: int) -> ResponseResult:
+        try:
+            return self._check_response(clearance_token, result, now)
+        except Exception:
+            logger.exception("custodian response check failed with an internal error")
+            return ResponseRefused("response_internal_error")
+
+    def _check_response(self, clearance_token: object, result: bytes, now: int) -> ResponseResult:
+        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+            raise ValueError("now must be a non-negative integer")
+        if not isinstance(clearance_token, str) or not clearance_token:
+            return ResponseRefused("response_clearance_missing")
+        release = self._inflight.take(token_hash(clearance_token)) if clearance_token.isascii() else None
+        if release is None:
+            logger.warning("no in-flight release matches a call result")
+            return ResponseRefused("response_unmatched")
+        op_id = release.entry.op_id
+        try:
+            redaction = redact(result, needles(release.header_value))
+        except UnreadableResult:
+            logger.warning("call result for op %s is not a readable JSON object", op_id)
+            return ResponseRefused("response_unreadable")
+        except Oversize:
+            logger.warning("redacted call result for op %s is over the size cap", op_id)
+            return ResponseRefused("response_oversize")
+        if redaction is None:
+            return ResponseChecked(None)
+        logger.error(
+            "redacted %d echoes of the released credential from the call result for op %s", redaction.hits, op_id
+        )
+        self._alert_echo(release, now)
+        return ResponseChecked(redaction.result)
+
+    def _alert_echo(self, release: InflightRelease, now: int) -> None:
+        alert = replace(
+            release.entry,
+            entry_id=uuid.uuid4().hex,
+            decision="alert",
+            reason="credential_echo",
+            parent_entry=release.release_entry_id,
+            at=now,
+        )
+        try:
+            self._docket.append(alert)
+        except Exception:
+            logger.exception("credential echo alert entry for op %s was not acknowledged", release.entry.op_id)
 
     def _release(self, clearance_token: object, request: object, now: int, started: int) -> Released:
         if isinstance(now, bool) or not isinstance(now, int) or now < 0:
@@ -175,17 +261,24 @@ class Custodian:
         header_value = self._decrypt(binding)
         if self._suspension.suspended is not False:
             raise _Refusal("suspended")
-        self._admit(clearance, now)
-        release_entry = replace(
-            entry,
-            entry_id=uuid.uuid4().hex,
-            decision="release",
-            reason="ok",
-            performed=True,
-            credential_tier=TIER,
-            latency_ms=self._elapsed_ms(started),
-        )
-        self._record(release_entry)
+        _warn_unredactable(header_value)
+        reservation = self._reserve(verified, header_value)
+        try:
+            self._admit(clearance, now)
+            release_entry = replace(
+                entry,
+                entry_id=uuid.uuid4().hex,
+                decision="release",
+                reason="ok",
+                performed=True,
+                credential_tier=TIER,
+                latency_ms=self._elapsed_ms(started),
+            )
+            self._record(release_entry)
+        except BaseException:
+            self._inflight.discard(reservation)
+            raise
+        self._inflight.commit(reservation, release_entry.entry_id, entry)
         return Released(binding.header_name, header_value, TIER, clearance.op_id, release_entry.entry_id)
 
     def _verify(self, clearance_token: object, request: object, now: int) -> _Verified:
@@ -271,8 +364,14 @@ class Custodian:
             )
         except ReleaseTooLarge:
             raise _Refusal("release_too_large") from None
-        self._admit(clearance, now)
-        self._record(release_entry)
+        reservation = self._reserve(verified, token)
+        try:
+            self._admit(clearance, now)
+            self._record(release_entry)
+        except BaseException:
+            self._inflight.discard(reservation)
+            raise
+        self._inflight.commit(reservation, release_entry.entry_id, entry)
         return Released(RELEASE_HEADER, token, EFFECTOR_TIER, clearance.op_id, release_entry.entry_id)
 
     def _binding(self, verified: _Verified) -> Binding:
@@ -366,6 +465,14 @@ class Custodian:
         if self._limiter.exhausted(clearance.tenant, clearance.task, now):
             raise _Refusal("rate_limited")
 
+    def _reserve(self, verified: _Verified, header_value: str) -> InflightReservation:
+        try:
+            return self._inflight.reserve(token_hash(verified.token), verified.clearance.tenant, header_value)
+        except InflightFull:
+            raise _Refusal("inflight_full") from None
+        except ValueError:
+            raise _Refusal("already_issued") from None
+
     def _admit(self, clearance: Clearance, now: int) -> None:
         with self._admit_lock:
             if self._limiter.exhausted(clearance.tenant, clearance.task, now):
@@ -442,6 +549,15 @@ def _check_scope(verified: _Verified) -> None:
         raise _Refusal("unbounded_scope")
     if not covers(verified.leaf_scope, verified.clearance.tool, verified.clearance.resource):
         raise _Refusal("out_of_scope")
+
+
+def _warn_unredactable(header_value: str) -> None:
+    if too_short_to_redact(header_value):
+        logger.warning(
+            "released credential, or its decoded basic password, is shorter than %d characters"
+            " and cannot be redacted from results",
+            MIN_NEEDLE_LENGTH,
+        )
 
 
 def _header_value(secret: bytes) -> str | None:

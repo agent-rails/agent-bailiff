@@ -24,7 +24,7 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 ## D3. Two chained agentgateway processors
 
-**Decision:** decide and the custodian are separate `ExtMcp` processors, decide first and the custodian last. Decide returns only metadata (the clearance); the custodian returns the credential as a header mutation.
+**Decision:** decide and the custodian are separate `ExtMcp` processors, decide first and the custodian last on the request phase. Decide returns only metadata (the clearance); the custodian returns the credential as a header mutation. D20 adds a response-phase processor.
 
 **Why:** a processor's header mutation is the only way to inject a header in agentgateway v1.7.0. Gateway metadata is access-logged and visible to CEL, so it must never carry a secret.
 
@@ -131,9 +131,15 @@ Each entry records what was decided and why. Later entries supersede earlier one
 
 The defence stops at what the call designates and what the docket sees. Arguments that do not build the route's resource reach the upstream unchecked, so a route with a coarse resource leaves the upstream able to act on objects the task did not name. The proof does not cover `_meta` or `traceparent`. The upstream MCP server holds the credential on every allowed call and is a deputy agent-bailiff does not constrain; what it does with the credential is not docketed. A task that never made an allowed call has no docket record to revoke from. An agent steered by injected instructions is itself a confused deputy for its user; the task scope bounds it but does not stop a call in scope. See [THREAT_MODEL.md](THREAT_MODEL.md).
 
+## D20. Credential echo redaction at the custodian
+
+**Decision:** the custodian serves a third processor, the redactor, on its own socket, gRPC server and workers, on `tools/call` responses only, `failClosed`, before the refusal guard. At each release the custodian keeps the released header value in memory, keyed by the hash of the verified clearance and bounded by `inflight_ttl` (180 s, at least the 120 s upstream timeout cap plus 30 s), `inflight_max` (4096 entries), `inflight_max_bytes` (8 MiB) and `inflight_per_tenant` (512). A full map refuses the release as `inflight_full`, before the upstream acts. The redactor takes the entry for the clearance in the gateway metadata, replaces each echo of the value in the result's JSON strings and keys with `[redacted by agent-bailiff]`, and records an `alert` entry with reason `credential_echo` and the release entry as `parent_entry`. It matches the raw header value, the token after an auth scheme, a Basic credential's decoded `user:pass` and password, their percent encodings and their base64 and base64url encodings at every byte offset, each only when it is at least 12 characters long. A shorter form is not matched: a Basic password under 12 decoded characters, for example, is released with a warning and not redacted. Matching is literal and case-sensitive. A result with no matching entry, unreadable JSON or a redacted size over 4 MiB fails the call with a `response_*` reason; the client reports `OutcomeUnknown`. check-config requires the processor order decide, custodian, redactor, refusal guard, and `requestTimeout`, `backendRequestTimeout` and any `responseIdleTimeout` of at most 120 s.
+
+**Why:** an upstream can return the credential it received, and the result goes to the agent. Only the custodian holds the plaintext, and the gateway's response hook is the one place the result passes before any caller sees it. Redacting keeps a result whose effect already happened; refusing it would hide that effect. The redactor runs before the guard so the guard sees the redacted result, and on its own workers so a large result does not delay releases. Redacting on the agent side would put the credential on the agent host. Redaction is best-effort suppression of the listed literal forms, not a containment boundary: a hex dump, re-wrapped base64, Unicode lookalikes and a value split across strings are not found. The control is short-lived, target-bound credentials; effector releases and short-lived upstream credentials remove the asset instead of the echo and stay preferred where a target supports them. JSON-RPC error text and event-stream side messages skip the response hook in agentgateway v1.7.0; see [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
 - Effector targets other than Kubernetes, and more than one effector instance.
-- A `CheckResponse` hook for outcomes (reconciliation covers them).
+- A `CheckResponse` hook for outcomes (reconciliation covers them). The response hook only redacts echoed credentials (D20).
 - A standards check of the chain format against RFC 8693 and the OAuth Transaction Tokens draft before 1.0.

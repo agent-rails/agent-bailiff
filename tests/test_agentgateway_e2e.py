@@ -1,3 +1,4 @@
+import base64
 import copy
 import hashlib
 import http.client
@@ -18,16 +19,17 @@ from pathlib import Path
 
 import pytest
 import test_custodian
-from test_agentgateway_config import gateway_config
+from test_agentgateway_config import CUSTODIAN, DECIDE, REDACTOR, gateway_config
 from test_control import MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
+from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.effector.catalog import Argument
@@ -281,24 +283,37 @@ def agent_headers(request):
 @pytest.fixture
 def stack(binary, workdir, private, make_decider, make_custodian):
     upstream = Upstream()
-    sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
+    custodian = make_custodian()
+    sockets = {
+        "decide": workdir / "d" / "decide.sock",
+        "custodian": workdir / "c" / "custodian.sock",
+        "redactor": workdir / "c" / "redactor.sock",
+    }
     servers = {
         "decide": ProcessorServer(
-            DecideProcessor(make_decider(), ROUTES, clock=lambda: NOW),
+            request_handlers(DecideProcessor(make_decider(), ROUTES, clock=lambda: NOW)),
             sockets["decide"],
             private("decide-grpc"),
             gateway_uid=os.geteuid(),
         ),
         "custodian": ProcessorServer(
-            CustodianProcessor(make_custodian(), ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1),
+            request_handlers(CustodianProcessor(custodian, ROUTES, CREDENTIAL_HEADERS, clock=lambda: NOW + 1)),
             sockets["custodian"],
             private("custodian-grpc"),
+            gateway_uid=os.geteuid(),
+        ),
+        "redactor": response_server(
+            RedactorProcessor(custodian, clock=lambda: NOW + 2),
+            sockets["redactor"],
+            private("redactor-grpc"),
             gateway_uid=os.geteuid(),
         ),
     }
     for server in servers.values():
         server.start()
-    config = gateway_config(sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS))
+    config = gateway_config(
+        sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS), sockets["redactor"]
+    )
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
         "adminAddr": f"127.0.0.1:{admin}",
@@ -306,7 +321,7 @@ def stack(binary, workdir, private, make_decider, make_custodian):
         "readinessAddr": f"127.0.0.1:{readiness}",
     }
     expected = GatewayExpectations(
-        sockets["decide"], sockets["custodian"], ROUTES.services, frozenset({"Authorization"})
+        sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset({"Authorization"})
     )
     assert validate_gateway_config(config, expected) == ()
     gateway = Gateway(binary, config, workdir)
@@ -347,6 +362,28 @@ def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(st
     assert release.trace_id == TRACE
     assert release.credential_tier == "gateway-bound"
     assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
+
+
+def test_an_echoed_credential_is_redacted_before_the_agent_sees_it(stack, workdir):
+    echo = f"token {DEPLOY_SECRET.decode()} and {base64.b64encode(DEPLOY_SECRET).decode()}"
+    stack["upstream"].call_result = {"content": [{"type": "text", "text": echo}]}
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    assert status == 200, body
+    [content] = body["result"]["content"]
+    assert content["text"].startswith(f"token {MARKER} and {MARKER}"), body
+    assert DEPLOY_SECRET.decode() not in json.dumps(body)
+    assert base64.b64encode(DEPLOY_SECRET).decode() not in json.dumps(body)
+    entries = docket_entries(workdir)
+    [release] = [entry for entry in entries if entry.hop == "custodian" and entry.decision == "release"]
+    [alert] = [entry for entry in entries if entry.decision == "alert"]
+    assert (alert.reason, alert.parent_entry, alert.op_id) == ("credential_echo", release.entry_id, release.op_id)
+
+
+def test_a_result_without_an_echo_reaches_the_agent_unchanged(stack):
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    assert status == 200 and body["result"] == {"content": [{"type": "text", "text": "deployed"}]}, body
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])
@@ -561,14 +598,18 @@ def test_a_call_without_chain_headers_is_refused(stack):
 
 
 UNSAFE = {
-    "fail_open": lambda policies, processors: processors[2].update(failureMode="failOpen"),
-    "no_header_allowlist": lambda policies, processors: processors[1].pop("requestHeaders"),
-    "custodian_header_filter": lambda policies, processors: processors[2].update(
+    "fail_open": lambda policies, processors: processors[CUSTODIAN].update(failureMode="failOpen"),
+    "no_header_allowlist": lambda policies, processors: processors[DECIDE].pop("requestHeaders"),
+    "custodian_header_filter": lambda policies, processors: processors[CUSTODIAN].update(
         requestHeaders={"allowed": ["x-bailiff-nonce"]}
     ),
-    "custodian_before_decide": lambda policies, processors: processors.insert(1, processors.pop(2)),
-    "custodian_over_tcp": lambda policies, processors: processors[2].update(host="127.0.0.1:9"),
-    "tools_call_only": lambda policies, processors: processors[1].update(methods={"tools/call": "request"}),
+    "custodian_before_decide": lambda policies, processors: processors.insert(DECIDE, processors.pop(CUSTODIAN)),
+    "custodian_over_tcp": lambda policies, processors: processors[CUSTODIAN].update(host="127.0.0.1:9"),
+    "tools_call_only": lambda policies, processors: processors[DECIDE].update(methods={"tools/call": "request"}),
+    "redactor_after_guard": lambda policies, processors: processors.append(processors.pop(REDACTOR)),
+    "redactor_fail_open": lambda policies, processors: processors[REDACTOR].update(failureMode="failOpen"),
+    "redactor_on_every_method": lambda policies, processors: processors[REDACTOR].update(methods={"*": "response"}),
+    "no_upstream_timeout": lambda policies, processors: policies.pop("timeout"),
     "no_method_rule": lambda policies, processors: policies.pop("mcpAuthorization"),
     "header_modifier_sets": lambda policies, processors: policies["requestHeaderModifier"].update(set={"x-a": "1"}),
     "chain_headers_stripped": lambda policies, processors: policies["requestHeaderModifier"]["remove"].append(

@@ -25,6 +25,7 @@ from agent_bailiff import cli
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
 from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
+from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket import DocketClient, decode_record
 from agent_bailiff.docket.entry import Entry
@@ -52,6 +53,7 @@ GID = os.getegid()
 ROOT = Path(__file__).resolve().parent.parent
 SECRET = b"Bearer deploy-secret"
 CHECK_REQUEST = "/agentgateway.dev.ext_mcp.ExtMcp/CheckRequest"
+CHECK_RESPONSE = "/agentgateway.dev.ext_mcp.ExtMcp/CheckResponse"
 ROUTES = {
     "routes": [{"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/staging/api"}]
 }
@@ -95,6 +97,7 @@ class Deployment:
         self.ledger = self.ledger_dir / "ledger.db"
         self.sockets = {"docket": root / "s" / "docket.sock", "decide": root / "d" / "decide.sock"}
         self.sockets["custodian"] = root / "c" / "custodian.sock"
+        self.sockets["redactor"] = root / "c" / "redactor.sock"
         self.keys = {
             "decide.example": generate_signing_key(self.decide / "signing.key", "decide.example"),
             "custodian.example": generate_signing_key(self.custodian / "signing.key", "custodian.example"),
@@ -190,6 +193,12 @@ class Deployment:
             "skew_seconds": 5,
             "rate_limit": 10,
             "rate_window": 60,
+            "inflight_ttl": 150,
+            "inflight_max": 64,
+            "inflight_max_bytes": 65536,
+            "inflight_per_tenant": 16,
+            "response_socket": str(self.sockets["redactor"]),
+            "response_workers": 2,
             "issuers": ISSUERS,
             "bindings": str(self.custodian / "bindings.json"),
             "kek": str(self.custodian / "kek"),
@@ -299,6 +308,9 @@ def test_the_example_documents_parse(deployment):
     control = load_control(deployment.paths["control"])
     assert decide.name == "decide.example" and decide.custodians == {"custodian.example"}
     assert list(custodian.decide_keys) == [deployment.keys["decide.example"].kid]
+    assert (custodian.inflight_ttl, custodian.inflight_max) == (150, 64)
+    assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (65536, 16)
+    assert (custodian.response_socket, custodian.response_workers) == (deployment.sockets["redactor"], 2)
     assert docket.allowed_uids == {UID} and set(docket.writers) == set(deployment.keys)
     assert control.name == "control" and set(control.writers) == {"decide.example", "custodian.example"}
 
@@ -349,6 +361,18 @@ BAD_CUSTODIAN = {
     "no_decide_keys": lambda doc: doc.update(decide_keys={}),
     "excess_skew": lambda doc: doc.update(skew_seconds=301),
     "zero_rate_limit": lambda doc: doc.update(rate_limit=0),
+    "zero_inflight_max": lambda doc: doc.update(inflight_max=0),
+    "bool_inflight_max_bytes": lambda doc: doc.update(inflight_max_bytes=True),
+    "zero_inflight_per_tenant": lambda doc: doc.update(inflight_per_tenant=0),
+    "inflight_ttl_over_an_hour": lambda doc: doc.update(inflight_ttl=3601),
+    "inflight_ttl_inside_the_upstream_timeout_margin": lambda doc: doc.update(inflight_ttl=149),
+    "missing_inflight_ttl": lambda doc: doc.pop("inflight_ttl"),
+    "missing_response_socket": lambda doc: doc.pop("response_socket"),
+    "relative_response_socket": lambda doc: doc.update(response_socket="c/redactor.sock"),
+    "response_socket_is_the_custodian_socket": lambda doc: doc.update(response_socket=doc["gateway"]["socket"]),
+    "zero_response_workers": lambda doc: doc.update(response_workers=0),
+    "three_response_workers": lambda doc: doc.update(response_workers=3),
+    "missing_response_workers": lambda doc: doc.pop("response_workers"),
     "ledger_without_writer": lambda doc: doc["ledger"].pop("writer_uid"),
     "decide_keys_not_an_object": lambda doc: doc.update(decide_keys=["x"]),
 }
@@ -588,6 +612,41 @@ def test_the_services_release_a_credential_once_through_both_sockets(stack, live
     assert replay.error.reason == "already_issued"
 
 
+def check_response(socket_path, response):
+    with grpc.insecure_channel(f"unix:{socket_path}") as channel:
+        stub = channel.unary_unary(
+            CHECK_RESPONSE,
+            request_serializer=ext_mcp_pb2.McpResponse.SerializeToString,
+            response_deserializer=ext_mcp_pb2.McpResponseResult.FromString,
+        )
+        return stub(response, timeout=10)
+
+
+def test_the_custodian_redacts_an_echo_on_its_response_socket(stack, live, deployment):
+    decided, released = stack.call(live())
+    assert released.WhichOneof("result") == "pass", released
+    echo = json.dumps({"content": [{"type": "text", "text": f"echo {SECRET.decode()}"}]}).encode()
+    response = ext_mcp_pb2.McpResponse(method="tools/call", mcp_response=echo)
+    response.metadata_context.CopyFrom(decided.metadata)
+    result = check_response(deployment.sockets["redactor"], response)
+    assert result.WhichOneof("result") == "mutated", result
+    assert b"deploy-secret" not in result.mutated and MARKER in json.loads(result.mutated)["content"][0]["text"]
+    again = check_response(deployment.sockets["redactor"], response)
+    assert (again.WhichOneof("result"), again.error.reason) == ("error", "response_unmatched")
+    with pytest.raises(grpc.RpcError) as caught:
+        check_response(deployment.sockets["custodian"], response)
+    assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
+
+
+def test_closing_the_custodian_removes_its_response_socket(stack, deployment):
+    assert deployment.sockets["redactor"].exists()
+    stack.custodian.close()
+    assert not deployment.sockets["redactor"].exists()
+    assert not deployment.sockets["custodian"].exists()
+    stack.custodian = run.start_custodian(load_custodian(deployment.paths["custodian"]))
+    assert deployment.sockets["redactor"].exists()
+
+
 @pytest.mark.parametrize("level", ["task", "tenant", "root"])
 def test_control_revoke_from_a_docket_line_stops_the_next_call(stack, live, deployment, level, capsys):
     stack.call(live())
@@ -654,7 +713,7 @@ def test_put_credential_refuses_an_empty_or_oversized_secret(deployment, stdin, 
 
 def test_check_config_runs_the_adapter_check_unchanged(tmp_path, capsys):
     arguments = ["check-config", "--gateway-config", str(tmp_path / "missing.json"), "--routes", "r", "--bindings", "b"]
-    arguments += ["--decide-socket", "/d.sock", "--custodian-socket", "/c.sock"]
+    arguments += ["--decide-socket", "/d.sock", "--custodian-socket", "/c.sock", "--redactor-socket", "/r.sock"]
     assert cli.main(arguments) == 1
     assert "check-config refused" in capsys.readouterr().err
 

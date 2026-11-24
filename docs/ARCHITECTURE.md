@@ -7,7 +7,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 | Component | Runs as | Holds | Listens on |
 |---|---|---|---|
 | decide | its own uid; owns the ledger | its signing key, policy, cost table, routes, the ledger (writer), the suspension switch | Unix socket for the gateway (ExtMcp) |
-| custodian | its own uid; in the ledger group | its signing key, key encryption key, credential store, binding table, claims database, routes; the ledger and suspension state read-only | Unix socket for the gateway (ExtMcp) |
+| custodian | its own uid; in the ledger group | its signing key, key encryption key, credential store, binding table, claims database, routes, released credentials for calls in flight; the ledger and suspension state read-only | Unix sockets for the gateway (ExtMcp request, and the redactor's response socket) |
 | docket | its own uid | the active segment, sealed segments, their manifest and the heads snapshot, pinned writer keys; the receipt directory read-only | Unix socket for decide, custodian and control |
 | docket archive | `archiver_uid`; in the docket reader group | its checkpoint, the archive directory, the receipt directory, pinned writer keys; the manifest and sealed segments read-only | none |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
@@ -59,6 +59,7 @@ flowchart LR
 
    It also removes every agent header except `accept`, `content-type`, `mcp-protocol-version`, `traceparent` and `tracestate`.
 4. The upstream MCP server receives the call with the credential header.
+5. agentgateway calls the custodian's redactor on its response socket with the `tools/call` result and the clearance. The redactor replaces any echo of the released credential with a marker and writes an alert entry linked to the release; the refusal guard then checks the result.
 
 The entries for a verified call carry the clearance's trace id and op_id, so the decide and custodian entries for one call can be joined. Early refusals may have no op_id. Decide and custodian refusals before verification are logged, not docketed, and decide records at most 16 agent-caused and 16 other refusals per task root per 60 s, each followed by one capped marker.
 
@@ -97,7 +98,7 @@ Decide and the custodian fail closed:
 
 Control applies its action first and reports it as unrecorded if its entry is not acknowledged.
 
-- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a non-Unix processor target, a gateway-bound upstream over `http` to a host that is neither loopback nor a single-label service name, or a `backendTLS` with any key but `root`.
+- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts, a non-Unix processor target, a gateway-bound upstream over `http` to a host that is neither loopback nor a single-label service name, or a `backendTLS` with any key but `root`.
 
 ## Credential tiers
 

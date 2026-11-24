@@ -40,6 +40,7 @@ from agent_bailiff.client import (
 from agent_bailiff.client import client as client_module
 from agent_bailiff.client.contract import new_traceparent, prepare_call
 from agent_bailiff.control import Control, Suspension
+from agent_bailiff.custodian.custodian import RESPONSE_REASONS
 from agent_bailiff.effector.catalog import Argument
 from agent_bailiff.routes import ToolRoute, ToolRoutes
 
@@ -47,6 +48,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VECTORS = json.loads((ROOT / "tests" / "vectors" / "client-v1.json").read_text())
 ROUTES = ToolRoutes([ToolRoute("deploy", "deploy_service", "deploy.service", "env/staging/api")])
 ARGS = {"service": "api", "replicas": 2}
+SECRET = "s3cr3t-credential-value"
 DEPLOYED = {"content": [{"type": "text", "text": "deployed"}]}
 
 binary = test_agentgateway_e2e.binary
@@ -441,6 +443,48 @@ def test_a_released_call_rejected_upstream_is_outcome_unknown(client, stub):
 def test_a_json_rpc_error_is_outcome_unknown(client, stub):
     stub.responders["tools/call"] = [reply(error={"code": -32603, "message": "boom"})]
     assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("jsonrpc_error_-32603")
+
+
+@pytest.mark.parametrize("reason", sorted(RESPONSE_REASONS))
+def test_a_response_phase_refusal_is_outcome_unknown(client, stub, reason):
+    stub.responders["tools/call"] = [reply(error={"code": -32001, "message": reason})]
+    assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("jsonrpc_error_-32001")
+    assert len(stub.calls()) == 1
+
+
+def test_no_response_phase_reason_is_a_refusal_reason():
+    assert all(reason.startswith("response_") for reason in RESPONSE_REASONS)
+    assert not RESPONSE_REASONS & REFUSAL_REASONS
+
+
+@pytest.mark.parametrize("code", [-32001, -32603])
+def test_json_rpc_error_text_never_reaches_the_outcome(client, stub, code):
+    stub.responders["tools/call"] = [reply(error={"code": code, "message": f"upstream said token {SECRET}"})]
+    outcome = client.call("deploy", "deploy_service", ARGS)
+    assert outcome == OutcomeUnknown(f"jsonrpc_error_{code}")
+    assert SECRET not in repr(outcome)
+
+
+def test_an_event_stream_side_message_never_reaches_the_outcome(client, stub):
+    def respond(message):
+        side = {"jsonrpc": "2.0", "method": "notifications/message", "params": {"data": f"token {SECRET}"}}
+        events = [side, {"jsonrpc": "2.0", "id": message["id"], "result": DEPLOYED}]
+        payload = b"".join(f"event: message\ndata: {json.dumps(event)}\n\n".encode() for event in events)
+        return 200, {"content-type": "text/event-stream"}, payload
+
+    stub.responders["tools/call"] = [respond]
+    outcome = client.call("deploy", "deploy_service", ARGS)
+    assert outcome == Result(DEPLOYED)
+    assert SECRET not in repr(outcome)
+
+
+def test_a_response_phase_error_in_an_event_stream_is_outcome_unknown(client, stub):
+    def respond(message):
+        error = {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32001, "message": "response_unmatched"}}
+        return 200, {"content-type": "text/event-stream"}, f"event: message\ndata: {json.dumps(error)}\n\n".encode()
+
+    stub.responders["tools/call"] = [respond]
+    assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("jsonrpc_error_-32001")
 
 
 def test_an_expired_session_reinitializes_with_jitter_and_does_not_resend(client, stub, sleeps):
@@ -882,6 +926,15 @@ def test_an_effector_error_passes_the_refusal_guard(gateway_client, stack, reaso
     stack["upstream"].call_result = {"content": [{"type": "text", "text": reason}], "isError": True}
     outcome = gateway_client.call("deploy", "deploy_service", ARGS)
     assert isinstance(outcome, Result) and outcome.effector_error == reason, outcome
+
+
+@live
+def test_a_closed_redactor_makes_an_executed_call_outcome_unknown(gateway_client, stack):
+    gateway_client.list_tools()
+    stack["servers"]["redactor"].close()
+    outcome = gateway_client.call("deploy", "deploy_service", ARGS)
+    assert isinstance(outcome, OutcomeUnknown), outcome
+    assert len(stack["upstream"].calls()) == 1
 
 
 @live

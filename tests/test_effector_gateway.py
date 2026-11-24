@@ -16,8 +16,8 @@ from test_decide import CUSTODIAN_ID, DECIDE_KEY, NOW, TENANT, make_request, mak
 from test_effector import EFFECTOR_TOKEN, FakeTransport, RecordingDocket, Suspended, Verified
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor
-from agent_bailiff.adapters.agentgateway.server import ProcessorServer
+from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.client.client import Result, _Exchange, classify, effector_error_action
 from agent_bailiff.custodian.bindings import EffectorBinding
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner
@@ -133,31 +133,39 @@ class FailingHandler(BaseHTTPRequestHandler):
 
 
 def build_stack(binary, workdir, private, make_decider, make_custodian, upstream_url):
-    sockets = {"decide": workdir / "d" / "decide.sock", "custodian": workdir / "c" / "custodian.sock"}
+    sockets = {
+        "decide": workdir / "d" / "decide.sock",
+        "custodian": workdir / "c" / "custodian.sock",
+        "redactor": workdir / "c" / "redactor.sock",
+    }
+    custodian = make_custodian(
+        bindings=EFFECTOR_BINDINGS, release_signer=ReleaseSigner(CUSTODIAN_ID, RELEASE_KEY, "release-1")
+    )
     servers = {
         "decide": ProcessorServer(
-            DecideProcessor(make_decider(DECIDE_BINDINGS, costs=COSTS), ROUTES, clock=lambda: NOW),
+            request_handlers(DecideProcessor(make_decider(DECIDE_BINDINGS, costs=COSTS), ROUTES, clock=lambda: NOW)),
             sockets["decide"],
             private("decide-grpc"),
             gateway_uid=os.geteuid(),
         ),
         "custodian": ProcessorServer(
-            CustodianProcessor(
-                make_custodian(
-                    bindings=EFFECTOR_BINDINGS, release_signer=ReleaseSigner(CUSTODIAN_ID, RELEASE_KEY, "release-1")
-                ),
-                ROUTES,
-                frozenset(),
-                clock=lambda: NOW + 1,
-            ),
+            request_handlers(CustodianProcessor(custodian, ROUTES, frozenset(), clock=lambda: NOW + 1)),
             sockets["custodian"],
             private("custodian-grpc"),
+            gateway_uid=os.geteuid(),
+        ),
+        "redactor": response_server(
+            RedactorProcessor(custodian, clock=lambda: NOW + 2),
+            sockets["redactor"],
+            private("redactor-grpc"),
             gateway_uid=os.geteuid(),
         ),
     }
     for server in servers.values():
         server.start()
-    config = gateway_config(sockets["decide"], sockets["custodian"], upstream_url, [RELEASE_HEADER])
+    config = gateway_config(
+        sockets["decide"], sockets["custodian"], upstream_url, [RELEASE_HEADER], sockets["redactor"]
+    )
     config["mcp"]["targets"][0]["name"] = SERVICE
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
@@ -165,7 +173,9 @@ def build_stack(binary, workdir, private, make_decider, make_custodian, upstream
         "statsAddr": f"127.0.0.1:{stats}",
         "readinessAddr": f"127.0.0.1:{readiness}",
     }
-    expected = GatewayExpectations(sockets["decide"], sockets["custodian"], ROUTES.services, frozenset())
+    expected = GatewayExpectations(
+        sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset()
+    )
     assert validate_gateway_config(config, expected) == ()
     return servers, Gateway(binary, config, workdir)
 

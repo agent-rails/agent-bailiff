@@ -1,11 +1,13 @@
 """A minimal Streamable HTTP MCP server for the default quickstart stack: notes kept in memory, readable and writable
 by name. It refuses every tool call that arrives without an Authorization header, so a successful call shows that
-the custodian injected the credential. Each request is logged to stdout as one JSON line, with the credential only
-as a SHA-256 digest. Tests can serve it over TLS and make chosen tools answer with a redirect."""
+the custodian injected the credential. Its echo_auth tool returns the credential it received, raw and in base64, to
+show the custodian redacting an echoed credential. Each request is logged to stdout as one JSON line, with the
+credential only as a SHA-256 digest. Tests can serve it over TLS and make chosen tools answer with a redirect."""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import socketserver
@@ -42,6 +44,11 @@ TOOLS = [
         "description": "Delete every note.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "echo_auth",
+        "description": "Echo the credential this call carried, raw and in base64.",
+        "inputSchema": {"type": "object", "properties": {"note": NOTE}, "required": ["note"]},
+    },
 ]
 
 
@@ -63,8 +70,11 @@ class StubUpstream(ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
-    def call(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    def call(self, name: str, arguments: dict[str, Any], authorization: str) -> tuple[str, bool]:
         note = arguments.get("note")
+        if name == "echo_auth" and isinstance(note, str):
+            encoded = base64.b64encode(authorization.encode()).decode()
+            return f"authorization: {authorization}\nbase64: {encoded}", False
         with self.lock:
             if name == "read_note" and isinstance(note, str):
                 return self.notes.get(note, ""), False
@@ -127,7 +137,7 @@ class Handler(BaseHTTPRequestHandler):
             if not authorization:
                 return text("missing credential", True)
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-            return text(*self.server.call(str(params.get("name")), arguments))
+            return text(*self.server.call(str(params.get("name")), arguments, authorization))
         return {}
 
     def reply(self, request_id: object, result: dict[str, Any]) -> None:

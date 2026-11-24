@@ -24,6 +24,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--bindings", type=Path, required=True, help="custodian binding table (run as its owner)")
     check.add_argument("--decide-socket", type=Path, required=True)
     check.add_argument("--custodian-socket", type=Path, required=True)
+    check.add_argument("--redactor-socket", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         document = _load_json(args.gateway_config, "gateway config")
@@ -32,6 +33,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected = GatewayExpectations(
             decide_socket=args.decide_socket,
             custodian_socket=args.custodian_socket,
+            redactor_socket=args.redactor_socket,
             services=routes.services,
             credential_headers=frozenset(binding.header_name for binding in bindings.credential_bindings),
             effector_services=routes.catalog_services,

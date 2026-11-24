@@ -62,6 +62,7 @@ DIRS = {
     for name in ("docket", "decide", "custodian", "control", "rule", "issuer", "ledger", "gitea-admin")
 }
 SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "custodian")}
+SOCKETS["redactor"] = RUN / "custodian" / "redactor.sock"
 LEDGER = DIRS["ledger"] / "ledger.db"
 RECEIPTS = STATE / "receipts"
 ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
@@ -388,7 +389,8 @@ def init_decide() -> str:
 def init_custodian() -> str:
     arguments = [
         "--decide-pin", pin_path("decide"), "--ledger", LEDGER, "--ledger-uid", DECIDE_UID,
-        "--ledger-group", LEDGER_GID, *gateway_client("custodian"), *docket_client(),
+        "--ledger-group", LEDGER_GID, *gateway_client("custodian"), "--response-socket", SOCKETS["redactor"],
+        *docket_client(),
     ]  # fmt: skip
     upstream = load_upstream(UPSTREAM_FILE)
     outcome = ensure_component("custodian", load_custodian, arguments)

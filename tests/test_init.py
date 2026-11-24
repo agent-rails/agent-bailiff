@@ -21,6 +21,13 @@ from test_service import (
 )
 
 from agent_bailiff import cli
+from agent_bailiff.custodian.config import (
+    DEFAULT_INFLIGHT_MAX,
+    DEFAULT_INFLIGHT_MAX_BYTES,
+    DEFAULT_INFLIGHT_PER_TENANT,
+    DEFAULT_INFLIGHT_TTL,
+    DEFAULT_RESPONSE_WORKERS,
+)
 from agent_bailiff.docket.retention import Retention
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, load_signing_key
 from agent_bailiff.service import run
@@ -71,6 +78,7 @@ def keyed(root, *arguments, capsys):
 def init_all(root, ledger_dir, capsys):
     run_dir = private(root / "run")
     sockets = {name: run_dir / name[0] / f"{name}.sock" for name in ("docket", "decide", "custodian")}
+    sockets["redactor"] = run_dir / "c" / "redactor.sock"
     docket = ["--docket-socket", sockets["docket"], "--docket-uid", UID]
     gateway = ["--gateway-uid", UID, "--gateway-group", GID]
     decide_pin = keyed(
@@ -96,6 +104,7 @@ def init_all(root, ledger_dir, capsys):
         "--ledger-uid", UID,
         "--ledger-group", GID,
         "--socket", sockets["custodian"],
+        "--response-socket", sockets["redactor"],
         *docket,
         *gateway,
         capsys=capsys,
@@ -162,6 +171,13 @@ def test_init_writes_private_keys_and_configs_that_load(root, ledger_dir, capsys
     control = load_control(root / "control" / "config.json")
     decide_record = PublicKeyRecord.from_document(json.loads(pins["decide"].read_text()))
     assert list(custodian.decide_keys) == [decide_record.kid] and custodian.decider == "decide.example"
+    assert (custodian.inflight_ttl, custodian.inflight_max) == (DEFAULT_INFLIGHT_TTL, DEFAULT_INFLIGHT_MAX)
+    assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (
+        DEFAULT_INFLIGHT_MAX_BYTES,
+        DEFAULT_INFLIGHT_PER_TENANT,
+    )
+    assert custodian.inflight_per_tenant == 512
+    assert (custodian.response_socket, custodian.response_workers) == (sockets["redactor"], DEFAULT_RESPONSE_WORKERS)
     assert set(docket.writers) == {"decide.example", "custodian.example", "control"}
     assert set(control.writers) == {"decide.example", "custodian.example"}
     assert control.decide_config == root / "decide" / "config.json"

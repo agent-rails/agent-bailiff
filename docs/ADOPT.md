@@ -1,6 +1,6 @@
 # Adopting agent-bailiff
 
-This guide puts one agent host (Claude Code, Cursor or any client that launches stdio MCP servers) in front of one Streamable HTTP MCP server through agent-bailiff. The agent gets a short-lived task: a scope, a budget and an expiry, bound to a key only the agent holds. Decide checks every call against that task, and the custodian adds the server's credential to allowed calls only, so the agent host never holds it. The server receives the credential on every allowed call and its results reach the agent unchanged, so the server must be trusted not to return it.
+This guide puts one agent host (Claude Code, Cursor or any client that launches stdio MCP servers) in front of one Streamable HTTP MCP server through agent-bailiff. The agent gets a short-lived task: a scope, a budget and an expiry, bound to a key only the agent holds. Decide checks every call against that task, and the custodian adds the server's credential to allowed calls only, so the agent host never holds it. The server receives the credential on every allowed call. If it echoes the credential in a call's result, the custodian replaces it with `[redacted by agent-bailiff]` before the agent sees the result; it cannot do that for error messages, short credentials or transformed echoes, so the server must still be trusted with the credential.
 
 Linux and macOS only.
 
@@ -225,5 +225,17 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names one of the stack's own components, `localhost`, or a loopback, link-local, unspecified or multicast IP address written in standard form. It does not refuse private ranges, other spellings of an IPv4 address such as `2130706433`, or a hostname that resolves to a local address.
 - With `ca_file` in the upstream config, the gateway trusts only those certificates for the upstream, not the system roots.
 - The agent user can read its own key and `task.json`, so anything running as that user can make calls within the task until it expires or is revoked.
+
+- Echo redaction is best-effort suppression of literal forms in a call's own result, not a containment boundary. A form under 12 characters, such as a short Basic password, an echo split across strings or transformed, JSON-RPC error text and event-stream side messages are not redacted. The proxy never shows the model error text or side messages, but any client that reaches the gateway port directly, the agent user included, can read them. Prefer short-lived, target-bound credentials.
+
+## Upgrading to echo redaction
+
+A stack from before echo redaction needs both the custodian's response socket and the gateway config's redactor. `docker compose up --build` ships both together. Elsewhere, upgrade the custodian first, so its response socket is listening, then the gateway config; roll back in the reverse order. A gateway config with the redactor in front of a custodian without the response socket fails every call after the upstream acted, and the client reports `outcome_unknown`. Releases made before the gateway runs the redactor leave in-flight entries that expire after `inflight_ttl`.
+
+`inflight_ttl` defaults to 180 s and the custodian refuses a value under 150 s: check-config caps the gateway's upstream timeouts at 120 s, and the entry must outlive the slowest non-streamed call by a margin of 30 s, or a slow call acts upstream and then fails as `response_unmatched`. An event stream held open past `inflight_ttl` is not covered: neither timeout bounds a stream body.
+
+Size the custodian's `inflight_max` at least 2 x peak releases per second x `inflight_ttl`. A full map refuses new releases before the upstream acts, and the agent sees `release_refused`. Keep `inflight_per_tenant` well below `inflight_max` (default 512 of 4096) so a few busy tenants cannot fill the map and refuse every other tenant.
+
+A result is capped at 4 MiB before and after redaction. The redacted result is re-encoded with ASCII escapes, so a result near the cap with many characters outside the Basic Multilingual Plane (each 4 bytes in UTF-8, 12 bytes escaped) can exceed the cap only after redaction; it is refused as `response_oversize` after the upstream acted.
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the full list. The quickstart's [README](../examples/quickstart/README.md) runs the same stack against Gitea (`UPSTREAM=gitea COMPOSE_PROFILES=gitea`).

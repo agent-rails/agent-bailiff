@@ -10,6 +10,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from cryptography.x509.oid import NameOID
 from test_quickstart_stack import b
 
+from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
+
 
 def test_a_probe_that_returns_ok_is_allowed():
     assert b.probe_outcome("read issues", 200) == "allowed"
@@ -67,6 +69,19 @@ def test_the_gateway_config_targets_only_the_upstream_url(name):
     document = b.gateway_document(upstream)
     assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}}]
     assert {**document, "mcp": {**document["mcp"], "targets": []}} == template
+
+
+@pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
+def test_the_quickstart_gateway_config_passes_check_config(name):
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / name)
+    expected = GatewayExpectations(
+        decide_socket=b.SOCKETS["decide"],
+        custodian_socket=b.SOCKETS["custodian"],
+        redactor_socket=b.SOCKETS["redactor"],
+        services=frozenset({upstream.target}),
+        credential_headers=frozenset({upstream.credential_header}),
+    )
+    assert validate_gateway_config(b.gateway_document(upstream), expected) == ()
 
 
 def test_a_gateway_template_with_a_target_is_refused(tmp_path, monkeypatch):

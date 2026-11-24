@@ -17,7 +17,7 @@ from agent_bailiff.chain_headers import (
     TRACEPARENT_HEADER,
 )
 from agent_bailiff.custodian.bindings import HEADER_NAME
-from agent_bailiff.custodian.custodian import Released, ReleaseResult
+from agent_bailiff.custodian.custodian import Released, ReleaseResult, ResponseChecked, ResponseResult
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import Decision
 from agent_bailiff.decide.request import OperationRequest
@@ -42,6 +42,10 @@ class CallDecider(Protocol):
 
 class CredentialReleaser(Protocol):
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult: ...
+
+
+class CallResultChecker(Protocol):
+    def check_response(self, clearance_token: object, result: bytes, now: int) -> ResponseResult: ...
 
 
 def system_clock() -> int:
@@ -136,6 +140,33 @@ class CustodianProcessor:
         return ext_mcp_pb2.McpRequestResult(**{"pass": ext_mcp_pb2.Pass()}, header_mutation=mutation)
 
 
+class RedactorProcessor:
+    def __init__(self, custodian: CallResultChecker, clock: Clock = system_clock) -> None:
+        self._custodian = custodian
+        self._clock = clock
+
+    def check_response(self, message: ext_mcp_pb2.McpResponse) -> ext_mcp_pb2.McpResponseResult:
+        try:
+            return self._check(message)
+        except Exception:
+            logger.exception("redactor processor failed with an internal error")
+            return refuse_response("response_internal_error")
+
+    def _check(self, message: ext_mcp_pb2.McpResponse) -> ext_mcp_pb2.McpResponseResult:
+        if message.method != TOOLS_CALL:
+            return ext_mcp_pb2.McpResponseResult(**{"pass": ext_mcp_pb2.Pass()})
+        clearance = _clearance(message)
+        if clearance is None:
+            logger.warning("redactor processor refused a call result without a clearance in the metadata context")
+            return refuse_response("response_clearance_missing")
+        result = self._custodian.check_response(clearance, message.mcp_response, self._clock())
+        if not isinstance(result, ResponseChecked):
+            return refuse_response(result.reason)
+        if result.result is None:
+            return ext_mcp_pb2.McpResponseResult(**{"pass": ext_mcp_pb2.Pass()})
+        return ext_mcp_pb2.McpResponseResult(mutated=result.result)
+
+
 def passed() -> ext_mcp_pb2.McpRequestResult:
     return ext_mcp_pb2.McpRequestResult(**{"pass": ext_mcp_pb2.Pass()})
 
@@ -145,7 +176,12 @@ def refuse(reason: str) -> ext_mcp_pb2.McpRequestResult:
     return ext_mcp_pb2.McpRequestResult(error=error)
 
 
-def _clearance(message: ext_mcp_pb2.McpRequest) -> str | None:
+def refuse_response(reason: str) -> ext_mcp_pb2.McpResponseResult:
+    error = ext_mcp_pb2.AuthorizationError(code=ext_mcp_pb2.AuthorizationError.PERMISSION_DENIED, reason=reason)
+    return ext_mcp_pb2.McpResponseResult(error=error)
+
+
+def _clearance(message: ext_mcp_pb2.McpRequest | ext_mcp_pb2.McpResponse) -> str | None:
     if not message.HasField("metadata_context"):
         return None
     value = message.metadata_context.fields.get(CLEARANCE_KEY)

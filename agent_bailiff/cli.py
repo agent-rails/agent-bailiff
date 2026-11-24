@@ -343,6 +343,7 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     custodian.add_argument("--ledger", type=Path, required=True)
     custodian.add_argument("--ledger-uid", type=int, required=True, help="decide's uid, the ledger owner")
     custodian.add_argument("--ledger-group", type=int, required=True)
+    custodian.add_argument("--response-socket", required=True, help="response check socket the gateway connects to")
     control = components.add_parser("control")
     control.add_argument("--decide-config", type=Path, required=True)
     effector = components.add_parser("effector")
@@ -467,6 +468,7 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
         ledger_group=args.ledger_group,
         docket=docket,
         gateway=gateway,
+        response_socket=args.response_socket,
     )
 
 
