@@ -1042,11 +1042,39 @@ def test_client_state_file_is_private(paths, start_sink):
     assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.head", "decide.lock"]
 
 
-def test_client_refuses_a_state_directory_writable_by_others(paths):
+@pytest.mark.parametrize("mode", [0o770, 0o777])
+def test_client_refuses_a_state_directory_writable_by_others(paths, mode):
     directory = state_dir(paths)
-    os.chmod(directory, 0o777)
-    with pytest.raises(PermissionError, match="writable"):
+    os.chmod(directory, mode)
+    with pytest.raises(DocketError, match="writable") as error:
         decide_client(paths)
+    assert error.value.reason == "state_invalid"
+
+
+def test_client_refuses_a_missing_state_directory(paths, workdir):
+    with pytest.raises(DocketError) as error:
+        decide_client(paths, state_dir=workdir / "missing")
+    assert error.value.reason == "state_invalid"
+
+
+def test_client_refuses_a_symlinked_state_directory(paths, workdir):
+    link = workdir / "state-link"
+    link.symlink_to(state_dir(paths))
+    with pytest.raises(DocketError) as error:
+        decide_client(paths, state_dir=link)
+    assert error.value.reason == "state_invalid"
+    assert list(state_dir(paths).iterdir()) == []
+
+
+def test_an_unsafe_state_directory_after_an_append_is_unacknowledged(paths, start_sink):
+    start_sink()
+    client = decide_client(paths)
+    os.chmod(state_dir(paths), 0o770)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    assert error.value.reason == "state_write_failed"
+    assert error.value.reason in UNACKNOWLEDGED
+    assert len(lines(paths[0])) == 1
 
 
 @pytest.mark.parametrize("content", [b"", b"garbage", b'{"seq":0,"hash":"x"}', b'{"seq":1}'])
