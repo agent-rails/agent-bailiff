@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ PERMISSION = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max
 SCOPE = {"permissions": [PERMISSION]}
 SCOPE_TEXT = json.dumps(SCOPE)
 ISSUER_KEY = Ed25519PrivateKey.generate()
+ROTATED_KEY = Ed25519PrivateKey.generate()
 MAX_BOUND_SCOPE = {
     "permissions": [
         {
@@ -93,8 +95,8 @@ class FakeDocket:
             raise self.record_then
 
 
-def write(out_dir, task, docket=None, now=NOW):
-    return write_task_file(out_dir, task, FakeDocket(out_dir) if docket is None else docket, now)
+def write(out_dir, task, docket=None, now=NOW, key=ISSUER_KEY):
+    return write_task_file(out_dir, task, key.public_key(), FakeDocket(out_dir) if docket is None else docket, now)
 
 
 def pending_of(out_dir):
@@ -453,6 +455,36 @@ def test_a_retry_after_the_pending_root_expired_is_refused(out_dir):
         write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW + 60), FakeDocket(out_dir), NOW + 60)
     grant_id = lost.grants[0].grant_id
     assert f"root expired at {NOW + 60}; grant may be recorded: grant_id {grant_id}" in str(error.value)
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_retry_with_a_rotated_issuer_key_is_refused_before_the_docket(out_dir):
+    made = request()
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), lost)
+    [grant] = lost.grants
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issue_task(ROTATED_KEY, ISSUER, DECIDER, made, NOW), docket, key=ROTATED_KEY)
+    assert str(error.value) == (
+        f"{out_dir / 'task.json.pending'} holds a root not signed by the current issuer key; "
+        f"grant may be recorded: grant_id {grant.grant_id}; check docket grants; remove it to issue"
+    )
+    assert docket.files_at_append == []
+    assert pending_of(out_dir).grant_id == grant.grant_id
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_forged_pending_root_matching_the_request_is_refused_before_the_docket(out_dir):
+    made = request()
+    signed = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    forged = TaskFile(replace(signed.root, task_id="task-forged"), DECIDER)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-forged", forged).encode())
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="not signed by the current issuer key; .*: grant_id g-forged;"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), docket)
+    assert docket.files_at_append == []
     assert os.listdir(out_dir) == ["task.json.pending"]
 
 

@@ -51,6 +51,7 @@ While `task.json.pending` exists, running the same command again (same decider i
 
 A retry is refused when:
 
+- the issuer key given to this run does not verify the pending root, as after a key rotation or with a file `task issue` did not write: `DIR/task.json.pending holds a root not signed by the current issuer key; grant may be recorded: grant_id <id>; check docket grants; remove it to issue`;
 - the request differs: `DIR/task.json.pending holds an unfinished issue of grant_id <id> for another request; rerun that command to finish it, or check docket grants, revoke via control and remove it`;
 - the pending root has expired: `DIR/task.json.pending holds an unfinished issue whose root expired at <expires_at>; grant may be recorded: grant_id <id>; check docket grants; remove it to issue`.
 

@@ -911,7 +911,7 @@ def _task_issue(args: argparse.Namespace) -> int:
         settings = DocketClientSettings(args.docket_socket, args.docket_uid, args.docket_state_dir)
         docket = run.docket_client(settings, args.docket_writer, docket_key)
         try:
-            issued = write_task_file(args.out_dir, task, docket, now)
+            issued = write_task_file(args.out_dir, task, issuer_key.public_key(), docket, now)
         finally:
             docket.close()
     except STARTUP_ERRORS + (TaskIssueError,) as exc:

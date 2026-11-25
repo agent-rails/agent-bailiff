@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from agent_warrant.encoding import b64u_decode
 from agent_warrant.identity import is_valid_public_key
 from agent_warrant.scope import validate_scope
 from agent_warrant.task_root import TaskRoot, issue_task_root
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from agent_bailiff.custodian.files import OwnedFileError, commit_at, discard_at, replace_at, stage_at
 from agent_bailiff.docket.client import UNACKNOWLEDGED, DocketError
@@ -154,18 +156,22 @@ def _check_task_file_size(unsigned: TaskFile) -> None:
         ) from None
 
 
-def write_task_file(out_dir: Path, task: TaskFile, docket: GrantWriter, now: int) -> IssuedTask:
+def write_task_file(
+    out_dir: Path, task: TaskFile, issuer_public_key: Ed25519PublicKey, docket: GrantWriter, now: int
+) -> IssuedTask:
     dir_fd = _open_task_dir(out_dir)
     try:
         _lock(dir_fd, out_dir)
-        return _issue_locked(dir_fd, out_dir, task, docket, now)
+        return _issue_locked(dir_fd, out_dir, task, issuer_public_key, docket, now)
     except OwnedFileError as exc:
         raise TaskIssueError(str(exc)) from None
     finally:
         os.close(dir_fd)
 
 
-def _issue_locked(dir_fd: int, out_dir: Path, task: TaskFile, docket: GrantWriter, now: int) -> IssuedTask:
+def _issue_locked(
+    dir_fd: int, out_dir: Path, task: TaskFile, issuer_public_key: Ed25519PublicKey, docket: GrantWriter, now: int
+) -> IssuedTask:
     current = _read_current(dir_fd, out_dir)
     pending = _read_pending(dir_fd, out_dir)
     if pending is not None and current is not None and current.root == pending.task.root:
@@ -182,7 +188,7 @@ def _issue_locked(dir_fd: int, out_dir: Path, task: TaskFile, docket: GrantWrite
         pending = PendingTask(uuid.uuid4().hex, task)
         replace_at(dir_fd, PENDING_FILE_NAME, "pending task file", pending.encode(), PENDING_FILE_MODE)
     else:
-        _check_resumable(pending, task, out_dir, now)
+        _check_resumable(pending, task, issuer_public_key, out_dir, now)
     try:
         staged = stage_at(dir_fd, TASK_FILE_NAME, "task file", pending.task.encode(), TASK_FILE_MODE)
     except OwnedFileError as exc:
@@ -210,8 +216,11 @@ def _issue_locked(dir_fd: int, out_dir: Path, task: TaskFile, docket: GrantWrite
     return IssuedTask(out_dir / TASK_FILE_NAME, pending.task, pending.grant_id)
 
 
-def _check_resumable(pending: PendingTask, task: TaskFile, out_dir: Path, now: int) -> None:
+def _check_resumable(
+    pending: PendingTask, task: TaskFile, issuer_public_key: Ed25519PublicKey, out_dir: Path, now: int
+) -> None:
     path = out_dir / PENDING_FILE_NAME
+    _check_signed(pending, issuer_public_key, path)
     if _request_of(pending.task) != _request_of(task):
         raise TaskIssueError(
             f"{path} holds an unfinished issue of grant_id {pending.grant_id} for another request; "
@@ -222,6 +231,17 @@ def _check_resumable(pending: PendingTask, task: TaskFile, out_dir: Path, now: i
             f"{path} holds an unfinished issue whose root expired at {pending.task.root.expires_at}; "
             f"grant may be recorded: grant_id {pending.grant_id}; check docket grants; remove it to issue"
         )
+
+
+def _check_signed(pending: PendingTask, issuer_public_key: Ed25519PublicKey, path: Path) -> None:
+    root = pending.task.root
+    try:
+        issuer_public_key.verify(b64u_decode(root.proof), root.signing_bytes())
+    except (InvalidSignature, ValueError):
+        raise TaskIssueError(
+            f"{path} holds a root not signed by the current issuer key; grant may be recorded: "
+            f"grant_id {pending.grant_id}; check docket grants; remove it to issue"
+        ) from None
 
 
 def _request_of(task: TaskFile) -> tuple[Any, ...]:
