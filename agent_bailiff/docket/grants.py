@@ -28,12 +28,15 @@ ISSUER_NOT_ALLOWED = "issuer_not_allowed"
 NEGATIVE = "negative"
 AFTER_EXPIRY = "after_expiry"
 DUPLICATE_ROOTS = "duplicate_roots"
+DUPLICATE_ROOTS_TRUNCATED = "duplicate_roots_truncated"
 PAIRS_TRUNCATED = "pairs_truncated"
 COST_INEXACT = "cost_inexact"
 WILDCARD_NAMES_CAP = 20
 MAX_PAIRS_PER_ROOT = 4096
 MAX_OPS_PER_ROOT = 65536
 MAX_ROOTS = 100_000
+MAX_TRACKED_ITEMS = 2_000_000
+DUPLICATE_ROOTS_CAP = 20
 CONTROL_HOP = "control"
 DECIDE_HOP = "decide"
 GRANT_COLUMNS = ("tenant", "task", "root", "status", "reason", "unused", "wildcards", "cost", "ttl", "flags")
@@ -78,6 +81,7 @@ class GrantRow:
     ttl_used: int | None = None
     ttl_flags: tuple[str, ...] = ()
     duplicate_roots: tuple[str, ...] = ()
+    duplicate_roots_truncated: int = 0
 
 
 @dataclass
@@ -97,12 +101,21 @@ class RootUse:
     first_use: int | None = None
     last_use: int | None = None
 
-    def add_allow(self, entry: Entry, line: int) -> None:
+    def add_allow(self, entry: Entry, line: int, room: int) -> int:
         if entry.op_id is None or entry.cost is None or entry.tool is None or entry.resource is None:
             raise ValueError(f"the decide allow on line {line} lacks an op_id, cost, tool or resource")
         if entry.op_id in self.ops:
-            return
-        if len(self.ops) < MAX_OPS_PER_ROOT:
+            return 0
+        pair = (entry.tool, entry.resource)
+        keep_op = len(self.ops) < MAX_OPS_PER_ROOT
+        new_pair = pair not in self.pairs
+        keep_pair = new_pair and len(self.pairs) < MAX_PAIRS_PER_ROOT
+        added = keep_op + keep_pair
+        if added > room:
+            raise ValueError(
+                f"the report tracks at most {MAX_TRACKED_ITEMS} op_ids and pairs and line {line} adds another"
+            )
+        if keep_op:
             self.ops.add(entry.op_id)
         else:
             self.authorized_cost_exact = False
@@ -110,13 +123,11 @@ class RootUse:
         self.authorized_cost += entry.cost
         self.first_use = entry.at if self.first_use is None else min(self.first_use, entry.at)
         self.last_use = entry.at if self.last_use is None else max(self.last_use, entry.at)
-        pair = (entry.tool, entry.resource)
-        if pair in self.pairs:
-            return
-        if len(self.pairs) < MAX_PAIRS_PER_ROOT:
+        if keep_pair:
             self.pairs.add(pair)
-        else:
+        elif new_pair:
             self.pairs_truncated += 1
+        return added
 
 
 class GrantReport:
@@ -126,6 +137,7 @@ class GrantReport:
         self._roots: dict[str, RootUse] = {}
         self._granted: dict[tuple[str, str], set[str]] = {}
         self._invalid: list[GrantRow] = []
+        self._tracked = 0
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
@@ -142,10 +154,11 @@ class GrantReport:
             self._check_room(verified.line)
             use = self._roots[binding] = RootUse(tenant, task)
         if entry.hop == DECIDE_HOP and entry.decision == "allow":
-            use.add_allow(entry, verified.line)
+            self._tracked += use.add_allow(entry, verified.line, MAX_TRACKED_ITEMS - self._tracked)
 
     def rows(self) -> list[GrantRow]:
-        rows = [self._row(binding, use) for binding, use in self._roots.items()] + self._invalid
+        granted = {key: sorted(bindings) for key, bindings in self._granted.items()}
+        rows = [self._row(binding, use, granted) for binding, use in self._roots.items()] + self._invalid
         return sorted(rows, key=lambda row: (row.tenant or "", row.task or "", row.root or "", row.grant_line or 0))
 
     def _add_grant(self, grant: Grant, line: int) -> None:
@@ -174,7 +187,7 @@ class GrantReport:
         if len(self._roots) + len(self._invalid) >= MAX_ROOTS:
             raise ValueError(f"the report tracks at most {MAX_ROOTS} roots and line {line} adds another")
 
-    def _row(self, binding: str, use: RootUse) -> GrantRow:
+    def _row(self, binding: str, use: RootUse, granted: dict[tuple[str, str], list[str]]) -> GrantRow:
         usage = GrantRow(
             UNGRANTED,
             use.tenant,
@@ -193,6 +206,8 @@ class GrantReport:
             flags.append(NEGATIVE)
         if use.last_use is not None and use.last_use >= root.expires_at:
             flags.append(AFTER_EXPIRY)
+        bindings = granted[(use.tenant, use.task)]
+        duplicates = [other for other in bindings[: DUPLICATE_ROOTS_CAP + 1] if other != binding][:DUPLICATE_ROOTS_CAP]
         return replace(
             usage,
             status=GRANTED,
@@ -206,7 +221,8 @@ class GrantReport:
             ttl=root.expires_at - root.issued_at,
             ttl_used=None if use.last_use is None else use.last_use - root.issued_at,
             ttl_flags=tuple(flags),
-            duplicate_roots=tuple(sorted(self._granted[(use.tenant, use.task)] - {binding})),
+            duplicate_roots=tuple(duplicates),
+            duplicate_roots_truncated=len(bindings) - 1 - len(duplicates),
         )
 
 
@@ -286,6 +302,7 @@ def grant_table_row(row: GrantRow) -> str:
     ttl = None if row.ttl is None else f"{'-' if row.ttl_used is None else row.ttl_used}/{row.ttl}"
     flags = [*row.ttl_flags]
     flags += [DUPLICATE_ROOTS] if row.duplicate_roots else []
+    flags += [DUPLICATE_ROOTS_TRUNCATED] if row.duplicate_roots_truncated else []
     flags += [PAIRS_TRUNCATED] if row.pairs_truncated else []
     flags += [] if row.authorized_cost_exact else [COST_INEXACT]
     values = (
@@ -337,5 +354,6 @@ def grant_json_row(row: GrantRow) -> str:
         "ttl_used": row.ttl_used,
         "ttl_flags": list(row.ttl_flags),
         "duplicate_roots": list(row.duplicate_roots),
+        "duplicate_roots_truncated": row.duplicate_roots_truncated,
     }
     return json.dumps(document, sort_keys=True)

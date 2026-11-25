@@ -225,29 +225,30 @@ It prints one row per root, with a `status`:
 
 A root is checked by signature and issuer allowance only, not expiry, so an expired root still reports.
 
-The table has the columns TENANT, TASK, ROOT, STATUS, REASON, UNUSED (count), WILDCARDS (count), COST (`authorized_cost/budget`), TTL (`ttl_used/ttl`, `-` when unused) and FLAGS. `--json` prints one object per row with `status`, `reason`, `detail`, `tenant`, `task`, `root`, `issuer`, `grant_id`, `grant_line`, `grant_records`, `unused`, `wildcards`, `pairs_truncated`, `budget`, `authorized_cost`, `authorized_cost_exact`, `allows`, `ttl`, `ttl_used`, `ttl_flags` and `duplicate_roots`. Only decide's allows count as use. For a granted root:
+The table has the columns TENANT, TASK, ROOT, STATUS, REASON, UNUSED (count), WILDCARDS (count), COST (`authorized_cost/budget`), TTL (`ttl_used/ttl`, `-` when unused) and FLAGS. `--json` prints one object per row with `status`, `reason`, `detail`, `tenant`, `task`, `root`, `issuer`, `grant_id`, `grant_line`, `grant_records`, `unused`, `wildcards`, `pairs_truncated`, `budget`, `authorized_cost`, `authorized_cost_exact`, `allows`, `ttl`, `ttl_used`, `ttl_flags`, `duplicate_roots` and `duplicate_roots_truncated`. Only decide's allows count as use. For a granted root:
 
 - `unused`: per permission (`permission` is its index), the `tool` and `resource` pairs no allowed call used. A pair counts as used only within one permission.
 - `wildcards`: for each tool or resource pattern ending in `*`, the names allowed calls used under it (`used`, at most 20 per pattern) and how many more there were (`truncated`).
 - `authorized_cost`: the costs of decide's allows under the root, each `op_id` counted once, against the root's `budget`; `allows` counts them. It is what decide authorized, not what was spent: budget refunded later is not subtracted.
 - `ttl` is `expires_at - issued_at`; `ttl_used` runs from `issued_at` to the last allowed call. `ttl_flags` holds `negative` when an allowed call came before `issued_at` and `after_expiry` when one came at or after `expires_at`; both mean the issuer's and decide's clocks disagree or the root was backdated.
 - `grant_records`: the number of grants of the root; a retried `task issue` can record one root twice.
-- `duplicate_roots`: the bindings of other granted roots with the same tenant and task id. A task-level revoke covers all of them.
+- `duplicate_roots`: the bindings of other granted roots with the same tenant and task id, the first 20 in sort order; `duplicate_roots_truncated` counts the rest. A task-level revoke covers all of them.
 
-Per root it tracks at most 4,096 distinct pairs and 65,536 `op_id`s. Allows with a new pair past the first cap are counted in `pairs_truncated` and their pairs are not marked used, so `unused` can list a pair that was used. Past the second cap an `op_id` is no longer deduplicated, so `authorized_cost` and `allows` can count a repeated allow twice, and `authorized_cost_exact` is `false`. FLAGS in the table lists `negative`, `after_expiry`, `duplicate_roots`, `pairs_truncated` and `cost_inexact`.
+Per root it tracks at most 4,096 distinct pairs and 65,536 `op_id`s. Allows with a new pair past the first cap are counted in `pairs_truncated` and their pairs are not marked used, so `unused` can list a pair that was used. Past the second cap an `op_id` is no longer deduplicated, so `authorized_cost` and `allows` can count a repeated allow twice, and `authorized_cost_exact` is `false`. Across all roots it tracks at most 2,000,000 `op_id`s and pairs together; an allow past that exits 2 (below). An allow past a per-root cap does not count toward it. FLAGS in the table lists `negative`, `after_expiry`, `duplicate_roots`, `duplicate_roots_truncated`, `pairs_truncated` and `cost_inexact`.
 
 stderr ends with `N records verified, R roots, I invalid grants`. Exit codes:
 
 - 0: every record verifies and no row is `invalid_grant`.
 - 1: every row is printed and at least one is `invalid_grant`.
-- 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, an archive that does not match, or a docket past the root cap below. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
+- 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, an archive that does not match, or a docket past the root cap or the `op_id` and pair budget. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
 
 Limits:
 
 - Advisory only. It sets no thresholds and revokes nothing.
 - `ungranted` covers only roots that appear in an entry. A root signed without a grant and never used is not seen.
 - Without `--archive` it starts at the manifest base. After segment removal, a grant in a removed segment is then not read, and later calls under its root show as `ungranted`. Pass `--archive` to read removed segments too.
-- It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket. It tracks at most 100,000 roots, counting granted, ungranted and `invalid_grant` rows; a docket with more exits 2 with `agent-bailiff docket grants refused: the report tracks at most 100000 roots and line N adds another`.
+- It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket. It tracks at most 100,000 roots, counting granted, ungranted and `invalid_grant` rows; a docket with more exits 2 with `agent-bailiff docket grants refused: the report tracks at most 100000 roots and line N adds another`. A docket past the `op_id` and pair budget exits 2 with `agent-bailiff docket grants refused: the report tracks at most 2000000 op_ids and pairs and line N adds another`.
+- Memory is bounded by those caps. Measured with tracemalloc on CPython 3.13: about 116 bytes per tracked `op_id` and about 225 bytes per pair whose tool and resource total about 50 characters (longer names cost more), so the budget holds about 0.5 GiB. Each granted root costs up to about 30 KiB for its aggregate with a 16 KiB root, and its row up to about 110 KiB for a scope with 1,024 tool and resource pairs; all rows are built before the first is printed. At 100,000 such roots the worst case is about 14 GiB.
 
 ## docket export
 

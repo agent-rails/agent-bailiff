@@ -55,6 +55,7 @@ ROW_FIELDS = {
     "ttl_used",
     "ttl_flags",
     "duplicate_roots",
+    "duplicate_roots_truncated",
 }
 
 
@@ -319,6 +320,24 @@ def test_two_roots_granted_for_one_task_flag_each_other(docket, pin_files, issue
     assert [row["duplicate_roots"] for row in rows if row["task"] == "task-2"] == [[]]
 
 
+def test_duplicate_roots_past_the_cap_are_counted_not_listed(docket, pin_files, issuers_file, capsys, monkeypatch):
+    monkeypatch.setattr(grants_module, "DUPLICATE_ROOTS_CAP", 1)
+    roots = [make_root(scope=scope) for scope in (SCOPE, WILDCARD_SCOPE, {"permissions": SCOPE["permissions"][:1]})]
+    for number, root in enumerate(roots):
+        grant(docket, root, grant_id=f"g-{number}")
+    code, rows, err = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == 0, err
+    bindings = sorted(root.binding() for root in roots)
+    assert [(row["root"], row["duplicate_roots"], row["duplicate_roots_truncated"]) for row in rows] == [
+        (bindings[0], [bindings[1]], 1),
+        (bindings[1], [bindings[0]], 1),
+        (bindings[2], [bindings[0]], 1),
+    ]
+    code, out, err = report(docket, pin_files, issuers_file, capsys=capsys)
+    assert code == 0, err
+    assert {line.split("\t")[-1] for line in out[1:]} == {"duplicate_roots,duplicate_roots_truncated"}
+
+
 def test_the_same_root_granted_twice_is_one_row(docket, pin_files, issuers_file, capsys):
     root = make_root()
     grant(docket, root, grant_id="g-1")
@@ -453,6 +472,32 @@ def test_a_root_past_the_cap_exits_2_and_prints_nothing(docket, pin_files, issue
     assert "docket grants refused: the report tracks at most 2 roots and line 3 adds another" in err
 
 
+def items_docket(docket):
+    for task_id in ("task-1", "task-2"):
+        root = make_root(task_id=task_id)
+        allow(docket, root, 1, op_id=f"{task_id}-op")
+        allow(docket, root, 2, op_id=f"{task_id}-op")
+
+
+def test_op_ids_and_pairs_up_to_the_total_budget_are_reported(docket, pin_files, issuers_file, capsys, monkeypatch):
+    monkeypatch.setattr(grants_module, "MAX_TRACKED_ITEMS", 4)
+    items_docket(docket)
+    code, rows, err = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == 0, err
+    assert [(row["allows"], row["authorized_cost_exact"]) for row in rows] == [(1, True), (1, True)]
+
+
+def test_op_ids_and_pairs_past_the_total_budget_exit_2_and_print_nothing(
+    docket, pin_files, issuers_file, capsys, monkeypatch
+):
+    monkeypatch.setattr(grants_module, "MAX_TRACKED_ITEMS", 3)
+    items_docket(docket)
+    code, out, err = report(docket, pin_files, issuers_file, "--json", capsys=capsys)
+    assert code == cli.EXIT_UNVERIFIED
+    assert out == []
+    assert "docket grants refused: the report tracks at most 3 op_ids and pairs and line 3 adds another" in err
+
+
 def test_grants_requires_an_issuers_file(docket, pin_files, capsys):
     with pytest.raises(SystemExit):
         cli.main(["docket", "grants", "--docket", str(docket.path), "--pin", str(pin_files["decide"])])
@@ -502,6 +547,18 @@ def test_operations_past_the_cap_mark_the_cost_inexact(docket, monkeypatch):
         grants.add(verified(docket, allow(docket, root, number, op_id=f"op-{number}", cost=2)))
     [row] = grants.rows()
     assert (row.authorized_cost, row.allows, row.authorized_cost_exact) == (6, 3, False)
+
+
+def test_items_past_a_per_root_cap_do_not_use_the_total_budget(docket, monkeypatch):
+    monkeypatch.setattr(grants_module, "MAX_OPS_PER_ROOT", 1)
+    monkeypatch.setattr(grants_module, "MAX_PAIRS_PER_ROOT", 1)
+    monkeypatch.setattr(grants_module, "MAX_TRACKED_ITEMS", 2)
+    grants = policy_report()
+    root = make_root(scope=WILDCARD_SCOPE)
+    for number in range(4):
+        grants.add(verified(docket, allow(docket, root, number + 1, tool=f"github.tool_{number}")))
+    [row] = grants.rows()
+    assert (row.allows, row.pairs_truncated, row.authorized_cost_exact) == (4, 3, False)
 
 
 def test_the_report_keeps_one_aggregate_per_root(docket):
