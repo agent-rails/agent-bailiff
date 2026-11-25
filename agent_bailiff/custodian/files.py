@@ -72,6 +72,10 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
 
 
 def replace_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> None:
+    commit_at(dir_fd, stage_at(dir_fd, name, label, content, mode), name, label)
+
+
+def stage_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> str:
     staged = f".{name}.{secrets.token_hex(8)}{STAGED_SUFFIX}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
     try:
@@ -84,13 +88,21 @@ def replace_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) ->
         if written != len(content):
             raise OSError(errno.EIO, f"wrote {written} of {len(content)} bytes")
         os.fsync(fd)
-        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        os.fsync(dir_fd)
     except OSError as exc:
         _unlink_staged(dir_fd, staged)
         raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
     finally:
         os.close(fd)
+    return staged
+
+
+def commit_at(dir_fd: int, staged: str, name: str, label: str) -> None:
+    try:
+        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.fsync(dir_fd)
+    except OSError as exc:
+        _unlink_staged(dir_fd, staged)
+        raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
 
 
 def pin_owned(path: Path, label: str) -> PinnedFile:
