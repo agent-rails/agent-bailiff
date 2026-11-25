@@ -224,6 +224,28 @@ def task_root(task_id, tenant="acme"):
     )
 
 
+def issuers_document(key=ROOT_KEY, issuer="issuer.example", tenants=None):
+    return {
+        issuer: {
+            "public_key": encode_public_key(key.public_key()),
+            "max_budget": 1000,
+            "max_depth": 2,
+            "tenants": tenants or {"acme": {"principals": ["carol"], "principal_prefixes": []}},
+        }
+    }
+
+
+def write_issuers(path, document):
+    path.write_text(json.dumps(document))
+    os.chmod(path, 0o600)
+    return path
+
+
+@pytest.fixture
+def issuers_file(workdir):
+    return write_issuers(workdir / "issuers.json", issuers_document())
+
+
 def grant_of(root, number=1, at=1_700_000_003):
     return Grant(grant_id=f"g-{number}", at=at, root_token=root.encode())
 

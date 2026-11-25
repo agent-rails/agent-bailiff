@@ -13,7 +13,8 @@ from agent_warrant.task_root import issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_docket import make_entry
-from test_docket_report import GRANT_WRITERS, ISSUER_PIN, PINS, Docket
+from test_docket_report import GRANT_WRITERS, ISSUER_PIN, PINS, Docket, write_issuers
+from test_docket_report import issuers_document as report_issuers_document
 
 from agent_bailiff import cli
 from agent_bailiff.control import Control, ControlRefused
@@ -63,14 +64,9 @@ ROW_FIELDS = {
 
 
 def issuers_document(tenants=None):
-    return {
-        "issuer-a": {
-            "public_key": encode_public_key(ROOT_KEY.public_key()),
-            "max_budget": 1000,
-            "max_depth": 2,
-            "tenants": tenants or {"acme": {"principals": ["alice"], "principal_prefixes": []}},
-        }
-    }
+    return report_issuers_document(
+        ROOT_KEY, "issuer-a", tenants or {"acme": {"principals": ["alice"], "principal_prefixes": []}}
+    )
 
 
 def make_root(*, key=ROOT_KEY, issuer="issuer-a", task_id="task-1", tenant="acme", principal="alice", scope=SCOPE):
@@ -116,10 +112,7 @@ def pin_files(workdir):
 
 @pytest.fixture
 def issuers_file(workdir):
-    path = workdir / "issuers.json"
-    path.write_text(json.dumps(issuers_document()))
-    os.chmod(path, 0o600)
-    return path
+    return write_issuers(workdir / "issuers.json", issuers_document())
 
 
 def grant(docket, root, grant_id="g-1", at=ISSUED):
