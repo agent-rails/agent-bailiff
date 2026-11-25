@@ -430,10 +430,11 @@ def test_clearance_naming_another_credential_of_the_tenant_is_refused(make_custo
     assert result == Refused("binding_mismatch")
 
 
-def test_mutated_args_fail_the_leaf_proof(make_custodian, issue):
+def test_mutated_args_do_not_match_the_clearance(make_custodian, issue, workdir):
     request, token = issue()
     mutated = replace(request, args={"service": "api", "replicas": 99})
-    assert make_custodian().release(token, mutated, NOW + 1) == Refused("chain_invalid")
+    assert make_custodian().release(token, mutated, NOW + 1) == Refused("clearance_mismatch")
+    assert custodian_entries(workdir) == []
 
 
 def test_clearance_for_another_request_of_the_same_task_is_refused(make_custodian, issue):
@@ -581,6 +582,22 @@ def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root), key=FORGER_KEY)
     assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("clearance_invalid")
+    assert custodian_entries(workdir) == []
+
+
+def test_a_broken_chain_on_another_request_is_not_recorded_under_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    token = sign_clearance(clearance_for(make_request(root), root))
+    other = make_request(root, tool="deploy.servicex")
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, other, NOW + 1) == Refused("clearance_mismatch")
+    assert custodian_entries(workdir) == []
+
+
+def test_a_broken_chain_under_another_root_is_not_recorded_under_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    token = sign_clearance(clearance_for(make_request(root), root))
+    other = make_request(make_v1_root(task_id="task-2"))
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, other, NOW + 1) == Refused("clearance_mismatch")
     assert custodian_entries(workdir) == []
 
 

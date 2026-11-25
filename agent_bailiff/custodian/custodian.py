@@ -318,6 +318,7 @@ class Custodian:
         if request.refusal() is not None:
             raise _Refusal("malformed_request")
         digest = request_digest(request.tool, request.resource, snapshot.thaw(), request.nonce)
+        _match_clearance(clearance, request, digest, snapshot)
         chain = verify_chain(
             request.task_root,
             list(request.links),
@@ -335,19 +336,6 @@ class Custodian:
             raise _ChainRefused(clearance, clearance_token, chain.reason)
         root = chain.root
         leaf_binding = chain.links[-1].binding() if chain.links else root.binding()
-        expected = {
-            "op_id": derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest),
-            "tenant": root.tenant_id,
-            "task": root.task_id,
-            "root_binding": root.binding(),
-            "leaf_binding": leaf_binding,
-            "request_digest": digest,
-            "tool": request.tool,
-            "resource": request.resource,
-            "args_digest": snapshot.digest,
-        }
-        if any(getattr(clearance, name) != value for name, value in expected.items()):
-            raise _Refusal("clearance_mismatch")
         return _Verified(clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token)
 
     def _release_to_effector(
@@ -576,6 +564,27 @@ class Custodian:
         ):
             logger.error("docket acknowledgement does not match the release entry")
             raise _UnacknowledgedRelease
+
+
+def _match_clearance(clearance: Clearance, request: OperationRequest, digest: str, snapshot: ArgsSnapshot) -> None:
+    try:
+        root = TaskRoot.decode(request.task_root)
+        leaf_binding = ChainLink.decode(request.links[-1]).binding() if request.links else root.binding()
+    except ValueError:
+        raise _Refusal("clearance_mismatch") from None
+    expected = {
+        "op_id": derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest),
+        "tenant": root.tenant_id,
+        "task": root.task_id,
+        "root_binding": root.binding(),
+        "leaf_binding": leaf_binding,
+        "request_digest": digest,
+        "tool": request.tool,
+        "resource": request.resource,
+        "args_digest": snapshot.digest,
+    }
+    if any(getattr(clearance, name) != value for name, value in expected.items()):
+        raise _Refusal("clearance_mismatch")
 
 
 def _check_scope(verified: _Verified) -> None:
