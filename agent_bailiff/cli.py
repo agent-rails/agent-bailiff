@@ -101,6 +101,7 @@ EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 EXIT_UNCOUNTED = 3
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
+GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
@@ -223,11 +224,22 @@ def _parser() -> argparse.ArgumentParser:
             grants = component.add_parser(
                 "grants",
                 help="verify every record and print granted versus used per task root; advisory, exit 1 on an "
-                "invalid grant, 2 when the docket fails verification",
+                "invalid grant, 3 when records are not counted, 2 when the docket fails verification",
             )
             grants.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
             grants.add_argument(
-                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+                "--pin",
+                type=Path,
+                action="append",
+                default=[],
+                help="public key record of a writer that is verified but feeds no root; repeat",
+            )
+            grants.add_argument(
+                "--decide-pin",
+                type=Path,
+                action="append",
+                required=True,
+                help="decide's public key record; only its allows count against a root; repeat",
             )
             grants.add_argument(
                 "--issuers",
@@ -673,8 +685,8 @@ def _list_tasks(args: argparse.Namespace) -> int:
 def _report_grants(args: argparse.Namespace) -> int:
     try:
         issuers = load_issuers(args.issuers)
-        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
-        grants = GrantReport(issuers.resolver, issuers.trust_policy)
+        writers, grant_writers, roles = _role_pins(args, GRANT_ROLE_FLAGS)
+        grants = GrantReport(issuers.resolver, issuers.trust_policy, roles)
         report = verify_records(
             args.docket, writers, RecordFilter(), grants.add, archive=args.archive, grant_writers=grant_writers
         )
@@ -689,6 +701,8 @@ def _report_grants(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_UNVERIFIED
+    _warn_role_mismatches("docket grants", grants.role_mismatches)
+    sys.stderr.flush()
     if not args.json:
         print(grant_header())
     roots = invalid = 0
@@ -700,6 +714,8 @@ def _report_grants(args: argparse.Namespace) -> int:
         f"{PROG} docket grants: {report.entries} records verified, {roots} roots, {invalid} invalid grants",
         file=sys.stderr,
     )
+    if grants.role_mismatches:
+        return EXIT_UNCOUNTED
     return EXIT_REFUSED if invalid else 0
 
 

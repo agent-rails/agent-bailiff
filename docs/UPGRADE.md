@@ -61,11 +61,13 @@ Once any v2 task is issued, going back to the previous release, on agent-warrant
 
 `docket tasks` binds each hop it reads to role pins. It takes `--decide-pin`, `--custodian-pin` and `--control-pin`, all required; `--pin` is optional and pins writers that are verified but feed no row. Replace `--pin decide.pub.json --pin custodian.pub.json` with `--decide-pin decide.pub.json --custodian-pin custodian.pub.json`. An earlier command line fails with `the following arguments are required: --decide-pin, --custodian-pin`.
 
-Rows change: a grant no longer sets PRINCIPAL, so a task listed only from grants shows `-` until decide records a call; `record` is the latest decide record that names a principal; effector refusals are not counted; `--json` rows add `principal_conflict`. A record whose writer is not pinned for its hop is not counted, and the command exits 3 with rows printed. Scripts that treat any non-zero exit as no output must accept 3.
+`docket grants` takes `--decide-pin`, required; replace `--pin decide.pub.json` with `--decide-pin decide.pub.json`, and `--pin` for other writers is optional. It counts allows only from a `--decide-pin` writer, a root seen only in custodian records is no longer listed as `ungranted`, and it exits 3 with rows printed when a record claims a hop its writer is not pinned for, ahead of 1 for an invalid grant.
+
+`docket tasks` rows change: a grant no longer sets PRINCIPAL, so a task listed only from grants shows `-` until decide records a call; `record` is the latest decide record that names a principal; effector refusals are not counted; `--json` rows add `principal_conflict`. A record whose writer is not pinned for its hop is not counted, and the command exits 3 with rows printed. Scripts that treat any non-zero exit as no output must accept 3.
 
 ### Rollback
 
-Nothing is written, so an earlier release reads the same docket. Its `docket tasks` counts a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`.
+Nothing is written, so an earlier release reads the same docket. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`.
 
 ## Docket grants
 

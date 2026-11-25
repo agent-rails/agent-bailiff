@@ -1,6 +1,8 @@
+import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from agent_bailiff.control import Control, ControlRefused
 from agent_bailiff.docket import Grant
 from agent_bailiff.docket import grants as grants_module
 from agent_bailiff.docket.grants import WILDCARD_NAMES_CAP, GrantReport
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
 from agent_bailiff.service.settings import ConfigError, load_issuers
 
@@ -139,7 +142,7 @@ def allow(docket, root, number, *, op_id=None, tool="github.create_issue", resou
 
 
 def report(docket, pin_files, issuers_file, *arguments, capsys):
-    pins = [item for name in ("decide", "custodian", "control") for item in ("--pin", pin_files[name])]
+    pins = ["--decide-pin", pin_files["decide"], "--pin", pin_files["custodian"], "--pin", pin_files["control"]]
     pins += ["--grant-pin", pin_files["issuer"], "--issuers", issuers_file]
     code = cli.main(["docket", "grants", "--docket", str(docket.path), *map(str, pins), *arguments])
     captured = capsys.readouterr()
@@ -191,13 +194,78 @@ def test_a_root_used_without_a_grant_is_ungranted(docket, pin_files, issuers_fil
     assert (row["authorized_cost"], row["allows"], row["budget"], row["ttl"], row["unused"]) == (2, 1, None, None, [])
 
 
-def test_a_root_seen_only_in_custodian_records_is_ungranted(docket, pin_files, issuers_file, capsys):
+def test_a_root_seen_only_in_custodian_records_is_not_listed(docket, pin_files, issuers_file, capsys):
     root = make_root()
     handles = {"tenant": "acme", "task": "task-1", "root": root.binding()}
     docket.append("custodian", make_entry(1, hop="custodian", component="custodian", handles=handles))
-    code, [row], err = json_report(docket, pin_files, issuers_file, capsys)
+    code, rows, err = json_report(docket, pin_files, issuers_file, capsys)
     assert code == 0, err
-    assert (row["status"], row["allows"]) == ("ungranted", 0)
+    assert rows == []
+    assert "1 records verified, 0 roots" in err
+
+
+def test_a_custodian_record_claiming_the_decide_hop_is_not_counted(docket, pin_files, issuers_file, capsys):
+    root = make_root()
+    grant(docket, root)
+    allow(docket, root, 1, cost=2)
+    other = make_root(task_id="task-m")
+    for number, forged_root in ((2, root), (3, other)):
+        handles = {"tenant": "acme", "task": forged_root.task_id, "root": forged_root.binding()}
+        entry = make_entry(number, op_id=f"op-m{number}", cost=50, task_root=forged_root.binding(), handles=handles)
+        docket.append("custodian", entry)
+    code, [row], err = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == cli.EXIT_UNCOUNTED == 3
+    assert (row["root"], row["allows"], row["authorized_cost"]) == (root.binding(), 1, 2)
+    assert "docket grants: 2 records claim a hop their writer is not pinned for; they are not counted" in err
+
+
+def test_the_mismatch_warning_comes_before_the_rows(docket, pin_files, issuers_file, monkeypatch):
+    root = make_root()
+    grant(docket, root)
+    docket.append("custodian", make_entry(2, handles={"tenant": "acme", "task": "task-1", "root": root.binding()}))
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", stream)
+    pins = ["--decide-pin", pin_files["decide"], "--pin", pin_files["custodian"], "--grant-pin", pin_files["issuer"]]
+    code = cli.main(["docket", "grants", "--docket", str(docket.path), *map(str, pins), "--issuers", str(issuers_file)])
+    lines = stream.getvalue().splitlines()
+    assert code == cli.EXIT_UNCOUNTED
+    assert "1 records claim a hop" in lines[0]
+    assert lines[1].startswith("TENANT")
+
+
+def test_uncounted_records_outrank_an_invalid_grant(docket, pin_files, issuers_file, capsys):
+    docket.grant(Grant(grant_id="g-bad", at=ISSUED, root_token="not-a-root"))
+    root = make_root()
+    docket.append("custodian", make_entry(2, handles={"tenant": "acme", "task": "task-1", "root": root.binding()}))
+    code, rows, err = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == cli.EXIT_UNCOUNTED
+    assert [row["status"] for row in rows] == ["invalid_grant"]
+    assert "1 invalid grants" in err
+
+
+def test_a_verification_failure_outranks_uncounted_records(docket, pin_files, issuers_file, capsys):
+    root = make_root()
+    docket.append("custodian", make_entry(1, handles={"tenant": "acme", "task": "task-1", "root": root.binding()}))
+    with docket.path.open("a") as handle:
+        handle.write("garbage\n")
+    code, out, err = report(docket, pin_files, issuers_file, "--json", capsys=capsys)
+    assert code == cli.EXIT_UNVERIFIED
+    assert out == []
+    assert "records claim a hop" not in err
+
+
+def test_grants_requires_a_decide_pin(docket, pin_files, issuers_file, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["docket", "grants", "--docket", str(docket.path), "--issuers", str(issuers_file)])
+    assert "--decide-pin" in capsys.readouterr().err
+
+
+def test_a_writer_pinned_as_decide_and_as_plain_pin_is_refused(docket, pin_files, issuers_file, capsys):
+    pins = ["--decide-pin", pin_files["decide"], "--pin", pin_files["decide"]]
+    code = cli.main(["docket", "grants", "--docket", str(docket.path), *map(str, pins), "--issuers", str(issuers_file)])
+    assert code == cli.EXIT_UNVERIFIED
+    assert "writer decide is pinned as both --pin and --decide-pin" in capsys.readouterr().err
 
 
 def test_uses_before_the_grant_still_join_the_root(docket, pin_files, issuers_file, capsys):
@@ -390,7 +458,7 @@ def test_a_docket_that_fails_verification_exits_2_and_prints_nothing(docket, pin
 
 def test_a_grant_without_its_grant_pin_fails_verification(docket, pin_files, issuers_file, capsys):
     grant(docket, make_root())
-    pins = [item for name in ("decide", "custodian") for item in ("--pin", str(pin_files[name]))]
+    pins = ["--decide-pin", str(pin_files["decide"]), "--pin", str(pin_files["custodian"])]
     code = cli.main(["docket", "grants", "--docket", str(docket.path), *pins, "--issuers", str(issuers_file)])
     assert code == cli.EXIT_UNVERIFIED
     assert "line 1 fails verification" in capsys.readouterr().err
@@ -519,7 +587,16 @@ def test_load_issuers_refuses_a_bad_allowance(issuers_file):
 def policy_report():
     allowance = IssuerAllowance(tenants={"acme": TenantAllowance(principals=["alice"])}, max_budget=1000, max_depth=2)
     resolver = PinnedResolver({"issuer-a": ROOT_KEY.public_key()})
-    return GrantReport(resolver, IssuerTrustPolicy({"issuer-a": allowance}))
+    return GrantReport(resolver, IssuerTrustPolicy({"issuer-a": allowance}), DECIDE_ROLE)
+
+
+DECIDE_ROLE = WriterRoles({"decide": frozenset({"decide"})})
+
+
+def test_a_grant_report_needs_a_decide_writer():
+    resolver = PinnedResolver({"issuer-a": ROOT_KEY.public_key()})
+    with pytest.raises(ValueError, match="no writer is pinned for hop decide"):
+        GrantReport(resolver, IssuerTrustPolicy({}), WriterRoles({"custodian": frozenset({"custodian"})}))
 
 
 def verified(docket, record):

@@ -18,7 +18,7 @@ A record is one of two types, named by its `typ`:
 
 Both carry `writer`, `seq` and `prev` and share each writer's chain. A reader reads `typ` before verifying, only to choose the field set, then verifies the signature and decodes strictly for that type. Any other `typ` is refused as `wrong_typ`.
 
-A writer is either an entry writer or a grant writer. The docket config's required `grant_writers` lists the grant writers by name, each also in `writers`; `[]` means none. Readers take a grant writer's public key record as `--grant-pin` (repeatable) on `docket verify`, `docket tasks`, `docket grants`, `docket export` and `docket archive`, and `init docket` and `init control` take it the same way. A writer pinned with both `--pin` and `--grant-pin` is refused ("writers pinned both as entry and grant writers"). A grant writer appends only grants and an entry writer only entries: the sink refuses, and every reader rejects, a record of the other type as `wrong_record_type`. A reader without the grant writer's pin rejects its first grant as `unknown_kid`.
+A writer is either an entry writer or a grant writer. The docket config's required `grant_writers` lists the grant writers by name, each also in `writers`; `[]` means none. Readers take a grant writer's public key record as `--grant-pin` (repeatable) on `docket verify`, `docket tasks`, `docket grants`, `docket export` and `docket archive`, and `init docket` and `init control` take it the same way. A writer pinned with both `--pin` and `--grant-pin` is refused ("writers pinned both as entry and grant writers"; in `docket tasks` and `docket grants`, "writer W is pinned as both --X and --grant-pin"). A grant writer appends only grants and an entry writer only entries: the sink refuses, and every reader rejects, a record of the other type as `wrong_record_type`. A reader without the grant writer's pin rejects its first grant as `unknown_kid`.
 
 The issuer appends grants with its own docket-writer key, separate from its task root signing key. The writer key places the grant in the issuer's chain; the issuer's signature on `root_token` is what makes the grant authentic. The sink, the archiver, the exporter, the quickstart rule and `docket verify` without `--task` check only the shape of `root_token` and never decode it, so a change to the task root format does not change the docket format. `docket tasks`, `docket grants`, `docket verify --task` and control decode it. The exporter sends no span for a grant.
 
@@ -228,16 +228,18 @@ So a grant writer cannot revoke a task of a tenant its issuer does not serve. Th
 ## docket grants
 
 ```
-agent-bailiff docket grants --docket PATH --pin decide.pub.json --pin custodian.pub.json \
+agent-bailiff docket grants --docket PATH --decide-pin decide.pub.json [--pin custodian.pub.json] \
   --grant-pin issuer-docket.pub.json --issuers ISSUERS.json [--archive DIR] [--json]
 ```
+
+Only decide records from a `--decide-pin` writer count, as in `docket tasks`; `--decide-pin` is required and repeatable, and `--pin` pins writers that are verified but feed no root. A decide record from any other writer is not counted, and stderr says `N records claim a hop their writer is not pinned for; they are not counted` before the rows.
 
 Run it like `docket verify`. It compares what each task root was granted with what decide allowed under it. `--issuers` is a JSON object in the format of decide's `issuers` section (issuer id to `public_key`, `tenants`, `max_budget` and `max_depth`), in a regular file with mode 0600 and one link, owned by the user running the command, in a directory that user owns and no group or other user can write. List every issuer whose roots are in the docket, including retired keys.
 
 It prints one row per root, with a `status`:
 
 - `granted`: a grant names the root and the root passes the checks below.
-- `ungranted`: an entry other than a control entry names the root in its handles, and no valid grant does.
+- `ungranted`: a decide record names the root in its handles, and no valid grant does. A root seen only in custodian records is not listed.
 - `invalid_grant`: one row per grant whose root fails, with a `reason`: `malformed` (the root does not decode; tenant, task and root are then `null`), `unknown_issuer` (not in `--issuers`), `bad_signature`, or `issuer_not_allowed` (the issuer's allowance does not cover the root's tenant, principal, budget or depth). `detail` gives the text. If that root is used, it also gets an `ungranted` row.
 
 A root is checked by signature and issuer allowance only, not expiry, so an expired root still reports.
@@ -257,12 +259,13 @@ stderr ends with `N records verified, R roots, I invalid grants`. Exit codes:
 
 - 0: every record verifies and no row is `invalid_grant`.
 - 1: every row is printed and at least one is `invalid_grant`.
+- 3: every row is printed and N records claim a hop their writer is not pinned for. 3 is returned even when a row is `invalid_grant`.
 - 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, an archive that does not match, or a docket past the root cap or the `op_id` and pair budget. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
 
 Limits:
 
 - Advisory only. It sets no thresholds and revokes nothing.
-- `ungranted` covers only roots that appear in an entry. A root signed without a grant and never used is not seen.
+- `ungranted` covers only roots that appear in a decide record. A root signed without a grant and never used is not seen.
 - Without `--archive` it starts at the manifest base. After segment removal, a grant in a removed segment is then not read, and later calls under its root show as `ungranted`. Pass `--archive` to read removed segments too.
 - It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket. It tracks at most 100,000 roots, counting granted, ungranted and `invalid_grant` rows; a docket with more exits 2 with `agent-bailiff docket grants refused: the report tracks at most 100000 roots and line N adds another`. A docket past the `op_id` and pair budget exits 2 with `agent-bailiff docket grants refused: the report tracks at most 2000000 op_ids and pairs and line N adds another`.
 - Memory is bounded by those caps. Measured with tracemalloc on CPython 3.13: about 116 bytes per tracked `op_id` and about 225 bytes per pair whose tool and resource total about 50 characters (longer names cost more), so the budget holds about 0.5 GiB. Each granted root costs up to about 30 KiB for its aggregate with a 16 KiB root. Rows are built one at a time as they are printed, so at most one row is held at once, up to about 110 KiB for a scope with 1,024 tool and resource pairs. At 100,000 such roots the worst case is about 3.4 GiB.
