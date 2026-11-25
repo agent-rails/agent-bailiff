@@ -32,7 +32,7 @@ A release before grants refuses a grant. Upgrade every reader, and give each the
 
 The sink must be reachable: `task issue` runs on the sink host, as a uid in the sink's `allowed_uids`, with the docket socket. It holds an exclusive lock on the task directory; a second run fails with `another task issue is running in DIR; retry when it finishes`. Under the lock it:
 
-1. removes `task.json.pending` if it holds the root already in `task.json` (an earlier run finished);
+1. if `task.json.pending` holds the root already in `task.json`, an earlier run renamed it: for the same request (see Retrying task issue) it checks the pending root's signature, removes `task.json.pending`, fsyncs the directory and succeeds with that task and its `grant_id`, appending nothing; for another request it removes `task.json.pending` and goes on;
 2. refuses an agent key that already has a task in `task.json`, without appending: `DIR/task.json already holds a task for this agent key; run proxy keygen for a new key and issue to that`;
 3. writes `task.json.pending` (mode 0600, JSON with `version`, `grant_id`, `task_root` and `decider_id`) with a new `grant_id` to a temporary file, fsyncs it, renames it and fsyncs the directory, or reuses the one already there (see Retrying task issue);
 4. writes the task file to a temporary file (mode 0644) and fsyncs it;

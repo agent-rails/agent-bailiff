@@ -175,8 +175,11 @@ def _issue_locked(
     current = _read_current(dir_fd, out_dir)
     pending = _read_pending(dir_fd, out_dir)
     if pending is not None and current is not None and current.root == pending.task.root:
-        discard_at(dir_fd, PENDING_FILE_NAME)
-        os.fsync(dir_fd)
+        if _request_of(pending.task) == _request_of(task):
+            _check_signed(pending, issuer_public_key, out_dir / PENDING_FILE_NAME)
+            _discard_pending(dir_fd)
+            return IssuedTask(out_dir / TASK_FILE_NAME, pending.task, pending.grant_id)
+        _discard_pending(dir_fd)
         pending = None
     if current is not None and current.root.subject == task.root.subject:
         raise TaskIssueError(
@@ -258,6 +261,11 @@ def _request_of(task: TaskFile) -> tuple[Any, ...]:
         root.subject,
         root.expires_at - root.issued_at,
     )
+
+
+def _discard_pending(dir_fd: int) -> None:
+    discard_at(dir_fd, PENDING_FILE_NAME)
+    os.fsync(dir_fd)
 
 
 def _unrecorded(dir_fd: int, out_dir: Path, pending: PendingTask, resumed: bool, problem: str) -> TaskIssueError:

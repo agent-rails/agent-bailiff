@@ -550,14 +550,53 @@ def test_a_pending_file_left_after_the_rename_is_removed_by_the_next_issue(out_d
     task = issued(subject=subject)
     write(out_dir, task)
     (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    docket = FakeDocket(out_dir)
+    finished = write(out_dir, issued(subject=subject), docket)
+    assert (finished.path, finished.task, finished.grant_id) == (out_dir / "task.json", task, "g-left")
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == ["task.json"]
     with pytest.raises(TaskIssueError, match="already holds a task for this agent key"):
         write(out_dir, issued(subject=subject))
-    assert os.listdir(out_dir) == ["task.json"]
     (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
     renewed = issued()
     written = write(out_dir, renewed)
     assert written.task == renewed and written.grant_id != "g-left"
     assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_crash_after_the_rename_finishes_on_retry_without_a_second_grant(out_dir, monkeypatch):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    real_discard = issue_module.discard_at
+
+    def crash_on_pending(dir_fd, name):
+        if name == "task.json.pending":
+            raise Crash()
+        real_discard(dir_fd, name)
+
+    monkeypatch.setattr(issue_module, "discard_at", crash_on_pending)
+    recorded = FakeDocket(out_dir)
+    with pytest.raises(Crash):
+        write(out_dir, first, recorded)
+    assert sorted(os.listdir(out_dir)) == ["task.json", "task.json.pending"]
+    monkeypatch.setattr(issue_module, "discard_at", real_discard)
+    docket = FakeDocket(out_dir)
+    written = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW + 5), docket, NOW + 5)
+    [grant] = recorded.grants
+    assert (written.path, written.task, written.grant_id) == (out_dir / "task.json", first, grant.grant_id)
+    assert docket.files_at_append == []
+    assert current(out_dir) == first
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_renamed_root_the_current_issuer_key_did_not_sign_is_refused(out_dir):
+    made = request()
+    task = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    write(out_dir, task)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    with pytest.raises(TaskIssueError, match="not signed by the current issuer key; .*: grant_id g-left;"):
+        write(out_dir, issue_task(ROTATED_KEY, ISSUER, DECIDER, made, NOW), key=ROTATED_KEY)
+    assert sorted(os.listdir(out_dir)) == ["task.json", "task.json.pending"]
 
 
 @pytest.mark.parametrize("content", [b"{}", b"not json", b'{"version": 1}'])
