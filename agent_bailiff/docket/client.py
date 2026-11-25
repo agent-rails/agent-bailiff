@@ -126,7 +126,7 @@ class DocketClient:
 
     def _lock_writer(self) -> int:
         name = f"{self._writer}.lock"
-        directory_fd = open_private_dir(self._state_dir)
+        directory_fd = self._open_state_dir("state_invalid")
         try:
             fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, STATE_MODE, dir_fd=directory_fd)
         except OSError as exc:
@@ -153,7 +153,7 @@ class DocketClient:
         return fd
 
     def _load_acked(self) -> Head | None:
-        directory_fd = open_private_dir(self._state_dir)
+        directory_fd = self._open_state_dir("state_invalid")
         try:
             fd = os.open(self._state_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
         except FileNotFoundError:
@@ -175,7 +175,7 @@ class DocketClient:
     def _save_acked(self, head: Head) -> None:
         content = canonicalize({"seq": head.seq, "hash": head.hash})
         temporary = f"{self._state_name}.{os.urandom(8).hex()}.tmp"
-        directory_fd = open_private_dir(self._state_dir)
+        directory_fd = self._open_state_dir("state_write_failed")
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
             fd = os.open(temporary, flags, STATE_MODE, dir_fd=directory_fd)
@@ -189,6 +189,12 @@ class DocketClient:
             raise DocketError("state_write_failed", str(exc)) from exc
         finally:
             os.close(directory_fd)
+
+    def _open_state_dir(self, reason: str) -> int:
+        try:
+            return open_private_dir(self._state_dir)
+        except OSError as exc:
+            raise DocketError(reason, f"state directory {self._state_dir}: {exc.strerror or exc}") from exc
 
     def _request(self, payload: bytes) -> dict[str, Any]:
         try:
