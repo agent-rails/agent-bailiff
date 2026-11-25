@@ -176,17 +176,22 @@ class DocketClient:
     def _save_acked(self, head: Head) -> None:
         content = canonicalize({"seq": head.seq, "hash": head.hash})
         directory_fd = self._open_state_dir("state_write_failed")
+        temporary = None
         try:
-            temporary = f"{self._state_name}.{os.urandom(8).hex()}.tmp"
+            name = f"{self._state_name}.{os.urandom(8).hex()}.tmp"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-            fd = os.open(temporary, flags, STATE_MODE, dir_fd=directory_fd)
+            fd = os.open(name, flags, STATE_MODE, dir_fd=directory_fd)
+            temporary = name
             with os.fdopen(fd, "wb") as state:
                 state.write(content)
                 state.flush()
                 os.fsync(state.fileno())
             os.rename(temporary, self._state_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            temporary = None
             os.fsync(directory_fd)
         except OSError as exc:
+            if temporary is not None:
+                _unlink_quietly(temporary, directory_fd)
             raise DocketError("state_write_failed", str(exc)) from exc
         finally:
             _close_quietly(directory_fd)
@@ -233,6 +238,13 @@ class DocketClient:
 def _close_quietly(fd: int) -> None:
     try:
         os.close(fd)
+    except OSError:
+        pass
+
+
+def _unlink_quietly(name: str, directory_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=directory_fd)
     except OSError:
         pass
 

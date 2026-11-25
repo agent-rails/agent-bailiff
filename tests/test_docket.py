@@ -1095,6 +1095,22 @@ def test_a_state_name_failure_after_an_append_is_unacknowledged(paths, start_sin
     assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.lock"]
 
 
+def test_a_failed_state_rename_after_an_append_leaves_no_temporary_file(paths, start_sink, monkeypatch):
+    start_sink()
+    client = decide_client(paths)
+
+    def no_rename(*args, **kwargs):
+        raise OSError(errno.EIO, "rename failed")
+
+    monkeypatch.setattr(client_module.os, "rename", no_rename)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    monkeypatch.undo()
+    assert error.value.reason == "state_write_failed"
+    assert len(lines(paths[0])) == 1
+    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.lock"]
+
+
 @pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed"])
 def test_a_sink_refusal_naming_a_client_reason_is_a_plain_refusal(paths, reason):
     socket_path = paths[1]
