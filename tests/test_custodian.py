@@ -34,6 +34,7 @@ from test_decide import (
     Suspension,
     make_request,
     make_root,
+    make_v1_root,
 )
 
 from agent_bailiff.custodian import (
@@ -523,10 +524,62 @@ def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused_and_recorde
     assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
 
 
-def test_revoked_chain_is_refused(make_custodian, issue, writer):
+def test_revoked_chain_is_refused(make_custodian, issue, writer, workdir):
     request, token = issue()
     writer.revoke_task(TENANT, "task-1", NOW)
     assert make_custodian().release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+
+
+def test_a_chain_refused_after_a_verified_clearance_is_recorded_from_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    clearance = clearance_for(request, root)
+    token = sign_clearance(clearance)
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("chain_invalid")
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.reason, entry.op_id, entry.parent_entry) == (
+        "refuse",
+        "chain_refused",
+        clearance.op_id,
+        clearance.entry_id,
+    )
+    assert (entry.tenant, entry.task_root, entry.tool, entry.resource, entry.cost) == (
+        TENANT,
+        root.binding(),
+        request.tool,
+        request.resource,
+        clearance.cost,
+    )
+    assert (entry.principal, entry.agent_key, entry.links) == (None, None, ())
+    assert entry.clearance_digest == token_hash(token)
+    assert dict(entry.handles) == {"task": root.task_id, "tenant": TENANT, "root": root.binding()}
+
+
+def test_a_v1_root_before_the_custodian_cutoff_passes_the_chain(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    assert make_custodian(scope_v1_cutoff=NOW + 1).release(token, request, NOW + 1) == Refused("reservation_missing")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["reservation_missing"]
+
+
+def test_a_repeated_chain_refusal_is_recorded_once(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    custodian = make_custodian(scope_v1_cutoff=NOW)
+    for _ in range(3):
+        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+
+
+def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root), key=FORGER_KEY)
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("clearance_invalid")
+    assert custodian_entries(workdir) == []
 
 
 def test_clearance_without_a_reservation_is_refused(make_custodian):

@@ -12,7 +12,7 @@ from agent_warrant.identity import encode_public_key
 from agent_warrant.ledger import LedgerUnavailable, Operation, TaskLedger
 from agent_warrant.ledger import Refused as LedgerRefused
 from agent_warrant.resolver import PinnedResolver
-from agent_warrant.task_root import issue_task_root
+from agent_warrant.task_root import TaskRoot, issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_docket import RunningSink
@@ -275,6 +275,24 @@ def make_root(*, budget=100, ttl=3600, scope=None, task_id="task-1"):
         scope=scope or SCOPE,
         subject=encode_public_key(AGENT_KEY.public_key()),
     )
+
+
+def make_v1_root(*, issued_at=NOW, task_id="task-1"):
+    unsigned = TaskRoot(
+        task_id=task_id,
+        tenant_id=TENANT,
+        principal=PRINCIPAL,
+        purpose="release-bot",
+        budget=100,
+        max_depth=4,
+        issued_at=issued_at,
+        expires_at=issued_at + 3600,
+        scope=PERMISSION,
+        subject=encode_public_key(AGENT_KEY.public_key()),
+        issuer=ISSUER_ID,
+        proof="",
+    )
+    return replace(unsigned, proof=b64u(ISSUER_KEY.sign(unsigned.signing_bytes())))
 
 
 def make_request(
