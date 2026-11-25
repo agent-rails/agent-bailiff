@@ -60,6 +60,7 @@ class TaskList:
         self._resolver = resolver
         self._trust_policy = trust_policy
         self._rows: dict[tuple[str, str], TaskRow] = {}
+        self._untrusted_times: set[tuple[str, str]] = set()
         self._revoked_tasks: dict[tuple[str, str], str] = {}
         self._revoked_roots: dict[str, str] = {}
         self._revoked_tenants: dict[str, str] = {}
@@ -104,16 +105,12 @@ class TaskList:
             self.undecodable_grants += 1
             return
         refusal = check_grant_root(root, self._resolver, self._trust_policy)
-        key = (root.tenant_id, root.task_id)
-        if refusal is not None and key in self._rows:
-            row = self._rows[key]
-        else:
-            row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
+        if refusal is not None:
+            self._reject_grant(self._invalid_row(root.tenant_id, root.task_id, grant.at, verified.line), refusal)
+            return
+        row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
         self._add_root(row, root.binding(), verified.line)
-        if refusal is None:
-            self._accept_grant(row, root, verified)
-        else:
-            self._reject_grant(row, refusal)
+        self._accept_grant(row, root, verified)
 
     def _accept_grant(self, row: TaskRow, root: TaskRoot, verified: VerifiedLine) -> None:
         row.root_status, row.root_reason = VERIFIED, None
@@ -127,11 +124,22 @@ class TaskList:
         if row.root_status == UNVERIFIED:
             row.root_status, row.root_reason = INVALID, refusal.reason
 
+    def _invalid_row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
+        row = self._rows.get((tenant, task))
+        if row is not None:
+            return row
+        row = self._row(tenant, task, at, line)
+        self._untrusted_times.add((tenant, task))
+        return row
+
     def _row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
         row = self._rows.get((tenant, task))
         if row is None:
             self._charge(ROW_BYTES + text_bytes(tenant) + text_bytes(task), line)
             row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=at)
+        if (tenant, task) in self._untrusted_times:
+            self._untrusted_times.discard((tenant, task))
+            row.first = row.last = at
         row.first, row.last = min(row.first, at), max(row.last, at)
         return row
 

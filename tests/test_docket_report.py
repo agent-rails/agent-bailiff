@@ -1400,12 +1400,11 @@ def test_a_task_with_no_grant_is_unverified(docket, pin_files, capsys):
     ]
 
 
-def test_an_invalid_grant_does_not_set_granted_expiry_or_record(docket, pin_files, grant_pin_file, capsys):
-    forged = task_root("task-c", key=FORGER_KEY)
-    docket.grant(grant_of(forged))
+def test_an_invalid_grant_does_not_set_granted_expiry_record_or_roots(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY)))
     _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
     assert (row["granted"], row["expires_at"], row["record"], row["record_line"]) == (False, None, None, None)
-    assert row["roots"] == [forged.binding()]
+    assert row["roots"] == []
     assert root_fields(row) == ("invalid", "bad_signature", 1)
 
 
@@ -1458,7 +1457,7 @@ def test_an_invalid_grant_does_not_move_first_or_last_of_an_existing_row(docket,
     docket.append("decide", make_entry(5, handles=handles))
     docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 2, at=AT + 9))
     _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
-    assert (row["first"], row["last"]) == (AT + 1, AT + 5)
+    assert (row["first"], row["last"]) == (AT + 5, AT + 5)
     assert root_fields(row) == ("invalid", "bad_signature", 2)
 
 
@@ -1468,12 +1467,32 @@ def test_an_invalid_grant_alone_opens_a_row(docket, pin_files, grant_pin_file, c
     assert (row["tenant"], row["task"], row["first"], row["last"]) == ("acme", "task-c", AT + 3, AT + 3)
 
 
+def test_a_row_opened_by_an_invalid_grant_takes_its_times_from_the_first_trusted_record(
+    docket, pin_files, grant_pin_file, capsys
+):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 1, at=2**40))
+    docket.grant(grant_of(task_root("task-c"), 2, at=AT + 3))
+    docket.append("decide", make_entry(5, handles={"tenant": "acme", "task": "task-c", "root": "root-c"}))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["first"], row["last"], row["root_status"]) == (AT + 3, AT + 5, "verified")
+
+
+def test_an_invalid_root_is_not_listed_and_its_revocation_does_not_mark_the_task(
+    docket, pin_files, grant_pin_file, capsys
+):
+    forged = replace(task_root("task-c", key=FORGER_KEY), purpose="evil")
+    real = task_root("task-c")
+    docket.grant(grant_of(forged, 1, at=AT + 1))
+    docket.grant(grant_of(real, 2, at=AT + 2))
+    docket.append("control", make_entry(3, hop="control", decision="revoke", handles={"root": forged.binding()}))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["roots"], row["revoked_by"], row["root_status"]) == ([real.binding()], None, "verified")
+
+
 def test_invalid_grants_are_charged_to_the_state_budget(docket):
-    forged = task_root("task-c", key=FORGER_KEY)
-    docket.grant(grant_of(forged))
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY)))
     tasks = task_list(docket)
-    texts = ("acme", "task-c", forged.binding())
-    assert tasks._tracked == tasks_module.ROW_BYTES + tasks_module.KEY_BYTES + sum(map(sys.getsizeof, texts))
+    assert tasks._tracked == tasks_module.ROW_BYTES + sum(map(sys.getsizeof, ("acme", "task-c")))
 
 
 def test_a_json_task_row_is_written_in_chunks_that_join_to_one_document():
