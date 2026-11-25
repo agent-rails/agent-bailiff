@@ -476,15 +476,15 @@ class Deployment:
         records = [json.loads(line) for line in self.upstream_log.read_text().split("\n")[:-1]]
         return [record for record in records if record["method"] == "tools/call" and record["tool"] == tool]
 
-    def docket_lines(self) -> list[tuple[str, Any]]:
+    def docket_lines(self) -> list[tuple[str, str, Any]]:
         settings = load_docket(self.config("docket"))
         index = build_kid_index(settings.writers)
         records = [(line, decode_record(line, index)) for line in settings.docket.read_text().splitlines()]
-        return [(line, record.entry) for line, record in records if isinstance(record.entry, Entry)]
+        return [(line, record.writer, record.entry) for line, record in records if isinstance(record.entry, Entry)]
 
     def allow_line(self, task_id: str) -> str:
-        for line, entry in reversed(self.docket_lines()):
-            if entry.hop == "decide" and entry.decision == "allow" and dict(entry.handles).get("task") == task_id:
+        for line, writer, entry in reversed(self.docket_lines()):
+            if writer == "decide" and entry.decision == "allow" and dict(entry.handles).get("task") == task_id:
                 return line
         raise RuntimeError(f"no allow entry for {task_id}")
 
@@ -697,10 +697,10 @@ def final_checks(deployment: Deployment, outcomes: list[Outcome]) -> dict[str, A
     report = verify_docket(
         load_docket(deployment.config("docket")).docket, load_docket(deployment.config("docket")).writers
     )
-    entries = [entry for _, entry in deployment.docket_lines()]
+    entries = deployment.docket_lines()
     decisions: dict[str, int] = {}
-    for entry in entries:
-        key = f"{entry.hop}:{entry.decision}"
+    for _, writer, entry in entries:
+        key = f"{writer}:{entry.decision}"
         decisions[key] = decisions.get(key, 0) + 1
     docket_text = load_docket(deployment.config("docket")).docket.read_text()
     return {

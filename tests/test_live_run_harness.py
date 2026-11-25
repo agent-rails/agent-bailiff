@@ -1034,3 +1034,33 @@ def test_final_checks_see_a_credential_in_a_result_the_agent_received(tmp_path, 
     received.write_text(json.dumps({"tool": "read_document", "result": shim.text("key s3cret")}) + "\n")
     checks = run.final_checks(deployment, [stop_outcome("revoke"), stop_outcome("suspend")])
     assert checks["credential seen by the agent or the model"] is True
+
+
+class LinedDeployment:
+    def __init__(self, lines):
+        self.lines = lines
+
+    def docket_lines(self):
+        return self.lines
+
+
+def lined_entry(hop, decision, task="task-a", tool="t", outcome=None):
+    fields = {"hop": hop, "decision": decision, "handles": {"task": task}, "tool": tool, "outcome": outcome}
+    return type("E", (), fields)()
+
+
+def test_the_allow_line_comes_from_the_decide_writer_not_the_hop():
+    deployment = LinedDeployment(
+        [("real", "decide", lined_entry("decide", "allow")), ("forged", "custodian", lined_entry("decide", "allow"))]
+    )
+    assert run.Deployment.allow_line(deployment, "task-a") == "real"
+
+
+def test_effector_outcomes_come_from_the_effector_writer_not_the_hop():
+    deployment = LinedDeployment(
+        [
+            ("real", "effector", lined_entry("effector", "outcome", tool="scale", outcome="ok")),
+            ("forged", "decide", lined_entry("effector", "outcome", tool="scale", outcome="forged")),
+        ]
+    )
+    assert kubernetes.effector_outcomes(deployment) == [("scale", "ok")]

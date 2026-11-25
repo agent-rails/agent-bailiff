@@ -574,8 +574,8 @@ class KubernetesDeployment(Deployment):
 def effector_outcomes(deployment: KubernetesDeployment) -> list[tuple[str, str | None]]:
     return [
         (entry.tool, entry.outcome)
-        for _, entry in deployment.docket_lines()
-        if entry.hop == "effector" and entry.decision == "outcome"
+        for _, writer, entry in deployment.docket_lines()
+        if writer == "effector" and entry.decision == "outcome"
     ]
 
 
@@ -813,10 +813,10 @@ def read_checks(outcomes: list[Outcome]) -> dict[str, Any]:
 def final_checks(deployment: KubernetesDeployment, outcomes: list[Outcome]) -> dict[str, Any]:
     settings = load_docket(deployment.config("docket"))
     report = verify_docket(settings.docket, settings.writers)
-    entries = [entry for _, entry in deployment.docket_lines()]
+    entries = deployment.docket_lines()
     decisions: dict[str, int] = {}
-    for entry in entries:
-        key = f"{entry.hop}:{entry.decision}"
+    for _, writer, entry in entries:
+        key = f"{writer}:{entry.decision}"
         decisions[key] = decisions.get(key, 0) + 1
     token = deployment.cluster.token()
     gateway_log = (deployment.logs / "gateway.log").read_text(errors="replace")
