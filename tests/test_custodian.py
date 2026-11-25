@@ -105,13 +105,12 @@ class AckDocket:
 
 
 class FailingDocket:
-    def __init__(self, error=None):
+    def __init__(self):
         self.entries = []
-        self.error = error or OSError("docket sink is down")
 
     def append(self, entry):
         self.entries.append(entry)
-        raise self.error
+        raise OSError("docket sink is down")
 
 
 class ShiftedExpiryReader:
@@ -592,19 +591,44 @@ def test_an_unacknowledged_chain_refusal_is_not_recorded_again(make_custodian, o
     for _ in range(3):
         assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
     assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
-    assert "may be recorded" in caplog.text
+    assert "recorded but its head was not saved" in caplog.text
     assert "was not written" not in caplog.text
 
 
-def test_a_refused_chain_refusal_entry_is_tried_again(make_custodian):
+class FailOnceDocket:
+    def __init__(self, inner, error):
+        self.inner = inner
+        self.error = error
+
+    def append(self, entry):
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        return self.inner.append(entry)
+
+
+@pytest.mark.parametrize(
+    "error, logged",
+    [
+        (DocketError("no_ack", "head fetch timed out"), "may be recorded"),
+        (DocketError("bad_ack", "head response is malformed"), "may be recorded"),
+        (DocketError("write_failed"), "may be recorded"),
+        (DocketError("docket_full"), "was not written"),
+        (OSError("docket sink is down"), "was not written"),
+    ],
+)
+def test_a_chain_refusal_not_known_to_be_recorded_is_tried_again(
+    make_custodian, open_docket, workdir, caplog, error, logged
+):
     root = make_v1_root()
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
-    docket = FailingDocket(DocketError("docket_full"))
-    custodian = make_custodian(scope_v1_cutoff=NOW, docket=docket)
-    for _ in range(2):
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_custodian(scope_v1_cutoff=NOW, docket=FailOnceDocket(inner, error))
+    for _ in range(3):
         assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
-    assert [entry.reason for entry in docket.entries] == ["chain_refused", "chain_refused"]
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+    assert logged in caplog.text
 
 
 def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian, workdir):

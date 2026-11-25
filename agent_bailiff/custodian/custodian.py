@@ -509,17 +509,23 @@ class Custodian:
                 )
             )
         except DocketError as exc:
+            if exc.reason == "state_write_failed":
+                logger.warning(
+                    "docket entry for a custodian refusal was recorded but its head was not saved", exc_info=True
+                )
+                return
             if exc.reason in UNACKNOWLEDGED:
                 logger.warning(
                     "docket entry for a custodian refusal was not acknowledged and may be recorded", exc_info=True
                 )
-                return
+            else:
+                logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
             self._forget_refusal(key)
         except Exception:
+            logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
             self._forget_refusal(key)
 
     def _forget_refusal(self, key: tuple[str, str, str, str]) -> None:
-        logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
         with self._refusals_lock:
             self._recorded_refusals.pop(key, None)
 
