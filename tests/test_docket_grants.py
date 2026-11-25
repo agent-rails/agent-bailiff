@@ -494,7 +494,7 @@ def test_a_forged_root_is_invalid_in_tasks_and_grants_and_refused_by_control(doc
     record = grant(docket, forged)
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
     pins += ["--grant-pin", str(pin_files["issuer"]), "--issuers", str(issuers_file)]
-    cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"])
+    assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == cli.EXIT_FORGED_GRANT
     [task] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", False, None)
     assert (task["root_status"], task["root_reason"], task["invalid_grants"]) == ("invalid", "bad_signature", 1)

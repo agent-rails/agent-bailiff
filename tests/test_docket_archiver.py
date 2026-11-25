@@ -471,9 +471,11 @@ def test_tasks_with_the_archive_counts_records_in_removed_segments(layout, pin_f
     code, rows, err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
     assert code == 0, err
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 3, 1, 1)]
+    assert "pass --archive" not in err
     code, rows, err = tasks_command(layout, pin_files, capsys)
     assert code == 0, err
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 2, 0, 0)]
+    assert "1 tasks have no verified grant in the read segments; if segments were removed, pass --archive" in err
 
 
 def test_tasks_refuses_an_archive_missing_a_removed_segment(layout, pin_files, capsys):
