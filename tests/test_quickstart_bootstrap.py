@@ -147,6 +147,17 @@ def test_init_reader_writes_an_owned_0600_copy_of_the_issuers(reader):
     assert b.init_reader() == "kept"
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_init_reader_replaces_a_staged_file_left_by_a_crash(reader, existing):
+    if existing:
+        b.init_reader()
+        b.READER_ISSUERS.write_text(json.dumps({"stale": {}}))
+    b.READER_ISSUERS.with_name(".issuers.json.new").write_text("partial")
+    assert b.init_reader() == ("updated" if existing else "created")
+    assert json.loads(b.READER_ISSUERS.read_text()) == b.issuers()
+    assert not b.READER_ISSUERS.with_name(".issuers.json.new").exists()
+
+
 def test_init_reader_rewrites_a_copy_that_no_longer_matches(reader):
     b.init_reader()
     b.READER_ISSUERS.write_text(json.dumps({"stale": {}}))

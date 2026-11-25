@@ -327,6 +327,7 @@ def replace_owned(path: Path, document: Any) -> bool:
 
 def write_owned(path: Path, document: Any) -> None:
     staged = path.with_name(f".{path.name}.new")
+    staged.unlink(missing_ok=True)
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "wb") as target:
         target.write(json.dumps(document, indent=2, sort_keys=True).encode() + b"\n")
