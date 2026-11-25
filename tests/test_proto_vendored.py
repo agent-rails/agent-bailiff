@@ -91,4 +91,4 @@ def test_every_image_builds_from_one_digest_pinned_python_base():
     ]
     bases = {image for image in images if image.startswith("python:")}
     assert len(tracked) >= 4 and len(bases) == 1, bases
-    assert re.fullmatch(r"python:3\.\d+\.\d+-slim@sha256:[0-9a-f]{64}", bases.pop())
+    assert re.fullmatch(r"python:3\.13\.\d+-slim@sha256:[0-9a-f]{64}", bases.pop())

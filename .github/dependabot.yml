@@ -14,7 +14,7 @@ updates:
       interval: weekly
     ignore:
       - dependency-name: python
-        versions: [">=3.15"]
+        versions: [">=3.14"]
     groups:
       python-base:
         group-by: dependency-name
