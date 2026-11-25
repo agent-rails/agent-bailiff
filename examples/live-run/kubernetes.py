@@ -535,9 +535,13 @@ class KubernetesDeployment(Deployment):
 
     def catalog_task(self, task_id: str) -> dict[str, Any]:
         scope = {
-            "tools": ["k8s.*"],
-            "resources": [f"k8s/{self.cluster.namespaces['staging']}/*"],
-            "max_cost_per_call": 5,
+            "permissions": [
+                {
+                    "tools": ["k8s.*"],
+                    "resources": [f"k8s/{self.cluster.namespaces['staging']}/*"],
+                    "max_cost_per_call": 5,
+                }
+            ]
         }
         task = self.task(task_id, scope)
         state = task["state"]

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import sqlite3
@@ -34,6 +35,7 @@ from test_decide import (
     Suspension,
     make_request,
     make_root,
+    make_v1_root,
 )
 
 from agent_bailiff.custodian import (
@@ -222,7 +224,7 @@ def trust_policy():
 
 @pytest.fixture
 def make_decider(open_docket, sink, writer):
-    def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None):
+    def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None, scope_v1_cutoff=0):
         return Decider(
             config=DeciderConfig(
                 DECIDER_ID,
@@ -231,6 +233,7 @@ def make_decider(open_docket, sink, writer):
                 MAX_PROOF_AGE,
                 bindings,
                 "decide",
+                scope_v1_cutoff=scope_v1_cutoff,
             ),
             ledger=writer,
             resolver=PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
@@ -427,10 +430,11 @@ def test_clearance_naming_another_credential_of_the_tenant_is_refused(make_custo
     assert result == Refused("binding_mismatch")
 
 
-def test_mutated_args_fail_the_leaf_proof(make_custodian, issue):
+def test_mutated_args_do_not_match_the_clearance(make_custodian, issue, workdir):
     request, token = issue()
     mutated = replace(request, args={"service": "api", "replicas": 99})
-    assert make_custodian().release(token, mutated, NOW + 1) == Refused("chain_invalid")
+    assert make_custodian().release(token, mutated, NOW + 1) == Refused("clearance_mismatch")
+    assert custodian_entries(workdir) == []
 
 
 def test_clearance_for_another_request_of_the_same_task_is_refused(make_custodian, issue):
@@ -441,7 +445,9 @@ def test_clearance_for_another_request_of_the_same_task_is_refused(make_custodia
 
 
 def test_request_outside_the_chain_scope_is_refused_and_recorded(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     assert make_custodian().release(token, request, NOW + 1) == Refused("out_of_scope")
@@ -456,7 +462,9 @@ def test_request_outside_the_chain_scope_is_refused_and_recorded(make_custodian,
     ],
 )
 def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(make_custodian, workdir, binding):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root, resource="env/staging-x/api")
     token = sign_clearance(clearance_for(request, root))
     custodian = make_custodian(
@@ -479,7 +487,7 @@ def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(m
 def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_clearance(
     make_custodian, workdir, tools, tool
 ):
-    root = make_root(scope={"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    root = make_root(scope={"permissions": [{"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5}]})
     request = make_request(root, tool=tool)
     token = sign_clearance(clearance_for(request, root))
     binding = CredentialBinding(TENANT, tool, "env/*", "deploy-api", "deploy.example", "Authorization", False)
@@ -490,13 +498,15 @@ def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_cleara
 
 def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused_and_recorded(make_custodian, workdir):
     tool = "gitea.issues_delete"
-    root = make_root(scope={"tools": ["gitea.issues_*"], "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["gitea.issues_*"], "resources": ["env/staging/*"], "max_cost_per_call": 5}]}
+    )
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": [tool], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": [tool], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -517,10 +527,78 @@ def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused_and_recorde
     assert [(entry.decision, entry.reason) for entry in custodian_entries(workdir)] == [("refuse", "unbounded_scope")]
 
 
-def test_revoked_chain_is_refused(make_custodian, issue, writer):
+def test_revoked_chain_is_refused(make_custodian, issue, writer, workdir):
     request, token = issue()
     writer.revoke_task(TENANT, "task-1", NOW)
     assert make_custodian().release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+
+
+def test_a_chain_refused_after_a_verified_clearance_is_recorded_from_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    clearance = clearance_for(request, root)
+    token = sign_clearance(clearance)
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("chain_invalid")
+    [entry] = custodian_entries(workdir)
+    assert (entry.decision, entry.reason, entry.op_id, entry.parent_entry) == (
+        "refuse",
+        "chain_refused",
+        clearance.op_id,
+        clearance.entry_id,
+    )
+    assert (entry.tenant, entry.task_root, entry.tool, entry.resource, entry.cost) == (
+        TENANT,
+        root.binding(),
+        request.tool,
+        request.resource,
+        clearance.cost,
+    )
+    assert (entry.principal, entry.agent_key, entry.links) == (None, None, ())
+    assert entry.clearance_digest == token_hash(token)
+    assert dict(entry.handles) == {"task": root.task_id, "tenant": TENANT, "root": root.binding()}
+
+
+def test_a_v1_root_before_the_custodian_cutoff_passes_the_chain(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    assert make_custodian(scope_v1_cutoff=NOW + 1).release(token, request, NOW + 1) == Refused("reservation_missing")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["reservation_missing"]
+
+
+def test_a_repeated_chain_refusal_is_recorded_once(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    custodian = make_custodian(scope_v1_cutoff=NOW)
+    for _ in range(3):
+        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+
+
+def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian, workdir):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root), key=FORGER_KEY)
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("clearance_invalid")
+    assert custodian_entries(workdir) == []
+
+
+def test_a_broken_chain_on_another_request_is_not_recorded_under_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    token = sign_clearance(clearance_for(make_request(root), root))
+    other = make_request(root, tool="deploy.servicex")
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, other, NOW + 1) == Refused("clearance_mismatch")
+    assert custodian_entries(workdir) == []
+
+
+def test_a_broken_chain_under_another_root_is_not_recorded_under_the_clearance(make_custodian, workdir):
+    root = make_v1_root()
+    token = sign_clearance(clearance_for(make_request(root), root))
+    other = make_request(make_v1_root(task_id="task-2"))
+    assert make_custodian(scope_v1_cutoff=NOW).release(token, other, NOW + 1) == Refused("clearance_mismatch")
+    assert custodian_entries(workdir) == []
 
 
 def test_clearance_without_a_reservation_is_refused(make_custodian):
@@ -890,7 +968,9 @@ def test_the_release_entry_records_the_time_the_release_took_in_whole_millisecon
 
 
 def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     make_custodian(monotonic_ns=SteppingClock(9)).release(token, request, NOW + 1)
@@ -899,7 +979,9 @@ def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodi
 
 
 def test_a_clock_that_steps_back_still_records_the_refusal(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     make_custodian(monotonic_ns=BackwardsClock()).release(token, request, NOW + 1)
@@ -912,3 +994,18 @@ def test_the_default_clock_records_a_non_negative_integer_on_release(make_custod
     make_custodian().release(token, request, NOW + 1)
     [entry] = custodian_entries(workdir)
     assert isinstance(entry.latency_ms, int) and entry.latency_ms >= 0
+
+
+def test_the_custodian_logs_its_effective_cutoff_at_startup(make_custodian, caplog):
+    with caplog.at_level(logging.INFO, logger="agent_bailiff.custodian.custodian"):
+        make_custodian(scope_v1_cutoff=NOW + 7)
+    assert f"custodian {CUSTODIAN_ID} effective scope_v1_cutoff={NOW + 7}" in caplog.text
+
+
+def test_a_custodian_chain_refusal_logs_the_library_reason(make_custodian, caplog):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert "custodian refused the chain of a verified clearance: task root: scope_v1_expired" in caplog.text

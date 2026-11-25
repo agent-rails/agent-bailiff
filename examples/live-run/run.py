@@ -39,7 +39,7 @@ GATEWAY_PLATFORMS = {("darwin", "arm64"): "darwin-arm64", ("linux", "x86_64"): "
 UID, GID = os.geteuid(), os.getegid()
 TENANT, PRINCIPAL, ISSUER = "acme", "user:alice", "issuer.live"
 DECIDE, CUSTODIAN, CONTROL = "decide.live", "custodian.live", "control.live"
-SCOPE = {"tools": ["deploy.*"], "resources": ["env/staging/*"], "max_cost_per_call": 5}
+SCOPE = {"permissions": [{"tools": ["deploy.*"], "resources": ["env/staging/*"], "max_cost_per_call": 5}]}
 ROUTES = [
     {"service": "ops", "name": "deploy_service", "tool": "deploy.service", "resource": "env/staging/api"},
     {"service": "ops", "name": "withdraw_funds", "tool": "signer.withdraw", "resource": "wallet/hot"},

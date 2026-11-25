@@ -161,6 +161,7 @@ class Deployment:
             "name": "decide.example",
             "key": str(self.decide / "signing.key"),
             "max_proof_age": 60,
+            "scope_v1_cutoff": 1_700_000_000,
             "reconcile_seconds": 1,
             "custodians": ["custodian.example"],
             "bindings": [
@@ -189,6 +190,7 @@ class Deployment:
             "decider": "decide.example",
             "decide_keys": self.pins("decide.example"),
             "max_proof_age": 60,
+            "scope_v1_cutoff": 1_700_000_000,
             "max_clearance_lifetime": 60,
             "skew_seconds": 5,
             "rate_limit": 10,
@@ -308,6 +310,7 @@ def test_the_example_documents_parse(deployment):
     control = load_control(deployment.paths["control"])
     assert decide.name == "decide.example" and decide.custodians == {"custodian.example"}
     assert list(custodian.decide_keys) == [deployment.keys["decide.example"].kid]
+    assert (decide.scope_v1_cutoff, custodian.scope_v1_cutoff) == (1_700_000_000, 1_700_000_000)
     assert (custodian.inflight_ttl, custodian.inflight_max) == (150, 64)
     assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (65536, 16)
     assert (custodian.response_socket, custodian.response_workers) == (deployment.sockets["redactor"], 2)
@@ -332,6 +335,9 @@ BAD_DECIDE = {
     "bad_name": lambda doc: doc.update(name="decide example"),
     "zero_proof_age": lambda doc: doc.update(max_proof_age=0),
     "bool_proof_age": lambda doc: doc.update(max_proof_age=True),
+    "negative_scope_v1_cutoff": lambda doc: doc.update(scope_v1_cutoff=-1),
+    "bool_scope_v1_cutoff": lambda doc: doc.update(scope_v1_cutoff=True),
+    "missing_scope_v1_cutoff": lambda doc: doc.pop("scope_v1_cutoff"),
     "negative_group": lambda doc: doc["ledger"].update(group=-1),
     "huge_uid": lambda doc: doc["gateway"].update(uid=2**32),
     "no_custodians": lambda doc: doc.update(custodians=[]),
@@ -354,6 +360,8 @@ def test_a_bad_decide_config_is_refused(deployment, name):
 
 
 BAD_CUSTODIAN = {
+    "float_scope_v1_cutoff": lambda doc: doc.update(scope_v1_cutoff=1.5),
+    "missing_scope_v1_cutoff": lambda doc: doc.pop("scope_v1_cutoff"),
     "unpinned_kid_for_the_key": lambda doc: doc.update(
         decide_keys={"decide.example-1": doc["decide_keys"].popitem()[1]}
     ),

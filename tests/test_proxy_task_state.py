@@ -11,7 +11,7 @@ from agent_bailiff.proxy.task_state import NoTask, TaskState, TaskUnavailable
 from agent_bailiff.task.issue import TaskRequest, issue_task
 
 NOW = 1_800_000_000
-SCOPE = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}
+SCOPE = {"permissions": [{"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}]}
 ISSUER_KEY = Ed25519PrivateKey.generate()
 
 

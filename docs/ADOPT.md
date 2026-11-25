@@ -116,7 +116,7 @@ The operator issues the task to that key:
 ```console
 $ docker compose --profile operator run --rm --no-deps -T task-issuer \
     --purpose triage-notes \
-    --scope '{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}' \
+    --scope '{"permissions": [{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}]}' \
     --budget 20 --subject=oa5bveQCZ3-a-9zg9TUN3MntJk9T_yIfkt7LoHUCtZ8
 agent-bailiff task issue: wrote /out/task.json, expires at 1795523898
 task-f0f2af5ac610e8db
@@ -124,7 +124,16 @@ task-f0f2af5ac610e8db
 
 Pass the key as `--subject=KEY`, since a key can start with `-`. A task lasts one hour by default (`--ttl` in seconds, at most 86400). The stack's issuer allows a budget of at most 100, and every call costs 1. `--max-depth` defaults to 0, which means the agent cannot delegate. The task is written to `$BAILIFF_TASK_DIR/task.json`, mode 0644, so the agent user can read it.
 
-A resource grant must be exact or end at `/*`. A tool grant can end at `.*`, but that also covers any tool routed later under the same prefix, so grant exact tools.
+The scope is a list of permissions. A call is allowed only when one permission lists both its tool and its resource, so to let the agent read every note but write only `notes/todo`, give each its own permission:
+
+```json
+{"permissions": [
+  {"tools": ["notes.read_note"], "resources": ["notes/*"], "max_cost_per_call": 1},
+  {"tools": ["notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}
+]}
+```
+
+`task.json` holds at most 4,096 bytes, and `task issue` refuses a scope that does not fit; two permissions over 20 resources fit in about 1,700 bytes. A resource grant must be exact or end at `/*`. A tool grant can end at `.*`, but that also covers any tool routed later under the same prefix, so grant exact tools.
 
 ## 5. Draft the routes
 

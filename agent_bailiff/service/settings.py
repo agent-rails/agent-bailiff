@@ -34,13 +34,13 @@ TENANT_KEYS = frozenset({"principals", "principal_prefixes"})
 BINDING_KEYS = frozenset({"tenant", "tool", "resource", "credential_id", "target", "custodian"})
 DECIDE_KEYS = frozenset(
     {"name", "key", "max_proof_age", "reconcile_seconds", "custodians", "bindings", "policy", "costs", "issuers"}
-    | {"ledger", "routes", "docket", "gateway"}
+    | {"ledger", "routes", "docket", "gateway", "scope_v1_cutoff"}
 )
 CUSTODIAN_KEYS = frozenset(
     {"name", "key", "decider", "decide_keys", "max_proof_age", "max_clearance_lifetime", "skew_seconds"}
     | {"rate_limit", "rate_window", "issuers", "bindings", "kek", "credentials", "claims", "ledger", "routes"}
     | {"docket", "gateway", "inflight_ttl", "inflight_max", "inflight_max_bytes", "inflight_per_tenant"}
-    | {"response_socket", "response_workers"}
+    | {"response_socket", "response_workers", "scope_v1_cutoff"}
 )
 DOCKET_KEYS = frozenset(
     {
@@ -161,6 +161,7 @@ class DecideSettings:
     name: str
     key: Path
     max_proof_age: int
+    scope_v1_cutoff: int
     reconcile_seconds: int
     custodians: frozenset[str]
     bindings: tuple[TargetBinding, ...]
@@ -181,6 +182,7 @@ class CustodianSettings:
     decider: str
     decide_keys: Mapping[str, Ed25519PublicKey]
     max_proof_age: int
+    scope_v1_cutoff: int
     max_clearance_lifetime: int
     skew_seconds: int
     rate_limit: int
@@ -352,6 +354,7 @@ def parse_decide(document: object) -> DecideSettings:
         name=name,
         key=config.path("key"),
         max_proof_age=config.integer("max_proof_age", 1),
+        scope_v1_cutoff=config.integer("scope_v1_cutoff"),
         reconcile_seconds=config.integer("reconcile_seconds", 1, 3600),
         custodians=custodian_names,
         bindings=_target_bindings(config, custodian_names),
@@ -384,6 +387,7 @@ def parse_custodian(document: object) -> CustodianSettings:
         decider=decider,
         decide_keys=decide_keys,
         max_proof_age=config.integer("max_proof_age", 1),
+        scope_v1_cutoff=config.integer("scope_v1_cutoff"),
         max_clearance_lifetime=config.integer("max_clearance_lifetime", 1),
         skew_seconds=config.integer("skew_seconds", 0, 300),
         rate_limit=config.integer("rate_limit", 1),

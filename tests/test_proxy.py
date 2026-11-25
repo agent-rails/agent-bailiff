@@ -21,7 +21,9 @@ from agent_bailiff.task.issue import TaskRequest, issue_task
 
 NOW = 1_800_000_000
 TTL = 600
-SCOPE = {"tools": ["gitea.issues.list"], "resources": ["gitea/repos/demo/issues"], "max_cost_per_call": 1}
+SCOPE = {
+    "permissions": [{"tools": ["gitea.issues.list"], "resources": ["gitea/repos/demo/issues"], "max_cost_per_call": 1}]
+}
 ISSUER_KEY = Ed25519PrivateKey.generate()
 ROUTE_DOCUMENT = {
     "routes": [

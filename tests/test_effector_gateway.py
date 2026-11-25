@@ -57,7 +57,7 @@ EFFECTOR_BINDINGS = tuple(
     EffectorBinding(TENANT, tool, "k8s/staging/*", EFFECTOR_ID, TARGET, CATALOG.digest) for tool in TOOLS
 )
 COSTS = CostTable(1, dict.fromkeys(TOOLS, 1))
-SCOPE = {"tools": ["k8s.*"], "resources": ["k8s/staging/*"], "max_cost_per_call": 5}
+SCOPE = {"permissions": [{"tools": ["k8s.*"], "resources": ["k8s/staging/*"], "max_cost_per_call": 5}]}
 SCALE = {"namespace": "staging", "name": "api", "replicas": 3}
 RETRY_WINDOW_SECONDS = 3
 

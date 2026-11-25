@@ -8,7 +8,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "voltagebots" }]
 dependencies = [
-    "agent-warrant==0.3.0",
+    "agent-warrant==0.4.0",
     "cryptography==50.0.2",
     "grpcio==1.85.3",
     "protobuf==7.36.2",

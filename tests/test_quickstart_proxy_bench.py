@@ -20,7 +20,11 @@ sys.modules[_spec.name] = bench
 _spec.loader.exec_module(bench)
 
 NOW = 1_800_000_000
-SCOPE = {"tools": ["gitea.issues.list"], "resources": ["gitea/repos/quickstart/demo/*"], "max_cost_per_call": 1}
+SCOPE = {
+    "permissions": [
+        {"tools": ["gitea.issues.list"], "resources": ["gitea/repos/quickstart/demo/*"], "max_cost_per_call": 1}
+    ]
+}
 FAKE_PROXY = """
 import json, sys
 retries = 3

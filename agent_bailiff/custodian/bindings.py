@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-from agent_warrant.scope import covers, validate_entry
+from agent_warrant.scope import Permission, validate_entry
 
 from agent_bailiff.custodian.files import read_owned
 from agent_bailiff.scope_pattern import is_bounded_resource
@@ -50,8 +50,7 @@ class CredentialBinding:
             raise BindingTableError("canary must be a bool")
 
     def matches(self, tenant: str, tool: str, resource: str) -> bool:
-        scope = {"tools": [self.tool], "resources": [self.resource], "max_cost_per_call": 0}
-        return self.tenant == tenant and covers(scope, tool, resource)
+        return self.tenant == tenant and Permission((self.tool,), (self.resource,), 0).covers(tool, resource)
 
 
 BINDING_FIELDS = frozenset(item.name for item in fields(CredentialBinding))
@@ -82,8 +81,7 @@ class EffectorBinding:
             raise BindingTableError("catalog must be the effector catalog digest")
 
     def matches(self, tenant: str, tool: str, resource: str) -> bool:
-        scope = {"tools": [self.tool], "resources": [self.resource], "max_cost_per_call": 0}
-        return self.tenant == tenant and covers(scope, tool, resource)
+        return self.tenant == tenant and Permission((self.tool,), (self.resource,), 0).covers(tool, resource)
 
 
 EFFECTOR_BINDING_FIELDS = frozenset(item.name for item in fields(EffectorBinding))

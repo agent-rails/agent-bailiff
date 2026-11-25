@@ -20,8 +20,43 @@ from agent_bailiff.task.task_file import TaskFile
 NOW = 1_800_000_000
 ISSUER = "issuer.quickstart"
 DECIDER = "decide.quickstart"
-SCOPE = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}
+PERMISSION = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}
+SCOPE = {"permissions": [PERMISSION]}
 ISSUER_KEY = Ed25519PrivateKey.generate()
+MAX_BOUND_SCOPE = {
+    "permissions": [
+        {
+            "tools": [f"tool.{index:02d}.{side}{'t' * 118}" for side in "ab"],
+            "resources": [f"repo/{index:02d}/{side}{'r' * 118}" for side in "ab"],
+            "max_cost_per_call": 9_007_199_254_740_991,
+        }
+        for index in range(16)
+    ]
+}
+TWO_PERMISSIONS_TWENTY_REPOS = {
+    "permissions": [
+        {
+            "tools": ["gitea.issues.list", "gitea.issues.read"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*" for index in range(10)],
+            "max_cost_per_call": 1,
+        },
+        {
+            "tools": ["gitea.issues.comment"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*" for index in range(10, 20)],
+            "max_cost_per_call": 2,
+        },
+    ]
+}
+SIXTEEN_SINGLE_PAIRS = {
+    "permissions": [
+        {
+            "tools": [f"gitea.issues.op{index:02d}"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*"],
+            "max_cost_per_call": 1,
+        }
+        for index in range(16)
+    ]
+}
 
 
 def new_subject():
@@ -60,8 +95,9 @@ def out_dir(tmp_path):
         {"purpose": "has space"},
         {"tenant": "ténant"},
         {"principal": ""},
-        {"scope": {"tools": ["a*b"], "resources": [], "max_cost_per_call": 1}},
+        {"scope": {"permissions": [{"tools": ["a*b"], "resources": [], "max_cost_per_call": 1}]}},
         {"scope": {"tools": []}},
+        {"scope": {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}},
         {"budget": 0},
         {"budget": True},
         {"ttl": 0},
@@ -80,18 +116,36 @@ def test_a_bad_request_is_refused(overrides):
 @pytest.mark.parametrize("tool", ["gitea.issues_*", "gitea.issues-*", "gitea:*", "gitea/*"])
 def test_a_tool_grant_that_stops_inside_a_name_is_refused(tool):
     with pytest.raises(ValueError, match=rf"scope: tool grant {re.escape(tool)} must be exact or end at \.\*"):
-        request(scope={**SCOPE, "tools": ["notes.read_note", tool]})
+        request(scope={"permissions": [{**PERMISSION, "tools": ["notes.read_note", tool]}]})
 
 
 @pytest.mark.parametrize("resource", ["repo:demo-*", "repo:demo/a.*", "repo:*"])
 def test_a_resource_grant_that_stops_inside_a_segment_is_refused(resource):
     with pytest.raises(ValueError, match=rf"scope: resource grant {re.escape(resource)} must be exact or end at /\*"):
-        request(scope={**SCOPE, "resources": ["repo:demo/*", resource]})
+        request(scope={"permissions": [{**PERMISSION, "resources": ["repo:demo/*", resource]}]})
 
 
 @pytest.mark.parametrize("tools", [["notes.read_note"], ["notes.*"], ["notes.read_note", "notes.*"]])
 def test_exact_and_dot_tool_grants_are_issued(tools):
-    assert issued(scope={**SCOPE, "tools": tools}).root.scope["tools"] == tools
+    assert (
+        issued(scope={"permissions": [{**PERMISSION, "tools": tools}]}).root.scope["permissions"][0]["tools"] == tools
+    )
+
+
+class RefusingKey:
+    def sign(self, data):
+        raise AssertionError("an oversize scope must be refused before signing")
+
+
+def test_a_max_bound_scope_is_refused_before_signing():
+    with pytest.raises(ValueError, match="task file would exceed the 4096 byte limit"):
+        issue_task(RefusingKey(), ISSUER, DECIDER, request(scope=MAX_BOUND_SCOPE), NOW)
+
+
+@pytest.mark.parametrize("scope", [TWO_PERMISSIONS_TWENTY_REPOS, SIXTEEN_SINGLE_PAIRS])
+def test_realistic_multi_permission_scopes_are_issued(scope):
+    task = issued(scope=scope)
+    assert task.root.scope == scope and len(task.encode()) <= 4096
 
 
 def test_request_defaults_are_short_lived_and_undelegable():
@@ -270,8 +324,9 @@ def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
         "not json",
         '{"tools": [], "tools": []}',
         "[]",
-        json.dumps({**SCOPE, "tools": ["gitea.issues_*"]}),
-        json.dumps({**SCOPE, "resources": ["repo:demo-*"]}),
+        json.dumps({"permissions": [{**PERMISSION, "tools": ["gitea.issues_*"]}]}),
+        json.dumps({"permissions": [{**PERMISSION, "resources": ["repo:demo-*"]}]}),
+        json.dumps(MAX_BOUND_SCOPE),
     ],
 )
 def test_the_cli_refuses_a_bad_scope(out_dir, tmp_path, scope, capsys):

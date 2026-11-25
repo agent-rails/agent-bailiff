@@ -6,12 +6,11 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Protocol
 
 from agent_warrant.chain import ChainContext, ChainLink, verify_chain
 from agent_warrant.ledger import LedgerError, Operation, Reservation
 from agent_warrant.resolver import IssuerResolver
-from agent_warrant.scope import covers
 from agent_warrant.task_root import TaskRoot
 from agent_warrant.trust import IssuerTrustPolicy
 
@@ -36,7 +35,7 @@ from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
-from agent_bailiff.scope_pattern import is_bounded_scope
+from agent_bailiff.scope_pattern import scope_refusal
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
 
@@ -49,7 +48,7 @@ CLEARANCE_REFUSALS = {
     "expired": "clearance_expired",
     "not_yet_valid": "clearance_not_yet_valid",
 }
-ONCE_REFUSALS = frozenset({"already_issued", "task_denied"})
+ONCE_REFUSALS = frozenset({"already_issued", "task_denied", "chain_refused"})
 RESPONSE_REASONS = frozenset(
     {
         "response_unmatched",
@@ -117,13 +116,20 @@ class _Verified:
     leaf_binding: str
     snapshot: ArgsSnapshot
     token: str
-    leaf_scope: dict[str, Any]
 
 
 class _Refusal(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class _ChainRefused(_Refusal):
+    def __init__(self, clearance: Clearance, token: str, library_reason: str) -> None:
+        super().__init__("chain_invalid")
+        self.clearance = clearance
+        self.token = token
+        self.library_reason = library_reason
 
 
 class _UnacknowledgedRelease(_Refusal):
@@ -168,6 +174,7 @@ class Custodian:
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
         self._refusals_lock = threading.Lock()
+        logger.info("custodian %s effective scope_v1_cutoff=%d", config.custodian_id, config.scope_v1_cutoff)
 
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult:
         started = self._monotonic_ns()
@@ -231,6 +238,10 @@ class Custodian:
             raise ValueError("now must be a non-negative integer")
         try:
             verified = self._verify(clearance_token, request, now)
+        except _ChainRefused as refusal:
+            logger.warning("custodian refused the chain of a verified clearance: %s", refusal.library_reason)
+            self._record_chain_refusal(refusal, now, started)
+            raise
         except _Refusal as refusal:
             logger.warning("custodian refused an unverified request: %s", refusal.reason)
             raise
@@ -307,6 +318,7 @@ class Custodian:
         if request.refusal() is not None:
             raise _Refusal("malformed_request")
         digest = request_digest(request.tool, request.resource, snapshot.thaw(), request.nonce)
+        _match_clearance(clearance, request, digest, snapshot)
         chain = verify_chain(
             request.task_root,
             list(request.links),
@@ -318,27 +330,13 @@ class Custodian:
             expected_audience=config.decider_id,
             expected_request_digest=digest,
             max_proof_age_seconds=config.max_proof_age,
+            scope_v1_cutoff=config.scope_v1_cutoff,
         )
-        if not chain.valid or chain.root is None or chain.leaf_scope is None or chain.leaf_subject is None:
-            raise _Refusal("chain_invalid")
+        if not chain.valid or chain.root is None or chain.leaf_subject is None:
+            raise _ChainRefused(clearance, clearance_token, chain.reason)
         root = chain.root
         leaf_binding = chain.links[-1].binding() if chain.links else root.binding()
-        expected = {
-            "op_id": derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest),
-            "tenant": root.tenant_id,
-            "task": root.task_id,
-            "root_binding": root.binding(),
-            "leaf_binding": leaf_binding,
-            "request_digest": digest,
-            "tool": request.tool,
-            "resource": request.resource,
-            "args_digest": snapshot.digest,
-        }
-        if any(getattr(clearance, name) != value for name, value in expected.items()):
-            raise _Refusal("clearance_mismatch")
-        return _Verified(
-            clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token, chain.leaf_scope
-        )
+        return _Verified(clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token)
 
     def _release_to_effector(
         self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int, started: int
@@ -514,6 +512,31 @@ class Custodian:
             with self._refusals_lock:
                 self._recorded_refusals.pop(key, None)
 
+    def _record_chain_refusal(self, refusal: _ChainRefused, now: int, started: int) -> None:
+        clearance = refusal.clearance
+        handles = {"task": clearance.task, "tenant": clearance.tenant, "root": clearance.root_binding}
+        if clearance.leaf_binding != clearance.root_binding:
+            handles["link"] = clearance.leaf_binding
+        entry = Entry(
+            entry_id=HOP,
+            trace_id=clearance.trace_id,
+            hop=HOP,
+            component=self._config.custodian_id,
+            decision="refuse",
+            at=now,
+            op_id=clearance.op_id,
+            parent_entry=clearance.entry_id,
+            tenant=clearance.tenant,
+            task_root=clearance.root_binding,
+            tool=clearance.tool,
+            resource=clearance.resource,
+            args_digest=clearance.args_digest,
+            cost=clearance.cost,
+            clearance_digest=token_hash(refusal.token),
+            handles=handles,
+        )
+        self._record_refusal(clearance, entry, "chain_refused", started)
+
     def _elapsed_ms(self, started: int) -> int:
         return max(0, (self._monotonic_ns() - started) // 1_000_000)
 
@@ -543,12 +566,32 @@ class Custodian:
             raise _UnacknowledgedRelease
 
 
+def _match_clearance(clearance: Clearance, request: OperationRequest, digest: str, snapshot: ArgsSnapshot) -> None:
+    try:
+        root = TaskRoot.decode(request.task_root)
+        leaf_binding = ChainLink.decode(request.links[-1]).binding() if request.links else root.binding()
+    except ValueError:
+        raise _Refusal("clearance_mismatch") from None
+    expected = {
+        "op_id": derive_op_id(root.tenant_id, root.task_id, leaf_binding, digest),
+        "tenant": root.tenant_id,
+        "task": root.task_id,
+        "root_binding": root.binding(),
+        "leaf_binding": leaf_binding,
+        "request_digest": digest,
+        "tool": request.tool,
+        "resource": request.resource,
+        "args_digest": snapshot.digest,
+    }
+    if any(getattr(clearance, name) != value for name, value in expected.items()):
+        raise _Refusal("clearance_mismatch")
+
+
 def _check_scope(verified: _Verified) -> None:
-    chain_scopes = (verified.root.scope, *(link.scope for link in verified.links))
-    if not all(is_bounded_scope(granted) for granted in chain_scopes):
-        raise _Refusal("unbounded_scope")
-    if not covers(verified.leaf_scope, verified.clearance.tool, verified.clearance.resource):
-        raise _Refusal("out_of_scope")
+    clearance = verified.clearance
+    refusal = scope_refusal((verified.root, *verified.links), clearance.tool, clearance.resource, clearance.cost)
+    if refusal is not None:
+        raise _Refusal(refusal)
 
 
 def _warn_unredactable(header_value: str) -> None:

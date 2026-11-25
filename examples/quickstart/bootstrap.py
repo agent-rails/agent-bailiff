@@ -107,9 +107,13 @@ STACK_HOSTS = frozenset(
 )  # fmt: skip
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 TASK_SCOPE = {
-    "tools": ["gitea.issues.list", "gitea.issues.read"],
-    "resources": ["gitea/repos/quickstart/demo/*"],
-    "max_cost_per_call": 1,
+    "permissions": [
+        {
+            "tools": ["gitea.issues.list", "gitea.issues.read"],
+            "resources": ["gitea/repos/quickstart/demo/*"],
+            "max_cost_per_call": 1,
+        }
+    ]
 }
 TASK_BUDGET = 20
 TASK_TTL_SECONDS = 3600

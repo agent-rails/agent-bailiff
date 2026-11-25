@@ -107,6 +107,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, one call end to end, data and signed records
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): assets, attackers, mitigations and residual risks
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits
+- [docs/UPGRADE.md](docs/UPGRADE.md): moving to permission scopes: v1 cutoff, rollout order, canary and rollback
 - [docs/CLIENT.md](docs/CLIENT.md): agent-side client, refusal actions, delegating to a sub-agent and route schemas
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
