@@ -89,7 +89,7 @@ def stage_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> s
             raise OSError(errno.EIO, f"wrote {written} of {len(content)} bytes")
         os.fsync(fd)
     except OSError as exc:
-        _unlink_staged(dir_fd, staged)
+        discard_at(dir_fd, staged)
         raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
     finally:
         os.close(fd)
@@ -101,8 +101,15 @@ def commit_at(dir_fd: int, staged: str, name: str, label: str) -> None:
         os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         os.fsync(dir_fd)
     except OSError as exc:
-        _unlink_staged(dir_fd, staged)
+        discard_at(dir_fd, staged)
         raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
+
+
+def discard_at(dir_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
 
 
 def pin_owned(path: Path, label: str) -> PinnedFile:
@@ -179,13 +186,6 @@ def _check_parent(path: Path, label: str) -> None:
         raise OwnedFileError(
             f"the {label} directory must be owned by uid {os.geteuid()} and not writable by group or others"
         )
-
-
-def _unlink_staged(dir_fd: int, staged: str) -> None:
-    try:
-        os.unlink(staged, dir_fd=dir_fd)
-    except FileNotFoundError:
-        pass
 
 
 def _sync_parent(path: Path) -> None:

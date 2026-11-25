@@ -64,6 +64,7 @@ from agent_bailiff.service.init import (
     read_pin,
 )
 from agent_bailiff.service.settings import (
+    DocketClientSettings,
     DocketSettings,
     load_control,
     load_custodian,
@@ -299,6 +300,17 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     issue.add_argument(
         "--out-dir", type=Path, required=True, help="task directory owned by this uid, not group or other writable"
+    )
+    issue.add_argument("--docket-socket", type=Path, required=True, help="the docket sink's socket")
+    issue.add_argument("--docket-uid", type=int, required=True, help="the docket sink's uid")
+    issue.add_argument(
+        "--docket-writer", required=True, help="this issuer's docket writer, pinned in the docket as a grant writer"
+    )
+    issue.add_argument(
+        "--docket-key", type=Path, required=True, help="the docket writer's 0600 signing key, not the issuer key"
+    )
+    issue.add_argument(
+        "--docket-state-dir", type=Path, required=True, help="the docket writer's own 0700 state directory"
     )
     issue.set_defaults(handler=_task_issue)
 
@@ -824,6 +836,7 @@ def _routes_generate(args: argparse.Namespace) -> int:
 
 
 def _task_issue(args: argparse.Namespace) -> int:
+    now = int(time.time())
     try:
         request = TaskRequest(
             purpose=args.purpose,
@@ -835,12 +848,24 @@ def _task_issue(args: argparse.Namespace) -> int:
             ttl=args.ttl,
             max_depth=args.max_depth,
         )
-        task = issue_task(load_signing_key(args.issuer_key), args.issuer, args.decider_id, request, int(time.time()))
-        path = write_task_file(args.out_dir, task)
+        issuer_key = load_signing_key(args.issuer_key)
+        docket_key = load_signing_key(args.docket_key)
+        if docket_key.public_key() == issuer_key.public_key():
+            raise ValueError("--docket-key must be the docket writer's own key, not the issuer key")
+        task = issue_task(issuer_key, args.issuer, args.decider_id, request, now)
+        settings = DocketClientSettings(args.docket_socket, args.docket_uid, args.docket_state_dir)
+        docket = run.docket_client(settings, args.docket_writer, docket_key)
+        try:
+            issued = write_task_file(args.out_dir, task, docket, now)
+        finally:
+            docket.close()
     except STARTUP_ERRORS + (TaskIssueError,) as exc:
         return _refused("task issue", exc)
-    print(f"{PROG} task issue: wrote {path}, expires at {task.root.expires_at}", file=sys.stderr)
-    print(task.root.task_id)
+    print(
+        f"{PROG} task issue: wrote {issued.path}, expires at {issued.task.root.expires_at}, grant_id {issued.grant_id}",
+        file=sys.stderr,
+    )
+    print(issued.task.root.task_id)
     return 0
 
 
