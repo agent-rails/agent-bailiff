@@ -103,9 +103,13 @@ class TaskList:
         if root is None:
             self.undecodable_grants += 1
             return
-        row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
-        self._add_root(row, root.binding(), verified.line)
         refusal = check_grant_root(root, self._resolver, self._trust_policy)
+        key = (root.tenant_id, root.task_id)
+        if refusal is not None and key in self._rows:
+            row = self._rows[key]
+        else:
+            row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
+        self._add_root(row, root.binding(), verified.line)
         if refusal is None:
             self._accept_grant(row, root, verified)
         else:

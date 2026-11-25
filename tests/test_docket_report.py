@@ -1452,6 +1452,22 @@ def test_the_archive_hint_shows_only_when_rows_are_unverified(docket, workdir, p
     assert f"1 tasks have no verified grant in the read segments; {hint}" in err
 
 
+def test_an_invalid_grant_does_not_move_first_or_last_of_an_existing_row(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 1, at=AT + 1))
+    handles = {"tenant": "acme", "task": "task-c", "root": "root-c"}
+    docket.append("decide", make_entry(5, handles=handles))
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 2, at=AT + 9))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["first"], row["last"]) == (AT + 1, AT + 5)
+    assert root_fields(row) == ("invalid", "bad_signature", 2)
+
+
+def test_an_invalid_grant_alone_opens_a_row(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), at=AT + 3))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["tenant"], row["task"], row["first"], row["last"]) == ("acme", "task-c", AT + 3, AT + 3)
+
+
 def test_invalid_grants_are_charged_to_the_state_budget(docket):
     forged = task_root("task-c", key=FORGER_KEY)
     docket.grant(grant_of(forged))
