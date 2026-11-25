@@ -41,7 +41,7 @@ from agent_bailiff.docket.report import (
 )
 from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
-from agent_bailiff.docket.tasks import TaskList, task_header, task_json_row, task_table_row
+from agent_bailiff.docket.tasks import TaskList, task_header, task_json_chunks, task_table_row
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.platform import PLATFORMS
@@ -625,7 +625,11 @@ def _list_tasks(args: argparse.Namespace) -> int:
     if not args.json:
         print(task_header())
     for row in rows:
-        print(task_json_row(row) if args.json else task_table_row(row))
+        if args.json:
+            sys.stdout.writelines(task_json_chunks(row))
+            sys.stdout.write("\n")
+        else:
+            print(task_table_row(row))
     print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
     if tasks.undecodable_grants:
         print(
@@ -655,14 +659,15 @@ def _report_grants(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_UNVERIFIED
-    rows = grants.rows()
     if not args.json:
         print(grant_header())
-    for row in rows:
+    roots = invalid = 0
+    for row in grants.rows():
         print(grant_json_row(row) if args.json else grant_table_row(row))
-    invalid = sum(row.status == INVALID_GRANT for row in rows)
+        roots += 1
+        invalid += row.status == INVALID_GRANT
     print(
-        f"{PROG} docket grants: {report.entries} records verified, {len(rows)} roots, {invalid} invalid grants",
+        f"{PROG} docket grants: {report.entries} records verified, {roots} roots, {invalid} invalid grants",
         file=sys.stderr,
     )
     return EXIT_REFUSED if invalid else 0

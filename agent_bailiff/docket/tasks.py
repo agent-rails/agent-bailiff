@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 from agent_bailiff.docket.grant import Grant
@@ -11,6 +12,9 @@ from agent_bailiff.docket.sink import VerifiedLine
 CONTROL_HOP = "control"
 DECIDE_HOP = "decide"
 TASK_COLUMNS = ("tenant", "task", "principal", "first", "last", "allows", "releases", "refusals", "state")
+MAX_TRACKED_BYTES = 1 << 30
+ROW_BYTES = 1024
+KEY_BYTES = 256
 
 
 @dataclass
@@ -40,6 +44,7 @@ class TaskList:
         self._revoked_tasks: dict[tuple[str, str], str] = {}
         self._revoked_roots: dict[str, str] = {}
         self._revoked_tenants: dict[str, str] = {}
+        self._tracked = 0
         self.undecodable_grants = 0
 
     def add(self, verified: VerifiedLine) -> None:
@@ -49,15 +54,15 @@ class TaskList:
             return
         if entry.hop == CONTROL_HOP:
             if entry.decision == "revoke" and verified.record.writer in self._control_writers:
-                self._add_revocation(entry.entry_id, entry.handles)
+                self._add_revocation(entry.entry_id, entry.handles, verified.line)
             return
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
             return
-        row = self._row(tenant, task, entry.at)
-        row.principal = entry.principal or row.principal
+        row = self._row(tenant, task, entry.at, verified.line)
+        self._set_principal(row, entry.principal or row.principal, verified.line)
         if "root" in entry.handles:
-            row.roots.add(entry.handles["root"])
+            self._add_root(row, entry.handles["root"], verified.line)
         if entry.decision == "refuse":
             row.refusals += 1
         elif entry.decision == "allow" and entry.hop == "custodian":
@@ -65,24 +70,25 @@ class TaskList:
         elif entry.decision == "allow":
             row.allows += 1
         if entry.hop == DECIDE_HOP and entry.tenant == tenant:
-            row.record, row.record_line = verified.record.token, verified.line
+            self._set_record(row, verified)
 
     def _add_grant(self, verified: VerifiedLine, grant: Grant) -> None:
         root = grant_root(grant)
         if root is None:
             self.undecodable_grants += 1
             return
-        row = self._row(root.tenant_id, root.task_id, grant.at)
+        row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
         row.granted = True
-        row.principal = row.principal or root.principal
-        row.roots.add(root.binding())
+        self._set_principal(row, row.principal or root.principal, verified.line)
+        self._add_root(row, root.binding(), verified.line)
         row.expires_at = max(row.expires_at or 0, root.expires_at)
         if row.record is None:
-            row.record, row.record_line = verified.record.token, verified.line
+            self._set_record(row, verified)
 
-    def _row(self, tenant: str, task: str, at: int) -> TaskRow:
+    def _row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
         row = self._rows.get((tenant, task))
         if row is None:
+            self._charge(ROW_BYTES + text_bytes(tenant) + text_bytes(task), line)
             row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=at)
         row.first, row.last = min(row.first, at), max(row.last, at)
         return row
@@ -93,13 +99,41 @@ class TaskList:
             row.revoked_by = self._revoked_by(row)
         return rows
 
-    def _add_revocation(self, entry_id: str, handles: Mapping[str, str]) -> None:
+    def _set_principal(self, row: TaskRow, principal: str | None, line: int) -> None:
+        self._charge(text_bytes(principal) - text_bytes(row.principal), line)
+        row.principal = principal
+
+    def _add_root(self, row: TaskRow, root: str, line: int) -> None:
+        if root in row.roots:
+            return
+        self._charge(KEY_BYTES + text_bytes(root), line)
+        row.roots.add(root)
+
+    def _set_record(self, row: TaskRow, verified: VerifiedLine) -> None:
+        self._charge(text_bytes(verified.record.token) - text_bytes(row.record), verified.line)
+        row.record, row.record_line = verified.record.token, verified.line
+
+    def _add_revocation(self, entry_id: str, handles: Mapping[str, str], line: int) -> None:
         if "task" in handles and "tenant" in handles:
-            self._revoked_tasks.setdefault((handles["tenant"], handles["task"]), entry_id)
+            key = (handles["tenant"], handles["task"])
+            if key not in self._revoked_tasks:
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(key[0]) + text_bytes(key[1]), line)
+                self._revoked_tasks[key] = entry_id
         elif "root" in handles:
-            self._revoked_roots.setdefault(handles["root"], entry_id)
+            if handles["root"] not in self._revoked_roots:
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(handles["root"]), line)
+                self._revoked_roots[handles["root"]] = entry_id
         elif "tenant" in handles and "link" not in handles:
-            self._revoked_tenants.setdefault(handles["tenant"], entry_id)
+            if handles["tenant"] not in self._revoked_tenants:
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(handles["tenant"]), line)
+                self._revoked_tenants[handles["tenant"]] = entry_id
+
+    def _charge(self, size: int, line: int) -> None:
+        if self._tracked + size > MAX_TRACKED_BYTES:
+            raise ValueError(
+                f"the report tracks at most {MAX_TRACKED_BYTES} bytes of task state and line {line} adds more"
+            )
+        self._tracked += size
 
     def _revoked_by(self, row: TaskRow) -> str | None:
         task = self._revoked_tasks.get((row.tenant, row.task))
@@ -107,6 +141,10 @@ class TaskList:
             return task
         root = next((self._revoked_roots[root] for root in sorted(row.roots) if root in self._revoked_roots), None)
         return root if root is not None else self._revoked_tenants.get(row.tenant)
+
+
+def text_bytes(text: str | None) -> int:
+    return 0 if text is None else sys.getsizeof(text)
 
 
 def task_header() -> str:
@@ -128,7 +166,7 @@ def task_table_row(row: TaskRow) -> str:
     return "\t".join(printable(value) for value in values)
 
 
-def task_json_row(row: TaskRow) -> str:
+def task_json_chunks(row: TaskRow) -> Iterator[str]:
     document = {
         "tenant": row.tenant,
         "task": row.task,
@@ -145,4 +183,4 @@ def task_json_row(row: TaskRow) -> str:
         "record_line": row.record_line,
         "record": row.record,
     }
-    return json.dumps(document, sort_keys=True)
+    return json.JSONEncoder(sort_keys=True).iterencode(document)
