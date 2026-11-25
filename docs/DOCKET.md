@@ -9,6 +9,53 @@ The docket is one file of newline-terminated signed records. Each record names i
 - A writer is identified by its pinned Ed25519 key ids. The sink also accepts a connection only from a peer uid in `allowed_uids`; the client accepts a sink only if its peer uid equals the configured `sink_uid`.
 - An entry means the operation was attempted or decided. It is not proof the operation happened or of its outcome; the outcome must come from reconciliation against the target system.
 
+## Record types
+
+A record is one of two types, named by its `typ`:
+
+- `agent-bailiff/docket-entry/v1`: a decision, release, outcome or control action. Its fields do not change with grants.
+- `agent-bailiff/docket-grant/v1`: a task root issued by `task issue`. Its body is `grant_id`, `at` and `root_token`, the issuer-signed task root as written to `task.json`, ASCII and 1 to 16,384 characters.
+
+Both carry `writer`, `seq` and `prev` and share each writer's chain. A reader reads `typ` before verifying, only to choose the field set, then verifies the signature and decodes strictly for that type. Any other `typ` is refused as `wrong_typ`.
+
+A writer is either an entry writer or a grant writer. The docket config's required `grant_writers` lists the grant writers by name, each also in `writers`; `[]` means none. Readers take a grant writer's public key record as `--grant-pin` (repeatable) on `docket verify`, `docket tasks`, `docket grants`, `docket export` and `docket archive`, and `init docket` and `init control` take it the same way. A writer pinned with both `--pin` and `--grant-pin` is refused ("writers pinned both as entry and grant writers"). A grant writer appends only grants and an entry writer only entries: the sink refuses, and every reader rejects, a record of the other type as `wrong_record_type`. A reader without the grant writer's pin rejects its first grant as `unknown_kid`.
+
+The issuer appends grants with its own docket-writer key, separate from its task root signing key. The writer key places the grant in the issuer's chain; the issuer's signature on `root_token` is what makes the grant authentic. The sink, the archiver, the exporter, the quickstart rule and `docket verify` without `--task` check only the shape of `root_token` and never decode it, so a change to the task root format does not change the docket format. `docket tasks`, `docket grants`, `docket verify --task` and control decode it. The exporter sends no span for a grant.
+
+A grant is evidence, not enforcement: decide does not look for a grant before it allows a call. See THREAT_MODEL.md, Grants are evidence, not enforcement.
+
+A release before grants refuses a grant. Upgrade every reader, and give each the issuer's docket-writer key as a grant pin, before the issuer writes its first grant; see [UPGRADE.md](UPGRADE.md), Docket grants.
+
+### Grants from task issue
+
+`task issue` appends one grant for each root it signs, so a task is in the docket before its agent makes a call. It takes the docket client settings as required flags: `--docket-socket`, `--docket-uid` (the sink's uid), `--docket-writer`, `--docket-key` and `--docket-state-dir` (the writer's own 0700 state directory). The docket key must not be the issuer key: `--docket-key must be the docket writer's own key, not the issuer key`.
+
+The sink must be reachable: `task issue` runs on the sink host, as a uid in the sink's `allowed_uids`, with the docket socket. It holds an exclusive lock on the task directory; a second run fails with `another task issue is running in DIR; retry when it finishes`. Under the lock it:
+
+1. removes `task.json.pending` if it holds the root already in `task.json` (an earlier run finished);
+2. refuses an agent key that already has a task in `task.json`, without appending: `DIR/task.json already holds a task for this agent key; run proxy keygen for a new key and issue to that`;
+3. writes `task.json.pending` (mode 0600, JSON with `version`, `grant_id`, `task_root` and `decider_id`) with a new `grant_id` to a temporary file, fsyncs it, renames it and fsyncs the directory, or reuses the one already there (see Retrying task issue);
+4. writes the task file to a temporary file (mode 0644) and fsyncs it;
+5. appends the grant and waits for the sink's acknowledgement;
+6. renames the temporary file to `task.json`, fsyncs the directory, removes `task.json.pending` and fsyncs the directory again.
+
+On success it prints `agent-bailiff task issue: wrote PATH, expires at EXPIRES_AT, grant_id GRANT_ID` to stderr and the task id to stdout. Every failure exits 1 with `agent-bailiff task issue refused: ` and one of:
+
+- The sink refuses the append or cannot be reached: `docket refused the grant: <reason>; no grant recorded, no task file written`. `task.json.pending` is removed.
+- No acknowledgement (`no_ack`, `bad_ack`, `write_failed`, `state_write_failed`): `docket did not acknowledge the grant (<reason>); grant may be recorded: grant_id <id>; check docket grants; revoke via control; or rerun the same command to finish from DIR/task.json.pending`. `task.json` is not written; `task.json.pending` is kept.
+- A failure after the append was acknowledged: `<error>; grant recorded: grant_id <id>; task.json may be written; rerun the same command to finish from DIR/task.json.pending`.
+
+### Retrying task issue
+
+While `task.json.pending` exists, running the same command again (same decider id, issuer, tenant, principal, purpose, budget, max depth, scope, agent key and TTL) reuses its root and `grant_id`: the root signed by the new run is dropped, and the task expires when the pending root does. The retry appends the grant again, with a new `at`, so after a lost acknowledgement the docket can hold two grants of one root; `docket grants` shows the root once, with `grant_records` above 1. A refusal on a retry keeps `task.json.pending`: `docket refused the grant: <reason>; an earlier run may have recorded grant_id <id>; DIR/task.json.pending kept, rerun the same command to finish`.
+
+A retry is refused when:
+
+- the request differs: `DIR/task.json.pending holds an unfinished issue of grant_id <id> for another request; rerun that command to finish it, or check docket grants, revoke via control and remove it`;
+- the pending root has expired: `DIR/task.json.pending holds an unfinished issue whose root expired at <expires_at>; grant may be recorded: grant_id <id>; check docket grants; remove it to issue`.
+
+A grant can still name a root that no agent holds: the operator gives up after a lost acknowledgement, or the process dies between the append and the rename. That root is valid until it expires. Find it with `docket grants`, where it shows every pair unused, and revoke it from its grant (see Revoking from a grant).
+
 ## Sink guarantees
 
 - One sink per docket and per socket: the sink holds an exclusive non-blocking `flock` on `<docket>.lock` (mode 0600, no symlinks, beside the docket) and on `<socket>.lock` for its lifetime. A second sink, or `repair`, fails with `DocketLocked`. The lock is its own file so it does not move when the docket file is renamed.
@@ -64,7 +111,7 @@ The docket config's `retained_bytes` (at least `2 * segment_bytes`; `agent-baili
 ### Archive
 
 ```
-agent-bailiff docket archive --docket PATH --pin decide.pub.json --pin custodian.pub.json --archive DIR --receipts RECEIPT_DIR --checkpoint DIR/checkpoint.json [--once] [--poll-interval 10] [--refresh-interval 900]
+agent-bailiff docket archive --docket PATH --pin decide.pub.json --pin custodian.pub.json --grant-pin issuer-docket.pub.json --archive DIR --receipts RECEIPT_DIR --checkpoint DIR/checkpoint.json [--once] [--poll-interval 10] [--refresh-interval 900]
 ```
 
 Run it as `archiver_uid`, a member of the reader group, in its own process with a 0700 checkpoint directory. For each sealed segment in order it reads the segment uncached, verifies every record from the previous segment's heads, writes `DIR/<docket_id>/seg-NNNNNNNNNNNN` (0640) and its canonical sidecar `.json` (0750 directory), fsyncs them, reads the copy back against the manifest entry, writes the receipt and then its checkpoint. Without `--once` it follows the manifest every `--poll-interval` seconds until SIGTERM or SIGINT.
@@ -102,14 +149,15 @@ A docket config with `reader_group` set lets members of that group read the dock
 ## docket verify
 
 ```
-agent-bailiff docket verify --docket PATH --pin decide.pub.json --pin custodian.pub.json [--trace ID] [--task ID] [--since UNIX_SECONDS] [--json] [--snapshot PATH] [--archive DIR] [--receipts RECEIPT_DIR]
+agent-bailiff docket verify --docket PATH --pin decide.pub.json --pin custodian.pub.json --grant-pin issuer-docket.pub.json [--trace ID] [--task ID] [--since UNIX_SECONDS] [--json] [--snapshot PATH] [--archive DIR] [--receipts RECEIPT_DIR]
 ```
 
 Run it as a reader group member, the sink uid or root; it needs read access to the docket only, never the sink config. Each `--pin` is a writer's public key record; pass one per writer key, including retired keys whose records are still in the docket. Take pins from the writers' own key directories, not from a copy stored next to the docket, or whoever can replace the docket can replace the pins too.
 
 - Every record on the host is verified, whatever the filters: each sealed segment `<docket>.seg-NNNNNNNNNNNN` in the manifest `<docket>.manifest`, in order, then the active segment `<docket>`. Line numbers count across segments. When earlier segments were removed, verification starts from the heads the manifest's `base` records. Each sealed segment must also match its manifest entry: size, SHA-256, record count, end heads and key ids; stderr names the fields that differ, with reason `segment_mismatch`. A segment that ends with an incomplete line is a `segment_mismatch`, not a `torn_tail`, and Torn tail repair does not apply to it. Verify reads the manifest before and after opening each segment and opens it again if a cut happened meanwhile.
-- Exit 1 with "cannot be opened; start the sink to finish a cut": a cut committed its manifest but the sink stopped before renaming the segment. Starting the sink finishes the cut. `--trace`, `--task` (the record's task root, or the `task` handle of a revocation) and `--since` (records at or after that Unix time, UTC) only choose which verified records are printed.
-- Records print as tab-separated columns, with control and non-ASCII characters escaped; `--json` prints one JSON object per record, including the signed `token`, so a record can be passed on as written. The summary goes to stderr.
+- Exit 1 with "cannot be opened; start the sink to finish a cut": a cut committed its manifest but the sink stopped before renaming the segment. Starting the sink finishes the cut. `--trace`, `--task` (the record's task root, the `task` handle of a revocation, or a grant whose root has that task id or binding) and `--since` (records at or after that Unix time, UTC) only choose which verified records are printed. A grant has no trace id, so `--trace` never prints one; `--task` prints the task's grant with its calls.
+- Records print as tab-separated columns, with control and non-ASCII characters escaped; `--json` prints one JSON object per record, including the signed `token`, so a record can be passed on as written. The summary goes to stderr. A grant prints `grant` as its decision and `task grant` as its note, with no tool, resource or reason. Each JSON object carries `typ`, and a grant's object carries `grant` (`grant_id`, `at`, `root_token`) where an entry's carries `entry`.
+- Pass the issuer's docket-writer key with `--grant-pin`, not `--pin`. Without it the first grant fails with `unknown_kid`; passed as `--pin`, with `wrong_record_type`.
 - A record with `performed` true is labelled `released, target outcome unknown`: the custodian released the credential, and the docket does not record what the target did with it.
 - Exit 0 when every record verifies. Exit 1 when a line fails: the records before it are printed, and stderr names the line and reason. Exit 1 too for an unreadable docket or pin.
 - `--snapshot PATH` also cross-checks a heads snapshot. The snapshot must be owned by the docket's owner with mode 0600, or 0640 and the docket's group when the docket is 0640. The snapshot covers the active segment only. After every record verifies, the record count, the SHA-256 of the bytes before the snapshot offset, each writer's anchor and the key ids are rebuilt from the verified records and compared. Exit 1 if any differ, if the snapshot names another segment than the active one, if the offset is not the end of a verified line, or if the snapshot is missing or invalid; stderr names the fields that differ. On a match, stderr also gives the number of records after the snapshot. Exit 0 does not mean the snapshot is recent: a snapshot that stopped being refreshed still matches. Alert on that count if it keeps growing past `snapshot_every`. The records printed are the same with and without it.
@@ -121,10 +169,10 @@ Run it as a reader group member, the sink uid or root; it needs read access to t
 
 ```
 agent-bailiff docket tasks --docket PATH --pin decide.pub.json --pin custodian.pub.json \
-  --control-pin control.pub.json [--archive DIR] [--json]
+  --grant-pin issuer-docket.pub.json --control-pin control.pub.json [--archive DIR] [--json]
 ```
 
-Run it like `docket verify`. It verifies every record first and prints nothing if any line fails. Then it prints one row per tenant and task id, from records whose `handles` name both: principal, first and last time, decide allows, custodian releases and verified refusals. Refusals before verification are not docketed, so they are not counted; see THREAT_MODEL.md, Unrecorded refusals.
+Run it like `docket verify`. It verifies every record first and prints nothing if any line fails. Then it prints one row per tenant and task id, from records whose `handles` name both and from grants, keyed by the tenant and task id in the grant's root: principal, first and last time, decide allows, custodian releases and verified refusals. A grant's `at` counts toward first and last. A task that never made a call is listed from its grant, with zero counts. A grant whose root does not decode gives no row; stderr then says `N grants hold a task root that does not decode; their tasks are not listed`. Refusals before verification are not docketed, so they are not counted; see THREAT_MODEL.md, Unrecorded refusals.
 
 STATE is `revoked` when a revocation recorded in the verified docket names the task, one of its roots or its tenant. Only revocations signed by a `--control-pin` writer count, so another pinned writer cannot mark a task. STATE is not the ledger's state:
 
@@ -134,25 +182,81 @@ STATE is `revoked` when a revocation recorded in the verified docket names the t
 
 A root is named by its binding, a hash of the signed root, which includes its tenant, so a root revocation marks tasks of one tenant only.
 
-`--json` rows also carry `record`, the signed token of the task's latest decide record whose tenant matches the row, and its `record_line`; both are `null` when the task has none. Control accepts it only if decide is among control's writer pins. To revoke a task from it:
+`--json` rows also carry `granted`, true when the verified docket holds a grant for the task; `expires_at`, the latest `expires_at` of the task's granted roots, `null` without a grant; and `record`, the signed token of the task's latest decide record whose tenant matches the row, or of its first grant when it has no such decide record, with its `record_line`; both are `null` when the task has neither. The table shows neither `granted` nor `expires_at`. Control accepts a decide record only if decide is among control's writer pins. To revoke a task from it:
 
 ```
 agent-bailiff docket tasks ... --json | jq -r 'select(.tenant == "acme" and .task == "TASK").record' > record
 agent-bailiff control revoke --config CONTROL --actor NAME --level task --record record
 ```
 
-Control verifies that record against its writer pins again, so a doctored row cannot revoke another task. `docket verify --task ID` shows the records of one task.
+Control verifies that record against its writer pins again, so a doctored row cannot revoke another task. `docket verify --task ID` shows the records of one task, its grant included.
+
+### Revoking from a grant
+
+`control revoke` takes a grant at `--level task`, `root` or `tenant`; `--level link` is refused as `no_handle`, since a grant names no link. Control's config has two required keys for this: `grant_writers`, the writers in its `writers` that may only record grants, and `issuers`, in the format of decide's `issuers` (issuer id to `public_key`, `tenants`, `max_budget` and `max_depth`). `agent-bailiff init control` writes `"issuers": {}`, so every revoke from a grant is refused until the operator fills it in.
+
+Control trusts a grant only after these checks, each refusing the revoke:
+
+- the record verifies against control's writer pins, and its writer is a grant writer (`record_wrong_record_type` otherwise);
+- the root in `root_token` decodes (`record_invalid_field`);
+- its issuer is in `issuers` and has a key there (`root_unknown_issuer`);
+- the issuer's signature on the root verifies (`root_bad_signature`);
+- the issuer's allowance in `issuers` covers the root's tenant, principal, budget and depth (`root_not_allowed`).
+
+So a grant writer cannot revoke a task of a tenant its issuer does not serve. The root's expiry is not checked: an expired root can be revoked. `task` revokes the root's tenant and task id, `root` its binding and `tenant` its tenant. The revocation entry's `trace_id` and `parent_entry` are both the grant's `grant_id`. `control suspend` refuses a grant as `record_not_suspendable`.
+
+## docket grants
+
+```
+agent-bailiff docket grants --docket PATH --pin decide.pub.json --pin custodian.pub.json \
+  --grant-pin issuer-docket.pub.json --issuers ISSUERS.json [--archive DIR] [--json]
+```
+
+Run it like `docket verify`. It compares what each task root was granted with what decide allowed under it. `--issuers` is a JSON object in the format of decide's `issuers` section (issuer id to `public_key`, `tenants`, `max_budget` and `max_depth`), in a regular file with mode 0600 and one link, owned by the user running the command, in a directory that user owns and no group or other user can write. List every issuer whose roots are in the docket, including retired keys.
+
+It prints one row per root, with a `status`:
+
+- `granted`: a grant names the root and the root passes the checks below.
+- `ungranted`: an entry other than a control entry names the root in its handles, and no valid grant does.
+- `invalid_grant`: one row per grant whose root fails, with a `reason`: `malformed` (the root does not decode; tenant, task and root are then `null`), `unknown_issuer` (not in `--issuers`), `bad_signature`, or `issuer_not_allowed` (the issuer's allowance does not cover the root's tenant, principal, budget or depth). `detail` gives the text. If that root is used, it also gets an `ungranted` row.
+
+A root is checked by signature and issuer allowance only, not expiry, so an expired root still reports.
+
+The table has the columns TENANT, TASK, ROOT, STATUS, REASON, UNUSED (count), WILDCARDS (count), COST (`authorized_cost/budget`), TTL (`ttl_used/ttl`, `-` when unused) and FLAGS. `--json` prints one object per row with `status`, `reason`, `detail`, `tenant`, `task`, `root`, `issuer`, `grant_id`, `grant_line`, `grant_records`, `unused`, `wildcards`, `pairs_truncated`, `budget`, `authorized_cost`, `authorized_cost_exact`, `allows`, `ttl`, `ttl_used`, `ttl_flags` and `duplicate_roots`. Only decide's allows count as use. For a granted root:
+
+- `unused`: per permission (`permission` is its index), the `tool` and `resource` pairs no allowed call used. A pair counts as used only within one permission.
+- `wildcards`: for each tool or resource pattern ending in `*`, the names allowed calls used under it (`used`, at most 20 per pattern) and how many more there were (`truncated`).
+- `authorized_cost`: the costs of decide's allows under the root, each `op_id` counted once, against the root's `budget`; `allows` counts them. It is what decide authorized, not what was spent: budget refunded later is not subtracted.
+- `ttl` is `expires_at - issued_at`; `ttl_used` runs from `issued_at` to the last allowed call. `ttl_flags` holds `negative` when an allowed call came before `issued_at` and `after_expiry` when one came at or after `expires_at`; both mean the issuer's and decide's clocks disagree or the root was backdated.
+- `grant_records`: the number of grants of the root; a retried `task issue` can record one root twice.
+- `duplicate_roots`: the bindings of other granted roots with the same tenant and task id. A task-level revoke covers all of them.
+
+Per root it tracks at most 4,096 distinct pairs and 65,536 `op_id`s. Allows with a new pair past the first cap are counted in `pairs_truncated` and their pairs are not marked used, so `unused` can list a pair that was used. Past the second cap an `op_id` is no longer deduplicated, so `authorized_cost` and `allows` can count a repeated allow twice, and `authorized_cost_exact` is `false`. FLAGS in the table lists `negative`, `after_expiry`, `duplicate_roots`, `pairs_truncated` and `cost_inexact`.
+
+stderr ends with `N records verified, R roots, I invalid grants`. Exit codes:
+
+- 0: every record verifies and no row is `invalid_grant`.
+- 1: every row is printed and at least one is `invalid_grant`.
+- 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, or an archive that does not match. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
+
+Limits:
+
+- Advisory only. It sets no thresholds and revokes nothing.
+- `ungranted` covers only roots that appear in an entry. A root signed without a grant and never used is not seen.
+- Without `--archive` it starts at the manifest base. After segment removal, a grant in a removed segment is then not read, and later calls under its root show as `ungranted`. Pass `--archive` to read removed segments too.
+- It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket.
 
 ## docket export
 
 ```
 pip install 'agent-bailiff[otel]'
-agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once] [--skip-line N] [--archive DIR]
+agent-bailiff docket export --docket PATH --pin decide.pub.json --pin custodian.pub.json --grant-pin issuer-docket.pub.json --checkpoint DIR/checkpoint.json --otlp http://collector:4318/v1/traces [--once] [--skip-line N] [--archive DIR]
 ```
 
 Run it as a reader group member in its own process, with its own uid and a 0700 checkpoint directory. It reads the docket and pins the same way `docket verify` does, verifies every record, and sends each one as an OTLP/HTTP span. It is off the call path: decide and the custodian never wait for it, and a stopped or failing exporter changes no decision. Without `--once` it follows the docket until SIGTERM or SIGINT.
 
 - Spans are a view, not evidence. The docket and `docket verify` are the record; a collector or trace backend can drop, alter or invent spans without a writer key.
+- Grants are verified and not sent; the checkpoint moves past them like past an exported record.
 - The span id is the first 8 bytes of sha256 over a fixed tag and the entry id, and the parent is derived the same way from `parent_entry`. Re-exporting a record sends the same ids. Two entry ids sharing an 8-byte prefix would collide; with random 128-bit entry ids this is negligible.
 - Attributes are the record's fields under `bailiff.*`, the docket line, writer, seq, kid and record hash, and `gen_ai.tool.name`, `gen_ai.operation.name` and `error.type` from the [GenAI semantic conventions at 622b2b6](https://github.com/open-telemetry/semantic-conventions-genai/blob/622b2b6073b15e5ed886c3c12a65a892b9cd5c70/docs/gen-ai/mcp.md), whose status is Development and may change. A refusal is an error span with its reason. A release carries `bailiff.note` = `released, target outcome unknown`. Arguments are never exported; the docket holds only their digest.
 - The span backend then holds what docket readers see: principals, tenants, tools and resources. Restrict access to it as you restrict the reader group.

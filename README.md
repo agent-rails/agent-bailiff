@@ -97,8 +97,8 @@ Each component has its own commands, run as that component's uid:
 
 - `agent-bailiff init {decide,custodian,control,docket}` creates the component's config; for decide, custodian and control it also creates the signing key. Decide starts with a deny-all policy and the custodian with no credential bindings.
 - `agent-bailiff {decide,custodian,docket} run --config FILE` runs a service until SIGTERM or SIGINT.
-- `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`.
-- `agent-bailiff docket verify` checks every record on the host against pinned writer keys, and with `--archive` every record from the first; `docket archive` copies sealed segments to an archive directory on another file system and writes the receipt the sink needs before it removes one; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
+- `agent-bailiff control revoke|suspend|resume` runs as decide's uid. `revoke` and `suspend` take one signed docket line as `--record`; `revoke` takes `--level link|task|tenant|root`, and also takes a task's grant at `task`, `root` or `tenant` level.
+- `agent-bailiff docket verify` checks every record on the host against pinned writer keys, and with `--archive` every record from the first; `docket archive` copies sealed segments to an archive directory on another file system and writes the receipt the sink needs before it removes one; `docket tasks` lists tasks with their counts, revocation state and a record to revoke from, including tasks that never made a call; `docket grants` compares each task root's grant with what decide allowed under it; `agent-bailiff docket export` (extra `otel`) sends verified records as OTLP spans, off the call path. See [docs/DOCKET.md](docs/DOCKET.md).
 - Allow, release and recorded refuse entries carry `latency_ms`, the time decide or the custodian spent on the call. Measured overhead on one host is in [docs/DOCKET.md](docs/DOCKET.md#latency); rerun it with the opt-in quickstart benchmarks.
 
 ## Documentation
@@ -107,7 +107,7 @@ Each component has its own commands, run as that component's uid:
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, one call end to end, data and signed records
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): assets, attackers, mitigations and residual risks
 - [docs/DECISIONS.md](docs/DECISIONS.md): design decisions and credits
-- [docs/UPGRADE.md](docs/UPGRADE.md): moving to permission scopes: v1 cutoff, rollout order, canary and rollback
+- [docs/UPGRADE.md](docs/UPGRADE.md): moving to permission scopes and to docket grants: cutoff, rollout order, canary and rollback
 - [docs/CLIENT.md](docs/CLIENT.md): agent-side client, refusal actions, delegating to a sub-agent and route schemas
 - [docs/AGENTGATEWAY.md](docs/AGENTGATEWAY.md): adapter method surface, sockets, config rules and limits
 - [docs/DOCKET.md](docs/DOCKET.md): docket trust model and operations
