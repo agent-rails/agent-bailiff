@@ -533,8 +533,8 @@ def refusal_events(caplog):
 @pytest.mark.parametrize(
     "failure, status",
     [
-        (ConnectionError("docket down"), "not_written"),
-        (OSError(errno.ENOSPC, "no space left on device"), "not_written"),
+        (ConnectionError("docket down"), "unacknowledged"),
+        (OSError(errno.ENOSPC, "no space left on device"), "unacknowledged"),
         (DocketError("docket_full"), "not_written"),
         (DocketError("no_ack", "head fetch timed out"), "unacknowledged"),
         (DocketError("write_failed"), "unacknowledged"),

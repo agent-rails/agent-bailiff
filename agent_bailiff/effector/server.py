@@ -169,13 +169,13 @@ class Effector:
         try:
             record = self._docket.append(entry)
         except DocketError as exc:
-            logger.exception("effector docket entry was not acknowledged")
+            logger.error("effector docket entry was not acknowledged: %s", exc)
             if exc.reason == "state_write_failed":
                 return "head_unsaved"
             return "unacknowledged" if exc.reason in UNACKNOWLEDGED else "not_written"
         except Exception:
             logger.exception("effector docket entry was not acknowledged")
-            return "not_written"
+            return "unacknowledged"
         if isinstance(record, Record) and record.entry == entry and record.writer == self._config.docket_writer:
             return "recorded"
         return "unacknowledged"
