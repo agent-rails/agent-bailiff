@@ -7,6 +7,9 @@ import test_quickstart_stack
 from test_quickstart import verified_rows
 from test_quickstart_trace import jaeger, spans_in, wait_for_export
 
+from agent_bailiff.docket.entry import ENTRY_TYP
+from agent_bailiff.docket.otlp import span_id_for
+
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
 PROFILES = ("gitea", "trace")
@@ -36,6 +39,16 @@ for top in sorted(os.listdir("/v")):
                 data = handle.read()
             hits += [[path[3:], index] for index, needle in enumerate(needles) if needle in data]
 json.dump(hits, sys.stdout)
+"""
+DOCKET_SCRIPT = """
+import base64, json, sys
+rows = []
+with open("/v/docket-data/docket.log", "rb") as docket:
+    for line, raw in enumerate(docket, 1):
+        encoded = raw.split(b".", 1)[0]
+        body = json.loads(base64.urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4)))
+        rows.append([line, body["typ"], body.get("entry_id")])
+json.dump(rows, sys.stdout)
 """
 AGENT_SCAN = """
 import json, os, stat, sys
@@ -93,6 +106,11 @@ def log_hits(stack, patterns):
 
 def jaeger_spans(stack):
     exported = wait_for_export(stack)["exported"]
+    wanted = {
+        span_id_for(entry_id): line
+        for line, typ, entry_id in stack.probe(DOCKET_SCRIPT)
+        if line <= exported and typ == ENTRY_TYP
+    }
     deadline = time.monotonic() + JAEGER_TIMEOUT_SECONDS
     while True:
         now = datetime.now(UTC)
@@ -104,13 +122,14 @@ def jaeger_spans(stack):
             name for name in jaeger(stack, "/services").get("services", []) if name.startswith("agent-bailiff-")
         ]
         spans = {
-            span["spanId"]: span
+            int(span["spanId"], 16): span
             for service in services
             for span in spans_in(jaeger(stack, "/traces", **{"query.service_name": service, **window}))
         }
-        if len(spans) >= exported:
+        missing = sorted(line for span_id, line in wanted.items() if span_id not in spans)
+        if not missing:
             return list(spans.values())
-        assert time.monotonic() < deadline, f"jaeger holds {len(spans)} of {exported} exported spans"
+        assert time.monotonic() < deadline, f"jaeger lacks the spans of exported docket lines {missing}"
         time.sleep(1)
 
 
