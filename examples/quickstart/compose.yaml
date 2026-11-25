@@ -185,6 +185,17 @@ services:
       control-init:
         condition: service_completed_successfully
 
+  reader-init:
+    <<: [*bailiff, *once, *offline]
+    user: "10005:10005"
+    command: ["/app/quickstart/bootstrap.py", "reader"]
+    volumes:
+      - reader-data:/var/lib/bailiff/reader
+      - pins:/pins:ro
+    depends_on:
+      issuer-init:
+        condition: service_completed_successfully
+
   docket-init:
     <<: [*bailiff, *once, *offline]
     user: "10001:10001"
@@ -195,6 +206,8 @@ services:
       - pins:/pins:ro
     depends_on:
       rule-init:
+        condition: service_completed_successfully
+      reader-init:
         condition: service_completed_successfully
 
   gateway-init:
@@ -421,6 +434,10 @@ services:
       - docket-data:/var/lib/bailiff/docket:ro
       - pins:/pins:ro
       - docket-receipts:/var/lib/bailiff/receipts:ro
+      - reader-data:/var/lib/bailiff/reader:ro
+    depends_on:
+      reader-init:
+        condition: service_completed_successfully
 
   archiver:
     <<: [*bailiff, *offline]
@@ -535,6 +552,7 @@ volumes:
   custodian-data: {}
   control-data: {}
   rule-data: {}
+  reader-data: {}
   docket-data: {}
   ledger: {}
   docket-run: {}

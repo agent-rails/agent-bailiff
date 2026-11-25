@@ -122,6 +122,22 @@ def test_every_docket_reader_pins_the_same_writers_and_the_grant_writer(config, 
     assert flag_values(arguments, "--grant-pin") == {str(b.GRANT_PIN)}
 
 
+def test_the_reader_reads_the_issuers_file_its_own_init_writes(config):
+    init, reader = config["services"]["reader-init"], config["services"]["reader"]
+    assert init["user"] == reader["user"] == f"{b.READER_UID}:{b.READER_UID}"
+    assert "profiles" not in init
+    init_mounts = {volume["source"]: volume for volume in init["volumes"]}
+    reader_mounts = {volume["source"]: volume for volume in reader["volumes"]}
+    assert init_mounts["reader-data"]["target"] == reader_mounts["reader-data"]["target"] == str(b.DIRS["reader"])
+    assert not init_mounts["reader-data"].get("read_only", False)
+    assert reader_mounts["reader-data"]["read_only"] is True
+    assert init_mounts["pins"]["read_only"] is True
+    assert reader["depends_on"]["reader-init"]["condition"] == "service_completed_successfully"
+    assert config["services"]["docket-init"]["depends_on"]["reader-init"]["condition"] == (
+        "service_completed_successfully"
+    )
+
+
 def test_the_rule_pins_the_same_writers_as_the_docket_readers():
     assert {str(path) for path in rule_module.PINS} == {str(b.pin_path(component)) for component in b.WRITERS}
     assert rule_module.GRANT_PIN == b.GRANT_PIN

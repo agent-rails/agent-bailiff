@@ -131,6 +131,30 @@ def test_issue_load_records_every_grant_through_one_client_before_the_load_file(
     assert len({grant.grant_id for grant in docket.grants}) == b.LOAD_TASKS
 
 
+@pytest.fixture
+def reader(issuer, monkeypatch):
+    (issuer / "reader").mkdir(mode=0o700)
+    monkeypatch.setattr(b, "READER_ISSUERS", issuer / "reader" / "issuers.json")
+    return issuer
+
+
+def test_init_reader_writes_an_owned_0600_copy_of_the_issuers(reader):
+    assert b.init_reader() == "created"
+    info = b.READER_ISSUERS.stat()
+    assert (info.st_uid, info.st_mode & 0o777) == (os.geteuid(), 0o600)
+    assert json.loads(b.READER_ISSUERS.read_text()) == b.issuers()
+    assert b.load_issuers(b.READER_ISSUERS).resolver.resolve(b.NAMES["issuer"])
+    assert b.init_reader() == "kept"
+
+
+def test_init_reader_rewrites_a_copy_that_no_longer_matches(reader):
+    b.init_reader()
+    b.READER_ISSUERS.write_text(json.dumps({"stale": {}}))
+    assert b.init_reader() == "updated"
+    assert json.loads(b.READER_ISSUERS.read_text()) == b.issuers()
+    assert b.READER_ISSUERS.stat().st_mode & 0o777 == 0o600
+
+
 GITEA_UPSTREAM = b.QUICKSTART_UPSTREAMS / "gitea.json"
 
 
