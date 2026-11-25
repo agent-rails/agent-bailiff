@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import binascii
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 
 from agent_warrant.encoding import b64u_decode
@@ -156,10 +157,18 @@ class GrantReport:
         if entry.hop == DECIDE_HOP and entry.decision == "allow":
             self._tracked += use.add_allow(entry, verified.line, MAX_TRACKED_ITEMS - self._tracked)
 
-    def rows(self) -> list[GrantRow]:
+    def rows(self) -> Iterator[GrantRow]:
         granted = {key: sorted(bindings) for key, bindings in self._granted.items()}
-        rows = [self._row(binding, use, granted) for binding, use in self._roots.items()] + self._invalid
-        return sorted(rows, key=lambda row: (row.tenant or "", row.task or "", row.root or "", row.grant_line or 0))
+        keys: list[tuple[tuple[str, str, str, int], str | GrantRow]] = [
+            ((use.tenant, use.task, binding, use.grant_line or 0), binding) for binding, use in self._roots.items()
+        ]
+        keys += [
+            ((row.tenant or "", row.task or "", row.root or "", row.grant_line or 0), row) for row in self._invalid
+        ]
+        order = sorted(range(len(keys)), key=lambda index: (keys[index][0], index))
+        for index in order:
+            item = keys[index][1]
+            yield item if isinstance(item, GrantRow) else self._row(item, self._roots[item], granted)
 
     def _add_grant(self, grant: Grant, line: int) -> None:
         root = decode_grant_root(grant.root_token)

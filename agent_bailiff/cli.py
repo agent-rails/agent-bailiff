@@ -655,14 +655,15 @@ def _report_grants(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_UNVERIFIED
-    rows = grants.rows()
     if not args.json:
         print(grant_header())
-    for row in rows:
+    roots = invalid = 0
+    for row in grants.rows():
         print(grant_json_row(row) if args.json else grant_table_row(row))
-    invalid = sum(row.status == INVALID_GRANT for row in rows)
+        roots += 1
+        invalid += row.status == INVALID_GRANT
     print(
-        f"{PROG} docket grants: {report.entries} records verified, {len(rows)} roots, {invalid} invalid grants",
+        f"{PROG} docket grants: {report.entries} records verified, {roots} roots, {invalid} invalid grants",
         file=sys.stderr,
     )
     return EXIT_REFUSED if invalid else 0

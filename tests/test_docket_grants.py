@@ -569,3 +569,18 @@ def test_the_report_keeps_one_aggregate_per_root(docket):
         grants.add(verified(docket, allow(docket, root, number + 1, op_id="op-1")))
     assert len(grants._roots) == 1
     assert grants._roots[root.binding()].ops == {"op-1"}
+
+
+def test_rows_are_built_one_at_a_time_in_sort_order(docket, monkeypatch):
+    grants = policy_report()
+    for task_id in ("task-2", "task-1"):
+        grants.add(verified(docket, grant(docket, make_root(task_id=task_id))))
+    grants.add(verified(docket, docket.grant(Grant(grant_id="g-bad", at=ISSUED, root_token="not-a-root"))))
+    built = []
+    build = GrantReport._row
+    monkeypatch.setattr(GrantReport, "_row", lambda self, *args: built.append(args[0]) or build(self, *args))
+    rows = grants.rows()
+    assert next(rows).status == "invalid_grant" and built == []
+    assert next(rows).task == "task-1" and len(built) == 1
+    assert next(rows).task == "task-2" and len(built) == 2
+    assert next(rows, None) is None
