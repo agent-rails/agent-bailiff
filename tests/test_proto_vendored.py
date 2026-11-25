@@ -9,7 +9,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "adapters" / "agentgateway" / "scripts" / "generate_proto.sh"
 PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
 STUBS = ROOT / "agent_bailiff" / "adapters" / "agentgateway" / "_proto"
-DOCKERFILES = [ROOT / "examples" / "quickstart" / "Dockerfile", ROOT / "deploy" / "kubernetes" / "Dockerfile.webhook"]
 
 
 def pinned_sha256():
@@ -82,10 +81,14 @@ def test_the_committed_stubs_match_a_fresh_generation(tmp_path):
 
 
 def test_every_image_builds_from_one_digest_pinned_python_base():
-    bases = {
+    tracked = subprocess.run(
+        ["git", "ls-files", "*Dockerfile*"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.split()
+    images = [
         match
-        for dockerfile in DOCKERFILES
-        for match in re.findall(r"^FROM (python:\S+)", dockerfile.read_text(), re.MULTILINE)
-    }
-    assert len(bases) == 1
+        for path in tracked
+        for match in re.findall(r"^FROM (?:--platform=\S+ )?(\S+)", (ROOT / path).read_text(), re.MULTILINE)
+    ]
+    bases = {image for image in images if image.startswith("python:")}
+    assert len(tracked) >= 4 and len(bases) == 1, bases
     assert re.fullmatch(r"python:3\.13\.\d+-slim@sha256:[0-9a-f]{64}", bases.pop())

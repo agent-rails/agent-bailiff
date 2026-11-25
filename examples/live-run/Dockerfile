@@ -1,10 +1,10 @@
-FROM node:22.23.5-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc AS claude
+FROM --platform=linux/amd64 node:22.23.5-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc AS claude
 
 WORKDIR /opt/claude
 COPY examples/live-run/package.json examples/live-run/package-lock.json ./
 RUN npm ci --no-audit --no-fund && ./node_modules/.bin/claude --version
 
-FROM python:3.13.18-slim@sha256:48d884813cf44e927cf64c5529dd630dd3b18338c6dc727991eef9b71e934a20
+FROM --platform=linux/amd64 python:3.13.18-slim@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DISABLE_AUTOUPDATER=1 AGENT_BAILIFF_CACHE=/opt/agent-bailiff \
     PATH=/opt/claude/node_modules/.bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
