@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from test_docket import make_entry
-from test_docket_report import OTHER_USER, PINS, WRITERS, Docket, filled, linux_cross_uid, run_as
+from test_docket_report import OTHER_USER, PINS, WRITERS, Docket, default_issuers, filled, linux_cross_uid, run_as
 from test_docket_report import cut as cut_docket
 
 from agent_bailiff import cli
@@ -449,7 +449,19 @@ def test_verify_without_the_archive_starts_at_the_base(layout, pin_files, capsys
 def tasks_command(layout, pin_files, capsys, *arguments):
     _, docket = layout
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", pin_files[name])]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), "--json", *map(str, arguments)])
+    issuers = ["--issuers", default_issuers(docket)]
+    code = cli.main(
+        [
+            "docket",
+            "tasks",
+            "--docket",
+            str(docket.path),
+            *map(str, pins),
+            *map(str, issuers),
+            "--json",
+            *map(str, arguments),
+        ]
+    )
     captured = capsys.readouterr()
     return code, [json.loads(line) for line in captured.out.splitlines()], captured.err
 

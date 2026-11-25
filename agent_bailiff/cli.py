@@ -217,6 +217,12 @@ def _parser() -> argparse.ArgumentParser:
                 help="control's public key record; only its revocations set STATE; repeat",
             )
             tasks.add_argument(
+                "--issuers",
+                type=Path,
+                required=True,
+                help="0600 JSON file holding the issuers section of decide's config; checks each grant's task root",
+            )
+            tasks.add_argument(
                 "--archive", type=Path, help="read removed segments from this archive, so older tasks are listed"
             )
             tasks.add_argument("--json", action="store_true", help="print one JSON object per task")
@@ -646,8 +652,9 @@ def _run_docket(args: argparse.Namespace) -> int:
 
 def _list_tasks(args: argparse.Namespace) -> int:
     try:
+        issuers = load_issuers(args.issuers)
         writers, grant_writers, roles = _role_pins(args, TASK_ROLE_FLAGS)
-        tasks = TaskList(roles)
+        tasks = TaskList(roles, issuers.resolver, issuers.trust_policy)
         report = verify_records(
             args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
         )

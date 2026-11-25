@@ -489,16 +489,15 @@ def test_a_decide_allow_without_a_cost_exits_2(docket, pin_files, issuers_file, 
     assert "line 1 lacks an op_id, cost, tool or resource" in err
 
 
-def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_control(
-    docket, pin_files, issuers_file, capsys
-):
+def test_a_forged_root_is_invalid_in_tasks_and_grants_and_refused_by_control(docket, pin_files, issuers_file, capsys):
     forged = make_root(key=OTHER_KEY)
     record = grant(docket, forged)
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
-    pins += ["--grant-pin", str(pin_files["issuer"])]
-    assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == 0
+    pins += ["--grant-pin", str(pin_files["issuer"]), "--issuers", str(issuers_file)]
+    cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"])
     [task] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", True, record.token)
+    assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", False, None)
+    assert (task["root_status"], task["root_reason"], task["invalid_grants"]) == ("invalid", "bad_signature", 1)
     code, [row], _ = json_report(docket, pin_files, issuers_file, capsys)
     assert code == cli.EXIT_REFUSED
     assert (row["status"], row["reason"], row["root"]) == ("invalid_grant", "bad_signature", forged.binding())
@@ -515,7 +514,7 @@ def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_cont
         grant_writers={"issuer"},
     )
     with pytest.raises(ControlRefused) as refused:
-        control.revoke(task["record"], "task", "ops", ISSUED)
+        control.revoke(record.token, "task", "ops", ISSUED)
     assert refused.value.reason == "root_bad_signature"
 
 
