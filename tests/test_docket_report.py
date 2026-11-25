@@ -1282,3 +1282,25 @@ def test_a_json_task_row_is_written_in_chunks_that_join_to_one_document():
     assert len(chunks) > 1
     assert "".join(chunks) == json.dumps(json.loads("".join(chunks)), sort_keys=True)
     assert json.loads("".join(chunks))["roots"] == ["root-a", "root-b"]
+
+
+def test_a_rotated_decide_key_pinned_under_the_same_flag_is_counted(docket, workdir, pin_files, capsys):
+    rotated_key = Ed25519PrivateKey.from_private_bytes(bytes(range(7, 39)))
+    rotated = PublicKeyRecord("decide", key_id("decide", rotated_key.public_key()), rotated_key.public_key())
+    path = workdir / "decide-rotated.pub.json"
+    path.write_text(json.dumps(rotated.to_document()))
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles, principal="zoe"))
+    docket.write("decide", rotated_key, rotated.kid, make_entry(2, handles=handles, principal="zoe"))
+    code, out, err = list_tasks(docket, pin_files, "--json", "--decide-pin", str(path), capsys=capsys)
+    assert code == 0, err
+    [row] = map(json.loads, out)
+    assert (row["allows"], row["principal"], row["record_line"]) == (2, "zoe", 2)
+
+
+def test_a_hop_no_report_reads_is_verified_and_exits_0(docket, pin_files, capsys):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("custodian", make_entry(1, hop="alien", component="custodian", handles=handles))
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert (code, out) == (0, [])
+    assert "1 records verified, 0 tasks" in err

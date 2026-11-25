@@ -203,7 +203,7 @@ Control verifies that record against its writer pins again, so a doctored row ca
 
 Exit codes:
 
-- 0: every record read was counted.
+- 0: every `decide`, `custodian` and `control` record read came from a writer pinned for its hop. Records with any other hop, such as the effector's, are verified and not counted, and do not change the exit code.
 - 1: a line fails verification, or an input is refused (`agent-bailiff docket tasks refused: ...`), such as a pin, an archive that does not match, or a docket past the budget. No rows are printed.
 - 3: rows are printed, and N records claim a hop their writer is not pinned for.
 
@@ -257,7 +257,7 @@ Per root it tracks at most 4,096 distinct pairs and 65,536 `op_id`s. Allows with
 
 stderr ends with `N records verified, R roots, I invalid grants`. Exit codes:
 
-- 0: every record verifies and no row is `invalid_grant`.
+- 0: every record verifies, every `decide` record came from a `--decide-pin` writer, and no row is `invalid_grant`. Records with any other hop are verified and not counted.
 - 1: every row is printed and at least one is `invalid_grant`.
 - 3: every row is printed and N records claim a hop their writer is not pinned for. 3 is returned even when a row is `invalid_grant`.
 - 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, an archive that does not match, or a docket past the root cap or the `op_id` and pair budget. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
