@@ -31,10 +31,12 @@ jobs:
           docker build --file examples/quickstart/Dockerfile --target quickstart --tag agent-bailiff-quickstart:scan .
           docker build --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt --tag agent-bailiff-quickstart-trace:scan .
           docker build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:scan .
+          docker build --file deploy/gke/Dockerfile.minter --tag agent-bailiff-minter:scan .
+          docker build --file examples/live-run/Dockerfile --tag agent-bailiff-live-run:scan .
       - name: Scan images
         run: |
           status=0
-          for image in agent-bailiff-quickstart:scan agent-bailiff-quickstart-trace:scan agent-bailiff-webhook:scan; do
+          for image in agent-bailiff-quickstart:scan agent-bailiff-quickstart-trace:scan agent-bailiff-webhook:scan agent-bailiff-minter:scan agent-bailiff-live-run:scan; do
             "$RUNNER_TEMP/trivy" image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$image" || status=1
           done
           exit "$status"
