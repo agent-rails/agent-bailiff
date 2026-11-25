@@ -466,6 +466,15 @@ def test_an_unusable_issuers_file_exits_2(docket, pin_files, issuers_file, capsy
     assert "docket grants refused: issuers" in err
 
 
+def test_grants_refuse_an_empty_issuers_file(docket, pin_files, issuers_file, capsys):
+    grant(docket, make_root())
+    issuers_file.write_text("{}")
+    code, out, err = report(docket, pin_files, issuers_file, capsys=capsys)
+    assert code == cli.EXIT_UNVERIFIED
+    assert out == []
+    assert "docket grants refused: issuers file must name at least one issuer" in err
+
+
 def test_an_issuers_file_others_can_write_is_refused(docket, pin_files, issuers_file, capsys):
     os.chmod(issuers_file, 0o644)
     code, _, err = report(docket, pin_files, issuers_file, capsys=capsys)
