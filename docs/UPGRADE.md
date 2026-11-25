@@ -65,9 +65,11 @@ Once any v2 task is issued, going back to the previous release, on agent-warrant
 
 `docket tasks` rows change: a grant no longer sets PRINCIPAL, so a task listed only from grants shows `-` until decide records a call; `record` is the latest decide record that names a principal; effector refusals are not counted; `--json` rows add `principal_conflict`. A record whose writer is not pinned for its hop is not counted, and the command exits 3 with rows printed. Scripts that treat any non-zero exit as no output must accept 3.
 
+`docket tasks` also requires `--issuers FILE`, the 0600 `issuers` section of decide's config, as `docket grants` takes it; an earlier command line fails with `the following arguments are required: --issuers`. The table gains a ROOT column after TASK, and `--json` rows add `root_status`, `root_reason` and `invalid_grants`. A grant whose root fails the issuers no longer sets `granted`, `expires_at` or `record`. The command exits 4 with rows printed when a grant is invalid or does not decode (before, an undecodable grant exited 0); 3 still takes precedence. A revoke pipeline should select `root_status == "verified"` and run under `set -o pipefail`. In the quickstart, `docker compose up` adds `reader-init`, which writes the reader's copy to `/var/lib/bailiff/reader/issuers.json` in a new `reader-data` volume.
+
 ### Rollback
 
-Nothing is written, so an earlier release reads the same docket. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`.
+Nothing is written, so an earlier release reads the same docket. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`. Its `docket tasks` refuses `--issuers` as an unrecognized argument, lists a task as `granted` with a root no allowed issuer signed, and has no ROOT column, so drop `--issuers` and the `root_status` filter from revoke pipelines before rolling back.
 
 ## Docket grants
 
