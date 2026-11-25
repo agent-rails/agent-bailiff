@@ -9,7 +9,7 @@ This release moves task scopes to agent-warrant 0.4.0's permission list (D21 in 
 - To keep tasks issued before the upgrade working, set the cutoff to the time you upgrade the issuers. Those tasks run to their expiry, at most 86,400 s later.
 - To end every v1 task at once, leave it at 0. Every v1 task is then refused from the moment decide restarts, and its agent needs a new task.
 
-Set the same value in both files. Each service logs its effective cutoff at startup:
+Add the key to both files before restarting on the new release. Without it the service refuses to start with `decide: missing scope_v1_cutoff` or `custodian: missing scope_v1_cutoff`; the default in `init` applies only to new configs. Set the same value in both files. Each service logs its effective cutoff at startup:
 
 ```
 decide <decider_id> effective scope_v1_cutoff=<n>
@@ -27,12 +27,12 @@ The two are not checked against each other. If the custodian's cutoff is earlier
 
 ## Canary
 
-After step 2, before step 4, run one v1 chain and one v2 chain through the gateway to both services:
+After step 2, before step 4, run one v1 chain and one v2 chain through the gateway to both services. Issue the v1 task with an issuer still on the previous release, and the v2 task with `task issue` from the new release on one canary host, under an issuer key decide already trusts:
 
 - A v1 task issued before the cutoff makes one allowed call. The docket shows decide's `allow` and the custodian's `release`, and decide logs `scope_v1_accepted` with the task's root binding.
 - A v2 task with two permissions makes one call each permission covers and one that pairs the tool of one with the resource of the other. The first two are released; the third is refused as `out_of_scope`.
 
-A `chain_refused` entry from the custodian on the v1 call means the cutoffs differ.
+A `chain_refused` entry from the custodian on the v1 call means the custodian refused a chain decide accepted. Read the custodian's log for the reason: `task root: scope_v1_expired` means the cutoffs differ; revocation, expiry or a stale proof give other reasons.
 
 ## Draining v1
 
@@ -50,4 +50,4 @@ The task file holds at most 4,096 bytes. agent-warrant allows a scope of up to 1
 
 ## Rollback
 
-Once any v2 task is issued, going back to the previous release, on agent-warrant 0.3.0, is an outage for v2 tasks: 0.3.0 refuses to decode a v2 root, so the previous decide and custodian refuse every v2 call, the previous proxy cannot load a v2 `task.json`, its `task issue` refuses to write over one until it is removed, and its client cannot delegate from one. To roll back, revert every component in the reverse of the rollout order, remove each v2 `task.json`, and reissue the tasks with v1 scopes. Tasks issued with v1 scopes before the upgrade keep working on 0.3.0.
+Once any v2 task is issued, going back to the previous release, on agent-warrant 0.3.0, is an outage for v2 tasks: 0.3.0 refuses to decode a v2 root, so the previous decide and custodian refuse every v2 call, the previous proxy cannot load a v2 `task.json`, its `task issue` refuses to write over one until it is removed, and its client cannot delegate from one. To roll back, revert every component in the reverse of the rollout order, remove `scope_v1_cutoff` from decide's and the custodian's `config.json` (the previous release refuses it as `unknown scope_v1_cutoff`), remove each v2 `task.json`, and reissue the tasks with v1 scopes. Tasks issued with v1 scopes before the upgrade keep working on 0.3.0.
