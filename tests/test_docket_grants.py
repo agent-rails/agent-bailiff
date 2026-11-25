@@ -424,8 +424,8 @@ def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_cont
 ):
     forged = make_root(key=OTHER_KEY)
     record = grant(docket, forged)
-    pins = [item for name in ("decide", "custodian") for item in ("--pin", str(pin_files[name]))]
-    pins += ["--control-pin", str(pin_files["control"]), "--grant-pin", str(pin_files["issuer"])]
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    pins += ["--grant-pin", str(pin_files["issuer"])]
     assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == 0
     [task] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", True, record.token)

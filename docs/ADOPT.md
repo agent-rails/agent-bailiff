@@ -213,7 +213,7 @@ To stop a task now, the operator revokes it from the signed docket:
 ```console
 $ docker compose --profile operator run --rm --no-deps -T --entrypoint python reader \
     -m agent_bailiff.cli docket tasks --docket /var/lib/bailiff/docket/docket.log \
-    --pin /pins/decide/decide.json --pin /pins/custodian/custodian.json \
+    --decide-pin /pins/decide/decide.json --custodian-pin /pins/custodian/custodian.json \
     --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json \
     --grant-pin /pins/issuer/issuer-docket.json --json \
   | jq -r 'select(.task == "task-f0f2af5ac610e8db").record' \
