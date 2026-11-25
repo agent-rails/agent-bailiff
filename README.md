@@ -126,6 +126,8 @@ python3.13 -m venv .venv
 .venv/bin/ruff check && .venv/bin/ruff format --check && .venv/bin/mypy && .venv/bin/pytest -q
 ```
 
+`requirements-ci.txt`, `deploy/kubernetes/webhook-requirements.txt` and `examples/quickstart/trace-requirements.txt` are exported from `uv.lock`. After changing `uv.lock`, run `sh scripts/export-requirements.sh` and commit the result; CI fails when an export differs.
+
 `generate_proto.sh` checks the sha256 of the vendored agentgateway `ExtMcp` proto (`adapters/agentgateway/proto/ext_mcp.proto`, v1.7.0, commit `26f5aeb`, Apache-2.0) and generates the Python stubs into `agent_bailiff/adapters/agentgateway/_proto`. The stubs are committed so a git install works without `grpcio-tools`; run the script after changing the proto, and the test suite fails when the committed stubs differ from a fresh run.
 
 The end-to-end tests run against the agentgateway v1.7.0 release binary. `adapters/agentgateway/scripts/fetch_gateway.sh` downloads it into `~/.cache/agent-bailiff`, checked against `adapters/agentgateway/agentgateway-v1.7.0.sha256`; without it those tests are skipped.
