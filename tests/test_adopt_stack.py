@@ -275,7 +275,8 @@ def test_an_in_scope_call_reaches_the_upstream_with_the_stored_credential(adopte
 
 
 def test_an_echoed_credential_is_redacted_and_alerted_against_its_release(adopter, proxy, secret):
-    task_id, _ = adopter.issue(scope={**SCOPE, "tools": [*SCOPE["tools"], "stub.echo_auth"]})
+    echo = {"tools": ["stub.echo_auth"], "resources": [ALLOWED], "max_cost_per_call": 1}
+    task_id, _ = adopter.issue(scope={"permissions": [*SCOPE["permissions"], echo]})
     assert proxy.call("write_note", note="allowed", text="plain") == {
         "content": [{"type": "text", "text": "wrote allowed"}],
         "isError": False,
@@ -347,7 +348,8 @@ def test_a_revoked_task_is_refused(adopter, proxy):
 
 
 def test_a_route_the_gateway_lacks_is_refused(adopter, proxy):
-    adopter.issue(scope={**SCOPE, "tools": [*SCOPE["tools"], "stub.delete_all_notes"], "resources": ["stub/notes"]})
+    delete_all = {"tools": ["stub.delete_all_notes"], "resources": ["stub/notes"], "max_cost_per_call": 1}
+    adopter.issue(scope={"permissions": [*SCOPE["permissions"], delete_all]})
     drifted = adopter.root / "drifted-routes.json"
     document = json.loads(ROUTES.read_text())
     document["routes"].append({"service": "stub", "name": "delete_all_notes", "tool": "stub.delete_all_notes",
