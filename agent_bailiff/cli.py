@@ -386,15 +386,15 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     docket.add_argument("--receipt-dir", type=Path, required=True, help="the archiver's receipt directory")
     docket.add_argument("--archiver-uid", type=int, required=True, help="the uid that writes archive receipts")
     docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
-    docket.add_argument(
-        "--grant-pin",
-        type=Path,
-        action="append",
-        default=[],
-        help="grant writer public key record; its writer may record only grants; repeat",
-    )
     for parser in (control, docket):
         parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
+        parser.add_argument(
+            "--grant-pin",
+            type=Path,
+            action="append",
+            default=[],
+            help="grant writer public key record; its writer may record only grants; repeat",
+        )
     for parser in (decide, custodian, control, docket, effector):
         parser.add_argument("--dir", type=Path, required=True, help="the component's 0700 directory")
         parser.set_defaults(handler=_init)
@@ -436,8 +436,14 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
         return None
     docket = {"socket": args.docket_socket, "sink_uid": args.docket_uid}
     if args.component == "control":
-        pins = [read_pin(path) for path in args.pin]
-        return init_control(args.dir, name=args.name, decide_config=args.decide_config, pins=pins, docket=docket)
+        return init_control(
+            args.dir,
+            name=args.name,
+            decide_config=args.decide_config,
+            pins=[read_pin(path) for path in args.pin],
+            grant_pins=[read_pin(path) for path in args.grant_pin],
+            docket=docket,
+        )
     if args.component == "effector":
         kubernetes = {
             "host": args.kube_host,

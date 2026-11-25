@@ -27,7 +27,7 @@ from agent_bailiff.control.suspension import create_suspension_directory, suspen
 from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
 from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.custodian.files import OwnedFileError
-from agent_bailiff.docket import DocketClient, decode_record
+from agent_bailiff.docket import DocketClient, Grant, decode_record, encode_record
 from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.manifest import MAX_MANIFEST_BYTES, entry_bytes_bound
 from agent_bailiff.docket.protocol import MAX_FRAME_BYTES
@@ -237,6 +237,8 @@ class Deployment:
             "decide_config": str(self.decide / "config.json"),
             "docket": self.docket_client(self.control),
             "writers": {name: self.pins(name) for name in ("decide.example", "custodian.example")},
+            "grant_writers": [],
+            "issuers": ISSUERS,
         }
 
     def records(self):
@@ -318,6 +320,8 @@ def test_the_example_documents_parse(deployment):
     assert docket.allowed_uids == {UID} and set(docket.writers) == set(deployment.keys)
     assert docket.grant_writers == frozenset()
     assert control.name == "control" and set(control.writers) == {"decide.example", "custodian.example"}
+    assert control.grant_writers == frozenset()
+    assert control.issuers.trust_policy.check_issuer(ISSUER_ID) is None
 
 
 def mutate(document, change):
@@ -482,6 +486,29 @@ def test_control_must_not_pin_its_own_writer(deployment):
     )
     with pytest.raises(ConfigError):
         parse_control(document)
+
+
+def test_a_control_config_marks_a_pinned_writer_as_a_grant_writer(deployment):
+    document = mutate(deployment.documents["control"], lambda doc: doc.update(grant_writers=["custodian.example"]))
+    assert parse_control(document).grant_writers == frozenset({"custodian.example"})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda doc: doc.pop("grant_writers"),
+        lambda doc: doc.update(grant_writers=None),
+        lambda doc: doc.update(grant_writers=["issuer"]),
+        lambda doc: doc.update(grant_writers=["decide.example", "decide.example"]),
+        lambda doc: doc.pop("issuers"),
+        lambda doc: doc.update(issuers=[]),
+        lambda doc: doc["issuers"][ISSUER_ID].update(public_key="not-a-key"),
+        lambda doc: doc["issuers"][ISSUER_ID].pop("tenants"),
+    ],
+)
+def test_a_bad_control_config_is_refused(deployment, change):
+    with pytest.raises(ConfigError):
+        parse_control(mutate(deployment.documents["control"], change))
 
 
 @pytest.mark.parametrize("mode", [0o640, 0o644, 0o400])
@@ -682,6 +709,43 @@ def test_control_revoke_from_a_docket_line_stops_the_next_call(stack, live, depl
     assert (decided.error.reason, released) == ("chain_invalid", None)
     [entry] = [record.entry for _, record in deployment.records() if record.entry.hop == "control"]
     assert entry.trace_id == "4bf92f3577b34da6a3ce929d0e0e4736" and entry.entry_id == outcome["entry_id"]
+
+
+def test_control_revoke_from_a_grant_stops_a_task_before_its_first_call(stack, live, deployment, capsys):
+    granter = Ed25519PrivateKey.generate()
+    kid = key_id("grants.example", granter.public_key())
+    document = mutate(
+        deployment.documents["control"],
+        lambda doc: doc.update(
+            writers={**doc["writers"], "grants.example": {kid: encode_public_key(granter.public_key())}},
+            grant_writers=["grants.example"],
+        ),
+    )
+    write_owned(deployment.paths["control"], document)
+    now = int(time.time())
+    root = issue_task_root(
+        ISSUER_KEY,
+        issuer=ISSUER_ID,
+        task_id="task-1",
+        tenant_id=TENANT,
+        principal=PRINCIPAL,
+        purpose="release-bot",
+        budget=100,
+        max_depth=4,
+        issued_at=now - 5,
+        expires_at=now + 3600,
+        scope=SCOPE,
+        subject=encode_public_key(AGENT_KEY.public_key()),
+    )
+    grant = Grant(grant_id="grant-1", at=now, root_token=root.encode())
+    token = encode_record(granter, kid, "grants.example", 1, None, grant).token
+    assert control(deployment, "revoke", "--level", "task", "--record", "-", stdin=token + "\n") == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["trace_id"] == "grant-1"
+    decided, released = stack.call(live())
+    assert (decided.error.reason, released) == ("chain_invalid", None)
+    [entry] = [record.entry for _, record in deployment.records() if record.entry.hop == "control"]
+    assert (entry.trace_id, entry.parent_entry, entry.op_id) == ("grant-1", "grant-1", None)
 
 
 def test_control_suspend_and_resume_through_the_cli(stack, live, deployment, capsys):

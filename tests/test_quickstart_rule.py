@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import test_custodian
-from test_control import MemoryDocket
+from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import WRITERS
 from test_decide import NOW, FakeClock, make_request, make_root
@@ -60,7 +60,16 @@ class RecordingControl:
 @pytest.fixture
 def control(writer, private):
     suspension = Suspension(shared_suspension(private("shared")), os.getegid())
-    return Control("control.example", WRITERS, writer, suspension, MemoryDocket(), "control")
+    return Control(
+        "control.example",
+        WRITERS,
+        writer,
+        suspension,
+        MemoryDocket(),
+        "control",
+        resolver=RESOLVER,
+        trust_policy=TRUST_POLICY,
+    )
 
 
 @pytest.fixture

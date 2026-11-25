@@ -66,7 +66,7 @@ EFFECTOR_KEYS = frozenset(
 )
 KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file", "audit_token_file"})
 RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "webhook_namespace", "tenants"})
-CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers"})
+CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers", "grant_writers", "issuers"})
 
 
 class ConfigError(ValueError):
@@ -258,6 +258,8 @@ class ControlSettings:
     decide_config: Path
     docket: DocketClientSettings
     writers: Writers
+    grant_writers: frozenset[str]
+    issuers: Issuers
 
 
 def read_config(path: Path, label: str) -> Any:
@@ -462,6 +464,8 @@ def parse_control(document: object) -> ControlSettings:
         decide_config=config.path("decide_config"),
         docket=_docket_client(config),
         writers=writers,
+        grant_writers=_grant_writers(config, writers),
+        issuers=_issuers(config),
     )
 
 
