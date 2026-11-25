@@ -157,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
                 "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
             )
             verify.add_argument("--trace", help="print only records of this trace id")
-            verify.add_argument("--task", help="print only records of this task root")
+            verify.add_argument("--task", help="print only records of this task root, and its grant")
             verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
             verify.add_argument("--json", action="store_true", help="print one JSON object per record")
             verify.add_argument("--snapshot", type=Path, help="also cross-check this heads snapshot against the docket")
@@ -586,6 +586,12 @@ def _list_tasks(args: argparse.Namespace) -> int:
     for row in rows:
         print(task_json_row(row) if args.json else task_table_row(row))
     print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
+    if tasks.undecodable_grants:
+        print(
+            f"{PROG} docket tasks: {tasks.undecodable_grants} grants hold a task root that does not decode; "
+            "their tasks are not listed",
+            file=sys.stderr,
+        )
     return 0
 
 

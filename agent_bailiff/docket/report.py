@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from agent_warrant.task_root import TaskRoot
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.archiver import ArchiveCopies, ArchivedCopy, encode_sidecar
@@ -53,12 +54,25 @@ class RecordFilter:
 
     def matches(self, entry: Entry | Grant) -> bool:
         if isinstance(entry, Grant):
-            return self.trace is None and self.task is None and (self.since is None or entry.at >= self.since)
+            return self.trace is None and self._grants_task(entry) and (self.since is None or entry.at >= self.since)
         if self.trace is not None and entry.trace_id != self.trace:
             return False
         if self.task is not None and self.task not in (entry.task_root, entry.handles.get("task")):
             return False
         return self.since is None or entry.at >= self.since
+
+    def _grants_task(self, grant: Grant) -> bool:
+        if self.task is None:
+            return True
+        root = grant_root(grant)
+        return root is not None and self.task in (root.binding(), root.task_id)
+
+
+def grant_root(grant: Grant) -> TaskRoot | None:
+    try:
+        return TaskRoot.decode(grant.root_token)
+    except (ValueError, TypeError):
+        return None
 
 
 def pinned_writers(pins: Iterable[PublicKeyRecord]) -> dict[str, dict[str, Ed25519PublicKey]]:

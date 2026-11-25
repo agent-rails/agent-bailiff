@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from agent_bailiff.docket.grant import Grant
-from agent_bailiff.docket.report import printable, utc
+from agent_bailiff.docket.report import grant_root, printable, utc
 from agent_bailiff.docket.sink import VerifiedLine
 
 CONTROL_HOP = "control"
@@ -24,6 +24,8 @@ class TaskRow:
     allows: int = 0
     releases: int = 0
     refusals: int = 0
+    granted: bool = False
+    expires_at: int | None = None
     revoked_by: str | None = None
     record: str | None = None
     record_line: int | None = None
@@ -38,10 +40,12 @@ class TaskList:
         self._revoked_tasks: dict[tuple[str, str], str] = {}
         self._revoked_roots: dict[str, str] = {}
         self._revoked_tenants: dict[str, str] = {}
+        self.undecodable_grants = 0
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
         if isinstance(entry, Grant):
+            self._add_grant(verified, entry)
             return
         if entry.hop == CONTROL_HOP:
             if entry.decision == "revoke" and verified.record.writer in self._control_writers:
@@ -50,10 +54,7 @@ class TaskList:
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
             return
-        row = self._rows.get((tenant, task))
-        if row is None:
-            row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=entry.at)
-        row.first, row.last = min(row.first, entry.at), max(row.last, entry.at)
+        row = self._row(tenant, task, entry.at)
         row.principal = entry.principal or row.principal
         if "root" in entry.handles:
             row.roots.add(entry.handles["root"])
@@ -65,6 +66,26 @@ class TaskList:
             row.allows += 1
         if entry.hop == DECIDE_HOP and entry.tenant == tenant:
             row.record, row.record_line = verified.record.token, verified.line
+
+    def _add_grant(self, verified: VerifiedLine, grant: Grant) -> None:
+        root = grant_root(grant)
+        if root is None:
+            self.undecodable_grants += 1
+            return
+        row = self._row(root.tenant_id, root.task_id, grant.at)
+        row.granted = True
+        row.principal = row.principal or root.principal
+        row.roots.add(root.binding())
+        row.expires_at = max(row.expires_at or 0, root.expires_at)
+        if row.record is None:
+            row.record, row.record_line = verified.record.token, verified.line
+
+    def _row(self, tenant: str, task: str, at: int) -> TaskRow:
+        row = self._rows.get((tenant, task))
+        if row is None:
+            row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=at)
+        row.first, row.last = min(row.first, at), max(row.last, at)
+        return row
 
     def rows(self) -> list[TaskRow]:
         rows = sorted(self._rows.values(), key=lambda row: (row.last, row.tenant, row.task))
@@ -118,6 +139,8 @@ def task_json_row(row: TaskRow) -> str:
         "allows": row.allows,
         "releases": row.releases,
         "refusals": row.refusals,
+        "granted": row.granted,
+        "expires_at": row.expires_at,
         "revoked_by": row.revoked_by,
         "record_line": row.record_line,
         "record": row.record,
