@@ -118,11 +118,13 @@ $ docker compose --profile operator run --rm --no-deps -T task-issuer \
     --purpose triage-notes \
     --scope '{"permissions": [{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}]}' \
     --budget 20 --subject=oa5bveQCZ3-a-9zg9TUN3MntJk9T_yIfkt7LoHUCtZ8
-agent-bailiff task issue: wrote /out/task.json, expires at 1795523898
+agent-bailiff task issue: wrote /out/task.json, expires at 1795523898, grant_id 6c1f0e5d2b7a4e8f9a3d1c0b5e7f2a46
 task-f0f2af5ac610e8db
 ```
 
 Pass the key as `--subject=KEY`, since a key can start with `-`. A task lasts one hour by default (`--ttl` in seconds, at most 86400). The stack's issuer allows a budget of at most 100, and every call costs 1. `--max-depth` defaults to 0, which means the agent cannot delegate. The task is written to `$BAILIFF_TASK_DIR/task.json`, mode 0644, so the agent user can read it.
+
+Before it writes `task.json`, `task issue` records a grant for the task in the docket with the issuer's own docket-writer key, so the docket service must be running. If the docket refuses the grant, no task is written. If the docket does not acknowledge it, the error names the `grant_id` that may be recorded and keeps `task.json.pending`; rerunning the same command reuses that root and `grant_id`. To give it up instead, revoke it from its grant (step 7). See [DOCKET.md](DOCKET.md), Grants from task issue.
 
 The scope is a list of permissions. A call is allowed only when one permission lists both its tool and its resource, so to let the agent read every note but write only `notes/todo`, give each its own permission:
 
@@ -212,14 +214,15 @@ To stop a task now, the operator revokes it from the signed docket:
 $ docker compose --profile operator run --rm --no-deps -T --entrypoint python reader \
     -m agent_bailiff.cli docket tasks --docket /var/lib/bailiff/docket/docket.log \
     --pin /pins/decide/decide.json --pin /pins/custodian/custodian.json \
-    --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json --json \
+    --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json \
+    --grant-pin /pins/issuer/issuer-docket.json --json \
   | jq -r 'select(.task == "task-f0f2af5ac610e8db").record' \
   | docker compose --profile operator run --rm --no-deps -T control revoke \
     --config /var/lib/bailiff/control/config.json --actor operator --level task --record -
 {"action": "revoke", "entry_id": "f8b39d6075144028b685cf000ec13743", "handles": {"task": "task-f0f2af5ac610e8db", "tenant": "quickstart"}, "reason": "task", "trace_id": "d5e3fffdc4062c1688be463c7b6a243c"}
 ```
 
-After that, every call on the task is refused as `chain_invalid`. A task that has made no allowed call has no docket record, so it cannot be revoked this way; it ends at its expiry. See [DOCKET.md](DOCKET.md) for `docket tasks` and `docket verify`.
+After that, every call on the task is refused as `chain_invalid`. A task that has made no call is listed from its grant, and its `record` is the grant, so it is revoked the same way. Once the issuer records grants, `docket tasks` also needs the issuer's docket-writer public key as `--grant-pin`, and control needs that writer in its `grant_writers` and the issuer in its `issuers`. See [DOCKET.md](DOCKET.md) for `docket tasks`, `docket grants` and `docket verify`.
 
 To remove the stack and its volumes, including the issuer key and the stored credential:
 

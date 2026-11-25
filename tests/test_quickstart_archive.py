@@ -9,7 +9,10 @@ stack = test_quickstart_stack.stack
 PROFILES = ("gitea", "archive")
 DOCKET = "/var/lib/bailiff/docket/docket.log"
 RECEIPTS = "/var/lib/bailiff/receipts"
-PINS = [arg for name in ("decide", "custodian", "control", "rule") for arg in ("--pin", f"/pins/{name}/{name}.json")]
+PINS = [
+    *(arg for name in ("decide", "custodian", "control", "rule") for arg in ("--pin", f"/pins/{name}/{name}.json")),
+    *("--grant-pin", str(b.GRANT_PIN)),
+]
 
 
 def run(stack, *arguments):

@@ -50,6 +50,7 @@ DOCKET_KEYS = frozenset(
         "reader_group",
         "allowed_uids",
         "writers",
+        "grant_writers",
         "snapshot_every",
         "free_space_floor",
         "segment_bytes",
@@ -65,7 +66,7 @@ EFFECTOR_KEYS = frozenset(
 )
 KUBERNETES_KEYS = frozenset({"host", "port", "ca", "token_file", "audit_token_file"})
 RBAC_KEYS = frozenset({"namespace", "service_account", "applier", "webhook_namespace", "tenants"})
-CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers"})
+CONTROL_KEYS = frozenset({"name", "key", "decide_config", "docket", "writers", "grant_writers", "issuers"})
 
 
 class ConfigError(ValueError):
@@ -243,6 +244,7 @@ class DocketSettings:
     reader_group: int
     allowed_uids: frozenset[int]
     writers: Writers
+    grant_writers: frozenset[str]
     snapshot_every: int
     free_space_floor: int
     segment_bytes: int
@@ -256,6 +258,8 @@ class ControlSettings:
     decide_config: Path
     docket: DocketClientSettings
     writers: Writers
+    grant_writers: frozenset[str]
+    issuers: Issuers
 
 
 def read_config(path: Path, label: str) -> Any:
@@ -279,6 +283,11 @@ def load_docket(path: Path) -> DocketSettings:
 
 def load_effector(path: Path) -> EffectorSettings:
     return parse_effector(read_config(path, "effector config"))
+
+
+def load_issuers(path: Path) -> Issuers:
+    document = {"issuers": read_config(path, "issuers file")}
+    return _issuers(Section(document, "issuers file", frozenset({"issuers"})))
 
 
 def parse_effector(document: object) -> EffectorSettings:
@@ -425,6 +434,7 @@ def parse_docket(document: object) -> DocketSettings:
         reader_group=config.os_id("reader_group"),
         allowed_uids=allowed,
         writers=writers,
+        grant_writers=_grant_writers(config, writers),
         snapshot_every=config.integer("snapshot_every", 1),
         free_space_floor=config.integer("free_space_floor", MIN_FREE_SPACE_FLOOR),
         segment_bytes=segment_bytes,
@@ -459,6 +469,8 @@ def parse_control(document: object) -> ControlSettings:
         decide_config=config.path("decide_config"),
         docket=_docket_client(config),
         writers=writers,
+        grant_writers=_grant_writers(config, writers),
+        issuers=_issuers(config),
     )
 
 
@@ -485,6 +497,22 @@ def _writers(config: Section) -> dict[str, dict[str, Ed25519PublicKey]]:
         except ValueError as exc:
             raise config.wrap(f"writers.{writer}", exc) from None
     return writers
+
+
+def _grant_writers(config: Section, writers: Mapping[str, object]) -> frozenset[str]:
+    names = config.raw("grant_writers")
+    if not isinstance(names, list):
+        raise ConfigError("docket.grant_writers must be a list of writer names")
+    try:
+        checked = [check_component(name) for name in names]
+    except ValueError as exc:
+        raise config.wrap("grant_writers", exc) from None
+    if len(set(checked)) != len(checked):
+        raise ConfigError("docket.grant_writers must not repeat a writer")
+    unpinned = sorted(set(checked) - writers.keys())
+    if unpinned:
+        raise ConfigError(f"docket.grant_writers names writers not in docket.writers: {', '.join(unpinned)}")
+    return frozenset(checked)
 
 
 def _issuers(config: Section) -> Issuers:

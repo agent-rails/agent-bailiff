@@ -13,7 +13,8 @@ from typing import Any, BinaryIO, Protocol
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from agent_bailiff.docket.entry import Head, Record, decode_record
+from agent_bailiff.docket.entry import ENTRY_TYP, Head, Record, WriterPin, decode_record
+from agent_bailiff.docket.grant import GRANT_TYP
 from agent_bailiff.docket.manifest import (
     Manifest,
     ManifestInvalid,
@@ -69,7 +70,7 @@ SNAPSHOT_MISMATCH = "snapshot_mismatch"
 SEGMENT_MISMATCH = "segment_mismatch"
 
 Writers = Mapping[str, Mapping[str, Ed25519PublicKey]]
-KidIndex = dict[str, tuple[str, Ed25519PublicKey]]
+KidIndex = dict[str, WriterPin]
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,11 @@ class DocketCorrupt(Exception):
         self.report = report
 
 
-def build_kid_index(writers: Writers) -> KidIndex:
+def build_kid_index(writers: Writers, grant_writers: Iterable[str] = ()) -> KidIndex:
+    grants = frozenset(grant_writers)
+    unpinned = sorted(grants - writers.keys())
+    if unpinned:
+        raise ValueError(f"grant writers are not pinned writers: {', '.join(unpinned)}")
     index: KidIndex = {}
     for writer, keys in writers.items():
         if not isinstance(writer, str) or not writer:
@@ -108,7 +113,7 @@ def build_kid_index(writers: Writers) -> KidIndex:
                 raise TypeError(f"key {kid!r} for writer {writer!r} must be an Ed25519PublicKey")
             if kid in index:
                 raise ValueError(f"key id {kid!r} is pinned for more than one writer")
-            index[kid] = (writer, key)
+            index[kid] = WriterPin(writer, key, GRANT_TYP if writer in grants else ENTRY_TYP)
     return index
 
 
@@ -246,8 +251,15 @@ class ChainState:
         )
 
 
-def repair(docket_path: Path, side_path: Path, writers: Writers, *, reader_gid: int | None = None) -> VerifyReport:
-    index = build_kid_index(writers)
+def repair(
+    docket_path: Path,
+    side_path: Path,
+    writers: Writers,
+    *,
+    grant_writers: Iterable[str] = (),
+    reader_gid: int | None = None,
+) -> VerifyReport:
+    index = build_kid_index(writers, grant_writers)
     directory_fd = open_private_dir(docket_path.parent)
     lock_fd: int | None = None
     try:
@@ -415,6 +427,7 @@ class DocketSink:
         writers: Writers,
         allowed_uids: Iterable[int],
         *,
+        grant_writers: Iterable[str] = (),
         socket_gid: int | None = None,
         reader_gid: int | None = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
@@ -444,7 +457,7 @@ class DocketSink:
         self._docket_path = docket_path
         self._socket_path = socket_path
         self._writers = writers
-        self._index = build_kid_index(writers)
+        self._index = build_kid_index(writers, grant_writers)
         self._allowed_uids = frozenset(allowed_uids)
         self._socket_gid = os.getegid() if socket_gid is None else socket_gid
         self._reader_gid = reader_gid

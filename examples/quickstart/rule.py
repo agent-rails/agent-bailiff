@@ -19,6 +19,7 @@ from agent_warrant.ledger import LedgerError
 from agent_bailiff.control.control import Control, ControlRefused, ControlUnrecorded
 from agent_bailiff.decide.refusals import CAPPED_REASON
 from agent_bailiff.docket.client import DocketError
+from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.follower import CheckpointMismatch, DocketFollower, FollowerLocked
 from agent_bailiff.docket.report import pinned_writers
 from agent_bailiff.docket.sink import DocketCorrupt, VerifiedLine, build_kid_index
@@ -28,6 +29,7 @@ from agent_bailiff.service.settings import load_control, load_decide
 
 DOCKET = Path("/var/lib/bailiff/docket/docket.log")
 PINS = tuple(Path(f"/pins/{component}/{component}.json") for component in ("decide", "custodian", "control", "rule"))
+GRANT_PIN = Path("/pins/issuer/issuer-docket.json")
 CHECKPOINT = Path("/var/lib/bailiff/rule/checkpoint.json")
 CONTROL_CONFIG = Path("/var/lib/bailiff/rule/config.json")
 DECIDE_WRITER = "decide.quickstart"
@@ -70,7 +72,7 @@ class RevokeRule:
 
     def matches(self, verified: VerifiedLine) -> bool:
         entry = verified.record.entry
-        if verified.record.writer != self._writer or entry.decision != "refuse":
+        if not isinstance(entry, Entry) or verified.record.writer != self._writer or entry.decision != "refuse":
             return False
         return entry.reason == CAPPED_REASON or (entry.reason == "out_of_scope" and entry.tool in self._tools)
 
@@ -108,7 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_control(CONTROL_CONFIG)
         decide = load_decide(settings.decide_config)
-        index = build_kid_index(pinned_writers(read_pin(path) for path in PINS))
+        grant = read_pin(GRANT_PIN)
+        index = build_kid_index(pinned_writers([*(read_pin(path) for path in PINS), grant]), [grant.component])
         rule = RevokeRule(lambda: open_control(settings, decide), DECIDE_WRITER, frozenset(args.tools or TOOLS))
         checked = DocketFollower(DOCKET, index, CHECKPOINT, rule, poll_interval=POLL_INTERVAL).run(
             stop, follow=not args.once

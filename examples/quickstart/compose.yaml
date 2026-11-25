@@ -133,6 +133,7 @@ services:
     command: ["/app/quickstart/bootstrap.py", "issuer"]
     volumes:
       - issuer-data:/var/lib/bailiff/issuer
+      - issuer-docket:/var/lib/bailiff/issuer-docket
       - pins:/pins
 
   decide-init:
@@ -234,10 +235,16 @@ services:
     <<: [*bailiff, *once, *offline]
     profiles: [operator]
     user: "10007:10007"
+    group_add: ["20000"]
     entrypoint: ["python", "-m", "agent_bailiff.cli", "task", "issue", "--issuer-key", "/var/lib/bailiff/issuer/issuer.key",
-                 "--issuer", "issuer.quickstart", "--decider-id", "decide.quickstart", "--out-dir", "/out"]
+                 "--issuer", "issuer.quickstart", "--decider-id", "decide.quickstart",
+                 "--docket-socket", "/run/bailiff/docket/docket.sock", "--docket-uid", "10001",
+                 "--docket-writer", "issuer-docket.quickstart", "--docket-key", "/var/lib/bailiff/issuer-docket/signing.key",
+                 "--docket-state-dir", "/var/lib/bailiff/issuer-docket/docket-state", "--out-dir", "/out"]
     volumes:
       - issuer-data:/var/lib/bailiff/issuer:ro
+      - issuer-docket:/var/lib/bailiff/issuer-docket
+      - docket-run:/run/bailiff/docket
       - type: bind
         source: ${BAILIFF_TASK_DIR:-./tasks}
         target: /out
@@ -246,19 +253,26 @@ services:
     depends_on:
       issuer-init:
         condition: service_completed_successfully
+      docket:
+        condition: service_healthy
 
   gitea-task:
     <<: [*bailiff, *once, *offline]
     profiles: [gitea]
     user: "10007:10007"
+    group_add: ["20000"]
     command: ["/app/quickstart/bootstrap.py", "issue"]
     volumes:
       - issuer-data:/var/lib/bailiff/issuer:ro
+      - issuer-docket:/var/lib/bailiff/issuer-docket
+      - docket-run:/run/bailiff/docket
       - agent-public:/var/lib/bailiff/agent-public:ro
       - tasks:/var/lib/bailiff/tasks
     depends_on:
       issuer-init:
         condition: service_completed_successfully
+      docket:
+        condition: service_healthy
       agent-key:
         condition: service_completed_successfully
 
@@ -401,7 +415,8 @@ services:
     group_add: ["20003"]
     entrypoint: ["python", "-m", "agent_bailiff.cli", "docket", "verify", "--docket", "/var/lib/bailiff/docket/docket.log",
                  "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
-                 "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json"]
+                 "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json",
+                 "--grant-pin", "/pins/issuer/issuer-docket.json"]
     volumes:
       - docket-data:/var/lib/bailiff/docket:ro
       - pins:/pins:ro
@@ -415,6 +430,7 @@ services:
     command: ["-m", "agent_bailiff.cli", "docket", "archive", "--docket", "/var/lib/bailiff/docket/docket.log",
               "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
               "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json",
+              "--grant-pin", "/pins/issuer/issuer-docket.json",
               "--archive", "/var/lib/bailiff/archive", "--receipts", "/var/lib/bailiff/receipts",
               "--checkpoint", "/var/lib/bailiff/archiver/checkpoint.json"]
     tmpfs:
@@ -463,7 +479,8 @@ services:
     group_add: ["20003"]
     command: ["-m", "agent_bailiff.cli", "docket", "export", "--docket", "/var/lib/bailiff/docket/docket.log",
               "--pin", "/pins/decide/decide.json", "--pin", "/pins/custodian/custodian.json",
-              "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json", "--checkpoint", "/var/lib/bailiff/exporter/checkpoint.json",
+              "--pin", "/pins/control/control.json", "--pin", "/pins/rule/rule.json",
+              "--grant-pin", "/pins/issuer/issuer-docket.json", "--checkpoint", "/var/lib/bailiff/exporter/checkpoint.json",
               "--otlp", "http://jaeger:4318/v1/traces", "--timeout", "30"]
     networks: [trace]
     volumes:
@@ -513,6 +530,7 @@ volumes:
   gitea-admin: {}
   pins: {}
   issuer-data: {}
+  issuer-docket: {}
   decide-data: {}
   custodian-data: {}
   control-data: {}

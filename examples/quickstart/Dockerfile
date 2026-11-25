@@ -20,7 +20,7 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10003 -g 10003 -m 0700 /var/lib/bailiff/custodian \
     && install -d -o 10003 -g 10003 -m 0755 /var/lib/bailiff/gateway \
     && install -d -o 10003 -g 20004 -m 0750 /var/lib/bailiff/gitea-admin \
-    && install -d -o 10007 -g 10007 -m 0700 /var/lib/bailiff/issuer \
+    && install -d -o 10007 -g 10007 -m 0700 /var/lib/bailiff/issuer /var/lib/bailiff/issuer-docket \
     && install -d -o 10007 -g 10007 -m 0755 /var/lib/bailiff/tasks \
     && install -d -o 10006 -g 10006 -m 0700 /var/lib/bailiff/agent \
     && install -d -o 10006 -g 10006 -m 0755 /var/lib/bailiff/agent-public \

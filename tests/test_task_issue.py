@@ -3,18 +3,26 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import stat
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from agent_warrant.encoding import b64u_decode
 from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_docket import RunningSink
 
 from agent_bailiff.cli import main
 from agent_bailiff.custodian import files
+from agent_bailiff.docket import DocketError, DocketSink, Grant, decode_record
+from agent_bailiff.docket import client as client_module
+from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.keys import generate_signing_key
 from agent_bailiff.task import issue as issue_module
-from agent_bailiff.task.issue import TaskIssueError, TaskRequest, issue_task, write_task_file
+from agent_bailiff.task.issue import PendingTask, TaskIssueError, TaskRequest, issue_task, write_task_file
 from agent_bailiff.task.task_file import TaskFile
 
 NOW = 1_800_000_000
@@ -22,7 +30,9 @@ ISSUER = "issuer.quickstart"
 DECIDER = "decide.quickstart"
 PERMISSION = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}
 SCOPE = {"permissions": [PERMISSION]}
+SCOPE_TEXT = json.dumps(SCOPE)
 ISSUER_KEY = Ed25519PrivateKey.generate()
+ROTATED_KEY = Ed25519PrivateKey.generate()
 MAX_BOUND_SCOPE = {
     "permissions": [
         {
@@ -57,6 +67,44 @@ SIXTEEN_SINGLE_PAIRS = {
         for index in range(16)
     ]
 }
+
+
+GRANT_WRITER = "issuer.docket"
+
+
+class Crash(BaseException):
+    pass
+
+
+class FakeDocket:
+    def __init__(self, out_dir, refuse=None, record_then=None):
+        self.out_dir = out_dir
+        self.refuse = refuse
+        self.record_then = record_then
+        self.grants = []
+        self.files_at_append = []
+
+    def append(self, grant):
+        self.files_at_append.append(
+            {name: (self.out_dir / name).read_bytes() for name in sorted(os.listdir(self.out_dir))}
+        )
+        if self.refuse is not None:
+            raise DocketError(self.refuse)
+        self.grants.append(grant)
+        if self.record_then is not None:
+            raise self.record_then
+
+
+def write(out_dir, task, docket=None, now=NOW, key=ISSUER_KEY):
+    return write_task_file(out_dir, task, key.public_key(), FakeDocket(out_dir) if docket is None else docket, now)
+
+
+def pending_of(out_dir):
+    return PendingTask.decode((out_dir / "task.json.pending").read_bytes())
+
+
+def current(out_dir):
+    return TaskFile.decode((out_dir / "task.json").read_bytes())
 
 
 def new_subject():
@@ -170,10 +218,10 @@ def test_each_issue_has_a_new_task_id():
 
 def test_the_task_file_is_written_whole_and_world_readable(out_dir):
     task = issued()
-    path = write_task_file(out_dir, task)
-    assert path == out_dir / "task.json"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o644
-    raw = path.read_bytes()
+    written = write(out_dir, task)
+    assert written.path == out_dir / "task.json" and written.task == task
+    assert stat.S_IMODE(written.path.stat().st_mode) == 0o644
+    raw = written.path.read_bytes()
     assert TaskFile.decode(raw) == task
     assert json.loads(raw) == {
         "version": 1,
@@ -185,41 +233,78 @@ def test_the_task_file_is_written_whole_and_world_readable(out_dir):
     assert os.listdir(out_dir) == ["task.json"]
 
 
+def test_the_grant_is_recorded_after_the_pending_file_and_before_the_task_file(out_dir):
+    first = issued()
+    write(out_dir, first)
+    task = issued()
+    docket = FakeDocket(out_dir)
+    written = write(out_dir, task, docket)
+    assert docket.grants == [Grant(written.grant_id, NOW, task.root.encode())]
+    [seen] = docket.files_at_append
+    assert TaskFile.decode(seen["task.json"]) == first
+    assert PendingTask.decode(seen["task.json.pending"]) == PendingTask(written.grant_id, task)
+    [staged] = [name for name in seen if name.startswith(".task.json.")]
+    assert TaskFile.decode(seen[staged]) == task
+    assert current(out_dir) == task
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_the_pending_file_is_private_and_holds_the_root_and_grant_id(out_dir):
+    task = issued()
+    modes = []
+
+    class Inspect(FakeDocket):
+        def append(self, grant):
+            modes.append(stat.S_IMODE(os.stat(out_dir / "task.json.pending").st_mode))
+            raw = json.loads((out_dir / "task.json.pending").read_bytes())
+            modes.append(raw)
+            return super().append(grant)
+
+    written = write(out_dir, task, Inspect(out_dir))
+    assert modes == [
+        0o600,
+        {"version": 1, "grant_id": written.grant_id, "task_root": task.root.encode(), "decider_id": DECIDER},
+    ]
+
+
 def test_a_new_key_replaces_the_current_task(out_dir):
-    write_task_file(out_dir, issued())
+    write(out_dir, issued())
     renewed = issued()
-    write_task_file(out_dir, renewed)
-    assert TaskFile.decode((out_dir / "task.json").read_bytes()) == renewed
+    write(out_dir, renewed)
+    assert current(out_dir) == renewed
 
 
-def test_a_second_task_for_the_same_key_is_refused(out_dir):
+def test_a_second_task_for_the_same_key_is_refused_before_the_docket(out_dir):
     subject = new_subject()
     first = issued(subject=subject)
-    write_task_file(out_dir, first)
+    write(out_dir, first)
+    docket = FakeDocket(out_dir)
     with pytest.raises(TaskIssueError, match="already holds a task for this agent key"):
-        write_task_file(out_dir, issued(subject=subject))
-    assert TaskFile.decode((out_dir / "task.json").read_bytes()) == first
+        write(out_dir, issued(subject=subject), docket)
+    assert docket.files_at_append == []
+    assert current(out_dir) == first
+    assert os.listdir(out_dir) == ["task.json"]
 
 
 def test_a_symlinked_task_dir_is_refused(out_dir, tmp_path):
     link = tmp_path / "link"
     link.symlink_to(out_dir)
     with pytest.raises(TaskIssueError, match="cannot open the task directory"):
-        write_task_file(link, issued())
+        write(link, issued(), FakeDocket(out_dir))
 
 
 @pytest.mark.parametrize("mode", [0o775, 0o757, 0o777])
 def test_a_task_dir_others_can_write_is_refused(out_dir, mode):
     os.chmod(out_dir, mode)
     with pytest.raises(TaskIssueError, match="not writable by group or others"):
-        write_task_file(out_dir, issued())
+        write(out_dir, issued())
     assert os.listdir(out_dir) == []
 
 
 def test_a_task_dir_another_uid_owns_is_refused(out_dir, monkeypatch):
     monkeypatch.setattr(issue_module.os, "geteuid", lambda: os.getuid() + 1)
     with pytest.raises(TaskIssueError, match="must be owned by uid"):
-        write_task_file(out_dir, issued())
+        write(out_dir, issued())
 
 
 def test_a_symlinked_task_file_is_refused(out_dir, tmp_path):
@@ -227,13 +312,13 @@ def test_a_symlinked_task_file_is_refused(out_dir, tmp_path):
     target.write_bytes(issued().encode())
     (out_dir / "task.json").symlink_to(target)
     with pytest.raises(TaskIssueError, match="cannot open the current task file"):
-        write_task_file(out_dir, issued())
+        write(out_dir, issued())
 
 
 def test_a_current_file_that_is_not_a_task_file_is_refused(out_dir):
     (out_dir / "task.json").write_text("{}")
     with pytest.raises(TaskIssueError, match="remove it to issue"):
-        write_task_file(out_dir, issued())
+        write(out_dir, issued())
     assert (out_dir / "task.json").read_text() == "{}"
 
 
@@ -241,14 +326,316 @@ def failing_rename(*args, **kwargs):
     raise OSError(errno.ENOSPC, "No space left on device")
 
 
-def test_a_failed_write_keeps_the_current_task(out_dir, monkeypatch):
+def test_a_failed_pending_write_keeps_the_current_task_and_records_nothing(out_dir, monkeypatch):
     first = issued()
-    write_task_file(out_dir, first)
+    write(out_dir, first)
     monkeypatch.setattr(files.os, "rename", failing_rename)
-    with pytest.raises(TaskIssueError, match="cannot write the task file"):
-        write_task_file(out_dir, issued())
-    assert TaskFile.decode((out_dir / "task.json").read_bytes()) == first
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="cannot write the pending task file"):
+        write(out_dir, issued(), docket)
+    assert docket.files_at_append == []
+    assert current(out_dir) == first
     assert os.listdir(out_dir) == ["task.json"]
+
+
+@pytest.mark.parametrize(("failing_call", "label"), [(1, "pending task file"), (3, "task file")])
+def test_no_space_while_staging_records_nothing(out_dir, monkeypatch, failing_call, label):
+    real_fsync = files.os.fsync
+    calls = []
+
+    def fsync(fd):
+        calls.append(fd)
+        if len(calls) == failing_call:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_fsync(fd)
+
+    monkeypatch.setattr(files.os, "fsync", fsync)
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match=f"cannot write the {label}: No space left on device") as error:
+        write(out_dir, issued(), docket)
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == []
+    if label == "task file":
+        assert str(error.value).endswith("; no grant recorded, no task file written")
+
+
+def test_a_read_only_task_dir_records_nothing(out_dir):
+    os.chmod(out_dir, 0o555)
+    docket = FakeDocket(out_dir)
+    try:
+        with pytest.raises(TaskIssueError, match="cannot create the pending task file"):
+            write(out_dir, issued(), docket)
+    finally:
+        os.chmod(out_dir, 0o755)
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == []
+
+
+def test_a_refused_grant_writes_no_task_file_and_removes_the_pending_file(out_dir):
+    first = issued()
+    write(out_dir, first)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issued(), FakeDocket(out_dir, refuse="sink_unreachable"))
+    assert str(error.value) == "docket refused the grant: sink_unreachable; no grant recorded, no task file written"
+    assert current(out_dir) == first
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+@pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed", "write_failed"])
+def test_an_unacknowledged_grant_keeps_the_pending_file_and_names_the_grant(out_dir, reason):
+    task = issued()
+    docket = FakeDocket(out_dir, record_then=DocketError(reason))
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, task, docket)
+    [grant] = docket.grants
+    message = str(error.value)
+    assert f"grant may be recorded: grant_id {grant.grant_id}; check docket grants; revoke via control" in message
+    assert f"rerun the same command to finish from {out_dir / 'task.json.pending'}" in message
+    assert pending_of(out_dir) == PendingTask(grant.grant_id, task)
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_retry_after_an_unacknowledged_grant_reuses_the_root_and_grant_id(out_dir):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, first, lost)
+    docket = FakeDocket(out_dir)
+    written = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW + 5), docket, NOW + 5)
+    assert written.task == first and written.grant_id == lost.grants[0].grant_id
+    assert docket.grants == [Grant(written.grant_id, NOW + 5, first.root.encode())]
+    assert current(out_dir) == first
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"subject": new_subject()},
+        {"budget": 11},
+        {"ttl": 60},
+        {"purpose": "other"},
+        {"tenant": "other"},
+        {"principal": "user:other"},
+        {"max_depth": 1},
+        {"scope": {"permissions": [{**PERMISSION, "max_cost_per_call": 2}]}},
+    ],
+)
+def test_a_retry_with_another_request_is_refused_and_keeps_the_pending_file(out_dir, changes):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, first, lost)
+    other = TaskRequest(**{**made.__dict__, **changes})
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="holds an unfinished issue of grant_id .* for another request"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, other, NOW), docket)
+    assert docket.files_at_append == []
+    assert pending_of(out_dir) == PendingTask(lost.grants[0].grant_id, first)
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_retry_for_another_decider_is_refused(out_dir):
+    made = request()
+    with pytest.raises(TaskIssueError):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), FakeDocket(out_dir, refuse="no_ack"))
+    with pytest.raises(TaskIssueError, match="for another request"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, "decide.other", made, NOW))
+
+
+def test_a_retry_after_the_pending_root_expired_is_refused(out_dir):
+    made = request(ttl=60)
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, first, lost)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW + 60), FakeDocket(out_dir), NOW + 60)
+    grant_id = lost.grants[0].grant_id
+    assert f"root expired at {NOW + 60}; grant may be recorded: grant_id {grant_id}" in str(error.value)
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_retry_with_a_rotated_issuer_key_is_refused_before_the_docket(out_dir):
+    made = request()
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), lost)
+    [grant] = lost.grants
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issue_task(ROTATED_KEY, ISSUER, DECIDER, made, NOW), docket, key=ROTATED_KEY)
+    assert str(error.value) == (
+        f"{out_dir / 'task.json.pending'} holds a root not signed by the current issuer key; "
+        f"grant may be recorded: grant_id {grant.grant_id}; check docket grants; remove it to issue"
+    )
+    assert docket.files_at_append == []
+    assert pending_of(out_dir).grant_id == grant.grant_id
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_forged_pending_root_matching_the_request_is_refused_before_the_docket(out_dir):
+    made = request()
+    signed = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    forged = TaskFile(replace(signed.root, task_id="task-forged"), DECIDER)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-forged", forged).encode())
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="not signed by the current issuer key; .*: grant_id g-forged;"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), docket)
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_refused_retry_keeps_the_pending_file_of_the_earlier_run(out_dir):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    lost = FakeDocket(out_dir, record_then=DocketError("no_ack"))
+    with pytest.raises(TaskIssueError):
+        write(out_dir, first, lost)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), FakeDocket(out_dir, refuse="rollback"))
+    grant_id = lost.grants[0].grant_id
+    assert str(error.value) == (
+        f"docket refused the grant: rollback; an earlier run may have recorded grant_id {grant_id}; "
+        f"{out_dir / 'task.json.pending'} kept, rerun the same command to finish"
+    )
+    assert os.listdir(out_dir) == ["task.json.pending"]
+
+
+def test_a_crash_after_the_grant_and_before_the_rename_finishes_on_retry(out_dir):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    crashed = FakeDocket(out_dir, record_then=Crash())
+    with pytest.raises(Crash):
+        write(out_dir, first, crashed)
+    assert "task.json" not in os.listdir(out_dir)
+    docket = FakeDocket(out_dir)
+    written = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), docket)
+    [recorded] = crashed.grants
+    assert written.grant_id == recorded.grant_id and written.task == first
+    assert [(grant.grant_id, grant.root_token) for grant in docket.grants] == [(recorded.grant_id, recorded.root_token)]
+    assert current(out_dir) == first
+    assert [name for name in os.listdir(out_dir) if not name.startswith(".")] == ["task.json"]
+
+
+def test_a_failed_rename_after_the_grant_names_the_grant_and_finishes_on_retry(out_dir, monkeypatch):
+    task = issued()
+    real_rename = files.os.rename
+
+    def rename(source, target, **kwargs):
+        if target == "task.json":
+            raise OSError(errno.EIO, "Input/output error")
+        real_rename(source, target, **kwargs)
+
+    monkeypatch.setattr(files.os, "rename", rename)
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, task, docket)
+    [grant] = docket.grants
+    assert str(error.value) == (
+        f"cannot write the task file: Input/output error; grant recorded: grant_id {grant.grant_id}; "
+        f"task.json may be written; rerun the same command to finish from {out_dir / 'task.json.pending'}"
+    )
+    assert os.listdir(out_dir) == ["task.json.pending"]
+    monkeypatch.setattr(files.os, "rename", real_rename)
+    written = write(out_dir, task)
+    assert (written.grant_id, current(out_dir)) == (grant.grant_id, task)
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_pending_file_left_after_the_rename_is_removed_by_the_next_issue(out_dir):
+    subject = new_subject()
+    task = issued(subject=subject)
+    write(out_dir, task)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    docket = FakeDocket(out_dir)
+    finished = write(out_dir, issued(subject=subject), docket)
+    assert (finished.path, finished.task, finished.grant_id) == (out_dir / "task.json", task, "g-left")
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == ["task.json"]
+    with pytest.raises(TaskIssueError, match="already holds a task for this agent key"):
+        write(out_dir, issued(subject=subject))
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    renewed = issued()
+    written = write(out_dir, renewed)
+    assert written.task == renewed and written.grant_id != "g-left"
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_crash_after_the_rename_finishes_on_retry_without_a_second_grant(out_dir, monkeypatch):
+    made = request()
+    first = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    real_discard = issue_module.discard_at
+
+    def crash_on_pending(dir_fd, name):
+        if name == "task.json.pending":
+            raise Crash()
+        real_discard(dir_fd, name)
+
+    monkeypatch.setattr(issue_module, "discard_at", crash_on_pending)
+    recorded = FakeDocket(out_dir)
+    with pytest.raises(Crash):
+        write(out_dir, first, recorded)
+    assert sorted(os.listdir(out_dir)) == ["task.json", "task.json.pending"]
+    monkeypatch.setattr(issue_module, "discard_at", real_discard)
+    docket = FakeDocket(out_dir)
+    written = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW + 5), docket, NOW + 5)
+    [grant] = recorded.grants
+    assert (written.path, written.task, written.grant_id) == (out_dir / "task.json", first, grant.grant_id)
+    assert docket.files_at_append == []
+    assert current(out_dir) == first
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+def test_a_renamed_root_the_current_issuer_key_did_not_sign_is_refused(out_dir):
+    made = request()
+    task = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    write(out_dir, task)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    with pytest.raises(TaskIssueError) as error:
+        write(out_dir, issue_task(ROTATED_KEY, ISSUER, DECIDER, made, NOW), key=ROTATED_KEY)
+    assert str(error.value) == (
+        f"{out_dir / 'task.json'} already holds this root; {out_dir / 'task.json.pending'} is left over from an "
+        "issue the current issuer key did not sign (grant_id g-left); check docket grants and remove it"
+    )
+    assert sorted(os.listdir(out_dir)) == ["task.json", "task.json.pending"]
+
+
+def test_a_pending_file_naming_another_decider_for_the_installed_root_is_not_finished(out_dir):
+    made = request()
+    installed = issue_task(ISSUER_KEY, ISSUER, "another-decider", made, NOW)
+    write(out_dir, installed)
+    planted = PendingTask("g-planted", TaskFile(installed.root, DECIDER))
+    (out_dir / "task.json.pending").write_bytes(planted.encode())
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="already holds a task for this agent key"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), docket)
+    assert docket.files_at_append == []
+    assert (current(out_dir), pending_of(out_dir)) == (installed, planted)
+
+
+def test_a_renamed_root_finishes_after_it_expired_without_a_grant(out_dir):
+    made = request()
+    task = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    write(out_dir, task)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    late = task.root.expires_at + 10
+    docket = FakeDocket(out_dir)
+    finished = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, late), docket, late)
+    assert (finished.task, finished.grant_id) == (task, "g-left")
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == ["task.json"]
+
+
+@pytest.mark.parametrize("content", [b"{}", b"not json", b'{"version": 1}'])
+def test_a_pending_file_that_does_not_decode_is_refused(out_dir, content):
+    (out_dir / "task.json.pending").write_bytes(content)
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="is not a pending task file .*; remove it to issue"):
+        write(out_dir, issued(), docket)
+    assert docket.files_at_append == []
 
 
 def test_a_concurrent_issue_is_refused_while_another_holds_the_lock(out_dir):
@@ -256,7 +643,7 @@ def test_a_concurrent_issue_is_refused_while_another_holds_the_lock(out_dir):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         with pytest.raises(TaskIssueError, match="another task issue is running"):
-            write_task_file(out_dir, issued())
+            write(out_dir, issued())
     finally:
         os.close(fd)
     assert os.listdir(out_dir) == []
@@ -287,35 +674,116 @@ def test_concurrent_writers_never_share_a_staged_file(out_dir, monkeypatch):
     assert os.listdir(out_dir) == ["task.json"]
 
 
-def test_the_cli_issues_and_prints_the_task_id(out_dir, tmp_path, capsys):
-    key_dir = tmp_path / "issuer"
-    key_dir.mkdir(mode=0o700)
-    generate_signing_key(key_dir / "issuer.key", "issuer")
+class Issuer:
+    def __init__(self, root):
+        self.root = root
+        self.dir = root / "issuer"
+        self.dir.mkdir(mode=0o700)
+        generate_signing_key(self.dir / "issuer.key", "issuer")
+        self.writer_pin = generate_signing_key(self.dir / "docket.key", GRANT_WRITER)
+        self.state = root / "docket-state"
+        self.state.mkdir(mode=0o700)
+        self.docket = root / "docket.log"
+        self.socket = root / "s" / "docket.sock"
+        self.writers = {GRANT_WRITER: {self.writer_pin.kid: self.writer_pin.public_key}}
+        self.sink = None
+
+    def start(self):
+        sink = DocketSink(self.docket, self.socket, self.writers, {os.getuid()}, grant_writers={GRANT_WRITER})
+        self.sink = RunningSink(sink)
+
+    def stop(self):
+        if self.sink is not None and self.sink.thread.is_alive():
+            self.sink.stop()
+
+    def grants(self):
+        index = build_kid_index(self.writers, {GRANT_WRITER})
+        if not self.docket.exists():
+            return []
+        return [decode_record(line, index).entry for line in self.docket.read_text().splitlines()]
+
+    def arguments(self, out_dir, *, scope=SCOPE_TEXT, subject=None, docket_key=None):
+        return [
+            "task", "issue", "--issuer-key", str(self.dir / "issuer.key"), "--issuer", ISSUER,
+            "--decider-id", DECIDER, "--purpose", "triage", "--scope", scope, "--budget", "5", "--ttl", "60",
+            f"--subject={subject or new_subject()}",
+            "--out-dir", str(out_dir), "--docket-socket", str(self.socket), "--docket-uid", str(os.getuid()),
+            "--docket-writer", GRANT_WRITER, "--docket-key", str(docket_key or self.dir / "docket.key"),
+            "--docket-state-dir", str(self.state),
+        ]  # fmt: skip
+
+
+@pytest.fixture
+def issuer():
+    made = Issuer(Path(tempfile.mkdtemp(prefix="bt-", dir="/tmp")))
+    yield made
+    made.stop()
+    shutil.rmtree(made.root)
+
+
+def test_the_cli_records_the_grant_and_prints_the_task_id(out_dir, issuer, capsys):
+    issuer.start()
     subject = new_subject()
-    arguments = [
-        "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
-        "--purpose", "triage", "--scope", json.dumps(SCOPE), "--budget", "5", "--ttl", "60",
-        f"--subject={subject}", "--out-dir", str(out_dir),
-    ]  # fmt: skip
-    assert main(arguments) == 0
-    task = TaskFile.decode((out_dir / "task.json").read_bytes())
-    assert capsys.readouterr().out == f"{task.root.task_id}\n"
+    assert main(issuer.arguments(out_dir, subject=subject)) == 0
+    task = current(out_dir)
+    captured = capsys.readouterr()
+    assert captured.out == f"{task.root.task_id}\n"
     assert (task.root.subject, task.root.budget, task.root.max_depth) == (subject, 5, 0)
     assert task.root.expires_at - task.root.issued_at == 60
+    [grant] = issuer.grants()
+    assert (grant.root_token, grant.at) == (task.root.encode(), task.root.issued_at)
+    assert f"grant_id {grant.grant_id}" in captured.err
+    assert os.listdir(out_dir) == ["task.json"]
 
 
-def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
-    key_dir = tmp_path / "issuer"
-    key_dir.mkdir(mode=0o700)
-    generate_signing_key(key_dir / "issuer.key", "issuer")
+def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, issuer):
+    issuer.start()
     subject = dash_subject()
-    arguments = [
-        "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
-        "--purpose", "triage", "--scope", json.dumps(SCOPE), "--budget", "5", f"--subject={subject}",
-        "--out-dir", str(out_dir),
-    ]  # fmt: skip
-    assert main(arguments) == 0
-    assert TaskFile.decode((out_dir / "task.json").read_bytes()).root.subject == subject
+    assert main(issuer.arguments(out_dir, subject=subject)) == 0
+    assert current(out_dir).root.subject == subject
+
+
+def test_the_cli_refuses_when_the_docket_is_down_and_writes_nothing(out_dir, issuer, capsys):
+    assert main(issuer.arguments(out_dir)) == 1
+    err = capsys.readouterr().err
+    assert "task issue refused: docket refused the grant: sink_unreachable" in err
+    assert err.rstrip().endswith("; no grant recorded, no task file written")
+    assert os.listdir(out_dir) == []
+
+
+def test_the_cli_refuses_the_issuer_key_as_the_docket_key(out_dir, issuer, capsys):
+    issuer.start()
+    assert main(issuer.arguments(out_dir, docket_key=issuer.dir / "issuer.key")) == 1
+    assert "--docket-key must be the docket writer's own key, not the issuer key" in capsys.readouterr().err
+    assert issuer.grants() == [] and os.listdir(out_dir) == []
+
+
+def test_the_cli_refuses_a_docket_writer_the_sink_does_not_pin_for_grants(out_dir, issuer, capsys):
+    sink = DocketSink(issuer.docket, issuer.socket, issuer.writers, {os.getuid()})
+    issuer.sink = RunningSink(sink)
+    assert main(issuer.arguments(out_dir)) == 1
+    assert "docket refused the grant: wrong_record_type" in capsys.readouterr().err
+    assert os.listdir(out_dir) == []
+
+
+def test_the_cli_retry_after_a_lost_ack_records_the_same_grant(out_dir, issuer, monkeypatch, capsys):
+    issuer.start()
+    subject = new_subject()
+    real_save = client_module.DocketClient._save_acked
+
+    def fail_save(self, head):
+        raise DocketError("state_write_failed", "disk full")
+
+    monkeypatch.setattr(client_module.DocketClient, "_save_acked", fail_save)
+    assert main(issuer.arguments(out_dir, subject=subject)) == 1
+    assert "grant may be recorded: grant_id" in capsys.readouterr().err
+    assert os.listdir(out_dir) == ["task.json.pending"]
+    monkeypatch.setattr(client_module.DocketClient, "_save_acked", real_save)
+    assert main(issuer.arguments(out_dir, subject=subject)) == 0
+    first, second = issuer.grants()
+    assert (first.grant_id, first.root_token) == (second.grant_id, second.root_token)
+    assert current(out_dir).root.encode() == first.root_token
+    assert os.listdir(out_dir) == ["task.json"]
 
 
 @pytest.mark.parametrize(
@@ -329,15 +797,8 @@ def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
         json.dumps(MAX_BOUND_SCOPE),
     ],
 )
-def test_the_cli_refuses_a_bad_scope(out_dir, tmp_path, scope, capsys):
-    key_dir = tmp_path / "issuer"
-    key_dir.mkdir(mode=0o700)
-    generate_signing_key(key_dir / "issuer.key", "issuer")
-    arguments = [
-        "task", "issue", "--issuer-key", str(key_dir / "issuer.key"), "--issuer", ISSUER, "--decider-id", DECIDER,
-        "--purpose", "triage", "--scope", scope, "--budget", "5", f"--subject={new_subject()}",
-        "--out-dir", str(out_dir),
-    ]  # fmt: skip
-    assert main(arguments) == 1
+def test_the_cli_refuses_a_bad_scope(out_dir, issuer, scope, capsys):
+    issuer.start()
+    assert main(issuer.arguments(out_dir, scope=scope)) == 1
     assert "task issue refused" in capsys.readouterr().err
-    assert os.listdir(out_dir) == []
+    assert issuer.grants() == [] and os.listdir(out_dir) == []

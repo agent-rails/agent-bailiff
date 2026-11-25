@@ -18,16 +18,18 @@ from agent_bailiff import cli
 from agent_bailiff.client import Holder
 from agent_bailiff.client.contract import prepare_call
 from agent_bailiff.custodian.files import create_owned
-from agent_bailiff.keys import KEY_LABEL
+from agent_bailiff.docket import ENTRY_TYP
+from agent_bailiff.keys import KEY_LABEL, generate_signing_key
 from agent_bailiff.proxy.agent_key import generate_agent_key
 from agent_bailiff.proxy.task_state import TaskState
 from agent_bailiff.routes import ToolRoutes
+from agent_bailiff.service.settings import load_docket
 
 deployment = test_service.deployment
-docket = test_service.docket
 separate_archiver = test_service.separate_archiver
 
 DECIDER = "decide.example"
+GRANT_WRITER = "issuer.example"
 ARGS = {"service": "api", "replicas": 2}
 DEPLOY = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 5}
 CANARY = {"tools": ["deploy.canary"], "resources": ["env/prod/*"], "max_cost_per_call": 5}
@@ -77,6 +79,21 @@ def configure(deployment, *, decide_cutoff, custodian_cutoff):
 
 
 @pytest.fixture
+def docket(deployment):
+    directory = test_service.private(deployment.root / "issuer-docket")
+    pin = generate_signing_key(directory / "writer.key", GRANT_WRITER)
+    test_service.private(directory / "state")
+    (deployment.root / f"{GRANT_WRITER}.pub.json").write_text(json.dumps(pin.to_document()))
+    document = deployment.documents["docket"]
+    document["writers"][GRANT_WRITER] = {pin.kid: encode_public_key(pin.public_key)}
+    document["grant_writers"] = [GRANT_WRITER]
+    write_owned(deployment.paths["docket"], document)
+    running = test_service.DocketThread(load_docket(deployment.paths["docket"]))
+    yield running
+    running.stop()
+
+
+@pytest.fixture
 def running(deployment, docket):
     stacks = []
 
@@ -106,7 +123,10 @@ def issue_task(deployment, scope, *, max_depth=0):
         "task", "issue", "--issuer-key", str(issuer / "issuer.key"), "--issuer", ISSUER_ID,
         "--decider-id", DECIDER, "--tenant", TENANT, "--principal", PRINCIPAL, "--purpose", "release-bot",
         "--scope", json.dumps(scope), "--budget", "50", "--ttl", "600", "--max-depth", str(max_depth),
-        f"--subject={subject}", "--out-dir", str(tasks),
+        f"--subject={subject}", "--out-dir", str(tasks), "--docket-socket", str(deployment.sockets["docket"]),
+        "--docket-uid", str(os.geteuid()), "--docket-writer", GRANT_WRITER,
+        "--docket-key", str(deployment.root / "issuer-docket" / "writer.key"),
+        "--docket-state-dir", str(deployment.root / "issuer-docket" / "state"),
     ]  # fmt: skip
     assert cli.main(arguments) == 0
     return TaskState.load(tasks / "task.json", keys).holder
@@ -157,11 +177,13 @@ def verified_docket(deployment, docket, capsys):
         path.write_text(json.dumps(deployment.keys[name].to_document()))
         os.chmod(path, 0o644)
         pins += ["--pin", str(path)]
+    pins += ["--grant-pin", str(deployment.root / f"{GRANT_WRITER}.pub.json")]
     capsys.readouterr()
     code = cli.main(["docket", "verify", "--docket", str(deployment.docket / "docket.log"), *pins, "--json"])
     captured = capsys.readouterr()
     assert code == 0, captured.err
-    entries = [(row["writer"], row["entry"]) for row in map(json.loads, captured.out.splitlines())]
+    rows = list(map(json.loads, captured.out.splitlines()))
+    entries = [(row["writer"], row["entry"]) for row in rows if row["typ"] == ENTRY_TYP]
     return [(writer, entry["decision"], entry["tool"], entry["resource"], entry["reason"]) for writer, entry in entries]
 
 

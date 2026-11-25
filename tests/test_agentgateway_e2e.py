@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import test_custodian
 from test_agentgateway_config import CUSTODIAN, DECIDE, REDACTOR, gateway_config
-from test_control import MemoryDocket
+from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_decide import make_request
@@ -651,6 +651,8 @@ def test_a_revoke_through_control_stops_the_next_call(stack, workdir, writer, pr
         Suspension(shared_suspension(private("shared")), os.getegid()),
         MemoryDocket(),
         "control",
+        resolver=RESOLVER,
+        trust_policy=TRUST_POLICY,
     )
     control.revoke(allow_record_line(workdir), level, "ops", NOW)
     later = make_request(nonce="n-2")

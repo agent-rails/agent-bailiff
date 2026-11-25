@@ -8,7 +8,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 |---|---|---|---|
 | decide | its own uid; owns the ledger | its signing key, policy, cost table, routes, the ledger (writer), the suspension switch | Unix socket for the gateway (ExtMcp) |
 | custodian | its own uid; in the ledger group | its signing key, key encryption key, credential store, binding table, claims database, routes, released credentials for calls in flight; the ledger and suspension state read-only | Unix sockets for the gateway (ExtMcp request, and the redactor's response socket) |
-| docket | its own uid | the active segment, sealed segments, their manifest and the heads snapshot, pinned writer keys; the receipt directory read-only | Unix socket for decide, custodian and control |
+| docket | its own uid | the active segment, sealed segments, their manifest and the heads snapshot, pinned writer keys; the receipt directory read-only | Unix socket for decide, custodian, control and the issuer |
 | docket archive | `archiver_uid`; in the docket reader group | its checkpoint, the archive directory, the receipt directory, pinned writer keys; the manifest and sealed segments read-only | none |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
 | docket export (optional) | its own uid; in the docket reader group | its checkpoint, pinned writer keys | none; sends OTLP/HTTP to a collector |
@@ -77,12 +77,13 @@ All records are Ed25519 signatures over agent-warrant's canonical JSON, encoded 
 
 - Clearance: `typ, v, kid, iss, aud, iat, exp, op_id, tenant, task, root_binding, leaf_binding, request_digest, tool, resource, args_digest, cost, credential_id, target, trace_id, entry_id`. Decide caps its lifetime at decide's `max_proof_age`; the custodian refuses one longer than its own `max_clearance_lifetime`.
 - Docket entry (`agent-bailiff/docket-entry/v1`): who (principal, tenant, task root, links, agent key), what (tool, resource, args digest, cost), policy (id, version, digest, rule, verdict), what was done (performed, outcome, credential tier), how (hop, component, decision, reason), and revocable handles.
+- Docket grant (`agent-bailiff/docket-grant/v1`): `grant_id`, `at` and `root_token`, the issuer-signed task root as `task issue` wrote it. Only a grant writer (the docket config's `grant_writers`) appends grants, and it appends nothing else. See [DOCKET.md](DOCKET.md), Record types.
 
 ## Control
 
 `agent-bailiff control` runs as decide's uid against decide's config.
 
-- `revoke` takes one signed docket line, verifies it against pinned writer keys, and revokes its handle at the chosen level (`link`, `task`, `tenant`, `root`) in the ledger.
+- `revoke` takes one signed docket line, verifies it against pinned writer keys, and revokes its handle at the chosen level (`link`, `task`, `tenant`, `root`) in the ledger. From a grant it takes `task`, `root` or `tenant`, after verifying the root against an issuer key in control's `issuers` and that issuer's allowance.
 - `suspend` and `resume` set or clear the suspension switch.
 
 Each action is applied first and then recorded as a control entry in the source record's trace. An unacknowledged entry is reported as unrecorded.

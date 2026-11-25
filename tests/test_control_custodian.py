@@ -2,7 +2,7 @@ import os
 
 import pytest
 import test_custodian
-from test_control import MemoryDocket
+from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import WRITERS, Refused, Released, custodian_entries
 from test_decide import NOW, make_request, make_root
@@ -38,6 +38,8 @@ def control(writer, suspension_dir):
         Suspension(suspension_dir, os.getegid()),
         MemoryDocket(),
         "control",
+        resolver=RESOLVER,
+        trust_policy=TRUST_POLICY,
     )
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from agent_warrant.ledger import LedgerError
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
@@ -25,6 +26,7 @@ from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, DocketArchiver
 from agent_bailiff.docket.client import DocketError
+from agent_bailiff.docket.grants import INVALID_GRANT, GrantReport, grant_header, grant_json_row, grant_table_row
 from agent_bailiff.docket.report import (
     RecordFilter,
     SeedCheck,
@@ -63,12 +65,14 @@ from agent_bailiff.service.init import (
     read_pin,
 )
 from agent_bailiff.service.settings import (
+    DocketClientSettings,
     DocketSettings,
     load_control,
     load_custodian,
     load_decide,
     load_docket,
     load_effector,
+    load_issuers,
 )
 from agent_bailiff.signing import MAX_TOKEN_CHARS
 from agent_bailiff.strict_json import parse_strict_json
@@ -84,6 +88,7 @@ from agent_bailiff.task.issue import (
 
 PROG = "agent-bailiff"
 EXIT_REFUSED = 1
+EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 MAX_SECRET_BYTES = 65536
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
@@ -156,7 +161,7 @@ def _parser() -> argparse.ArgumentParser:
                 "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
             )
             verify.add_argument("--trace", help="print only records of this trace id")
-            verify.add_argument("--task", help="print only records of this task root")
+            verify.add_argument("--task", help="print only records of this task root, and its grant")
             verify.add_argument("--since", type=int, help="print only records at or after this Unix time (UTC)")
             verify.add_argument("--json", action="store_true", help="print one JSON object per record")
             verify.add_argument("--snapshot", type=Path, help="also cross-check this heads snapshot against the docket")
@@ -186,6 +191,26 @@ def _parser() -> argparse.ArgumentParser:
             )
             tasks.add_argument("--json", action="store_true", help="print one JSON object per task")
             tasks.set_defaults(handler=_list_tasks)
+            grants = component.add_parser(
+                "grants",
+                help="verify every record and print granted versus used per task root; advisory, exit 1 on an "
+                "invalid grant, 2 when the docket fails verification",
+            )
+            grants.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            grants.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            grants.add_argument(
+                "--issuers",
+                type=Path,
+                required=True,
+                help="0600 JSON file holding the issuers section of decide's config; checks each grant's task root",
+            )
+            grants.add_argument(
+                "--archive", type=Path, help="read removed segments from this archive, so older grants are listed"
+            )
+            grants.add_argument("--json", action="store_true", help="print one JSON object per task root")
+            grants.set_defaults(handler=_report_grants)
             export = component.add_parser(
                 "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
             )
@@ -240,6 +265,14 @@ def _parser() -> argparse.ArgumentParser:
                 "--once", action="store_true", help="archive every sealed segment and recheck receipts, then exit"
             )
             archive.set_defaults(handler=_archive_docket)
+            for reader in (verify, tasks, grants, export, archive):
+                reader.add_argument(
+                    "--grant-pin",
+                    type=Path,
+                    action="append",
+                    default=[],
+                    help="grant writer public key record; its writer may record only grants; repeat",
+                )
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -290,6 +323,17 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     )
     issue.add_argument(
         "--out-dir", type=Path, required=True, help="task directory owned by this uid, not group or other writable"
+    )
+    issue.add_argument("--docket-socket", type=Path, required=True, help="the docket sink's socket")
+    issue.add_argument("--docket-uid", type=int, required=True, help="the docket sink's uid")
+    issue.add_argument(
+        "--docket-writer", required=True, help="this issuer's docket writer, pinned in the docket as a grant writer"
+    )
+    issue.add_argument(
+        "--docket-key", type=Path, required=True, help="the docket writer's 0600 signing key, not the issuer key"
+    )
+    issue.add_argument(
+        "--docket-state-dir", type=Path, required=True, help="the docket writer's own 0700 state directory"
     )
     issue.set_defaults(handler=_task_issue)
 
@@ -379,6 +423,13 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
     for parser in (control, docket):
         parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
+        parser.add_argument(
+            "--grant-pin",
+            type=Path,
+            action="append",
+            default=[],
+            help="grant writer public key record; its writer may record only grants; repeat",
+        )
     for parser in (decide, custodian, control, docket, effector):
         parser.add_argument("--dir", type=Path, required=True, help="the component's 0700 directory")
         parser.set_defaults(handler=_init)
@@ -413,14 +464,21 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             reader_group=args.reader_group,
             allowed_uids=args.allowed_uid,
             pins=pins,
+            grant_pins=[read_pin(path) for path in args.grant_pin],
             receipt_dir=args.receipt_dir,
             archiver_uid=args.archiver_uid,
         )
         return None
     docket = {"socket": args.docket_socket, "sink_uid": args.docket_uid}
     if args.component == "control":
-        pins = [read_pin(path) for path in args.pin]
-        return init_control(args.dir, name=args.name, decide_config=args.decide_config, pins=pins, docket=docket)
+        return init_control(
+            args.dir,
+            name=args.name,
+            decide_config=args.decide_config,
+            pins=[read_pin(path) for path in args.pin],
+            grant_pins=[read_pin(path) for path in args.grant_pin],
+            docket=docket,
+        )
     if args.component == "effector":
         kubernetes = {
             "host": args.kube_host,
@@ -548,9 +606,11 @@ def _run_docket(args: argparse.Namespace) -> int:
 def _list_tasks(args: argparse.Namespace) -> int:
     try:
         control = [read_pin(path) for path in args.control_pin]
-        writers = pinned_writers([*(read_pin(path) for path in args.pin), *control])
+        writers, grant_writers = _docket_pins([*(read_pin(path) for path in args.pin), *control], args.grant_pin)
         tasks = TaskList(frozenset(pin.component for pin in control))
-        report = verify_records(args.docket, writers, RecordFilter(), tasks.add, archive=args.archive)
+        report = verify_records(
+            args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
+        )
     except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket tasks", exc)
     if not report.ok:
@@ -567,7 +627,45 @@ def _list_tasks(args: argparse.Namespace) -> int:
     for row in rows:
         print(task_json_row(row) if args.json else task_table_row(row))
     print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
+    if tasks.undecodable_grants:
+        print(
+            f"{PROG} docket tasks: {tasks.undecodable_grants} grants hold a task root that does not decode; "
+            "their tasks are not listed",
+            file=sys.stderr,
+        )
     return 0
+
+
+def _report_grants(args: argparse.Namespace) -> int:
+    try:
+        issuers = load_issuers(args.issuers)
+        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
+        grants = GrantReport(issuers.resolver, issuers.trust_policy)
+        report = verify_records(
+            args.docket, writers, RecordFilter(), grants.add, archive=args.archive, grant_writers=grant_writers
+        )
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
+        print(f"{PROG} docket grants refused: {exc}", file=sys.stderr)
+        return EXIT_UNVERIFIED
+    if not report.ok:
+        where = "the docket" if report.line is None else f"line {report.line}"
+        print(
+            f"{PROG} docket grants: {where} fails verification: {report.reason} {printable(report.detail)}; "
+            "no grants printed",
+            file=sys.stderr,
+        )
+        return EXIT_UNVERIFIED
+    rows = grants.rows()
+    if not args.json:
+        print(grant_header())
+    for row in rows:
+        print(grant_json_row(row) if args.json else grant_table_row(row))
+    invalid = sum(row.status == INVALID_GRANT for row in rows)
+    print(
+        f"{PROG} docket grants: {report.entries} records verified, {len(rows)} roots, {invalid} invalid grants",
+        file=sys.stderr,
+    )
+    return EXIT_REFUSED if invalid else 0
 
 
 def _verify_docket(args: argparse.Namespace) -> int:
@@ -580,12 +678,14 @@ def _verify_docket(args: argparse.Namespace) -> int:
         print(json_row(verified) if args.json else table_row(verified))
 
     try:
-        writers = pinned_writers(read_pin(path) for path in args.pin)
+        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
         check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
         seeds = None if args.receipts is None else SeedCheck(args.receipts)
-        report = verify_records(args.docket, writers, selected, emit, check, args.archive, seeds)
+        report = verify_records(
+            args.docket, writers, selected, emit, check, args.archive, seeds, grant_writers=grant_writers
+        )
     except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
@@ -644,7 +744,7 @@ def _export_docket(args: argparse.Namespace) -> int:
     stop = _stop_on_signals()
     try:
         endpoint = _otlp_endpoint(args.otlp)
-        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        index = build_kid_index(*_docket_pins([read_pin(path) for path in args.pin], args.grant_pin))
         span_exporter: SpanExporter = OtlpHttpExporter(endpoint, timeout=args.timeout)
     except STARTUP_ERRORS + (InitError,) as exc:
         return _refused("docket export", exc)
@@ -679,7 +779,7 @@ def _export_docket(args: argparse.Namespace) -> int:
 def _archive_docket(args: argparse.Namespace) -> int:
     stop = _stop_on_signals()
     try:
-        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        index = build_kid_index(*_docket_pins([read_pin(path) for path in args.pin], args.grant_pin))
         archiver = DocketArchiver(
             args.docket,
             index,
@@ -694,6 +794,17 @@ def _archive_docket(args: argparse.Namespace) -> int:
         return _refused("docket archive", exc)
     print(f"{PROG} docket archive: {archived} segments archived", file=sys.stderr)
     return 0
+
+
+def _docket_pins(
+    pins: Sequence[PublicKeyRecord], grant_pin_paths: Sequence[Path]
+) -> tuple[dict[str, dict[str, Ed25519PublicKey]], frozenset[str]]:
+    grants = [read_pin(path) for path in grant_pin_paths]
+    grant_writers = frozenset(pin.component for pin in grants)
+    both = sorted({pin.component for pin in pins} & grant_writers)
+    if both:
+        raise InitError(f"writers pinned both as entry and grant writers: {', '.join(both)}")
+    return pinned_writers([*pins, *grants]), grant_writers
 
 
 def _otlp_endpoint(value: str) -> str:
@@ -780,6 +891,7 @@ def _routes_generate(args: argparse.Namespace) -> int:
 
 
 def _task_issue(args: argparse.Namespace) -> int:
+    now = int(time.time())
     try:
         request = TaskRequest(
             purpose=args.purpose,
@@ -791,12 +903,24 @@ def _task_issue(args: argparse.Namespace) -> int:
             ttl=args.ttl,
             max_depth=args.max_depth,
         )
-        task = issue_task(load_signing_key(args.issuer_key), args.issuer, args.decider_id, request, int(time.time()))
-        path = write_task_file(args.out_dir, task)
+        issuer_key = load_signing_key(args.issuer_key)
+        docket_key = load_signing_key(args.docket_key)
+        if docket_key.public_key() == issuer_key.public_key():
+            raise ValueError("--docket-key must be the docket writer's own key, not the issuer key")
+        task = issue_task(issuer_key, args.issuer, args.decider_id, request, now)
+        settings = DocketClientSettings(args.docket_socket, args.docket_uid, args.docket_state_dir)
+        docket = run.docket_client(settings, args.docket_writer, docket_key)
+        try:
+            issued = write_task_file(args.out_dir, task, issuer_key.public_key(), docket, now)
+        finally:
+            docket.close()
     except STARTUP_ERRORS + (TaskIssueError,) as exc:
         return _refused("task issue", exc)
-    print(f"{PROG} task issue: wrote {path}, expires at {task.root.expires_at}", file=sys.stderr)
-    print(task.root.task_id)
+    print(
+        f"{PROG} task issue: wrote {issued.path}, expires at {issued.task.root.expires_at}, grant_id {issued.grant_id}",
+        file=sys.stderr,
+    )
+    print(issued.task.root.task_id)
     return 0
 
 

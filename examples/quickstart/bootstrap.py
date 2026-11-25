@@ -15,6 +15,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,8 @@ from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
+from agent_bailiff.docket.client import DocketClient, DocketError
+from agent_bailiff.docket.grant import Grant
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
 from agent_bailiff.plain_http import allows_plain_http
 from agent_bailiff.route_generation import service_problem
@@ -57,16 +60,19 @@ GITEA_ADMIN_GID = 20004
 STATE = Path("/var/lib/bailiff")
 RUN = Path("/run/bailiff")
 PINS = Path("/pins")
-DIRS = {
-    name: STATE / name
-    for name in ("docket", "decide", "custodian", "control", "rule", "issuer", "ledger", "gitea-admin")
-}
+STATE_DIRS = (
+    "docket", "decide", "custodian", "control", "rule", "issuer", "issuer-docket", "ledger", "gitea-admin",
+)  # fmt: skip
+DIRS = {name: STATE / name for name in STATE_DIRS}
 SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "custodian")}
 SOCKETS["redactor"] = RUN / "custodian" / "redactor.sock"
 LEDGER = DIRS["ledger"] / "ledger.db"
 RECEIPTS = STATE / "receipts"
 ADMIN_PASSWORD = DIRS["gitea-admin"] / "password"
 ISSUER_KEY = DIRS["issuer"] / "issuer.key"
+ISSUER_DOCKET_KEY = DIRS["issuer-docket"] / "signing.key"
+ISSUER_DOCKET_STATE = DIRS["issuer-docket"] / "docket-state"
+GRANT_PIN = PINS / "issuer" / "issuer-docket.json"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
@@ -79,6 +85,7 @@ NAMES = {
     "control": "control.quickstart",
     "rule": "rule.quickstart",
     "issuer": "issuer.quickstart",
+    "issuer-docket": "issuer-docket.quickstart",
 }
 WRITERS = ("decide", "custodian", "control", "rule")
 QUICKSTART_UPSTREAMS = Path(__file__).resolve().parent / "upstreams"
@@ -362,15 +369,25 @@ def bindings(upstream: Upstream, **extra: Any) -> list[dict[str, Any]]:
     ]
 
 
-def init_issuer() -> str:
-    pin = pin_path("issuer")
-    if ISSUER_KEY.exists():
-        check_pin(ISSUER_KEY, NAMES["issuer"], pin)
+def ensure_signing_key(key: Path, component: str, pin: Path) -> str:
+    if key.exists():
+        check_pin(key, component, pin)
         return "kept"
     if pin.exists():
-        raise BootstrapError(f"{pin} exists without {ISSUER_KEY}; run docker compose down --volumes and start again")
-    write_pin(pin, json.dumps(generate_signing_key(ISSUER_KEY, NAMES["issuer"]).to_document(), sort_keys=True))
+        raise BootstrapError(f"{pin} exists without {key}; run docker compose down --volumes and start again")
+    write_pin(pin, json.dumps(generate_signing_key(key, component).to_document(), sort_keys=True))
     return "created"
+
+
+def init_issuer() -> str:
+    outcomes = {
+        ensure_signing_key(ISSUER_KEY, NAMES["issuer"], pin_path("issuer")),
+        ensure_signing_key(ISSUER_DOCKET_KEY, NAMES["issuer-docket"], GRANT_PIN),
+    }
+    if not ISSUER_DOCKET_STATE.exists():
+        os.mkdir(ISSUER_DOCKET_STATE, 0o700)
+        outcomes.add("created")
+    return "created" if "created" in outcomes else "kept"
 
 
 def init_decide() -> str:
@@ -438,36 +455,44 @@ def init_gateway() -> str:
 def control_arguments() -> list[object]:
     return [
         "--decide-config", DIRS["decide"] / "config.json", "--pin", pin_path("decide"),
-        "--pin", pin_path("custodian"), *docket_client(),
+        "--pin", pin_path("custodian"), "--grant-pin", GRANT_PIN, *docket_client(),
     ]  # fmt: skip
 
 
 def init_control() -> str:
-    return ensure_component("control", load_control, control_arguments())
+    return fill_control_issuers("control", ensure_component("control", load_control, control_arguments()))
 
 
 def init_rule() -> str:
-    return ensure_component("rule", load_control, control_arguments(), kind="control")
+    outcome = ensure_component("rule", load_control, control_arguments(), kind="control")
+    return fill_control_issuers("rule", outcome)
+
+
+def fill_control_issuers(component: str, outcome: str) -> str:
+    config = DIRS[component] / "config.json"
+    changed = replace_owned(config, {**json.loads(config.read_text()), "issuers": issuers()})
+    load_control(config)
+    return "updated" if changed and outcome == "kept" else outcome
 
 
 def init_docket() -> str:
     config = DIRS["docket"] / "config.json"
-    pins = [read_pin(pin_path(component)) for component in WRITERS]
-    expected = {pin.component: {pin.kid} for pin in pins}
     if config.exists():
         try:
             settings = load_docket(config)
         except ConfigError as error:
             raise BootstrapError(f"{config}: {error}; run docker compose down --volumes and start again") from None
+        pins = [read_pin(pin_path(component)) for component in WRITERS] + [read_pin(GRANT_PIN)]
+        expected = {pin.component: {pin.kid} for pin in pins}
         writers = {component: set(keys) for component, keys in settings.writers.items()}
-        if writers != expected:
+        if writers != expected or set(settings.grant_writers) != {NAMES["issuer-docket"]}:
             raise BootstrapError(f"{config} pins other writers than {PINS}; run docker compose down --volumes")
         return "kept"
     arguments: list[object] = [
         "init", "docket", "--dir", DIRS["docket"], "--socket", SOCKETS["docket"],
         "--socket-group", DOCKET_WRITERS_GID, "--reader-group", DOCKET_READERS_GID,
-        "--allowed-uid", DECIDE_UID, "--allowed-uid", CUSTODIAN_UID,
-        "--receipt-dir", RECEIPTS, "--archiver-uid", ARCHIVER_UID,
+        "--allowed-uid", DECIDE_UID, "--allowed-uid", CUSTODIAN_UID, "--allowed-uid", ISSUER_UID,
+        "--receipt-dir", RECEIPTS, "--archiver-uid", ARCHIVER_UID, "--grant-pin", GRANT_PIN,
     ]  # fmt: skip
     for component in WRITERS:
         arguments += ["--pin", pin_path(component)]
@@ -708,8 +733,23 @@ def write_public_bytes(path: Path, data: bytes) -> None:
     os.replace(staged, path)
 
 
+def append_grants(documents: Sequence[dict[str, str]]) -> None:
+    key = load_signing_key(ISSUER_DOCKET_KEY)
+    writer = NAMES["issuer-docket"]
+    docket = DocketClient(
+        SOCKETS["docket"], writer, key_id(writer, key.public_key()), key,
+        sink_uid=DOCKET_UID, state_dir=ISSUER_DOCKET_STATE,
+    )  # fmt: skip
+    try:
+        for document in documents:
+            docket.append(Grant(uuid.uuid4().hex, int(time.time()), document["task_root"]))
+    finally:
+        docket.close()
+
+
 def issue_task() -> str:
     document = task_document(agent_subject(), "triage-quickstart-demo", TASK_BUDGET)
+    append_grants([document])
     write_public(TASK_FILE, document)
     return document["task_id"]
 
@@ -717,6 +757,7 @@ def issue_task() -> str:
 def issue_load_tasks() -> str:
     subject = agent_subject()
     tasks = [task_document(subject, "quickstart-load", ISSUER_MAX_BUDGET) for _ in range(LOAD_TASKS)]
+    append_grants(tasks)
     write_public(LOAD_FILE, {"budget": ISSUER_MAX_BUDGET, "tasks": tasks})
     return f"{LOAD_TASKS} tasks"
 
@@ -742,7 +783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         outcome = COMMANDS[args.step]()
-    except (BootstrapError, InitError, OwnedFileError, BackendError, OSError, ValueError) as error:
+    except (BootstrapError, InitError, OwnedFileError, BackendError, DocketError, OSError, ValueError) as error:
         print(f"bootstrap {args.step} refused: {error}", file=sys.stderr)
         return 1
     print(f"{args.step}: {outcome}")

@@ -10,10 +10,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
+from agent_warrant.task_root import TaskRoot
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.docket.archiver import ArchiveCopies, ArchivedCopy, encode_sidecar
-from agent_bailiff.docket.entry import Entry, Head
+from agent_bailiff.docket.entry import ENTRY_TYP, Entry, Head
+from agent_bailiff.docket.grant import GRANT_TYP, Grant
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, read_docket_manifest
 from agent_bailiff.docket.receipt import Receipt, ReceiptDir
 from agent_bailiff.docket.segments import (
@@ -37,6 +39,8 @@ from agent_bailiff.docket.snapshot import Snapshot, SnapshotInvalid, read_snapsh
 from agent_bailiff.keys import PublicKeyRecord
 
 RELEASED = "released, target outcome unknown"
+GRANTED = "task grant"
+GRANT_DECISION = "grant"
 TABLE_COLUMNS = ("line", "at", "writer", "seq", "decision", "tool", "resource", "reason", "note")
 SNAPSHOT_FIELDS = ("segment", "entries", "prefix_sha256", "anchors", "kids")
 READER_MODE = 0o640
@@ -48,12 +52,27 @@ class RecordFilter:
     task: str | None = None
     since: int | None = None
 
-    def matches(self, entry: Entry) -> bool:
+    def matches(self, entry: Entry | Grant) -> bool:
+        if isinstance(entry, Grant):
+            return self.trace is None and self._grants_task(entry) and (self.since is None or entry.at >= self.since)
         if self.trace is not None and entry.trace_id != self.trace:
             return False
         if self.task is not None and self.task not in (entry.task_root, entry.handles.get("task")):
             return False
         return self.since is None or entry.at >= self.since
+
+    def _grants_task(self, grant: Grant) -> bool:
+        if self.task is None:
+            return True
+        root = grant_root(grant)
+        return root is not None and self.task in (root.binding(), root.task_id)
+
+
+def grant_root(grant: Grant) -> TaskRoot | None:
+    try:
+        return TaskRoot.decode(grant.root_token)
+    except (ValueError, TypeError):
+        return None
 
 
 def pinned_writers(pins: Iterable[PublicKeyRecord]) -> dict[str, dict[str, Ed25519PublicKey]]:
@@ -65,8 +84,8 @@ def pinned_writers(pins: Iterable[PublicKeyRecord]) -> dict[str, dict[str, Ed255
     return writers
 
 
-def verify_docket(path: Path, writers: Writers) -> VerifyReport:
-    return verify_records(path, writers, RecordFilter(), lambda _line: None)
+def verify_docket(path: Path, writers: Writers, grant_writers: Iterable[str] = ()) -> VerifyReport:
+    return verify_records(path, writers, RecordFilter(), lambda _line: None, grant_writers=grant_writers)
 
 
 def verify_records(
@@ -77,8 +96,9 @@ def verify_records(
     check: SnapshotCheck | None = None,
     archive: Path | None = None,
     seeds: SeedCheck | None = None,
+    grant_writers: Iterable[str] = (),
 ) -> VerifyReport:
-    index = build_kid_index(writers)
+    index = build_kid_index(writers, grant_writers)
     manifest = read_listed_manifest(path)
     if seeds is not None:
         seeds.compare(path, manifest)
@@ -297,15 +317,14 @@ def _receipt_fields(receipt: Receipt) -> tuple[str, str, int, dict[str, Head]]:
     return receipt.docket_id, receipt.sha256, receipt.size, dict(receipt.end_heads)
 
 
-def note(entry: Entry) -> str | None:
+def note(entry: Entry | Grant) -> str | None:
+    if isinstance(entry, Grant):
+        return GRANTED
     return RELEASED if entry.performed else None
 
 
 def json_row(verified: VerifiedLine) -> str:
     record = verified.record
-    entry = asdict(record.entry)
-    entry["links"] = list(record.entry.links)
-    entry["handles"] = dict(record.entry.handles)
     document = {
         "line": verified.line,
         "writer": record.writer,
@@ -313,9 +332,15 @@ def json_row(verified: VerifiedLine) -> str:
         "kid": record.kid,
         "hash": record.hash,
         "note": note(record.entry),
-        "entry": entry,
         "token": record.token,
     }
+    if isinstance(record.entry, Grant):
+        document |= {"typ": GRANT_TYP, "grant": asdict(record.entry)}
+    else:
+        entry = asdict(record.entry)
+        entry["links"] = list(record.entry.links)
+        entry["handles"] = dict(record.entry.handles)
+        document |= {"typ": ENTRY_TYP, "entry": entry}
     return json.dumps(document, sort_keys=True)
 
 
@@ -326,18 +351,14 @@ def table_header() -> str:
 def table_row(verified: VerifiedLine) -> str:
     record = verified.record
     entry = record.entry
-    values = (
-        str(verified.line),
-        utc(entry.at),
-        record.writer,
-        str(record.seq),
-        entry.decision,
-        entry.tool,
-        entry.resource,
-        entry.reason,
-        note(entry),
-    )
+    values = (str(verified.line), utc(entry.at), record.writer, str(record.seq), *_columns(entry), note(entry))
     return "\t".join(printable(value) for value in values)
+
+
+def _columns(entry: Entry | Grant) -> tuple[str | None, ...]:
+    if isinstance(entry, Grant):
+        return GRANT_DECISION, None, None, None
+    return entry.decision, entry.tool, entry.resource, entry.reason
 
 
 def utc(at: int) -> str:

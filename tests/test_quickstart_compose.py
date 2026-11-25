@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_quickstart_rule import rule_module
 from test_quickstart_stack import b
 
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "examples" / "quickstart" / "compose.yaml"
@@ -12,6 +13,8 @@ UPSTREAM_SERVERS = {"stub-upstream", "gitea", "gitea-mcp", "gitea-mcp-spike"}
 PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
 GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
+DOCKET_READERS = ("reader", "archiver", "exporter")
+ISSUERS = ("task-issuer", "gitea-task")
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -75,17 +78,53 @@ def test_the_gateway_depends_on_gitea_only_when_its_profile_runs(config):
     assert config["services"]["custodian"]["depends_on"]["bootstrap"]["required"] is False
 
 
+def arguments_of(service):
+    return [*(service.get("entrypoint") or []), *(service.get("command") or [])]
+
+
+def flag_values(arguments, flag):
+    return {arguments[index + 1] for index, argument in enumerate(arguments) if argument == flag}
+
+
 def test_the_task_issuer_reads_the_issuer_key_and_writes_only_the_task_directory(config):
     service = config["services"]["task-issuer"]
     assert service["profiles"] == ["operator"]
     assert service["network_mode"] == "none"
     volumes = {volume["target"]: volume for volume in service["volumes"]}
-    assert volumes.keys() == {"/var/lib/bailiff/issuer", "/out"}
+    assert volumes.keys() == {"/var/lib/bailiff/issuer", str(b.DIRS["issuer-docket"]), "/run/bailiff/docket", "/out"}
     assert volumes["/var/lib/bailiff/issuer"]["source"] == "issuer-data"
     assert volumes["/var/lib/bailiff/issuer"]["read_only"] is True
     assert volumes["/out"]["type"] == "bind"
     assert volumes["/out"]["bind"]["create_host_path"] is False
-    assert service["entrypoint"][-2:] == ["--out-dir", "/out"]
+    entrypoint = service["entrypoint"]
+    assert entrypoint[-2:] == ["--out-dir", "/out"]
+    assert flag_values(entrypoint, "--docket-writer") == {b.NAMES["issuer-docket"]}
+    assert flag_values(entrypoint, "--docket-key") == {str(b.ISSUER_DOCKET_KEY)}
+    assert flag_values(entrypoint, "--docket-state-dir") == {str(b.ISSUER_DOCKET_STATE)}
+    assert flag_values(entrypoint, "--docket-key") != flag_values(entrypoint, "--issuer-key")
+
+
+@pytest.mark.parametrize("name", ISSUERS)
+def test_an_issuer_reaches_the_docket_socket_only_once_the_docket_is_healthy(config, name):
+    service = config["services"][name]
+    assert service["user"] == f"{b.ISSUER_UID}:{b.ISSUER_UID}"
+    assert service["group_add"] == [str(b.DOCKET_WRITERS_GID)]
+    mounts = {volume["source"]: volume for volume in service["volumes"]}
+    assert not mounts["issuer-docket"].get("read_only", False)
+    assert mounts["docket-run"]["target"] == str(b.SOCKETS["docket"].parent)
+    assert service["depends_on"]["docket"]["condition"] == "service_healthy"
+
+
+@pytest.mark.parametrize("name", DOCKET_READERS)
+def test_every_docket_reader_pins_the_same_writers_and_the_grant_writer(config, name):
+    arguments = arguments_of(config["services"][name])
+    assert flag_values(arguments, "--pin") == {str(b.pin_path(component)) for component in b.WRITERS}
+    assert flag_values(arguments, "--grant-pin") == {str(b.GRANT_PIN)}
+
+
+def test_the_rule_pins_the_same_writers_as_the_docket_readers():
+    assert {str(path) for path in rule_module.PINS} == {str(b.pin_path(component)) for component in b.WRITERS}
+    assert rule_module.GRANT_PIN == b.GRANT_PIN
 
 
 def test_the_gateway_reads_its_config_read_only(config):

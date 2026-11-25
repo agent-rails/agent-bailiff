@@ -172,16 +172,20 @@ def init_control(
     name: str,
     decide_config: Path,
     pins: Iterable[PublicKeyRecord],
+    grant_pins: Iterable[PublicKeyRecord],
     docket: Mapping[str, Any],
 ) -> PublicKeyRecord:
     check_component(name)
+    entry_pins, grants = _pin_roles(pins, grant_pins)
     _check_new(directory, (CONFIG, KEY, DOCKET_STATE))
     document = {
         "name": name,
         "key": str(directory / KEY),
         "decide_config": str(decide_config),
         "docket": _docket_client(directory, docket),
-        "writers": _writers(pins),
+        "writers": _writers([*entry_pins, *grants]),
+        "grant_writers": sorted({pin.component for pin in grants}),
+        "issuers": {},
     }
     parse_control(document)
     _make_private_dirs(directory, (DOCKET_STATE,))
@@ -251,9 +255,11 @@ def init_docket(
     reader_group: int,
     allowed_uids: Iterable[int],
     pins: Iterable[PublicKeyRecord],
+    grant_pins: Iterable[PublicKeyRecord],
     receipt_dir: Path,
     archiver_uid: int,
 ) -> Path:
+    entry_pins, grants = _pin_roles(pins, grant_pins)
     _check_new(directory, (CONFIG, "docket.log", "docket.log.snapshot"))
     document = {
         "docket": str(directory / "docket.log"),
@@ -261,7 +267,8 @@ def init_docket(
         "socket_group": socket_group,
         "reader_group": reader_group,
         "allowed_uids": sorted(set(allowed_uids)),
-        "writers": _writers(pins),
+        "writers": _writers([*entry_pins, *grants]),
+        "grant_writers": sorted({pin.component for pin in grants}),
         "snapshot_every": DEFAULT_SNAPSHOT_EVERY,
         "free_space_floor": DEFAULT_FREE_SPACE_FLOOR,
         "segment_bytes": DEFAULT_SEGMENT_BYTES,
@@ -274,6 +281,16 @@ def init_docket(
     _share_directory(directory, reader_group)
     _write(directory / CONFIG, document)
     return directory / CONFIG
+
+
+def _pin_roles(
+    pins: Iterable[PublicKeyRecord], grant_pins: Iterable[PublicKeyRecord]
+) -> tuple[list[PublicKeyRecord], list[PublicKeyRecord]]:
+    entry_pins, grants = list(pins), list(grant_pins)
+    both = sorted({pin.component for pin in entry_pins} & {pin.component for pin in grants})
+    if both:
+        raise InitError(f"writers pinned both as entry and grant writers: {', '.join(both)}")
+    return entry_pins, grants
 
 
 def _writers(pins: Iterable[PublicKeyRecord]) -> dict[str, dict[str, str]]:

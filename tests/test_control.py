@@ -12,6 +12,7 @@ from agent_warrant.encoding import b64u, b64u_decode
 from agent_warrant.identity import encode_public_key
 from agent_warrant.ledger import LedgerUnavailable, TaskLedger
 from agent_warrant.resolver import PinnedResolver
+from agent_warrant.task_root import issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_control_suspension import shared_suspension
@@ -29,6 +30,7 @@ from test_decide import (
     NOW,
     POLICY,
     PRINCIPAL,
+    SCOPE,
     SIGNER_CUSTODIAN_ID,
     TENANT,
     RunningSink,
@@ -38,7 +40,7 @@ from test_decide import (
 
 from agent_bailiff.control import Control, ControlRefused, ControlUnrecorded, Suspension
 from agent_bailiff.decide import Decider, DeciderConfig, PolicyRef
-from agent_bailiff.docket import DocketClient, DocketSink, Record, decode_record, encode_record
+from agent_bailiff.docket import DocketClient, DocketSink, Grant, Record, decode_record, encode_record
 from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused
@@ -46,11 +48,27 @@ from agent_bailiff.signing import Refused
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(4, 36)))
 CONTROL_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(6, 38)))
 FORGER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(7, 39)))
+GRANTER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(8, 40)))
+OTHER_ISSUER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
+OTHER_ISSUER_ID = "issuer.other"
+OTHER_TENANT = "tenant-b"
 VERIFIED_WRITERS = {
     "decide": {"decide-1": DECIDE_KEY.public_key()},
     "custodian": {"custodian-1": CUSTODIAN_KEY.public_key()},
 }
+GRANT_WRITERS = {**VERIFIED_WRITERS, "issuer": {"issuer-1": GRANTER_KEY.public_key()}}
 SINK_WRITERS = {**VERIFIED_WRITERS, "control": {"control-1": CONTROL_KEY.public_key()}}
+RESOLVER = PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key(), OTHER_ISSUER_ID: OTHER_ISSUER_KEY.public_key()})
+TRUST_POLICY = IssuerTrustPolicy(
+    {
+        ISSUER_ID: IssuerAllowance(
+            tenants={TENANT: TenantAllowance(principals={PRINCIPAL})}, max_budget=100, max_depth=4
+        ),
+        OTHER_ISSUER_ID: IssuerAllowance(
+            tenants={OTHER_TENANT: TenantAllowance(principals={PRINCIPAL})}, max_budget=100, max_depth=4
+        ),
+    }
+)
 LINK_SCOPE = {"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]}
 LEVELS = ("link", "task", "tenant", "root")
 
@@ -122,14 +140,8 @@ def decider(workdir, sink, ledger, suspension):
             DECIDER_ID, "decide-1", frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}), MAX_PROOF_AGE, BINDINGS, "decide"
         ),
         ledger=ledger,
-        resolver=PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
-        trust_policy=IssuerTrustPolicy(
-            {
-                ISSUER_ID: IssuerAllowance(
-                    tenants={TENANT: TenantAllowance(principals={PRINCIPAL})}, max_budget=100, max_depth=4
-                )
-            }
-        ),
+        resolver=RESOLVER,
+        trust_policy=TRUST_POLICY,
         policy=PolicyRef.from_dict("default", "1", POLICY),
         suspension=suspension,
         docket=client(workdir, "decide", "decide-1", DECIDE_KEY),
@@ -148,11 +160,43 @@ def make_control(workdir, sink, ledger, suspension):
             "suspension": suspension,
             "docket": docket or client(workdir, "control", "control-1", CONTROL_KEY),
             "docket_writer": "control",
+            "resolver": RESOLVER,
+            "trust_policy": TRUST_POLICY,
         }
         options.update(overrides)
         return Control(**options)
 
     return make
+
+
+@pytest.fixture
+def grant_control(make_control):
+    def make(**overrides):
+        return make_control(writers=GRANT_WRITERS, grant_writers={"issuer"}, **overrides)
+
+    return make
+
+
+def signed_root(key=ISSUER_KEY, *, issuer=ISSUER_ID, tenant=TENANT, ttl=3600, task_id="task-1"):
+    return issue_task_root(
+        key,
+        issuer=issuer,
+        task_id=task_id,
+        tenant_id=tenant,
+        principal=PRINCIPAL,
+        purpose="release-bot",
+        budget=100,
+        max_depth=4,
+        issued_at=NOW,
+        expires_at=NOW + ttl,
+        scope=SCOPE,
+        subject=encode_public_key(AGENT_KEY.public_key()),
+    )
+
+
+def grant_token(root_token, grant_id="g-1"):
+    grant = Grant(grant_id=grant_id, at=NOW, root_token=root_token)
+    return encode_record(GRANTER_KEY, "issuer-1", "issuer", 1, None, grant).token
 
 
 def delegated_root_and_link():
@@ -247,6 +291,108 @@ def test_an_invalid_binding_handle_is_refused_without_an_entry(decider, make_con
     with pytest.raises(ControlRefused) as refused:
         make_control().revoke(token, "root", "ops", NOW + 1)
     assert refused.value.reason == "invalid_handle"
+    assert control_entries(workdir) == []
+
+
+GRANT_LEVELS = ("task", "tenant", "root")
+
+
+@pytest.mark.parametrize("level", GRANT_LEVELS)
+def test_revoke_from_a_grant_stops_a_task_that_never_called(decider, grant_control, workdir, level):
+    root, link = delegated_root_and_link()
+    grant_control().revoke(grant_token(root.encode()), level, "ops@example", NOW + 1)
+    decision = next_delegated_call(decider, root, link)
+    assert (decision.allowed, decision.reason, decision.clearance) == (False, "chain_invalid", None)
+
+
+@pytest.mark.parametrize(
+    ("level", "applied"),
+    [
+        ("task", lambda root: {"tenant": TENANT, "task": root.task_id}),
+        ("tenant", lambda root: {"tenant": TENANT}),
+        ("root", lambda root: {"root": root.binding()}),
+    ],
+)
+def test_the_control_entry_of_a_grant_revoke_names_the_grant(grant_control, workdir, level, applied):
+    root = signed_root()
+    outcome = grant_control().revoke(grant_token(root.encode(), "grant-7"), level, "ops@example", NOW + 1)
+    [entry] = control_entries(workdir)
+    assert entry.entry_id == outcome.entry_id
+    assert (entry.trace_id, entry.parent_entry, entry.op_id) == ("grant-7", "grant-7", None)
+    assert (entry.hop, entry.component, entry.decision, entry.reason) == ("control", "control.example", "revoke", level)
+    assert (entry.principal, entry.tenant, entry.at) == ("ops@example", TENANT, NOW + 1)
+    assert dict(entry.handles) == applied(root) == dict(outcome.handles)
+    assert outcome.trace_id == "grant-7"
+
+
+def test_an_expired_task_can_be_revoked_from_its_grant(grant_control, workdir):
+    root = signed_root(ttl=60)
+    grant_control().revoke(grant_token(root.encode()), "task", "ops", NOW + 3600)
+    [entry] = control_entries(workdir)
+    assert dict(entry.handles) == {"tenant": TENANT, "task": root.task_id}
+
+
+@pytest.mark.parametrize(
+    ("root_token", "overrides", "reason"),
+    [
+        (lambda: "root.token", {}, "record_invalid_field"),
+        (lambda: signed_root(FORGER_KEY).encode(), {}, "root_bad_signature"),
+        (lambda: signed_root(OTHER_ISSUER_KEY).encode(), {}, "root_bad_signature"),
+        (lambda: signed_root(FORGER_KEY, issuer="issuer.unknown").encode(), {}, "root_unknown_issuer"),
+        (lambda: signed_root().encode(), {"resolver": PinnedResolver({})}, "root_unknown_issuer"),
+        (
+            lambda: signed_root(FORGER_KEY, issuer="issuer.unknown").encode(),
+            {"resolver": PinnedResolver({"issuer.unknown": FORGER_KEY.public_key()})},
+            "root_unknown_issuer",
+        ),
+        (lambda: signed_root(OTHER_ISSUER_KEY, issuer=OTHER_ISSUER_ID).encode(), {}, "root_not_allowed"),
+    ],
+    ids=["undecodable", "forged", "other_issuer_key", "unknown_issuer", "unresolvable", "untrusted", "cross_tenant"],
+)
+@pytest.mark.parametrize("level", GRANT_LEVELS)
+def test_a_grant_whose_root_is_not_trusted_revokes_nothing(
+    decider, grant_control, workdir, root_token, overrides, reason, level
+):
+    root, link = allowed_delegated_call(decider, workdir)
+    with pytest.raises(ControlRefused) as refused:
+        grant_control(**overrides).revoke(grant_token(root_token()), level, "ops", NOW + 1)
+    assert refused.value.reason == reason
+    assert next_delegated_call(decider, root, link).allowed
+    assert control_entries(workdir) == []
+
+
+def test_a_grant_revokes_only_in_a_tenant_its_issuer_is_allowed(grant_control, workdir):
+    root = signed_root(OTHER_ISSUER_KEY, issuer=OTHER_ISSUER_ID, tenant=OTHER_TENANT)
+    outcome = grant_control().revoke(grant_token(root.encode()), "tenant", "ops", NOW + 1)
+    assert dict(outcome.handles) == {"tenant": OTHER_TENANT}
+
+
+def test_link_level_from_a_grant_is_refused(decider, grant_control, workdir):
+    root, link = allowed_delegated_call(decider, workdir)
+    with pytest.raises(ControlRefused) as refused:
+        grant_control().revoke(grant_token(root.encode()), "link", "ops", NOW + 1)
+    assert refused.value.reason == "no_handle"
+    assert "grant has no link handle" in str(refused.value)
+    assert next_delegated_call(decider, root, link).allowed
+    assert control_entries(workdir) == []
+
+
+def test_suspend_from_a_grant_is_refused(decider, grant_control, workdir, suspension):
+    root, link = allowed_delegated_call(decider, workdir)
+    with pytest.raises(ControlRefused) as refused:
+        grant_control().suspend(grant_token(root.encode()), "ops", NOW + 1)
+    assert refused.value.reason == "record_not_suspendable"
+    assert suspension.suspended is False
+    assert next_delegated_call(decider, root, link).allowed
+    assert control_entries(workdir) == []
+
+
+def test_a_grant_from_an_entry_writer_is_refused(decider, grant_control, workdir):
+    grant = Grant(grant_id="g-1", at=NOW, root_token=signed_root().encode())
+    token = encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, grant).token
+    with pytest.raises(ControlRefused) as refused:
+        grant_control().revoke(token, "task", "ops", NOW + 1)
+    assert refused.value.reason == "record_wrong_record_type"
     assert control_entries(workdir) == []
 
 

@@ -201,7 +201,7 @@ def test_init_never_overwrites(root, ledger_dir, capsys):
     assert (root / "decide" / "signing.key").read_bytes() == before
 
 
-def control_init(root, directory, pin, capsys):
+def control_init(root, directory, pin, capsys, *extra):
     return init(
         "control",
         "--dir", directory,
@@ -210,6 +210,7 @@ def control_init(root, directory, pin, capsys):
         "--pin", pin,
         "--docket-socket", "/run/d.sock",
         "--docket-uid", UID,
+        *extra,
         capsys=capsys,
     )  # fmt: skip
 
@@ -322,6 +323,61 @@ def test_docket_init_writes_the_default_limits_and_retention(root, decide_pin, c
     limits = (settings.snapshot_every, settings.free_space_floor, settings.segment_bytes)
     assert limits == (10_000, 256 << 20, 256 << 20)
     assert settings.retention == Retention(root / "receipts", UID, 16 << 30, 86400)
+
+
+def test_docket_init_writes_no_grant_writers_by_default(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    code, _, err = docket_init(root, directory, decide_pin, capsys)
+    assert code == 0, err
+    assert load_docket(directory / "config.json").grant_writers == frozenset()
+
+
+def issuer_pin(root):
+    record = generate_signing_key(root / "keys" / "issuer.key", "issuer.example")
+    path = root / "issuer.pub.json"
+    path.write_text(json.dumps(record.to_document()))
+    return path
+
+
+def test_docket_init_pins_a_grant_writer(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    code, _, err = docket_init(root, directory, decide_pin, capsys, "--grant-pin", issuer_pin(root))
+    assert code == 0, err
+    settings = load_docket(directory / "config.json")
+    assert set(settings.writers) == {"decide.example", "issuer.example"}
+    assert settings.grant_writers == {"issuer.example"}
+
+
+def test_docket_init_refuses_a_writer_pinned_in_both_roles(root, decide_pin, capsys):
+    directory = private(root / "docket")
+    code, _, err = docket_init(root, directory, decide_pin, capsys, "--grant-pin", decide_pin)
+    assert code == cli.EXIT_REFUSED and "both as entry and grant writers" in err
+    assert os.listdir(directory) == []
+
+
+def test_control_init_writes_no_grant_writers_or_issuers_by_default(root, decide_pin, capsys):
+    directory = private(root / "control")
+    code, _, err = control_init(root, directory, decide_pin, capsys)
+    assert code == 0, err
+    settings = load_control(directory / "config.json")
+    assert settings.grant_writers == frozenset()
+    assert json.loads((directory / "config.json").read_text())["issuers"] == {}
+
+
+def test_control_init_pins_a_grant_writer(root, decide_pin, capsys):
+    directory = private(root / "control")
+    code, _, err = control_init(root, directory, decide_pin, capsys, "--grant-pin", issuer_pin(root))
+    assert code == 0, err
+    settings = load_control(directory / "config.json")
+    assert set(settings.writers) == {"decide.example", "issuer.example"}
+    assert settings.grant_writers == {"issuer.example"}
+
+
+def test_control_init_refuses_a_writer_pinned_in_both_roles(root, decide_pin, capsys):
+    directory = private(root / "control")
+    code, _, err = control_init(root, directory, decide_pin, capsys, "--grant-pin", decide_pin)
+    assert code == cli.EXIT_REFUSED and "both as entry and grant writers" in err
+    assert os.listdir(directory) == []
 
 
 @pytest.mark.parametrize("missing", ["--reader-group", "--receipt-dir", "--archiver-uid"])

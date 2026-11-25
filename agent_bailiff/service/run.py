@@ -232,6 +232,7 @@ async def serve_docket(settings: DocketSettings, stop: asyncio.Event) -> None:
         settings.socket,
         settings.writers,
         settings.allowed_uids,
+        grant_writers=settings.grant_writers,
         socket_gid=settings.socket_group,
         reader_gid=settings.reader_group,
         snapshot_every=settings.snapshot_every,
@@ -269,6 +270,9 @@ def open_control(settings: ControlSettings, decide: DecideSettings) -> ControlSe
             suspension=Suspension(decide.suspension_dir, decide.ledger.group),
             docket=docket,
             docket_writer=settings.name,
+            resolver=settings.issuers.resolver,
+            trust_policy=settings.issuers.trust_policy,
+            grant_writers=settings.grant_writers,
         )
     except BaseException:
         _close_all(tuple(opened))

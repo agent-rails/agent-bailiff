@@ -17,7 +17,7 @@ from agent_warrant.chain import ChainLink, LeafProof
 from agent_warrant.identity import encode_public_key
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_agentgateway_e2e import BINARY
-from test_control import MemoryDocket
+from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import NOW, docket_entries
 from test_decide import AGENT_KEY, CHILD_KEY, DECIDER_ID, make_root
@@ -1031,6 +1031,8 @@ def test_revoking_a_sub_agent_link_stops_the_sub_agent_but_not_its_parent(
             Suspension(shared_suspension(private("shared")), os.getegid()),
             MemoryDocket(),
             "control",
+            resolver=RESOLVER,
+            trust_policy=TRUST_POLICY,
         )
         control.revoke(test_agentgateway_e2e.allow_record_line(workdir), "link", "ops", NOW)
         assert sub_agent.call("deploy", "deploy_service", ARGS) == Refused("chain_invalid")
