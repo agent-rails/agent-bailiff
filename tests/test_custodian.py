@@ -224,7 +224,7 @@ def trust_policy():
 
 @pytest.fixture
 def make_decider(open_docket, sink, writer):
-    def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None):
+    def make(bindings=DECIDE_BINDINGS, costs=COSTS, refusal_budget=None, scope_v1_cutoff=0):
         return Decider(
             config=DeciderConfig(
                 DECIDER_ID,
@@ -233,6 +233,7 @@ def make_decider(open_docket, sink, writer):
                 MAX_PROOF_AGE,
                 bindings,
                 "decide",
+                scope_v1_cutoff=scope_v1_cutoff,
             ),
             ledger=writer,
             resolver=PinnedResolver({ISSUER_ID: ISSUER_KEY.public_key()}),
