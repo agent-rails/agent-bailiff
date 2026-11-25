@@ -111,18 +111,19 @@ The operator reads the docket, then revokes the task from a verified record:
 $ TASK=$(jq -r .task_id run.json)
 $ docker compose run --rm -T reader --task "$TASK"
 LINE	AT	WRITER	SEQ	DECISION	TOOL	RESOURCE	REASON	NOTE
-1	2026-11-22T14:07:15Z	decide.quickstart	1	allow	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	-
-2	2026-11-22T14:07:15Z	custodian.quickstart	1	release	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
-3	2026-11-22T14:07:15Z	decide.quickstart	2	allow	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	-
-4	2026-11-22T14:07:15Z	custodian.quickstart	2	release	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
-5	2026-11-22T14:07:15Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
-6	2026-11-22T14:07:15Z	decide.quickstart	4	refuse	gitea.issues.list	gitea/repos/quickstart/demo/issues	already_issued	-
-7	2026-11-22T14:07:15Z	decide.quickstart	5	refuse	gitea.issues.list	gitea/repos/quickstart/payroll/issues	out_of_scope	-
-agent-bailiff docket verify: 7 records verified, 7 printed
+1	2026-11-22T14:07:02Z	issuer-docket.quickstart	1	grant	-	-	-	task grant
+2	2026-11-22T14:07:15Z	decide.quickstart	1	allow	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	-
+3	2026-11-22T14:07:15Z	custodian.quickstart	1	release	gitea.issues.list	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
+4	2026-11-22T14:07:15Z	decide.quickstart	2	allow	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	-
+5	2026-11-22T14:07:15Z	custodian.quickstart	2	release	gitea.issues.read	gitea/repos/quickstart/demo/issues	ok	released, target outcome unknown
+6	2026-11-22T14:07:15Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
+7	2026-11-22T14:07:15Z	decide.quickstart	4	refuse	gitea.issues.list	gitea/repos/quickstart/demo/issues	already_issued	-
+8	2026-11-22T14:07:15Z	decide.quickstart	5	refuse	gitea.issues.list	gitea/repos/quickstart/payroll/issues	out_of_scope	-
+agent-bailiff docket verify: 8 records verified, 8 printed
 $ docker compose run --rm -T reader --task "$TASK" --json \
     | jq -r 'select(.writer == "decide.quickstart" and .entry.decision == "allow") | .token' | tail -n 1 \
     | docker compose run --rm -T control revoke --config /var/lib/bailiff/control/config.json --actor operator --level task --record -
-agent-bailiff docket verify: 7 records verified, 7 printed
+agent-bailiff docket verify: 8 records verified, 8 printed
 {"action": "revoke", "entry_id": "79825d1dbf414a17bb8ba0de44109e00", "handles": {"task": "task-04c2212456940c17", "tenant": "quickstart"}, "reason": "task", "trace_id": "399b2cd9174d87289639cb12dd9211b4"}
 $ docker compose run --rm -T agent after-revoke
 {
@@ -133,8 +134,8 @@ $ docker compose run --rm -T agent after-revoke
 }
 $ docker compose run --rm -T reader
 ...
-8	2026-11-22T14:07:17Z	control.quickstart	1	revoke	-	-	task	-
-agent-bailiff docket verify: 8 records verified, 8 printed
+9	2026-11-22T14:07:17Z	control.quickstart	1	revoke	-	-	task	-
+agent-bailiff docket verify: 9 records verified, 9 printed
 ```
 
 The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke is not in the docket: decide could not verify the chain, so it logs the refusal instead of recording it.
@@ -154,12 +155,12 @@ $ docker compose run --rm -T agent inject | tee inject.json
   ]
 }
 $ docker compose logs --no-log-prefix rule
-{"entry_id": "854cbba532a24c23ac69d9c2697d70b7", "line": 5, "rule": "out_of_scope", "task": "task-90033a566373be1b", "tenant": "quickstart"}
+{"entry_id": "854cbba532a24c23ac69d9c2697d70b7", "line": 6, "rule": "out_of_scope", "task": "task-90033a566373be1b", "tenant": "quickstart"}
 $ docker compose run --rm -T reader --task "$(jq -r .task_id inject.json)"
 ...
-5	2026-11-22T14:14:38Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
-6	2026-11-22T14:14:39Z	rule.quickstart	1	revoke	-	-	task	-
-agent-bailiff docket verify: 6 records verified, 6 printed
+6	2026-11-22T14:14:38Z	decide.quickstart	3	refuse	gitea.contents.read	gitea/repos/quickstart/payroll/contents	out_of_scope	-
+7	2026-11-22T14:14:39Z	rule.quickstart	1	revoke	-	-	task	-
+agent-bailiff docket verify: 7 records verified, 7 printed
 $ docker compose run --rm -T agent after-revoke
 ...
     {"scenario": "call after revoke refused", "expected": "refused: chain_invalid", "observed": "refused: chain_invalid", "pass": true}
@@ -185,7 +186,7 @@ The `archive` profile runs `agent-bailiff docket archive` as uid 10009 in the do
 $ COMPOSE_PROFILES=gitea,archive docker compose up --build --detach --wait
 $ docker compose run --rm -T reader --receipts /var/lib/bailiff/receipts
 ...
-agent-bailiff docket verify: 8 records verified, 8 printed
+agent-bailiff docket verify: 9 records verified, 9 printed
 agent-bailiff docket verify: 0 retained segments match their receipts
 ```
 

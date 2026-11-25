@@ -29,6 +29,7 @@ from agent_bailiff.service.settings import load_control, load_decide
 
 DOCKET = Path("/var/lib/bailiff/docket/docket.log")
 PINS = tuple(Path(f"/pins/{component}/{component}.json") for component in ("decide", "custodian", "control", "rule"))
+GRANT_PIN = Path("/pins/issuer/issuer-docket.json")
 CHECKPOINT = Path("/var/lib/bailiff/rule/checkpoint.json")
 CONTROL_CONFIG = Path("/var/lib/bailiff/rule/config.json")
 DECIDE_WRITER = "decide.quickstart"
@@ -109,7 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_control(CONTROL_CONFIG)
         decide = load_decide(settings.decide_config)
-        index = build_kid_index(pinned_writers(read_pin(path) for path in PINS))
+        grant = read_pin(GRANT_PIN)
+        index = build_kid_index(pinned_writers([*(read_pin(path) for path in PINS), grant]), [grant.component])
         rule = RevokeRule(lambda: open_control(settings, decide), DECIDE_WRITER, frozenset(args.tools or TOOLS))
         checked = DocketFollower(DOCKET, index, CHECKPOINT, rule, poll_interval=POLL_INTERVAL).run(
             stop, follow=not args.once

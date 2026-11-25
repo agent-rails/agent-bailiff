@@ -3,14 +3,18 @@ import json
 import os
 
 import pytest
+from agent_warrant.identity import encode_public_key
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.x509.oid import NameOID
 from test_quickstart_stack import b
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
+from agent_bailiff.docket.client import DocketError
+from agent_bailiff.keys import load_signing_key
 
 
 def test_a_probe_that_returns_ok_is_allowed():
@@ -38,6 +42,93 @@ def test_an_old_docket_config_fails_bootstrap_with_the_reset_hint(tmp_path, monk
     monkeypatch.setattr(b, "WRITERS", ())
     with pytest.raises(b.BootstrapError, match="missing .*free_space_floor.*run docker compose down --volumes"):
         b.init_docket()
+
+
+class FakeDocket:
+    def __init__(self, error=None):
+        self.error = error
+        self.clients = []
+        self.grants = []
+        self.files_at_append = []
+
+    def __call__(self, socket_path, writer, kid, key, *, sink_uid, state_dir):
+        self.clients.append({"writer": writer, "sink_uid": sink_uid, "state_dir": state_dir, "closed": False})
+        return self
+
+    def append(self, grant):
+        self.files_at_append.append((b.TASK_FILE.exists(), b.LOAD_FILE.exists()))
+        if self.error is not None:
+            raise self.error
+        self.grants.append(grant)
+
+    def close(self):
+        self.clients[-1]["closed"] = True
+
+
+@pytest.fixture
+def issuer(tmp_path, monkeypatch):
+    for name in ("issuer", "issuer-docket", "pins", "tasks", "agent-public"):
+        (tmp_path / name).mkdir(mode=0o700)
+    monkeypatch.setattr(b, "PINS", tmp_path / "pins")
+    (tmp_path / "pins" / "issuer").mkdir(mode=0o755)
+    monkeypatch.setattr(b, "ISSUER_KEY", tmp_path / "issuer" / "issuer.key")
+    monkeypatch.setattr(b, "ISSUER_DOCKET_KEY", tmp_path / "issuer-docket" / "signing.key")
+    monkeypatch.setattr(b, "ISSUER_DOCKET_STATE", tmp_path / "issuer-docket" / "docket-state")
+    monkeypatch.setattr(b, "GRANT_PIN", tmp_path / "pins" / "issuer" / "issuer-docket.json")
+    monkeypatch.setattr(b, "TASK_FILE", tmp_path / "tasks" / "task.json")
+    monkeypatch.setattr(b, "LOAD_FILE", tmp_path / "tasks" / "load.json")
+    monkeypatch.setattr(b, "AGENT_PUBLIC_KEY", tmp_path / "agent-public" / "agent.pub")
+    b.AGENT_PUBLIC_KEY.write_text(encode_public_key(Ed25519PrivateKey.generate().public_key()))
+    assert b.init_issuer() == "created"
+    return tmp_path
+
+
+def test_init_issuer_creates_a_docket_writer_key_apart_from_the_issuer_key_and_keeps_it(issuer):
+    issuer_key = load_signing_key(b.ISSUER_KEY).public_key()
+    docket_key = load_signing_key(b.ISSUER_DOCKET_KEY).public_key()
+    assert issuer_key != docket_key
+    assert b.read_pin(b.GRANT_PIN) == b.record_of(b.ISSUER_DOCKET_KEY, b.NAMES["issuer-docket"])
+    assert b.read_pin(b.pin_path("issuer")) == b.record_of(b.ISSUER_KEY, b.NAMES["issuer"])
+    assert b.ISSUER_DOCKET_STATE.stat().st_mode & 0o777 == 0o700
+    assert b.init_issuer() == "kept"
+
+
+def test_init_issuer_refuses_a_grant_pin_without_its_key(issuer):
+    b.ISSUER_DOCKET_KEY.unlink()
+    with pytest.raises(b.BootstrapError, match="exists without .*signing.key"):
+        b.init_issuer()
+
+
+def test_issue_records_the_grant_before_it_writes_the_task_file(issuer, monkeypatch):
+    docket = FakeDocket()
+    monkeypatch.setattr(b, "DocketClient", docket)
+    task_id = b.issue_task()
+    document = json.loads(b.TASK_FILE.read_text())
+    assert document["task_id"] == task_id
+    assert docket.files_at_append == [(False, False)]
+    assert [grant.root_token for grant in docket.grants] == [document["task_root"]]
+    client = {"writer": b.NAMES["issuer-docket"], "sink_uid": b.DOCKET_UID, "state_dir": b.ISSUER_DOCKET_STATE}
+    assert docket.clients == [client | {"closed": True}]
+
+
+def test_a_refused_grant_writes_no_task_file(issuer, monkeypatch, capsys):
+    docket = FakeDocket(DocketError("unknown_writer", "writer is not pinned"))
+    monkeypatch.setattr(b, "DocketClient", docket)
+    assert b.main(["issue"]) == 1
+    assert "bootstrap issue refused: unknown_writer" in capsys.readouterr().err
+    assert not b.TASK_FILE.exists()
+    assert docket.clients[-1]["closed"] is True
+
+
+def test_issue_load_records_every_grant_through_one_client_before_the_load_file(issuer, monkeypatch):
+    docket = FakeDocket()
+    monkeypatch.setattr(b, "DocketClient", docket)
+    b.issue_load_tasks()
+    tasks = json.loads(b.LOAD_FILE.read_text())["tasks"]
+    assert len(docket.clients) == 1 and docket.clients[0]["closed"]
+    assert docket.files_at_append == [(False, False)] * b.LOAD_TASKS
+    assert [grant.root_token for grant in docket.grants] == [task["task_root"] for task in tasks]
+    assert len({grant.grant_id for grant in docket.grants}) == b.LOAD_TASKS
 
 
 GITEA_UPSTREAM = b.QUICKSTART_UPSTREAMS / "gitea.json"

@@ -118,7 +118,7 @@ $ docker compose --profile operator run --rm --no-deps -T task-issuer \
     --purpose triage-notes \
     --scope '{"permissions": [{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}]}' \
     --budget 20 --subject=oa5bveQCZ3-a-9zg9TUN3MntJk9T_yIfkt7LoHUCtZ8
-agent-bailiff task issue: wrote /out/task.json, expires at 1795523898
+agent-bailiff task issue: wrote /out/task.json, expires at 1795523898, grant_id 6c1f0e5d2b7a4e8f9a3d1c0b5e7f2a46
 task-f0f2af5ac610e8db
 ```
 
@@ -212,14 +212,15 @@ To stop a task now, the operator revokes it from the signed docket:
 $ docker compose --profile operator run --rm --no-deps -T --entrypoint python reader \
     -m agent_bailiff.cli docket tasks --docket /var/lib/bailiff/docket/docket.log \
     --pin /pins/decide/decide.json --pin /pins/custodian/custodian.json \
-    --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json --json \
+    --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json \
+    --grant-pin /pins/issuer/issuer-docket.json --json \
   | jq -r 'select(.task == "task-f0f2af5ac610e8db").record' \
   | docker compose --profile operator run --rm --no-deps -T control revoke \
     --config /var/lib/bailiff/control/config.json --actor operator --level task --record -
 {"action": "revoke", "entry_id": "f8b39d6075144028b685cf000ec13743", "handles": {"task": "task-f0f2af5ac610e8db", "tenant": "quickstart"}, "reason": "task", "trace_id": "d5e3fffdc4062c1688be463c7b6a243c"}
 ```
 
-After that, every call on the task is refused as `chain_invalid`. A task that has made no allowed call has no docket record, so it cannot be revoked this way; it ends at its expiry. See [DOCKET.md](DOCKET.md) for `docket tasks` and `docket verify`.
+After that, every call on the task is refused as `chain_invalid`. A task that has made no allowed call is listed from the grant `task issue` recorded, and control revokes it from that record. See [DOCKET.md](DOCKET.md) for `docket tasks` and `docket verify`.
 
 To remove the stack and its volumes, including the issuer key and the stored credential:
 

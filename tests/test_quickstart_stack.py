@@ -36,6 +36,7 @@ _spec.loader.exec_module(b)
 VOLUMES = {
     "pins": "/pins",
     "issuer-data": "/var/lib/bailiff/issuer",
+    "issuer-docket": "/var/lib/bailiff/issuer-docket",
     "decide-data": "/var/lib/bailiff/decide",
     "custodian-data": "/var/lib/bailiff/custodian",
     "control-data": "/var/lib/bailiff/control",
@@ -55,6 +56,7 @@ VOLUMES = {
 PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
     "issuer-data",
+    "issuer-docket",
     "decide-data",
     "custodian-data",
     "control-data",
@@ -75,6 +77,7 @@ EXPECTED_ENTRIES = {
     "pins": (0, 0, 0o755, DIRECTORY),
     "pins/issuer": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
     "pins/issuer/issuer.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
+    "pins/issuer/issuer-docket.json": (b.ISSUER_UID, b.ISSUER_UID, 0o644, FILE),
     "pins/decide": (b.DECIDE_UID, b.DECIDE_UID, 0o755, DIRECTORY),
     "pins/decide/decide.json": (*DECIDE, 0o644, FILE),
     "pins/custodian": (*CUSTODIAN, 0o755, DIRECTORY),
@@ -85,6 +88,9 @@ EXPECTED_ENTRIES = {
     "pins/rule/rule.json": (*DECIDE, 0o644, FILE),
     "issuer-data": (b.ISSUER_UID, b.ISSUER_UID, 0o700, DIRECTORY),
     "issuer-data/issuer.key": (b.ISSUER_UID, b.ISSUER_UID, 0o600, FILE),
+    "issuer-docket": (b.ISSUER_UID, b.ISSUER_UID, 0o700, DIRECTORY),
+    "issuer-docket/signing.key": (b.ISSUER_UID, b.ISSUER_UID, 0o600, FILE),
+    "issuer-docket/docket-state": (b.ISSUER_UID, b.ISSUER_UID, 0o700, DIRECTORY),
     "decide-data": (*DECIDE, 0o700, DIRECTORY),
     "decide-data/config.json": (*DECIDE, 0o600, FILE),
     "decide-data/routes.json": (*DECIDE, 0o600, FILE),
