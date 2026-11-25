@@ -12,6 +12,7 @@ from agent_warrant.canonical import canonicalize, strict_decode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.docket.entry import Entry, Head, Record, encode_record
+from agent_bailiff.docket.grant import Grant
 from agent_bailiff.docket.peer import PeerCredentialsUnavailable, peer_uid
 from agent_bailiff.docket.private_dir import open_private_dir
 from agent_bailiff.docket.protocol import (
@@ -79,7 +80,7 @@ class DocketClient:
                 os.close(self._lock_fd)
                 self._lock_fd = -1
 
-    def append(self, entry: Entry) -> Record:
+    def append(self, entry: Entry | Grant) -> Record:
         with self._lock:
             if self._lock_fd < 0:
                 raise DocketError("closed", "the docket client is closed")
@@ -95,7 +96,7 @@ class DocketClient:
                 raise DocketError("closed", "the docket client is closed")
             return self._fetch_head()
 
-    def _append(self, entry: Entry) -> Record:
+    def _append(self, entry: Entry | Grant) -> Record:
         if self._head is None:
             self._head = self._fetch_head()
         record = encode_record(self._private_key, self._kid, self._writer, self._head.seq + 1, self._head.hash, entry)

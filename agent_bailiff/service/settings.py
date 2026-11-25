@@ -50,6 +50,7 @@ DOCKET_KEYS = frozenset(
         "reader_group",
         "allowed_uids",
         "writers",
+        "grant_writers",
         "snapshot_every",
         "free_space_floor",
         "segment_bytes",
@@ -243,6 +244,7 @@ class DocketSettings:
     reader_group: int
     allowed_uids: frozenset[int]
     writers: Writers
+    grant_writers: frozenset[str]
     snapshot_every: int
     free_space_floor: int
     segment_bytes: int
@@ -425,6 +427,7 @@ def parse_docket(document: object) -> DocketSettings:
         reader_group=config.os_id("reader_group"),
         allowed_uids=allowed,
         writers=writers,
+        grant_writers=_grant_writers(config, writers),
         snapshot_every=config.integer("snapshot_every", 1),
         free_space_floor=config.integer("free_space_floor", MIN_FREE_SPACE_FLOOR),
         segment_bytes=segment_bytes,
@@ -485,6 +488,22 @@ def _writers(config: Section) -> dict[str, dict[str, Ed25519PublicKey]]:
         except ValueError as exc:
             raise config.wrap(f"writers.{writer}", exc) from None
     return writers
+
+
+def _grant_writers(config: Section, writers: Mapping[str, object]) -> frozenset[str]:
+    names = config.raw("grant_writers")
+    if not isinstance(names, list):
+        raise ConfigError("docket.grant_writers must be a list of writer names")
+    try:
+        checked = [check_component(name) for name in names]
+    except ValueError as exc:
+        raise config.wrap("grant_writers", exc) from None
+    if len(set(checked)) != len(checked):
+        raise ConfigError("docket.grant_writers must not repeat a writer")
+    unpinned = sorted(set(checked) - writers.keys())
+    if unpinned:
+        raise ConfigError(f"docket.grant_writers names writers not in docket.writers: {', '.join(unpinned)}")
+    return frozenset(checked)
 
 
 def _issuers(config: Section) -> Issuers:

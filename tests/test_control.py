@@ -38,7 +38,7 @@ from test_decide import (
 
 from agent_bailiff.control import Control, ControlRefused, ControlUnrecorded, Suspension
 from agent_bailiff.decide import Decider, DeciderConfig, PolicyRef
-from agent_bailiff.docket import DocketClient, DocketSink, Record, decode_record, encode_record
+from agent_bailiff.docket import DocketClient, DocketSink, Grant, Record, decode_record, encode_record
 from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused
@@ -46,6 +46,7 @@ from agent_bailiff.signing import Refused
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(4, 36)))
 CONTROL_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(6, 38)))
 FORGER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(7, 39)))
+GRANTER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(8, 40)))
 VERIFIED_WRITERS = {
     "decide": {"decide-1": DECIDE_KEY.public_key()},
     "custodian": {"custodian-1": CUSTODIAN_KEY.public_key()},
@@ -247,6 +248,23 @@ def test_an_invalid_binding_handle_is_refused_without_an_entry(decider, make_con
     with pytest.raises(ControlRefused) as refused:
         make_control().revoke(token, "root", "ops", NOW + 1)
     assert refused.value.reason == "invalid_handle"
+    assert control_entries(workdir) == []
+
+
+@pytest.mark.parametrize(
+    "act",
+    [
+        lambda control, token: control.revoke(token, "task", "ops", NOW + 1),
+        lambda control, token: control.suspend(token, "ops", NOW + 1),
+    ],
+)
+def test_a_grant_record_is_refused_without_an_entry(make_control, workdir, act):
+    writers = {**VERIFIED_WRITERS, "issuer": {"issuer-1": GRANTER_KEY.public_key()}}
+    grant = Grant(grant_id="g-1", at=NOW, root_token="root.token")
+    token = encode_record(GRANTER_KEY, "issuer-1", "issuer", 1, None, grant).token
+    with pytest.raises(ControlRefused) as refused:
+        act(make_control(writers=writers, grant_writers={"issuer"}), token)
+    assert refused.value.reason == "record_grant_unsupported"
     assert control_entries(workdir) == []
 
 

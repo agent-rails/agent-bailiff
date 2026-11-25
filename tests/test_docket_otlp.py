@@ -20,11 +20,11 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import SpanContext, SpanKind, StatusCode, TraceFlags
 from test_docket import make_entry
-from test_docket_report import PINS, WRITERS, Docket
+from test_docket_report import GRANT_WRITERS, PINS, WRITERS, Docket
 from test_effector import EFFECTOR_TOKEN, NOW, effector, release_for, scale_params
 
 from agent_bailiff import cli
-from agent_bailiff.docket import DocketCorrupt
+from agent_bailiff.docket import DocketCorrupt, Grant
 from agent_bailiff.docket.entry import Head, Record
 from agent_bailiff.docket.follower import CheckpointMismatch, FollowerLocked, load_checkpoint
 from agent_bailiff.docket.manifest import Base, Manifest, manifest_path, segment_path, write_manifest
@@ -33,6 +33,7 @@ from agent_bailiff.docket.report import RELEASED
 from agent_bailiff.docket.sink import VerifiedLine, build_kid_index
 
 INDEX = build_kid_index(WRITERS)
+GRANT_INDEX = build_kid_index(GRANT_WRITERS, {"issuer"})
 TRACE = "0af7651916cd43dd8448eb211c80319c"
 
 
@@ -133,9 +134,9 @@ def fill(docket, count, start=1):
         docket.append("decide", make_entry(number, trace_id=TRACE))
 
 
-def export(docket, checkpoint, exporter, **options):
+def export(docket, checkpoint, exporter, index=INDEX, **options):
     stop = threading.Event()
-    return DocketExporter(docket.path, INDEX, checkpoint, exporter, **options).run(stop, follow=False)
+    return DocketExporter(docket.path, index, checkpoint, exporter, **options).run(stop, follow=False)
 
 
 def verified(record, line=1):
@@ -251,6 +252,44 @@ def test_export_ships_every_record_in_batches_and_checkpoints(docket, checkpoint
     assert saved.heads["decide"].hash == docket.records[-1].hash
     assert saved.last_hash == docket.records[-1].hash and saved.first_hash == docket.records[0].hash
     assert checkpoint.stat().st_mode & 0o777 == 0o600
+
+
+def grant(docket, number):
+    return docket.grant(Grant(grant_id=f"g-{number}", at=1_700_000_000 + number, root_token="root.token"))
+
+
+def test_grants_are_skipped_and_the_checkpoint_passes_them(docket, checkpoint):
+    fill(docket, 2)
+    grant(docket, 3)
+    fill(docket, 1, start=4)
+    exporter = FakeExporter()
+    assert export(docket, checkpoint, exporter, GRANT_INDEX, batch_size=2) == 4
+    assert [len(batch) for batch in exporter.batches] == [2, 1]
+    assert exporter.entry_ids() == ["e-1", "e-2", "e-4"]
+    saved = load_checkpoint(checkpoint)
+    assert saved.entries == 4 and saved.offset == docket.path.stat().st_size
+    assert saved.heads["issuer"].hash == docket.records[2].hash
+
+
+def test_a_batch_of_only_grants_advances_the_checkpoint(docket, checkpoint, caplog):
+    grant(docket, 1)
+    grant(docket, 2)
+    exporter = FakeExporter()
+    with caplog.at_level("INFO", logger="agent_bailiff.docket.otlp"):
+        assert export(docket, checkpoint, exporter, GRANT_INDEX) == 2
+    assert exporter.attempts == 0
+    assert "lines 1-2 hold no entries to export" in caplog.text
+    saved = load_checkpoint(checkpoint)
+    assert saved.entries == 2 and saved.last_hash == docket.records[-1].hash
+    fill(docket, 1, start=3)
+    assert export(docket, checkpoint, exporter, GRANT_INDEX) == 1
+    assert exporter.entry_ids() == ["e-3"]
+
+
+def test_a_grant_has_no_span(docket):
+    record = grant(docket, 1)
+    with pytest.raises(ValueError, match="is not an entry"):
+        to_span(verified(record))
 
 
 def test_resume_exports_only_new_records(docket, checkpoint):

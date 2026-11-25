@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from agent_bailiff.docket.grant import Grant
 from agent_bailiff.docket.report import printable, utc
 from agent_bailiff.docket.sink import VerifiedLine
 
@@ -40,6 +41,8 @@ class TaskList:
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
+        if isinstance(entry, Grant):
+            return
         if entry.hop == CONTROL_HOP:
             if entry.decision == "revoke" and verified.record.writer in self._control_writers:
                 self._add_revocation(entry.entry_id, entry.handles)

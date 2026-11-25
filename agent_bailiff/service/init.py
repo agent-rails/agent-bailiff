@@ -251,9 +251,14 @@ def init_docket(
     reader_group: int,
     allowed_uids: Iterable[int],
     pins: Iterable[PublicKeyRecord],
+    grant_pins: Iterable[PublicKeyRecord],
     receipt_dir: Path,
     archiver_uid: int,
 ) -> Path:
+    entry_pins, grants = list(pins), list(grant_pins)
+    both = sorted({pin.component for pin in entry_pins} & {pin.component for pin in grants})
+    if both:
+        raise InitError(f"writers pinned both as entry and grant writers: {', '.join(both)}")
     _check_new(directory, (CONFIG, "docket.log", "docket.log.snapshot"))
     document = {
         "docket": str(directory / "docket.log"),
@@ -261,7 +266,8 @@ def init_docket(
         "socket_group": socket_group,
         "reader_group": reader_group,
         "allowed_uids": sorted(set(allowed_uids)),
-        "writers": _writers(pins),
+        "writers": _writers([*entry_pins, *grants]),
+        "grant_writers": sorted({pin.component for pin in grants}),
         "snapshot_every": DEFAULT_SNAPSHOT_EVERY,
         "free_space_floor": DEFAULT_FREE_SPACE_FLOOR,
         "segment_bytes": DEFAULT_SEGMENT_BYTES,

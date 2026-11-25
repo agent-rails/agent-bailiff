@@ -220,6 +220,7 @@ class Deployment:
             "reader_group": GID,
             "allowed_uids": [UID],
             "writers": {name: self.pins(name) for name in self.keys},
+            "grant_writers": [],
             "snapshot_every": 10_000,
             "free_space_floor": 256 << 20,
             "segment_bytes": 256 << 20,
@@ -315,6 +316,7 @@ def test_the_example_documents_parse(deployment):
     assert (custodian.inflight_max_bytes, custodian.inflight_per_tenant) == (65536, 16)
     assert (custodian.response_socket, custodian.response_workers) == (deployment.sockets["redactor"], 2)
     assert docket.allowed_uids == {UID} and set(docket.writers) == set(deployment.keys)
+    assert docket.grant_writers == frozenset()
     assert control.name == "control" and set(control.writers) == {"decide.example", "custodian.example"}
 
 
@@ -404,6 +406,11 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
     assert parse_docket(mutate(document, lambda doc: doc["writers"].update({"control": unknown})))
 
 
+def test_a_docket_config_marks_a_pinned_writer_as_a_grant_writer(deployment):
+    document = mutate(deployment.documents["docket"], lambda doc: doc.update(grant_writers=["custodian.example"]))
+    assert parse_docket(document).grant_writers == frozenset({"custodian.example"})
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -441,6 +448,13 @@ def test_a_writer_pinned_under_another_writers_key_id_is_refused(deployment):
         lambda doc: doc.update(max_receipt_age=7 * 86400 + 1),
         lambda doc: doc.update(max_receipt_age=True),
         lambda doc: doc.pop("max_receipt_age"),
+        lambda doc: doc.pop("grant_writers"),
+        lambda doc: doc.update(grant_writers=None),
+        lambda doc: doc.update(grant_writers="decide.example"),
+        lambda doc: doc.update(grant_writers=["issuer"]),
+        lambda doc: doc.update(grant_writers=["decide.example", "decide.example"]),
+        lambda doc: doc.update(grant_writers=[""]),
+        lambda doc: doc.update(grant_writers=[1]),
     ],
 )
 def test_a_bad_docket_config_is_refused(deployment, change):

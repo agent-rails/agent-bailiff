@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from agent_bailiff.adapters.agentgateway.config_check import REFUSAL_GUARD
-from agent_bailiff.docket.entry import decode_record
+from agent_bailiff.docket.entry import Entry, decode_record
 from agent_bailiff.docket.report import verify_docket
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.service.settings import load_docket
@@ -479,7 +479,8 @@ class Deployment:
     def docket_lines(self) -> list[tuple[str, Any]]:
         settings = load_docket(self.config("docket"))
         index = build_kid_index(settings.writers)
-        return [(line, decode_record(line, index).entry) for line in settings.docket.read_text().splitlines()]
+        records = [(line, decode_record(line, index)) for line in settings.docket.read_text().splitlines()]
+        return [(line, record.entry) for line, record in records if isinstance(record.entry, Entry)]
 
     def allow_line(self, task_id: str) -> str:
         for line, entry in reversed(self.docket_lines()):

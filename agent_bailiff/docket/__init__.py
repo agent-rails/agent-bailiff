@@ -1,5 +1,6 @@
 from agent_bailiff.docket.client import DocketClient, DocketError, DocketRollback
 from agent_bailiff.docket.entry import ENTRY_TYP, Entry, Head, Record, decode_record, encode_record
+from agent_bailiff.docket.grant import GRANT_TYP, Grant
 from agent_bailiff.docket.sink import (
     DocketCorrupt,
     DocketLocked,
@@ -12,6 +13,7 @@ from agent_bailiff.docket.sink import (
 
 __all__ = [
     "ENTRY_TYP",
+    "GRANT_TYP",
     "DocketClient",
     "DocketCorrupt",
     "DocketError",
@@ -19,6 +21,7 @@ __all__ = [
     "DocketRollback",
     "DocketSink",
     "Entry",
+    "Grant",
     "Head",
     "Record",
     "VerifiedLine",

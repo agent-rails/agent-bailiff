@@ -19,6 +19,7 @@ from agent_warrant.ledger import LedgerError
 from agent_bailiff.control.control import Control, ControlRefused, ControlUnrecorded
 from agent_bailiff.decide.refusals import CAPPED_REASON
 from agent_bailiff.docket.client import DocketError
+from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.follower import CheckpointMismatch, DocketFollower, FollowerLocked
 from agent_bailiff.docket.report import pinned_writers
 from agent_bailiff.docket.sink import DocketCorrupt, VerifiedLine, build_kid_index
@@ -70,7 +71,7 @@ class RevokeRule:
 
     def matches(self, verified: VerifiedLine) -> bool:
         entry = verified.record.entry
-        if verified.record.writer != self._writer or entry.decision != "refuse":
+        if not isinstance(entry, Entry) or verified.record.writer != self._writer or entry.decision != "refuse":
             return False
         return entry.reason == CAPPED_REASON or (entry.reason == "out_of_scope" and entry.tool in self._tools)
 

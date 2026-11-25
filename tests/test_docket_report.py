@@ -14,11 +14,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_docket import RunningSink, make_entry
 
 from agent_bailiff import cli
-from agent_bailiff.docket import DocketClient, DocketSink, decode_record, encode_record
+from agent_bailiff.docket import GRANT_TYP, DocketClient, DocketSink, Grant, decode_record, encode_record
 from agent_bailiff.docket import segments as segments_module
 from agent_bailiff.docket.entry import ENTRY_TYP, Head, _entry_body
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
-from agent_bailiff.docket.report import RELEASED, verify_docket
+from agent_bailiff.docket.report import GRANTED, RELEASED, verify_docket
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
 from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
@@ -33,6 +33,9 @@ PINS = {
 }
 KEYS = {"decide": DECIDE_KEY, "custodian": CUSTODIAN_KEY, "control": CONTROL_KEY}
 WRITERS = {name: {pin.kid: pin.public_key} for name, pin in PINS.items()}
+ISSUER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(3, 35)))
+ISSUER_PIN = PublicKeyRecord("issuer", key_id("issuer", ISSUER_KEY.public_key()), ISSUER_KEY.public_key())
+GRANT_WRITERS = {**WRITERS, "issuer": {ISSUER_PIN.kid: ISSUER_PIN.public_key}}
 OTHER_USER = os.environ.get("AGENT_BAILIFF_TEST_OTHER_USER")
 
 
@@ -60,8 +63,14 @@ class Docket:
         self.records = []
 
     def append(self, writer, entry):
+        return self.write(writer, KEYS[writer], PINS[writer].kid, entry)
+
+    def grant(self, grant):
+        return self.write("issuer", ISSUER_KEY, ISSUER_PIN.kid, grant)
+
+    def write(self, writer, key, kid, entry):
         seq, prev = self.heads.get(writer, (0, None))
-        record = encode_record(KEYS[writer], PINS[writer].kid, writer, seq + 1, prev, entry)
+        record = encode_record(key, kid, writer, seq + 1, prev, entry)
         with open(self.path, "a") as docket:
             docket.write(f"{record.token}\n")
         self.heads[writer] = (record.seq, record.hash)
@@ -117,6 +126,14 @@ def filled(docket):
         make_entry(4, trace_id="trace-a", task_root=None, decision="revoke", handles={"task": "task-a"}),
     )
     return docket
+
+
+@pytest.fixture
+def grant_pin_file(workdir):
+    path = workdir / "issuer.pub.json"
+    path.write_text(json.dumps(ISSUER_PIN.to_document()))
+    os.chmod(path, 0o644)
+    return path
 
 
 def verify(docket, pin_files, *arguments, capsys, writers=("decide", "custodian")):
@@ -180,6 +197,54 @@ def test_filters_select_records_but_every_record_is_verified(docket, pin_files, 
     assert code == 0, err
     assert [row["line"] for row in json_rows(out)] == lines
     assert f"4 records verified, {len(lines)} printed" in err
+
+
+def granted(docket):
+    filled(docket)
+    docket.grant(Grant(grant_id="g-1", at=1_700_000_003, root_token="root.token"))
+    return docket
+
+
+def test_a_grant_row_carries_its_type_and_note(docket, pin_files, grant_pin_file, capsys):
+    granted(docket)
+    code, out, err = verify(docket, pin_files, "--json", "--grant-pin", str(grant_pin_file), capsys=capsys)
+    assert code == 0, err
+    rows = json_rows(out)
+    assert [row["typ"] for row in rows] == [ENTRY_TYP] * 4 + [GRANT_TYP]
+    assert (rows[4]["writer"], rows[4]["note"], rows[4]["token"]) == ("issuer", GRANTED, docket.records[4].token)
+    assert rows[4]["grant"] == {"grant_id": "g-1", "at": 1_700_000_003, "root_token": "root.token"}
+    assert "entry" not in rows[4] and "grant" not in rows[0]
+
+
+def test_a_grant_table_row_has_no_tool_or_resource(docket, pin_files, grant_pin_file, capsys):
+    granted(docket)
+    code, out, err = verify(docket, pin_files, "--grant-pin", str(grant_pin_file), capsys=capsys)
+    assert code == 0, err
+    assert out[5].split("\t") == ["5", "2023-11-14T22:13:23Z", "issuer", "1", "grant", "-", "-", "-", GRANTED]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "lines"),
+    [
+        (["--trace", "trace-a"], [1, 2, 4]),
+        (["--task", "task-a"], [1, 2, 4]),
+        (["--since", "1700000003"], [3, 4, 5]),
+        (["--since", "1700000004"], [4]),
+    ],
+)
+def test_entry_filters_skip_grants_and_since_keeps_them(docket, pin_files, grant_pin_file, capsys, arguments, lines):
+    granted(docket)
+    code, out, err = verify(docket, pin_files, "--json", "--grant-pin", str(grant_pin_file), *arguments, capsys=capsys)
+    assert code == 0, err
+    assert [row["line"] for row in json_rows(out)] == lines
+    assert f"5 records verified, {len(lines)} printed" in err
+
+
+def test_a_grant_from_a_writer_pinned_for_entries_fails_verification(docket, pin_files, grant_pin_file, capsys):
+    granted(docket)
+    code, _, err = verify(docket, pin_files, "--pin", str(grant_pin_file), capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert "line 5 fails verification: wrong_record_type" in err
 
 
 def test_filters_do_not_hide_a_corrupt_record(docket, pin_files, capsys):
@@ -796,6 +861,19 @@ def test_tasks_prints_one_row_per_tenant_and_task(docket, pin_files, capsys):
         ("zeta", "task-a", "1", "0", "0", "-"),
     ]
     assert "6 records verified, 3 tasks" in err
+
+
+def test_tasks_skip_grants(docket, pin_files, grant_pin_file, capsys):
+    task_docket(docket)
+    docket.grant(Grant(grant_id="g-1", at=1_700_000_007, root_token="root.token"))
+    code, out, err = list_tasks(docket, pin_files, "--grant-pin", str(grant_pin_file), capsys=capsys)
+    assert code == 0, err
+    assert [tuple(row.split("\t")[:2]) for row in out[1:]] == [
+        ("acme", "task-a"),
+        ("acme", "task-b"),
+        ("zeta", "task-a"),
+    ]
+    assert "7 records verified, 3 tasks" in err
 
 
 def test_a_task_row_carries_its_last_record_for_control(docket, pin_files, capsys):

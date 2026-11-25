@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from agent_warrant.ledger import LedgerError
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
@@ -240,6 +241,14 @@ def _parser() -> argparse.ArgumentParser:
                 "--once", action="store_true", help="archive every sealed segment and recheck receipts, then exit"
             )
             archive.set_defaults(handler=_archive_docket)
+            for reader in (verify, tasks, export, archive):
+                reader.add_argument(
+                    "--grant-pin",
+                    type=Path,
+                    action="append",
+                    default=[],
+                    help="grant writer public key record; its writer may record only grants; repeat",
+                )
         if name == "custodian":
             put = component.add_parser("put-credential", help="store a credential read from stdin")
             put.add_argument("--config", type=Path, required=True)
@@ -377,6 +386,13 @@ def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     docket.add_argument("--receipt-dir", type=Path, required=True, help="the archiver's receipt directory")
     docket.add_argument("--archiver-uid", type=int, required=True, help="the uid that writes archive receipts")
     docket.add_argument("--allowed-uid", type=int, action="append", required=True, help="writer uid; repeat")
+    docket.add_argument(
+        "--grant-pin",
+        type=Path,
+        action="append",
+        default=[],
+        help="grant writer public key record; its writer may record only grants; repeat",
+    )
     for parser in (control, docket):
         parser.add_argument("--pin", type=Path, action="append", required=True, help="writer public key record")
     for parser in (decide, custodian, control, docket, effector):
@@ -413,6 +429,7 @@ def _init_component(args: argparse.Namespace) -> PublicKeyRecord | None:
             reader_group=args.reader_group,
             allowed_uids=args.allowed_uid,
             pins=pins,
+            grant_pins=[read_pin(path) for path in args.grant_pin],
             receipt_dir=args.receipt_dir,
             archiver_uid=args.archiver_uid,
         )
@@ -548,9 +565,11 @@ def _run_docket(args: argparse.Namespace) -> int:
 def _list_tasks(args: argparse.Namespace) -> int:
     try:
         control = [read_pin(path) for path in args.control_pin]
-        writers = pinned_writers([*(read_pin(path) for path in args.pin), *control])
+        writers, grant_writers = _docket_pins([*(read_pin(path) for path in args.pin), *control], args.grant_pin)
         tasks = TaskList(frozenset(pin.component for pin in control))
-        report = verify_records(args.docket, writers, RecordFilter(), tasks.add, archive=args.archive)
+        report = verify_records(
+            args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
+        )
     except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket tasks", exc)
     if not report.ok:
@@ -580,12 +599,14 @@ def _verify_docket(args: argparse.Namespace) -> int:
         print(json_row(verified) if args.json else table_row(verified))
 
     try:
-        writers = pinned_writers(read_pin(path) for path in args.pin)
+        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
         check = None if args.snapshot is None else SnapshotCheck(read_docket_snapshot(args.snapshot, args.docket))
         if not args.json:
             print(table_header())
         seeds = None if args.receipts is None else SeedCheck(args.receipts)
-        report = verify_records(args.docket, writers, selected, emit, check, args.archive, seeds)
+        report = verify_records(
+            args.docket, writers, selected, emit, check, args.archive, seeds, grant_writers=grant_writers
+        )
     except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket verify", exc)
     if not report.ok:
@@ -644,7 +665,7 @@ def _export_docket(args: argparse.Namespace) -> int:
     stop = _stop_on_signals()
     try:
         endpoint = _otlp_endpoint(args.otlp)
-        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        index = build_kid_index(*_docket_pins([read_pin(path) for path in args.pin], args.grant_pin))
         span_exporter: SpanExporter = OtlpHttpExporter(endpoint, timeout=args.timeout)
     except STARTUP_ERRORS + (InitError,) as exc:
         return _refused("docket export", exc)
@@ -679,7 +700,7 @@ def _export_docket(args: argparse.Namespace) -> int:
 def _archive_docket(args: argparse.Namespace) -> int:
     stop = _stop_on_signals()
     try:
-        index = build_kid_index(pinned_writers(read_pin(path) for path in args.pin))
+        index = build_kid_index(*_docket_pins([read_pin(path) for path in args.pin], args.grant_pin))
         archiver = DocketArchiver(
             args.docket,
             index,
@@ -694,6 +715,17 @@ def _archive_docket(args: argparse.Namespace) -> int:
         return _refused("docket archive", exc)
     print(f"{PROG} docket archive: {archived} segments archived", file=sys.stderr)
     return 0
+
+
+def _docket_pins(
+    pins: Sequence[PublicKeyRecord], grant_pin_paths: Sequence[Path]
+) -> tuple[dict[str, dict[str, Ed25519PublicKey]], frozenset[str]]:
+    grants = [read_pin(path) for path in grant_pin_paths]
+    grant_writers = frozenset(pin.component for pin in grants)
+    both = sorted({pin.component for pin in pins} & grant_writers)
+    if both:
+        raise InitError(f"writers pinned both as entry and grant writers: {', '.join(both)}")
+    return pinned_writers([*pins, *grants]), grant_writers
 
 
 def _otlp_endpoint(value: str) -> str:

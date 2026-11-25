@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -12,6 +12,7 @@ from agent_warrant.ledger import LedgerError
 from agent_bailiff.control.suspension import SuspensionError
 from agent_bailiff.decide.decider import DocketWriter
 from agent_bailiff.docket.entry import Entry, Record, decode_record
+from agent_bailiff.docket.grant import Grant
 from agent_bailiff.docket.sink import Writers, build_kid_index
 from agent_bailiff.signing import Refused
 
@@ -64,6 +65,8 @@ class Control:
         suspension: SuspensionSwitch,
         docket: DocketWriter,
         docket_writer: str,
+        *,
+        grant_writers: Iterable[str] = (),
     ) -> None:
         for name, value in (("component", component), ("docket_writer", docket_writer)):
             if not isinstance(value, str) or not value:
@@ -73,7 +76,7 @@ class Control:
         if docket_writer in writers:
             raise ValueError("control must not accept records from its own docket writer")
         self._component = component
-        self._index = build_kid_index(writers)
+        self._index = build_kid_index(writers, grant_writers)
         self._ledger = ledger
         self._suspension = suspension
         self._docket = docket
@@ -132,6 +135,8 @@ class Control:
         record = decode_record(record_token, self._index)
         if isinstance(record, Refused):
             raise ControlRefused(f"record_{record.reason}", record.detail)
+        if isinstance(record.entry, Grant):
+            raise ControlRefused("record_grant_unsupported", "control does not act on grant records")
         return record.entry
 
     def _apply_revocation(self, handles: Mapping[str, str], now: int) -> None:

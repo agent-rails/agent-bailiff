@@ -18,6 +18,7 @@ from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 from opentelemetry.util.types import AttributeValue
 
+from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.docket.follower import DEFAULT_BATCH_SIZE, DEFAULT_POLL_INTERVAL, DEFAULT_STALL_AFTER, DocketFollower
 from agent_bailiff.docket.report import RELEASED, printable
 from agent_bailiff.docket.sink import KidIndex, VerifiedLine
@@ -72,7 +73,7 @@ def trace_id_for(trace_id: str, entry_id: str) -> tuple[int, bool]:
 
 def to_span(verified: VerifiedLine) -> ReadableSpan:
     record = verified.record
-    entry = record.entry
+    entry = _entry(record)
     trace_id, mapped = trace_id_for(entry.trace_id, entry.entry_id)
     attributes: dict[str, AttributeValue] = {
         "bailiff.entry_id": entry.entry_id,
@@ -130,23 +131,24 @@ def to_span(verified: VerifiedLine) -> ReadableSpan:
 
 def to_skipped_span(verified: VerifiedLine) -> ReadableSpan:
     record = verified.record
-    trace_id, mapped = trace_id_for(record.entry.trace_id, record.entry.entry_id)
+    entry = _entry(record)
+    trace_id, mapped = trace_id_for(entry.trace_id, entry.entry_id)
     attributes: dict[str, AttributeValue] = {
-        "bailiff.entry_id": record.entry.entry_id,
+        "bailiff.entry_id": entry.entry_id,
         "bailiff.export_skipped": True,
         "bailiff.docket.line": verified.line,
         "bailiff.docket.writer": record.writer,
         "bailiff.docket.seq": record.seq,
         "bailiff.docket.kid": record.kid,
         "bailiff.docket.hash": record.hash,
-        "bailiff.entry_at": record.entry.at,
+        "bailiff.entry_at": entry.at,
     }
     if mapped:
         attributes["bailiff.trace_id_mapped"] = True
     now = time.time_ns()
     return ReadableSpan(
         name="docket export_skipped",
-        context=SpanContext(trace_id, span_id_for(record.entry.entry_id), is_remote=False, trace_flags=SAMPLED),
+        context=SpanContext(trace_id, span_id_for(entry.entry_id), is_remote=False, trace_flags=SAMPLED),
         resource=Resource({"service.name": f"agent-bailiff-{record.writer}"}),
         attributes=attributes,
         kind=SpanKind.INTERNAL,
@@ -155,6 +157,12 @@ def to_skipped_span(verified: VerifiedLine) -> ReadableSpan:
         end_time=now,
         instrumentation_scope=SCOPE,
     )
+
+
+def _entry(record: Record) -> Entry:
+    if not isinstance(record.entry, Entry):
+        raise ValueError(f"record {record.writer} seq {record.seq} is not an entry and has no span")
+    return record.entry
 
 
 class ExportFailed(Exception):
@@ -251,7 +259,10 @@ class DocketExporter:
         return exported
 
     def _ship(self, batch: Sequence[VerifiedLine], stop: threading.Event) -> None:
-        spans = [self._span(verified) for verified in batch]
+        spans = [self._span(verified) for verified in batch if isinstance(verified.record.entry, Entry)]
+        if not spans:
+            logger.info("lines %d-%d hold no entries to export", batch[0].line, batch[-1].line)
+            return
         failures = 0
         while self._export(spans, batch) is not SpanExportResult.SUCCESS:
             failures += 1
