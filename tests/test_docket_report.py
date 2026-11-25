@@ -18,6 +18,7 @@ from test_docket import RunningSink, make_entry
 from agent_bailiff import cli
 from agent_bailiff.docket import GRANT_TYP, DocketClient, DocketSink, Grant, decode_record, encode_record
 from agent_bailiff.docket import segments as segments_module
+from agent_bailiff.docket import tasks as tasks_module
 from agent_bailiff.docket.entry import ENTRY_TYP, Head, _entry_body
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
 from agent_bailiff.docket.report import GRANTED, RELEASED, verify_docket
@@ -1069,3 +1070,41 @@ def test_tasks_prints_nothing_from_a_docket_that_fails_verification(docket, pin_
     assert code != 0
     assert out == []
     assert "line 7 fails verification" in err
+
+
+def task_state_bytes(docket, pin_files, capsys, monkeypatch):
+    tracked = []
+    rows = tasks_module.TaskList.rows
+    monkeypatch.setattr(tasks_module.TaskList, "rows", lambda self: tracked.append(self._tracked) or rows(self))
+    code, _, err = list_tasks(docket, pin_files, capsys=capsys)
+    assert code == 0, err
+    monkeypatch.setattr(tasks_module.TaskList, "rows", rows)
+    return tracked[0]
+
+
+def test_tasks_within_the_state_budget_are_listed(docket, pin_files, capsys, monkeypatch):
+    task_docket(docket)
+    monkeypatch.setattr(tasks_module, "MAX_TRACKED_BYTES", task_state_bytes(docket, pin_files, capsys, monkeypatch))
+    code, out, err = list_tasks(docket, pin_files, capsys=capsys)
+    assert code == 0, err
+    assert len(out) == 4
+
+
+def test_tasks_past_the_state_budget_are_refused_and_print_nothing(docket, pin_files, capsys, monkeypatch):
+    task_docket(docket)
+    budget = task_state_bytes(docket, pin_files, capsys, monkeypatch) - 1
+    monkeypatch.setattr(tasks_module, "MAX_TRACKED_BYTES", budget)
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert code == cli.EXIT_REFUSED
+    assert out == []
+    assert f"docket tasks refused: the report tracks at most {budget} bytes of task state and line 6 adds more" in err
+
+
+def test_a_replaced_record_frees_its_share_of_the_budget(docket, pin_files, capsys, monkeypatch):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles))
+    once = task_state_bytes(docket, pin_files, capsys, monkeypatch)
+    for number in range(2, 6):
+        docket.append("decide", make_entry(number, handles=handles))
+    replaced = len(docket.records[-1].token) - len(docket.records[0].token)
+    assert task_state_bytes(docket, pin_files, capsys, monkeypatch) == once + replaced
