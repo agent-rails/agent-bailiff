@@ -12,7 +12,7 @@ from typing import Any
 
 from agent_warrant.identity import is_valid_public_key
 from agent_warrant.scope import validate_scope
-from agent_warrant.task_root import issue_task_root
+from agent_warrant.task_root import TaskRoot, issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.custodian.files import OwnedFileError, replace_at
@@ -32,6 +32,7 @@ MAX_DELEGATION_DEPTH = 2
 TASK_FILE_NAME = "task.json"
 TASK_FILE_MODE = 0o644
 FORBIDDEN_DIR_BITS = 0o022
+SIGNATURE_PLACEHOLDER = "A" * 86
 
 
 class TaskIssueError(Exception):
@@ -72,21 +73,31 @@ class TaskRequest:
 
 
 def issue_task(issuer_key: Ed25519PrivateKey, issuer: str, decider_id: str, request: TaskRequest, now: int) -> TaskFile:
-    root = issue_task_root(
-        issuer_key,
-        issuer=issuer,
-        task_id=f"task-{secrets.token_hex(8)}",
-        tenant_id=request.tenant,
-        principal=request.principal,
-        purpose=request.purpose,
-        budget=request.budget,
-        max_depth=request.max_depth,
-        issued_at=now,
-        expires_at=now + request.ttl,
-        scope=request.scope,
-        subject=request.subject,
-    )
-    return TaskFile(root, decider_id)
+    fields: dict[str, Any] = {
+        "issuer": issuer,
+        "task_id": f"task-{secrets.token_hex(8)}",
+        "tenant_id": request.tenant,
+        "principal": request.principal,
+        "purpose": request.purpose,
+        "budget": request.budget,
+        "max_depth": request.max_depth,
+        "issued_at": now,
+        "expires_at": now + request.ttl,
+        "scope": request.scope,
+        "subject": request.subject,
+    }
+    _check_task_file_size(TaskFile(TaskRoot(**fields, proof=SIGNATURE_PLACEHOLDER), decider_id))
+    return TaskFile(issue_task_root(issuer_key, **fields), decider_id)
+
+
+def _check_task_file_size(unsigned: TaskFile) -> None:
+    try:
+        unsigned.encode()
+    except TaskFileError:
+        raise ValueError(
+            f"scope: the task file would exceed the {MAX_TASK_FILE_BYTES} byte limit; "
+            "narrow the scope or split the work across tasks"
+        ) from None
 
 
 def write_task_file(out_dir: Path, task: TaskFile) -> Path:

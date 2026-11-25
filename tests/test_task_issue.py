@@ -23,6 +23,40 @@ DECIDER = "decide.quickstart"
 PERMISSION = {"tools": ["gitea.list_issues"], "resources": ["repo:demo/*"], "max_cost_per_call": 1}
 SCOPE = {"permissions": [PERMISSION]}
 ISSUER_KEY = Ed25519PrivateKey.generate()
+MAX_BOUND_SCOPE = {
+    "permissions": [
+        {
+            "tools": [f"tool.{index:02d}.{side}{'t' * 118}" for side in "ab"],
+            "resources": [f"repo/{index:02d}/{side}{'r' * 118}" for side in "ab"],
+            "max_cost_per_call": 9_007_199_254_740_991,
+        }
+        for index in range(16)
+    ]
+}
+TWO_PERMISSIONS_TWENTY_REPOS = {
+    "permissions": [
+        {
+            "tools": ["gitea.issues.list", "gitea.issues.read"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*" for index in range(10)],
+            "max_cost_per_call": 1,
+        },
+        {
+            "tools": ["gitea.issues.comment"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*" for index in range(10, 20)],
+            "max_cost_per_call": 2,
+        },
+    ]
+}
+SIXTEEN_SINGLE_PAIRS = {
+    "permissions": [
+        {
+            "tools": [f"gitea.issues.op{index:02d}"],
+            "resources": [f"gitea/repos/acme/service-{index:02d}/*"],
+            "max_cost_per_call": 1,
+        }
+        for index in range(16)
+    ]
+}
 
 
 def new_subject():
@@ -96,6 +130,22 @@ def test_exact_and_dot_tool_grants_are_issued(tools):
     assert (
         issued(scope={"permissions": [{**PERMISSION, "tools": tools}]}).root.scope["permissions"][0]["tools"] == tools
     )
+
+
+class RefusingKey:
+    def sign(self, data):
+        raise AssertionError("an oversize scope must be refused before signing")
+
+
+def test_a_max_bound_scope_is_refused_before_signing():
+    with pytest.raises(ValueError, match="task file would exceed the 4096 byte limit"):
+        issue_task(RefusingKey(), ISSUER, DECIDER, request(scope=MAX_BOUND_SCOPE), NOW)
+
+
+@pytest.mark.parametrize("scope", [TWO_PERMISSIONS_TWENTY_REPOS, SIXTEEN_SINGLE_PAIRS])
+def test_realistic_multi_permission_scopes_are_issued(scope):
+    task = issued(scope=scope)
+    assert task.root.scope == scope and len(task.encode()) <= 4096
 
 
 def test_request_defaults_are_short_lived_and_undelegable():
@@ -276,6 +326,7 @@ def test_the_cli_issues_to_a_subject_starting_with_a_dash(out_dir, tmp_path):
         "[]",
         json.dumps({"permissions": [{**PERMISSION, "tools": ["gitea.issues_*"]}]}),
         json.dumps({"permissions": [{**PERMISSION, "resources": ["repo:demo-*"]}]}),
+        json.dumps(MAX_BOUND_SCOPE),
     ],
 )
 def test_the_cli_refuses_a_bad_scope(out_dir, tmp_path, scope, capsys):
