@@ -117,6 +117,10 @@ def test_every_ci_job_installs_from_the_hash_lock_and_the_smoke_job_only_adds_uv
         "/opt/bailiff-agent/bin/python -m pip install --no-deps --no-build-isolation .",
         "/opt/bailiff-agent/bin/python -m pip check",
     ]
+    assert jobs.pop("test") == [
+        *locked,
+        '"$RUNNER_TEMP/aw030/bin/python" -m pip install --require-hashes -r requirements-aw030.txt',
+    ]
     for name, installs in jobs.items():
         assert installs == locked, name
 

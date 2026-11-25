@@ -27,9 +27,13 @@ jobs:
       - run: mypy
       - run: sh adapters/agentgateway/scripts/fetch_gateway.sh
       - run: sudo useradd --no-create-home --groups "$(id -gn)" bailiff-other
+      - run: |
+          python -m venv "$RUNNER_TEMP/aw030"
+          "$RUNNER_TEMP/aw030/bin/python" -m pip install --require-hashes -r requirements-aw030.txt
       - run: pytest -q
         env:
           AGENT_BAILIFF_TEST_OTHER_USER: bailiff-other
+          AW_030_VENV: ${{ runner.temp }}/aw030
 
   install-smoke:
     runs-on: ubuntu-latest
