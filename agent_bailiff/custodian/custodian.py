@@ -34,6 +34,7 @@ from agent_bailiff.decide.clearance import Clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
+from agent_bailiff.docket.client import UNACKNOWLEDGED, DocketError
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.scope_pattern import scope_refusal
 from agent_bailiff.signing import Refused as SigningRefused
@@ -507,10 +508,20 @@ class Custodian:
                     latency_ms=self._elapsed_ms(started),
                 )
             )
+        except DocketError as exc:
+            if exc.reason in UNACKNOWLEDGED:
+                logger.warning(
+                    "docket entry for a custodian refusal was not acknowledged and may be recorded", exc_info=True
+                )
+                return
+            self._forget_refusal(key)
         except Exception:
-            logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
-            with self._refusals_lock:
-                self._recorded_refusals.pop(key, None)
+            self._forget_refusal(key)
+
+    def _forget_refusal(self, key: tuple[str, str, str, str]) -> None:
+        logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
+        with self._refusals_lock:
+            self._recorded_refusals.pop(key, None)
 
     def _record_chain_refusal(self, refusal: _ChainRefused, now: int, started: int) -> None:
         clearance = refusal.clearance
