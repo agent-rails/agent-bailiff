@@ -611,7 +611,7 @@ def _list_tasks(args: argparse.Namespace) -> int:
         report = verify_records(
             args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
         )
-    except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket tasks", exc)
     if not report.ok:
         where = "the docket" if report.line is None else f"line {report.line}"

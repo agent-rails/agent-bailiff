@@ -464,6 +464,15 @@ def test_tasks_with_the_archive_counts_records_in_removed_segments(layout, pin_f
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 2, 0, 0)]
 
 
+def test_tasks_refuses_an_archive_missing_a_removed_segment(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    (copies(layout, manifest) / "seg-000000000001").unlink()
+    code, rows, err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert rows == []
+    assert "docket tasks refused: segment 1 has no archived copy" in err
+
+
 def test_verify_refuses_an_archived_copy_differing_from_its_sidecar(layout, pin_files, capsys):
     manifest, _ = archived_and_removed(layout)
     copy = copies(layout, manifest) / "seg-000000000001"
