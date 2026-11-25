@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -18,12 +19,13 @@ PINS = {
 }
 PINNED_NAMES = ("agent-warrant", "toolcall-authz", "cryptography", "grpcio", "protobuf")
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+WORKFLOWS = sorted(path for path in (ROOT / ".github" / "workflows").iterdir() if path.suffix in {".yml", ".yaml"})
 EXPORTS = (
     "requirements-ci.txt",
     "deploy/kubernetes/webhook-requirements.txt",
     "examples/quickstart/trace-requirements.txt",
 )
+UNEXPORTED = ("requirements-aw030.txt",)
 SETUP_UV = "astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d"
 
 
@@ -44,7 +46,7 @@ def test_every_workflow_is_checked():
 
 @pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.name)
 def test_workflow_actions_are_pinned_to_commit_shas(workflow):
-    uses = re.findall(r"uses:\s*(\S+)", workflow.read_text())
+    uses = re.findall(r"^\s*(?:- )?uses:\s*(\S+)", workflow.read_text(), re.MULTILINE)
     assert uses
     for reference in uses:
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", reference), reference
@@ -57,10 +59,11 @@ def test_workflow_token_is_read_only_and_credentials_are_not_persisted(workflow)
     assert text.count("persist-credentials: false") == text.count("actions/checkout@")
 
 
-def test_every_setup_uv_requires_a_checksum():
-    text = WORKFLOW.read_text()
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda path: path.name)
+def test_every_setup_uv_requires_a_checksum(workflow):
+    text = workflow.read_text()
     steps = re.findall(rf"- uses: {re.escape(SETUP_UV)} # v[\d.]+\n        with:\n((?:          .*\n)+)", text)
-    assert len(steps) == text.count(SETUP_UV) == 2
+    assert len(steps) == text.count("astral-sh/setup-uv") == (2 if workflow == WORKFLOW else 0)
     for step in steps:
         assert 'version: "0.12.3"' in step
         assert "require-checksums: true" in step
@@ -71,8 +74,16 @@ def test_ci_fails_when_an_export_disagrees_with_the_uv_lock():
     assert job.endswith("- run: sh scripts/export-requirements.sh\n      - run: git diff --exit-code")
     script = (ROOT / "scripts" / "export-requirements.sh").read_text()
     assert "uv export --locked " in script
-    for path in EXPORTS:
-        assert f"export_lock {path}" in script
+    calls = re.findall(r"^export_lock (\S+)(?: |$)", script, re.MULTILINE)
+    assert sorted(calls) == sorted(EXPORTS)
+    assert script.count("export_lock") == len(EXPORTS) + 1
+
+
+def test_every_tracked_requirements_file_is_exported_from_the_uv_lock():
+    tracked = subprocess.run(
+        ["git", "ls-files", "*requirements*.txt"], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert sorted(tracked) == sorted((*EXPORTS, *UNEXPORTED))
 
 
 @pytest.mark.parametrize("path", EXPORTS)
