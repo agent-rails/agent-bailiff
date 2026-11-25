@@ -159,7 +159,7 @@ def test_the_live_run_claude_cli_is_pinned_by_lockfile():
 
 def test_the_live_run_image_pins_every_input_by_digest():
     dockerfile = (ROOT / "examples" / "live-run" / "Dockerfile").read_text()
-    for image in re.findall(r"^FROM (\S+)", dockerfile, re.MULTILINE):
+    for image in re.findall(r"^FROM (?:--platform=linux/amd64 )?(\S+)", dockerfile, re.MULTILINE):
         assert re.fullmatch(r"[\w.-]+:[\w.-]+@sha256:[0-9a-f]{64}", image), image
     added = dict(re.findall(r"ADD --checksum=sha256:([0-9a-f]{64}) --chmod=0755 \\\n\s+(\S+)", dockerfile))
     assert len(added) == 2

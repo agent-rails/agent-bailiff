@@ -9,11 +9,12 @@ updates:
       - /examples/quickstart
       - /deploy/kubernetes
       - /deploy/gke
+      - /examples/live-run
     schedule:
       interval: weekly
     ignore:
       - dependency-name: python
-        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+        versions: [">=3.15"]
     groups:
       python-base:
         group-by: dependency-name
