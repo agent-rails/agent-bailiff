@@ -41,7 +41,7 @@ from agent_bailiff.docket.report import (
 )
 from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
-from agent_bailiff.docket.tasks import TaskList, task_header, task_json_row, task_table_row
+from agent_bailiff.docket.tasks import TaskList, task_header, task_json_chunks, task_table_row
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.platform import PLATFORMS
@@ -625,7 +625,11 @@ def _list_tasks(args: argparse.Namespace) -> int:
     if not args.json:
         print(task_header())
     for row in rows:
-        print(task_json_row(row) if args.json else task_table_row(row))
+        if args.json:
+            sys.stdout.writelines(task_json_chunks(row))
+            sys.stdout.write("\n")
+        else:
+            print(task_table_row(row))
     print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
     if tasks.undecodable_grants:
         print(

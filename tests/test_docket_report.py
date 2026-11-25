@@ -1108,3 +1108,20 @@ def test_a_replaced_record_frees_its_share_of_the_budget(docket, pin_files, caps
         docket.append("decide", make_entry(number, handles=handles))
     replaced = len(docket.records[-1].token) - len(docket.records[0].token)
     assert task_state_bytes(docket, pin_files, capsys, monkeypatch) == once + replaced
+
+
+def test_non_ascii_task_state_is_charged_at_its_stored_size(docket, pin_files, capsys, monkeypatch):
+    tenant, task, root, principal = ("\U0001f600" * 1000 + name for name in ("t", "k", "r", "p"))
+    handles = {"tenant": tenant, "task": task, "root": root}
+    docket.append("decide", make_entry(1, handles=handles, tenant=tenant, principal=principal))
+    stored = sum(sys.getsizeof(text) for text in (tenant, task, root, principal, docket.records[0].token))
+    expected = tasks_module.ROW_BYTES + tasks_module.KEY_BYTES + stored
+    assert task_state_bytes(docket, pin_files, capsys, monkeypatch) == expected
+
+
+def test_a_json_task_row_is_written_in_chunks_that_join_to_one_document():
+    row = tasks_module.TaskRow("acme", "task-a", roots={"root-a", "root-b"})
+    chunks = list(tasks_module.task_json_chunks(row))
+    assert len(chunks) > 1
+    assert "".join(chunks) == json.dumps(json.loads("".join(chunks)), sort_keys=True)
+    assert json.loads("".join(chunks))["roots"] == ["root-a", "root-b"]

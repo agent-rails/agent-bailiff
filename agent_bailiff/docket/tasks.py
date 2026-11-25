@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 from agent_bailiff.docket.grant import Grant
@@ -87,7 +88,7 @@ class TaskList:
     def _row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
         row = self._rows.get((tenant, task))
         if row is None:
-            self._charge(ROW_BYTES + len(tenant) + len(task), line)
+            self._charge(ROW_BYTES + text_bytes(tenant) + text_bytes(task), line)
             row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=at)
         row.first, row.last = min(row.first, at), max(row.last, at)
         return row
@@ -99,32 +100,32 @@ class TaskList:
         return rows
 
     def _set_principal(self, row: TaskRow, principal: str | None, line: int) -> None:
-        self._charge(len(principal or "") - len(row.principal or ""), line)
+        self._charge(text_bytes(principal) - text_bytes(row.principal), line)
         row.principal = principal
 
     def _add_root(self, row: TaskRow, root: str, line: int) -> None:
         if root in row.roots:
             return
-        self._charge(KEY_BYTES + len(root), line)
+        self._charge(KEY_BYTES + text_bytes(root), line)
         row.roots.add(root)
 
     def _set_record(self, row: TaskRow, verified: VerifiedLine) -> None:
-        self._charge(len(verified.record.token) - len(row.record or ""), verified.line)
+        self._charge(text_bytes(verified.record.token) - text_bytes(row.record), verified.line)
         row.record, row.record_line = verified.record.token, verified.line
 
     def _add_revocation(self, entry_id: str, handles: Mapping[str, str], line: int) -> None:
         if "task" in handles and "tenant" in handles:
             key = (handles["tenant"], handles["task"])
             if key not in self._revoked_tasks:
-                self._charge(KEY_BYTES + len(entry_id) + len(key[0]) + len(key[1]), line)
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(key[0]) + text_bytes(key[1]), line)
                 self._revoked_tasks[key] = entry_id
         elif "root" in handles:
             if handles["root"] not in self._revoked_roots:
-                self._charge(KEY_BYTES + len(entry_id) + len(handles["root"]), line)
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(handles["root"]), line)
                 self._revoked_roots[handles["root"]] = entry_id
         elif "tenant" in handles and "link" not in handles:
             if handles["tenant"] not in self._revoked_tenants:
-                self._charge(KEY_BYTES + len(entry_id) + len(handles["tenant"]), line)
+                self._charge(KEY_BYTES + text_bytes(entry_id) + text_bytes(handles["tenant"]), line)
                 self._revoked_tenants[handles["tenant"]] = entry_id
 
     def _charge(self, size: int, line: int) -> None:
@@ -140,6 +141,10 @@ class TaskList:
             return task
         root = next((self._revoked_roots[root] for root in sorted(row.roots) if root in self._revoked_roots), None)
         return root if root is not None else self._revoked_tenants.get(row.tenant)
+
+
+def text_bytes(text: str | None) -> int:
+    return 0 if text is None else sys.getsizeof(text)
 
 
 def task_header() -> str:
@@ -161,7 +166,7 @@ def task_table_row(row: TaskRow) -> str:
     return "\t".join(printable(value) for value in values)
 
 
-def task_json_row(row: TaskRow) -> str:
+def task_json_chunks(row: TaskRow) -> Iterator[str]:
     document = {
         "tenant": row.tenant,
         "task": row.task,
@@ -178,4 +183,4 @@ def task_json_row(row: TaskRow) -> str:
         "record_line": row.record_line,
         "record": row.record,
     }
-    return json.dumps(document, sort_keys=True)
+    return json.JSONEncoder(sort_keys=True).iterencode(document)
