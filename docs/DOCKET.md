@@ -238,14 +238,14 @@ stderr ends with `N records verified, R roots, I invalid grants`. Exit codes:
 
 - 0: every record verifies and no row is `invalid_grant`.
 - 1: every row is printed and at least one is `invalid_grant`.
-- 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, or an archive that does not match. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
+- 2: a line fails verification (`agent-bailiff docket grants: line N fails verification: ...; no grants printed`), or an input is refused (`agent-bailiff docket grants refused: ...`), such as the issuers file, a pin, an archive that does not match, or a docket past the root cap below. No rows are printed. Unlike `docket grants`, `docket verify` and `docket tasks` exit 1 on a line that fails.
 
 Limits:
 
 - Advisory only. It sets no thresholds and revokes nothing.
 - `ungranted` covers only roots that appear in an entry. A root signed without a grant and never used is not seen.
 - Without `--archive` it starts at the manifest base. After segment removal, a grant in a removed segment is then not read, and later calls under its root show as `ungranted`. Pass `--archive` to read removed segments too.
-- It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket.
+- It reads the docket once, in order, and keeps one bounded aggregate per root, not the records, so memory grows with the number of roots in the docket. It tracks at most 100,000 roots, counting granted, ungranted and `invalid_grant` rows; a docket with more exits 2 with `agent-bailiff docket grants refused: the report tracks at most 100000 roots and line N adds another`.
 
 ## docket export
 

@@ -33,6 +33,7 @@ COST_INEXACT = "cost_inexact"
 WILDCARD_NAMES_CAP = 20
 MAX_PAIRS_PER_ROOT = 4096
 MAX_OPS_PER_ROOT = 65536
+MAX_ROOTS = 100_000
 CONTROL_HOP = "control"
 DECIDE_HOP = "decide"
 GRANT_COLUMNS = ("tenant", "task", "root", "status", "reason", "unused", "wildcards", "cost", "ttl", "flags")
@@ -138,6 +139,7 @@ class GrantReport:
             return
         use = self._roots.get(binding)
         if use is None:
+            self._check_room(verified.line)
             use = self._roots[binding] = RootUse(tenant, task)
         if entry.hop == DECIDE_HOP and entry.decision == "allow":
             use.add_allow(entry, verified.line)
@@ -149,21 +151,28 @@ class GrantReport:
     def _add_grant(self, grant: Grant, line: int) -> None:
         root = decode_grant_root(grant.root_token)
         if isinstance(root, Refused):
+            self._check_room(line)
             self._invalid.append(_invalid_row(grant, line, None, root))
             return
         refusal = check_grant_root(root, self._resolver, self._trust_policy)
         if refusal is not None:
+            self._check_room(line)
             self._invalid.append(_invalid_row(grant, line, root, refusal))
             return
         binding = root.binding()
         use = self._roots.get(binding)
         if use is None:
+            self._check_room(line)
             use = self._roots[binding] = RootUse(root.tenant_id, root.task_id)
         use.grant_records += 1
         if use.root is None:
             use.tenant, use.task = root.tenant_id, root.task_id
             use.root, use.grant_id, use.grant_line = root, grant.grant_id, line
             self._granted.setdefault((root.tenant_id, root.task_id), set()).add(binding)
+
+    def _check_room(self, line: int) -> None:
+        if len(self._roots) + len(self._invalid) >= MAX_ROOTS:
+            raise ValueError(f"the report tracks at most {MAX_ROOTS} roots and line {line} adds another")
 
     def _row(self, binding: str, use: RootUse) -> GrantRow:
         usage = GrantRow(

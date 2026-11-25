@@ -399,6 +399,29 @@ def test_a_decide_allow_without_a_cost_exits_2(docket, pin_files, issuers_file, 
     assert "line 1 lacks an op_id, cost, tool or resource" in err
 
 
+def roots_docket(docket):
+    grant(docket, make_root(task_id="task-1"), grant_id="g-1")
+    allow(docket, make_root(task_id="task-2"), 1)
+    docket.grant(Grant(grant_id="g-bad", at=ISSUED, root_token="not-a-root"))
+
+
+def test_roots_up_to_the_cap_are_reported(docket, pin_files, issuers_file, capsys, monkeypatch):
+    monkeypatch.setattr(grants_module, "MAX_ROOTS", 3)
+    roots_docket(docket)
+    code, rows, err = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == cli.EXIT_REFUSED, err
+    assert sorted(row["status"] for row in rows) == ["granted", "invalid_grant", "ungranted"]
+
+
+def test_a_root_past_the_cap_exits_2_and_prints_nothing(docket, pin_files, issuers_file, capsys, monkeypatch):
+    monkeypatch.setattr(grants_module, "MAX_ROOTS", 2)
+    roots_docket(docket)
+    code, out, err = report(docket, pin_files, issuers_file, "--json", capsys=capsys)
+    assert code == cli.EXIT_UNVERIFIED
+    assert out == []
+    assert "docket grants refused: the report tracks at most 2 roots and line 3 adds another" in err
+
+
 def test_grants_requires_an_issuers_file(docket, pin_files, capsys):
     with pytest.raises(SystemExit):
         cli.main(["docket", "grants", "--docket", str(docket.path), "--pin", str(pin_files["decide"])])
