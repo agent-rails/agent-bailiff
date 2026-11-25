@@ -174,6 +174,7 @@ class Custodian:
         self._admit_lock = threading.Lock()
         self._recorded_refusals: dict[tuple[str, str, str, str], None] = {}
         self._refusals_lock = threading.Lock()
+        logger.info("custodian %s effective scope_v1_cutoff=%d", config.custodian_id, config.scope_v1_cutoff)
 
     def release(self, clearance_token: object, request: object, now: int) -> ReleaseResult:
         started = self._monotonic_ns()

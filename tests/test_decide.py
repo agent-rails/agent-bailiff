@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
@@ -1132,3 +1133,52 @@ def test_outcome_and_reconcile_entries_carry_no_latency(make_decider, docket_pat
         "outcome": None,
         "reconcile": None,
     }
+
+
+def cutoff_config(cutoff):
+    return DeciderConfig(
+        DECIDER_ID,
+        "decide-1",
+        frozenset({CUSTODIAN_ID, SIGNER_CUSTODIAN_ID}),
+        MAX_PROOF_AGE,
+        BINDINGS,
+        "decide",
+        scope_v1_cutoff=cutoff,
+    )
+
+
+def test_the_decider_logs_its_effective_cutoff_at_startup(make_decider, caplog):
+    with caplog.at_level(logging.INFO, logger="agent_bailiff.decide.decider"):
+        make_decider(config=cutoff_config(NOW + 7))
+    assert f"decide {DECIDER_ID} effective scope_v1_cutoff={NOW + 7}" in caplog.text
+
+
+def test_a_v1_root_before_the_cutoff_is_allowed_and_logged(make_decider, caplog):
+    root = make_v1_root()
+    decider = make_decider(config=cutoff_config(NOW + 1))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.decide.decider"):
+        decision = decider.check(make_request(root), NOW)
+    assert (decision.allowed, decision.reason) == (True, "ok")
+    expected = (
+        f"scope_v1_accepted tenant={TENANT} task={root.task_id} root_binding={root.binding()} "
+        f"issued_at={NOW} cutoff={NOW + 1}"
+    )
+    assert [record.getMessage() for record in caplog.records if "scope_v1_accepted" in record.getMessage()] == [
+        expected
+    ]
+
+
+def test_a_v1_root_at_the_cutoff_is_refused_with_the_library_reason(make_decider, caplog):
+    decider = make_decider(config=cutoff_config(NOW))
+    with caplog.at_level(logging.INFO, logger="agent_bailiff.decide.decider"):
+        decision = decider.check(make_request(make_v1_root()), NOW)
+    assert (decision.allowed, decision.reason) == (False, "chain_invalid")
+    assert "scope_v1_accepted" not in caplog.text
+    assert "unverified refusal chain_invalid (task root: scope_v1_expired) not docketed" in caplog.text
+
+
+def test_a_v2_root_is_not_logged_as_v1(make_decider, caplog):
+    decider = make_decider(config=cutoff_config(NOW + 1))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.decide.decider"):
+        assert decider.check(make_request(make_root()), NOW).allowed
+    assert "scope_v1_accepted" not in caplog.text

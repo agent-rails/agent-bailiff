@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import sqlite3
@@ -975,3 +976,18 @@ def test_the_default_clock_records_a_non_negative_integer_on_release(make_custod
     make_custodian().release(token, request, NOW + 1)
     [entry] = custodian_entries(workdir)
     assert isinstance(entry.latency_ms, int) and entry.latency_ms >= 0
+
+
+def test_the_custodian_logs_its_effective_cutoff_at_startup(make_custodian, caplog):
+    with caplog.at_level(logging.INFO, logger="agent_bailiff.custodian.custodian"):
+        make_custodian(scope_v1_cutoff=NOW + 7)
+    assert f"custodian {CUSTODIAN_ID} effective scope_v1_cutoff={NOW + 7}" in caplog.text
+
+
+def test_a_custodian_chain_refusal_logs_the_library_reason(make_custodian, caplog):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert make_custodian(scope_v1_cutoff=NOW).release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert "custodian refused the chain of a verified clearance: task root: scope_v1_expired" in caplog.text

@@ -66,10 +66,11 @@ class _Issued:
 
 
 class _Refusal(Exception):
-    def __init__(self, reason: str, entry: Entry) -> None:
+    def __init__(self, reason: str, entry: Entry, detail: str | None = None) -> None:
         super().__init__(reason)
         self.reason = reason
         self.entry = entry
+        self.detail = detail
 
 
 class Decider:
@@ -101,6 +102,7 @@ class Decider:
         self._issued: dict[str, _Issued] = {}
         self._in_flight: set[str] = set()
         self._lock = threading.Lock()
+        logger.info("decide %s effective scope_v1_cutoff=%d", config.decider_id, config.scope_v1_cutoff)
 
     def check(self, request: OperationRequest, now: int) -> Decision:
         started = self._monotonic_ns()
@@ -115,7 +117,7 @@ class Decider:
         try:
             return self._check(request, now, entry, started)
         except _Refusal as refusal:
-            return self._refuse(refusal.reason, refusal.entry, started)
+            return self._refuse(refusal.reason, refusal.entry, started, refusal.detail)
         except Exception:
             logger.exception("decide failed with an internal error")
             return self._refuse("internal_error", entry, started)
@@ -223,7 +225,9 @@ class Decider:
             scope_v1_cutoff=self._config.scope_v1_cutoff,
         )
         if not chain.valid or chain.root is None or chain.leaf_subject is None:
-            raise _Refusal("chain_invalid", entry)
+            raise _Refusal("chain_invalid", entry, chain.reason)
+        if chain.root.scope_version == 1:
+            self._log_v1_accepted(chain.root)
         entry = _with_who(entry, chain.root, chain.links, chain.leaf_subject)
         try:
             return self._decide(
@@ -397,10 +401,20 @@ class Decider:
             and bool(record.token)
         )
 
-    def _refuse(self, reason: str, entry: Entry, started: int) -> Decision:
+    def _log_v1_accepted(self, root: TaskRoot) -> None:
+        logger.warning(
+            "scope_v1_accepted tenant=%s task=%s root_binding=%s issued_at=%d cutoff=%d",
+            root.tenant_id,
+            root.task_id,
+            root.binding(),
+            root.issued_at,
+            self._config.scope_v1_cutoff,
+        )
+
+    def _refuse(self, reason: str, entry: Entry, started: int, detail: str | None = None) -> Decision:
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
-            logger.info("unverified refusal %s not docketed (trace %s)", reason, entry.trace_id)
+            logger.info("unverified refusal %s (%s) not docketed (trace %s)", reason, detail or reason, entry.trace_id)
             return Decision(allowed=False, reason=reason, entry_id=None, op_id=entry.op_id)
         root = entry.handles.get("root", "")
         admission = self._refusal_budget.admit(tenant, task, root, reason)
