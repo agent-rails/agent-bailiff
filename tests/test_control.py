@@ -42,7 +42,10 @@ from agent_bailiff.control import Control, ControlRefused, ControlUnrecorded, Su
 from agent_bailiff.decide import Decider, DeciderConfig, PolicyRef
 from agent_bailiff.docket import DocketClient, DocketSink, Grant, Record, decode_record, encode_record
 from agent_bailiff.docket.entry import Entry
+from agent_bailiff.docket.report import RecordFilter, verify_records
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import build_kid_index
+from agent_bailiff.docket.tasks import TaskList
 from agent_bailiff.signing import Refused
 
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(4, 36)))
@@ -292,6 +295,18 @@ def test_an_invalid_binding_handle_is_refused_without_an_entry(decider, make_con
         make_control().revoke(token, "root", "ops", NOW + 1)
     assert refused.value.reason == "invalid_handle"
     assert control_entries(workdir) == []
+
+
+def test_every_task_row_record_is_revocable_at_the_task_level(decider, make_control, workdir):
+    root, link = allowed_delegated_call(decider, workdir)
+    assert not decider.check(make_request(root, (link,), CHILD_KEY, nonce="n-1", trace_id="trace-9"), NOW).allowed
+    tasks = TaskList(WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")}))
+    assert verify_records(workdir / "docket.log", SINK_WRITERS, RecordFilter(), tasks.add).ok
+    [row] = tasks.rows()
+    assert (row.principal, row.allows, row.refusals, row.principal_conflict) == (PRINCIPAL, 1, 1, False)
+    outcome = make_control().revoke(row.record, "task", "ops@example", NOW + 1)
+    assert dict(outcome.handles) == {"tenant": TENANT, "task": root.task_id}
+    assert not next_delegated_call(decider, root, link).allowed
 
 
 GRANT_LEVELS = ("task", "tenant", "root")

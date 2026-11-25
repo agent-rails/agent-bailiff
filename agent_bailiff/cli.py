@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import BinaryIO
 
@@ -39,9 +39,18 @@ from agent_bailiff.docket.report import (
     table_row,
     verify_records,
 )
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.segments import SegmentMismatch, SegmentRemoved
 from agent_bailiff.docket.sink import DocketCorrupt, DocketLocked, VerifiedLine, build_kid_index
-from agent_bailiff.docket.tasks import TaskList, task_header, task_json_chunks, task_table_row
+from agent_bailiff.docket.tasks import (
+    CONTROL_HOP,
+    CUSTODIAN_HOP,
+    DECIDE_HOP,
+    TaskList,
+    task_header,
+    task_json_chunks,
+    task_table_row,
+)
 from agent_bailiff.effector.catalog import OperationCatalog
 from agent_bailiff.effector.drift import RbacDrift
 from agent_bailiff.effector.platform import PLATFORMS
@@ -90,6 +99,9 @@ PROG = "agent-bailiff"
 EXIT_REFUSED = 1
 EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
+EXIT_UNCOUNTED = 3
+TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
+GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
@@ -177,7 +189,25 @@ def _parser() -> argparse.ArgumentParser:
             )
             tasks.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
             tasks.add_argument(
-                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+                "--pin",
+                type=Path,
+                action="append",
+                default=[],
+                help="public key record of a writer that is verified but feeds no row; repeat",
+            )
+            tasks.add_argument(
+                "--decide-pin",
+                type=Path,
+                action="append",
+                required=True,
+                help="decide's public key record; only its records count allows and set PRINCIPAL; repeat",
+            )
+            tasks.add_argument(
+                "--custodian-pin",
+                type=Path,
+                action="append",
+                required=True,
+                help="custodian's public key record; only its records count releases; repeat",
             )
             tasks.add_argument(
                 "--control-pin",
@@ -194,11 +224,22 @@ def _parser() -> argparse.ArgumentParser:
             grants = component.add_parser(
                 "grants",
                 help="verify every record and print granted versus used per task root; advisory, exit 1 on an "
-                "invalid grant, 2 when the docket fails verification",
+                "invalid grant, 3 when records are not counted, 2 when the docket fails verification",
             )
             grants.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
             grants.add_argument(
-                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+                "--pin",
+                type=Path,
+                action="append",
+                default=[],
+                help="public key record of a writer that is verified but feeds no root; repeat",
+            )
+            grants.add_argument(
+                "--decide-pin",
+                type=Path,
+                action="append",
+                required=True,
+                help="decide's public key record; only its allows count against a root; repeat",
             )
             grants.add_argument(
                 "--issuers",
@@ -605,13 +646,12 @@ def _run_docket(args: argparse.Namespace) -> int:
 
 def _list_tasks(args: argparse.Namespace) -> int:
     try:
-        control = [read_pin(path) for path in args.control_pin]
-        writers, grant_writers = _docket_pins([*(read_pin(path) for path in args.pin), *control], args.grant_pin)
-        tasks = TaskList(frozenset(pin.component for pin in control))
+        writers, grant_writers, roles = _role_pins(args, TASK_ROLE_FLAGS)
+        tasks = TaskList(roles)
         report = verify_records(
             args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
         )
-    except STARTUP_ERRORS + (InitError, SegmentMismatch, SegmentRemoved) as exc:
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
         return _refused("docket tasks", exc)
     if not report.ok:
         where = "the docket" if report.line is None else f"line {report.line}"
@@ -622,6 +662,15 @@ def _list_tasks(args: argparse.Namespace) -> int:
         )
         return EXIT_REFUSED
     rows = tasks.rows()
+    print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
+    if tasks.undecodable_grants:
+        print(
+            f"{PROG} docket tasks: {tasks.undecodable_grants} grants hold a task root that does not decode; "
+            "their tasks are not listed",
+            file=sys.stderr,
+        )
+    _warn_role_mismatches("docket tasks", tasks.role_mismatches)
+    sys.stderr.flush()
     if not args.json:
         print(task_header())
     for row in rows:
@@ -630,21 +679,14 @@ def _list_tasks(args: argparse.Namespace) -> int:
             sys.stdout.write("\n")
         else:
             print(task_table_row(row))
-    print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
-    if tasks.undecodable_grants:
-        print(
-            f"{PROG} docket tasks: {tasks.undecodable_grants} grants hold a task root that does not decode; "
-            "their tasks are not listed",
-            file=sys.stderr,
-        )
-    return 0
+    return EXIT_UNCOUNTED if tasks.role_mismatches else 0
 
 
 def _report_grants(args: argparse.Namespace) -> int:
     try:
         issuers = load_issuers(args.issuers)
-        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
-        grants = GrantReport(issuers.resolver, issuers.trust_policy)
+        writers, grant_writers, roles = _role_pins(args, GRANT_ROLE_FLAGS)
+        grants = GrantReport(issuers.resolver, issuers.trust_policy, roles)
         report = verify_records(
             args.docket, writers, RecordFilter(), grants.add, archive=args.archive, grant_writers=grant_writers
         )
@@ -659,6 +701,8 @@ def _report_grants(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_UNVERIFIED
+    _warn_role_mismatches("docket grants", grants.role_mismatches)
+    sys.stderr.flush()
     if not args.json:
         print(grant_header())
     roots = invalid = 0
@@ -670,6 +714,8 @@ def _report_grants(args: argparse.Namespace) -> int:
         f"{PROG} docket grants: {report.entries} records verified, {roots} roots, {invalid} invalid grants",
         file=sys.stderr,
     )
+    if grants.role_mismatches:
+        return EXIT_UNCOUNTED
     return EXIT_REFUSED if invalid else 0
 
 
@@ -810,6 +856,36 @@ def _docket_pins(
     if both:
         raise InitError(f"writers pinned both as entry and grant writers: {', '.join(both)}")
     return pinned_writers([*pins, *grants]), grant_writers
+
+
+def _role_pins(
+    args: argparse.Namespace, role_flags: Mapping[str, str]
+) -> tuple[dict[str, dict[str, Ed25519PublicKey]], frozenset[str], WriterRoles]:
+    flags = ["--pin", *role_flags.values(), "--grant-pin"]
+    pins = {flag: [read_pin(path) for path in getattr(args, flag[2:].replace("-", "_"))] for flag in flags}
+    owners: dict[str, str] = {}
+    for flag in flags:
+        for pin in pins[flag]:
+            owner = owners.setdefault(pin.component, flag)
+            if owner != flag:
+                raise InitError(f"writer {pin.component} is pinned as both {owner} and {flag}")
+    names: dict[bytes, str] = {}
+    for pin in (pin for flag in flags for pin in pins[flag]):
+        name = names.setdefault(pin.public_key.public_bytes_raw(), pin.component)
+        if name != pin.component:
+            first, second = sorted((name, pin.component))
+            raise InitError(f"writers {first} and {second} are pinned with the same public key")
+    roles = WriterRoles({hop: frozenset(pin.component for pin in pins[flag]) for hop, flag in role_flags.items()})
+    grant_writers = frozenset(pin.component for pin in pins["--grant-pin"])
+    return pinned_writers(pin for flag in flags for pin in pins[flag]), grant_writers, roles
+
+
+def _warn_role_mismatches(command: str, mismatches: int) -> None:
+    if mismatches:
+        print(
+            f"{PROG} {command}: {mismatches} records claim a hop their writer is not pinned for; they are not counted",
+            file=sys.stderr,
+        )
 
 
 def _otlp_endpoint(value: str) -> str:

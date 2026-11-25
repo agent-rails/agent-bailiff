@@ -51,7 +51,11 @@ def verified_rows(stack, task_id):
 
 
 def granted_roots(stack):
-    pins = [arg for component in b.WRITERS for arg in ("--pin", b.pin_path(component))]
+    pins = [
+        arg
+        for component in b.WRITERS
+        for arg in ("--decide-pin" if component == "decide" else "--pin", b.pin_path(component))
+    ]
     reader = ["--profile", "operator", "run", "--rm", "--no-deps", "-T", "--entrypoint", "python", "reader"]
     output = stack.compose(
         *reader, "-c", GRANTS_SCRIPT, "--docket", DOCKET, *map(str, pins), "--grant-pin", str(b.GRANT_PIN)

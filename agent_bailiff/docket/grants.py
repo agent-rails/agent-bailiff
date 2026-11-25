@@ -16,6 +16,7 @@ from cryptography.exceptions import InvalidSignature
 from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.grant import Grant
 from agent_bailiff.docket.report import printable
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
 from agent_bailiff.signing import Refused
 
@@ -38,7 +39,6 @@ MAX_OPS_PER_ROOT = 65536
 MAX_ROOTS = 100_000
 MAX_TRACKED_ITEMS = 2_000_000
 DUPLICATE_ROOTS_CAP = 20
-CONTROL_HOP = "control"
 DECIDE_HOP = "decide"
 GRANT_COLUMNS = ("tenant", "task", "root", "status", "reason", "unused", "wildcards", "cost", "ttl", "flags")
 
@@ -132,20 +132,27 @@ class RootUse:
 
 
 class GrantReport:
-    def __init__(self, resolver: IssuerResolver, trust_policy: IssuerTrustPolicy) -> None:
+    def __init__(self, resolver: IssuerResolver, trust_policy: IssuerTrustPolicy, roles: WriterRoles) -> None:
+        if not roles.reads(DECIDE_HOP):
+            raise ValueError(f"no writer is pinned for hop {DECIDE_HOP}")
+        self._roles = roles
         self._resolver = resolver
         self._trust_policy = trust_policy
         self._roots: dict[str, RootUse] = {}
         self._granted: dict[tuple[str, str], set[str]] = {}
         self._invalid: list[GrantRow] = []
         self._tracked = 0
+        self.role_mismatches = 0
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
         if isinstance(entry, Grant):
             self._add_grant(entry, verified.line)
             return
-        if entry.hop == CONTROL_HOP:
+        if entry.hop != DECIDE_HOP:
+            return
+        if not self._roles.holds(verified.record.writer, entry.hop):
+            self.role_mismatches += 1
             return
         binding, tenant, task = (entry.handles.get(level) for level in ("root", "tenant", "task"))
         if binding is None or tenant is None or task is None:
@@ -154,7 +161,7 @@ class GrantReport:
         if use is None:
             self._check_room(verified.line)
             use = self._roots[binding] = RootUse(tenant, task)
-        if entry.hop == DECIDE_HOP and entry.decision == "allow":
+        if entry.decision == "allow":
             self._tracked += use.add_allow(entry, verified.line, MAX_TRACKED_ITEMS - self._tracked)
 
     def rows(self) -> Iterator[GrantRow]:

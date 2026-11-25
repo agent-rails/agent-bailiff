@@ -448,7 +448,7 @@ def test_verify_without_the_archive_starts_at_the_base(layout, pin_files, capsys
 
 def tasks_command(layout, pin_files, capsys, *arguments):
     _, docket = layout
-    pins = ["--pin", pin_files["decide"], "--pin", pin_files["custodian"], "--control-pin", pin_files["control"]]
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", pin_files[name])]
     code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), "--json", *map(str, arguments)])
     captured = capsys.readouterr()
     return code, [json.loads(line) for line in captured.out.splitlines()], captured.err
@@ -462,6 +462,32 @@ def test_tasks_with_the_archive_counts_records_in_removed_segments(layout, pin_f
     code, rows, err = tasks_command(layout, pin_files, capsys)
     assert code == 0, err
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 2, 0, 0)]
+
+
+def test_tasks_refuses_an_archive_missing_a_removed_segment(layout, pin_files, capsys):
+    manifest, _ = archived_and_removed(layout)
+    (copies(layout, manifest) / "seg-000000000001").unlink()
+    code, rows, err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == cli.EXIT_REFUSED
+    assert rows == []
+    assert "docket tasks refused: segment 1 has no archived copy" in err
+
+
+def test_a_principal_conflict_covers_only_the_records_read(layout, pin_files, capsys):
+    _, docket = layout
+    docket.append("decide", make_entry(1, principal="alice"))
+    first = cut(docket)
+    docket.append("decide", make_entry(2, principal="bob"))
+    manifest = cut(docket, first)
+    docket.append("decide", make_entry(3, principal="bob"))
+    assert run(layout) == 2
+    remove_oldest(docket, manifest)
+    code, [row], err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
+    assert code == 0, err
+    assert (row["principal"], row["principal_conflict"], row["allows"]) == ("bob", True, 3)
+    code, [row], err = tasks_command(layout, pin_files, capsys)
+    assert code == 0, err
+    assert (row["principal"], row["principal_conflict"], row["allows"]) == ("bob", False, 2)
 
 
 def test_verify_refuses_an_archived_copy_differing_from_its_sidecar(layout, pin_files, capsys):

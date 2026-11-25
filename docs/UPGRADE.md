@@ -57,6 +57,18 @@ The task file holds at most 4,096 bytes. agent-warrant allows a scope of up to 1
 
 Once any v2 task is issued, going back to the previous release, on agent-warrant 0.3.0, is an outage for v2 tasks: 0.3.0 refuses to decode a v2 root, so the previous decide and custodian refuse every v2 call, the previous proxy cannot load a v2 `task.json`, its `task issue` refuses to write over one until it is removed, and its client cannot delegate from one. To roll back, revert every component in the reverse of the rollout order, remove `scope_v1_cutoff` from decide's and the custodian's `config.json` (the previous release refuses it as `unknown scope_v1_cutoff`), remove each v2 `task.json`, and reissue the tasks with v1 scopes. Tasks issued with v1 scopes before the upgrade keep working on 0.3.0.
 
+## Docket report roles
+
+`docket tasks` binds each hop it reads to role pins. It takes `--decide-pin`, `--custodian-pin` and `--control-pin`, all required; `--pin` is optional and pins writers that are verified but feed no row. Replace `--pin decide.pub.json --pin custodian.pub.json` with `--decide-pin decide.pub.json --custodian-pin custodian.pub.json`. An earlier command line fails with `the following arguments are required: --decide-pin, --custodian-pin`.
+
+`docket grants` takes `--decide-pin`, required; replace `--pin decide.pub.json` with `--decide-pin decide.pub.json`, and `--pin` for other writers is optional. It counts allows only from a `--decide-pin` writer, a root seen only in custodian records is no longer listed as `ungranted`, and it exits 3 with rows printed when a record claims a hop its writer is not pinned for, ahead of 1 for an invalid grant.
+
+`docket tasks` rows change: a grant no longer sets PRINCIPAL, so a task listed only from grants shows `-` until decide records a call; `record` is the latest decide record that names a principal; effector refusals are not counted; `--json` rows add `principal_conflict`. A record whose writer is not pinned for its hop is not counted, and the command exits 3 with rows printed. Scripts that treat any non-zero exit as no output must accept 3.
+
+### Rollback
+
+Nothing is written, so an earlier release reads the same docket. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`.
+
 ## Docket grants
 
 The docket grants release adds the grant record, `agent-bailiff/docket-grant/v1` (see [DOCKET.md](DOCKET.md), Record types). `task issue` appends one for each root it signs, with a docket-writer key of its own. A reader on an earlier release refuses a grant, so every reader is upgraded before the issuer writes one.

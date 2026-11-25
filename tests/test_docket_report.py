@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -13,7 +14,7 @@ import pytest
 from agent_warrant.identity import encode_public_key
 from agent_warrant.task_root import issue_task_root
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from test_docket import RunningSink, make_entry
+from test_docket import AT, RunningSink, make_entry
 
 from agent_bailiff import cli
 from agent_bailiff.docket import GRANT_TYP, DocketClient, DocketSink, Grant, decode_record, encode_record
@@ -21,7 +22,8 @@ from agent_bailiff.docket import segments as segments_module
 from agent_bailiff.docket import tasks as tasks_module
 from agent_bailiff.docket.entry import ENTRY_TYP, Head, _entry_body
 from agent_bailiff.docket.manifest import Base, Manifest, SegmentEntry, manifest_path, segment_path, write_manifest
-from agent_bailiff.docket.report import GRANTED, RELEASED, verify_docket
+from agent_bailiff.docket.report import GRANTED, RELEASED, RecordFilter, verify_docket, verify_records
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
 from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
@@ -874,8 +876,7 @@ def test_a_snapshot_of_a_sealed_segment_does_not_match_after_a_cut(docket, pin_f
 
 
 def list_tasks(docket, pin_files, *arguments, capsys):
-    pins = [item for name in ("decide", "custodian") for item in ("--pin", pin_files[name])]
-    pins += ["--control-pin", pin_files["control"]]
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", pin_files[name])]
     code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), *arguments])
     captured = capsys.readouterr()
     return code, captured.out.splitlines(), captured.err
@@ -931,7 +932,7 @@ def test_a_never_called_task_is_listed_from_its_grant(docket, pin_files, grant_p
     code, out, err = list_tasks(docket, pin_files, "--json", "--grant-pin", str(grant_pin_file), capsys=capsys)
     assert code == 0, err
     row = json_rows(out)[-1]
-    assert (row["tenant"], row["task"], row["principal"], row["roots"]) == ("acme", "task-c", "carol", [root.binding()])
+    assert (row["tenant"], row["task"], row["principal"], row["roots"]) == ("acme", "task-c", None, [root.binding()])
     assert (row["allows"], row["releases"], row["refusals"]) == (0, 0, 0)
     assert (row["first"], row["last"], row["expires_at"]) == (1_700_000_007, 1_700_000_007, ROOT_EXPIRES_AT)
     assert (row["granted"], row["revoked_by"]) == (True, None)
@@ -946,7 +947,7 @@ def test_a_never_called_task_shows_in_the_table(docket, pin_files, grant_pin_fil
     code, out, err = list_tasks(docket, pin_files, "--grant-pin", str(grant_pin_file), capsys=capsys)
     assert code == 0, err
     assert out[1].split("\t") == [
-        "acme", "task-c", "carol", "2023-11-14T22:13:23Z", "2023-11-14T22:13:23Z", "0", "0", "0", "-"
+        "acme", "task-c", "-", "2023-11-14T22:13:23Z", "2023-11-14T22:13:23Z", "0", "0", "0", "-"
     ]  # fmt: skip
 
 
@@ -965,7 +966,7 @@ def test_a_called_task_keeps_its_decide_record_and_is_marked_granted(docket, pin
 
 def test_a_later_grant_does_not_replace_the_decide_record(docket, pin_files, grant_pin_file, capsys):
     handles = {"tenant": "acme", "task": "task-b", "root": "root-b"}
-    decide = docket.append("decide", make_entry(1, handles=handles))
+    decide = docket.append("decide", make_entry(1, handles=handles, principal="alice"))
     docket.grant(grant_of(task_root("task-b"), at=1_700_000_002))
     _, out, _ = list_tasks(docket, pin_files, "--json", "--grant-pin", str(grant_pin_file), capsys=capsys)
     [row] = json_rows(out)
@@ -998,12 +999,12 @@ def test_a_revocation_marks_a_never_called_task(docket, pin_files, grant_pin_fil
     assert row["revoked_by"] == "e-4"
 
 
-def test_a_task_row_carries_its_last_record_for_control(docket, pin_files, capsys):
+def test_a_task_row_carries_its_last_decide_record_naming_a_principal(docket, pin_files, capsys):
     task_docket(docket)
     code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
     assert code == 0, err
     row = json_rows(out)[0]
-    assert row["record"] == docket.records[2].token and row["record_line"] == 3
+    assert row["record"] == docket.records[0].token and row["record_line"] == 1
     assert row["roots"] == ["root-a"] and row["principal"] == "alice"
     assert row["revoked_by"] == "e-6"
     assert decode_record(row["record"], build_kid_index(WRITERS)).entry.handles["task"] == "task-a"
@@ -1032,14 +1033,15 @@ def test_a_revocation_from_a_writer_other_than_control_leaves_the_task_unmarked(
     docket.append("decide", make_entry(2, hop="control", decision="revoke", handles=handles))
     docket.append("custodian", make_entry(3, hop="control", decision="revoke", handles={"tenant": "acme"}))
     code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
-    assert code == 0, err
+    assert code == cli.EXIT_UNCOUNTED, err
     assert [row["revoked_by"] for row in json_rows(out)] == [None]
+    assert "2 records claim a hop their writer is not pinned for; they are not counted" in err
 
 
 def test_the_record_for_control_is_the_latest_decide_record_of_the_task(docket, pin_files, capsys):
     handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
-    docket.append("decide", make_entry(1, handles=handles))
-    docket.append("decide", make_entry(2, handles=handles, tenant="zeta"))
+    docket.append("decide", make_entry(1, handles=handles, principal="alice"))
+    docket.append("decide", make_entry(2, handles=handles, tenant="zeta", principal="mallory"))
     docket.append("custodian", make_entry(3, handles=handles, hop="custodian", component="custodian", performed=True))
     code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
     assert code == 0, err
@@ -1056,10 +1058,165 @@ def test_a_task_with_no_decide_record_has_no_record_for_control(docket, pin_file
     assert row["record"] is None and row["record_line"] is None
 
 
-def test_tasks_requires_a_control_pin(docket, pin_files, capsys):
+@pytest.mark.parametrize("missing", ["decide", "custodian", "control"])
+def test_tasks_requires_a_pin_for_each_role(docket, pin_files, capsys, missing):
+    pins = [item for name in PINS if name != missing for item in (f"--{name}-pin", str(pin_files[name]))]
     with pytest.raises(SystemExit):
-        cli.main(["docket", "tasks", "--docket", str(docket.path), "--pin", str(pin_files["decide"])])
-    assert "--control-pin" in capsys.readouterr().err
+        cli.main(["docket", "tasks", "--docket", str(docket.path), *pins])
+    assert f"--{missing}-pin" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("extra", "flags"),
+    [
+        ("--pin", "--pin and --decide-pin"),
+        ("--custodian-pin", "--decide-pin and --custodian-pin"),
+        ("--control-pin", "--decide-pin and --control-pin"),
+        ("--grant-pin", "--decide-pin and --grant-pin"),
+    ],
+)
+def test_a_writer_pinned_under_two_flags_is_refused(docket, pin_files, capsys, extra, flags):
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, extra, str(pin_files["decide"])])
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_REFUSED
+    assert captured.out == ""
+    assert f"docket tasks refused: writer decide is pinned as both {flags}" in captured.err
+
+
+def test_one_public_key_pinned_under_two_writer_names_is_refused(docket, workdir, pin_files, capsys):
+    alias = PublicKeyRecord("alias", key_id("alias", DECIDE_KEY.public_key()), DECIDE_KEY.public_key())
+    path = workdir / "alias.pub.json"
+    path.write_text(json.dumps(alias.to_document()))
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--pin", str(path)])
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_REFUSED
+    assert captured.out == ""
+    assert "docket tasks refused: writers alias and decide are pinned with the same public key" in captured.err
+
+
+TASK_ROLES = WriterRoles({name: frozenset({name}) for name in ("decide", "custodian", "control")})
+EFFECTOR_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(5, 37)))
+EFFECTOR_PIN = PublicKeyRecord("effector", key_id("effector", EFFECTOR_KEY.public_key()), EFFECTOR_KEY.public_key())
+
+
+def task_list(docket):
+    tasks = tasks_module.TaskList(TASK_ROLES)
+    writers = {**GRANT_WRITERS, "effector": {EFFECTOR_PIN.kid: EFFECTOR_PIN.public_key}}
+    report = verify_records(docket.path, writers, RecordFilter(), tasks.add, grant_writers={"issuer"})
+    assert report.ok, report
+    return tasks
+
+
+def forged(docket, writer, number, **changes):
+    changes.setdefault("handles", {"tenant": "acme", "task": "task-a", "root": "root-a"})
+    return docket.append(writer, make_entry(number, hop="decide", component="decide", **changes))
+
+
+def test_a_custodian_record_claiming_the_decide_hop_is_not_counted(docket):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    decide = docket.append("decide", make_entry(1, handles=handles, principal="zoe"))
+    for number in range(2, 7):
+        forged(docket, "custodian", number, principal="mallory", handles={**handles, "root": "root-m"})
+    tasks = task_list(docket)
+    [row] = tasks.rows()
+    assert (row.principal, row.allows, row.roots, row.first, row.last) == ("zoe", 1, {"root-a"}, AT + 1, AT + 1)
+    assert (row.record, row.record_line, row.principal_conflict) == (decide.token, 1, False)
+    assert tasks.role_mismatches == 5
+
+
+def test_a_record_from_a_writer_not_pinned_for_its_hop_opens_no_row_and_charges_nothing(docket):
+    forged(docket, "custodian", 1, principal="mallory", handles={"tenant": "zeta", "task": "task-x"})
+    docket.append(
+        "decide", make_entry(2, hop="custodian", component="custodian", handles={"tenant": "zeta", "task": "x"})
+    )
+    tasks = task_list(docket)
+    assert tasks.rows() == []
+    assert (tasks.role_mismatches, tasks._tracked) == (2, 0)
+
+
+def test_custodian_records_count_releases_and_refusals_but_set_no_principal_or_root(docket):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-m"}
+    for number, decision in ((1, "allow"), (2, "refuse")):
+        docket.append(
+            "custodian",
+            make_entry(
+                number, hop="custodian", component="custodian", decision=decision, handles=handles, principal="mallory"
+            ),
+        )
+    [row] = task_list(docket).rows()
+    assert (row.releases, row.refusals, row.allows) == (1, 1, 0)
+    assert (row.principal, row.roots, row.record) == (None, set(), None)
+
+
+def test_principal_and_record_come_from_the_same_decide_record(docket):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    named = docket.append("decide", make_entry(1, handles=handles, principal="alice"))
+    docket.append("decide", make_entry(2, handles=handles, decision="refuse"))
+    [row] = task_list(docket).rows()
+    assert (row.principal, row.record, row.record_line) == ("alice", named.token, 1)
+    assert (row.allows, row.refusals) == (1, 1)
+
+
+def test_grants_set_the_record_but_never_the_principal(docket):
+    first = docket.grant(grant_of(task_root("task-c"), 1, at=1_700_000_001))
+    docket.grant(grant_of(task_root("task-c"), 2, at=1_700_000_002))
+    [row] = task_list(docket).rows()
+    assert (row.principal, row.record, row.record_line, row.granted) == (None, first.token, 1, True)
+    assert row.principal_conflict is False
+
+
+def test_a_decide_record_naming_a_principal_replaces_the_grant_record(docket):
+    docket.grant(grant_of(task_root("task-c"), at=1_700_000_001))
+    handles = {"tenant": "acme", "task": "task-c", "root": task_root("task-c").binding()}
+    decide = docket.append("decide", make_entry(2, handles=handles, principal="carol"))
+    [row] = task_list(docket).rows()
+    assert (row.principal, row.record, row.record_line, row.principal_conflict) == ("carol", decide.token, 2, False)
+
+
+@pytest.mark.parametrize("principals", [("alice", "bob"), ("bob", "alice")])
+def test_decide_records_disagreeing_on_the_principal_flag_a_conflict(docket, principals):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    for number, principal in enumerate(principals, start=1):
+        docket.append("decide", make_entry(number, handles=handles, principal=principal))
+    [row] = task_list(docket).rows()
+    assert (row.principal, row.record_line, row.principal_conflict) == (principals[1], 2, True)
+
+
+def test_effector_records_are_verified_but_not_counted(docket):
+    handles = {"tenant": "acme", "task": "task-a"}
+    record = make_entry(1, hop="effector", component="effector", decision="refuse", handles=handles)
+    docket.write("effector", EFFECTOR_KEY, EFFECTOR_PIN.kid, record)
+    tasks = task_list(docket)
+    assert (tasks.rows(), tasks.role_mismatches) == ([], 0)
+
+
+def test_a_replaced_principal_is_charged_its_size_difference(docket):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    short = docket.append("decide", make_entry(1, handles=handles, principal="a"))
+    once = task_list(docket)._tracked
+    long = docket.append("decide", make_entry(2, handles=handles, principal="a" * 4096))
+    grown = (sys.getsizeof("a" * 4096) - sys.getsizeof("a")) + (len(long.token) - len(short.token))
+    assert task_list(docket)._tracked == once + grown
+
+
+def test_tasks_warn_of_uncounted_records_before_the_rows_and_exit_3(docket, pin_files, monkeypatch):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles, principal="zoe"))
+    forged(docket, "custodian", 2, principal="mallory")
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", stream)
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"])
+    lines = stream.getvalue().splitlines()
+    assert code == cli.EXIT_UNCOUNTED
+    assert lines[:2] == [
+        "agent-bailiff docket tasks: 2 records verified, 1 tasks",
+        "agent-bailiff docket tasks: 1 records claim a hop their writer is not pinned for; they are not counted",
+    ]
+    assert [json.loads(line)["principal"] for line in lines[2:]] == ["zoe"]
 
 
 def test_tasks_prints_nothing_from_a_docket_that_fails_verification(docket, pin_files, capsys):
@@ -1102,10 +1259,10 @@ def test_tasks_past_the_state_budget_are_refused_and_print_nothing(docket, pin_f
 
 def test_a_replaced_record_frees_its_share_of_the_budget(docket, pin_files, capsys, monkeypatch):
     handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
-    docket.append("decide", make_entry(1, handles=handles))
+    docket.append("decide", make_entry(1, handles=handles, principal="alice"))
     once = task_state_bytes(docket, pin_files, capsys, monkeypatch)
     for number in range(2, 6):
-        docket.append("decide", make_entry(number, handles=handles))
+        docket.append("decide", make_entry(number, handles=handles, principal="alice"))
     replaced = len(docket.records[-1].token) - len(docket.records[0].token)
     assert task_state_bytes(docket, pin_files, capsys, monkeypatch) == once + replaced
 
@@ -1125,3 +1282,25 @@ def test_a_json_task_row_is_written_in_chunks_that_join_to_one_document():
     assert len(chunks) > 1
     assert "".join(chunks) == json.dumps(json.loads("".join(chunks)), sort_keys=True)
     assert json.loads("".join(chunks))["roots"] == ["root-a", "root-b"]
+
+
+def test_a_rotated_decide_key_pinned_under_the_same_flag_is_counted(docket, workdir, pin_files, capsys):
+    rotated_key = Ed25519PrivateKey.from_private_bytes(bytes(range(7, 39)))
+    rotated = PublicKeyRecord("decide", key_id("decide", rotated_key.public_key()), rotated_key.public_key())
+    path = workdir / "decide-rotated.pub.json"
+    path.write_text(json.dumps(rotated.to_document()))
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("decide", make_entry(1, handles=handles, principal="zoe"))
+    docket.write("decide", rotated_key, rotated.kid, make_entry(2, handles=handles, principal="zoe"))
+    code, out, err = list_tasks(docket, pin_files, "--json", "--decide-pin", str(path), capsys=capsys)
+    assert code == 0, err
+    [row] = map(json.loads, out)
+    assert (row["allows"], row["principal"], row["record_line"]) == (2, "zoe", 2)
+
+
+def test_a_hop_no_report_reads_is_verified_and_exits_0(docket, pin_files, capsys):
+    handles = {"tenant": "acme", "task": "task-a", "root": "root-a"}
+    docket.append("custodian", make_entry(1, hop="alien", component="custodian", handles=handles))
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert (code, out) == (0, [])
+    assert "1 records verified, 0 tasks" in err

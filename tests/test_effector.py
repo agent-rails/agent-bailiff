@@ -16,6 +16,7 @@ from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.identity import snapshot_args
 from agent_bailiff.docket.entry import Record
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
 from agent_bailiff.docket.tasks import TaskList
 from agent_bailiff.effector.catalog import OperationCatalog
@@ -496,15 +497,14 @@ def test_no_call_is_made_while_rbac_is_unverified(token_file):
     assert refusals(docket) == [("refuse", None, "rbac_unverified", "f" * 32, TASK_HANDLES)]
 
 
-def test_an_effector_refusal_counts_against_its_task(token_file):
+def test_an_effector_refusal_is_not_counted_in_task_rows(token_file):
     instance, _, docket = effector(token_file, rbac_healthy=False)
     instance.call(scale_params(), release_for(), NOW + 2)
     [entry] = docket.entries
     verified = VerifiedLine(1, Record("effector.homelab", 1, None, entry, "k", "t"), 0, 2)
-    tasks = TaskList(frozenset({"control.example"}))
+    tasks = TaskList(WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")}))
     tasks.add(verified)
-    [row] = tasks.rows()
-    assert (row.tenant, row.task, row.refusals, row.allows) == ("tenant-a", "task-1", 1, 0)
+    assert (tasks.rows(), tasks.role_mismatches) == ([], 0)
 
 
 class FailingDocket:

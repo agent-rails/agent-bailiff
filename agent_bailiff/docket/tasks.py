@@ -7,10 +7,13 @@ from dataclasses import dataclass, field
 
 from agent_bailiff.docket.grant import Grant
 from agent_bailiff.docket.report import grant_root, printable, utc
+from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
 
 CONTROL_HOP = "control"
+CUSTODIAN_HOP = "custodian"
 DECIDE_HOP = "decide"
+TASK_HOPS = (DECIDE_HOP, CUSTODIAN_HOP, CONTROL_HOP)
 TASK_COLUMNS = ("tenant", "task", "principal", "first", "last", "allows", "releases", "refusals", "state")
 MAX_TRACKED_BYTES = 1 << 30
 ROW_BYTES = 1024
@@ -22,6 +25,7 @@ class TaskRow:
     tenant: str
     task: str
     principal: str | None = None
+    principal_conflict: bool = False
     roots: set[str] = field(default_factory=set)
     first: int = 0
     last: int = 0
@@ -36,41 +40,49 @@ class TaskRow:
 
 
 class TaskList:
-    def __init__(self, control_writers: frozenset[str]) -> None:
-        if not control_writers:
-            raise ValueError("at least one control writer is required")
-        self._control_writers = control_writers
+    def __init__(self, roles: WriterRoles) -> None:
+        missing = [hop for hop in TASK_HOPS if not roles.reads(hop)]
+        if missing:
+            raise ValueError(f"no writer is pinned for hop {missing[0]}")
+        self._roles = roles
         self._rows: dict[tuple[str, str], TaskRow] = {}
         self._revoked_tasks: dict[tuple[str, str], str] = {}
         self._revoked_roots: dict[str, str] = {}
         self._revoked_tenants: dict[str, str] = {}
         self._tracked = 0
         self.undecodable_grants = 0
+        self.role_mismatches = 0
 
     def add(self, verified: VerifiedLine) -> None:
         entry = verified.record.entry
         if isinstance(entry, Grant):
             self._add_grant(verified, entry)
             return
+        if not self._roles.reads(entry.hop):
+            return
+        if not self._roles.holds(verified.record.writer, entry.hop):
+            self.role_mismatches += 1
+            return
         if entry.hop == CONTROL_HOP:
-            if entry.decision == "revoke" and verified.record.writer in self._control_writers:
+            if entry.decision == "revoke":
                 self._add_revocation(entry.entry_id, entry.handles, verified.line)
             return
         tenant, task = entry.handles.get("tenant"), entry.handles.get("task")
         if tenant is None or task is None:
             return
         row = self._row(tenant, task, entry.at, verified.line)
-        self._set_principal(row, entry.principal or row.principal, verified.line)
-        if "root" in entry.handles:
-            self._add_root(row, entry.handles["root"], verified.line)
         if entry.decision == "refuse":
             row.refusals += 1
-        elif entry.decision == "allow" and entry.hop == "custodian":
+        elif entry.decision == "allow" and entry.hop == CUSTODIAN_HOP:
             row.releases += 1
         elif entry.decision == "allow":
             row.allows += 1
-        if entry.hop == DECIDE_HOP and entry.tenant == tenant:
-            self._set_record(row, verified)
+        if entry.hop != DECIDE_HOP:
+            return
+        if "root" in entry.handles:
+            self._add_root(row, entry.handles["root"], verified.line)
+        if entry.tenant == tenant and entry.principal is not None:
+            self._set_source(row, entry.principal, verified)
 
     def _add_grant(self, verified: VerifiedLine, grant: Grant) -> None:
         root = grant_root(grant)
@@ -79,7 +91,6 @@ class TaskList:
             return
         row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
         row.granted = True
-        self._set_principal(row, row.principal or root.principal, verified.line)
         self._add_root(row, root.binding(), verified.line)
         row.expires_at = max(row.expires_at or 0, root.expires_at)
         if row.record is None:
@@ -99,9 +110,12 @@ class TaskList:
             row.revoked_by = self._revoked_by(row)
         return rows
 
-    def _set_principal(self, row: TaskRow, principal: str | None, line: int) -> None:
-        self._charge(text_bytes(principal) - text_bytes(row.principal), line)
+    def _set_source(self, row: TaskRow, principal: str, verified: VerifiedLine) -> None:
+        if row.principal is not None and row.principal != principal:
+            row.principal_conflict = True
+        self._charge(text_bytes(principal) - text_bytes(row.principal), verified.line)
         row.principal = principal
+        self._set_record(row, verified)
 
     def _add_root(self, row: TaskRow, root: str, line: int) -> None:
         if root in row.roots:
@@ -171,6 +185,7 @@ def task_json_chunks(row: TaskRow) -> Iterator[str]:
         "tenant": row.tenant,
         "task": row.task,
         "principal": row.principal,
+        "principal_conflict": row.principal_conflict,
         "roots": sorted(row.roots),
         "first": row.first,
         "last": row.last,
