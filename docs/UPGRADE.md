@@ -69,7 +69,7 @@ Once any v2 task is issued, going back to the previous release, on agent-warrant
 
 ### Rollback
 
-Nothing is written, so an earlier release reads the same docket. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`. Its `docket tasks` refuses `--issuers` as an unrecognized argument, lists a task as `granted` with a root no allowed issuer signed, and has no ROOT column, so drop `--issuers` and the `root_status` filter from revoke pipelines before rolling back.
+The docket format does not change, so an earlier release reads the same docket; the quickstart's `reader-data` volume is unused by it. Its `docket tasks` and `docket grants` count a record from any pinned writer under the hop the record claims, so a pinned custodian or effector key can again change a task's principal, counts and `record`, and a root's allows and `authorized_cost`. Its `docket tasks` refuses `--issuers` as an unrecognized argument, lists a task as `granted` with a root no allowed issuer signed, and has no ROOT column, so drop `--issuers` and the `root_status` filter from revoke pipelines before rolling back.
 
 ## Docket grants
 
