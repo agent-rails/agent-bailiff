@@ -9,7 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "adapters" / "agentgateway" / "scripts" / "generate_proto.sh"
 PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
 STUBS = ROOT / "agent_bailiff" / "adapters" / "agentgateway" / "_proto"
-DOCKERFILES = [ROOT / "examples" / "quickstart" / "Dockerfile", ROOT / "deploy" / "kubernetes" / "Dockerfile.webhook"]
+DOCKERFILES = [
+    ROOT / "examples" / "quickstart" / "Dockerfile",
+    ROOT / "deploy" / "kubernetes" / "Dockerfile.webhook",
+    ROOT / "deploy" / "gke" / "Dockerfile.minter",
+]
 
 
 def pinned_sha256():
