@@ -183,7 +183,7 @@ STATE is `revoked` when a revocation recorded in the verified docket names the t
 
 A root is named by its binding, a hash of the signed root, which includes its tenant, so a root revocation marks tasks of one tenant only.
 
-`--json` rows also carry `granted`, true when the verified docket holds a grant for the task; `expires_at`, the latest `expires_at` of the task's granted roots, `null` without a grant; and `record`, the signed token of the task's latest decide record whose tenant matches the row, or of its first grant when it has no such decide record, with its `record_line`; both are `null` when the task has neither. The table shows neither `granted` nor `expires_at`. Control accepts a decide record only if decide is among control's writer pins. To revoke a task from it:
+`--json` rows also carry `granted`, true when the verified docket holds a grant for the task from a pinned grant writer; `expires_at`, the latest `expires_at` of the task's granted roots, `null` without a grant; and `record`, the signed token of the task's latest decide record whose tenant matches the row, or of its first grant when it has no such decide record, with its `record_line`; both are `null` when the task has neither. The table shows neither `granted` nor `expires_at`. Control accepts a decide record only if decide is among control's writer pins. To revoke a task from it:
 
 ```
 agent-bailiff docket tasks ... --json | jq -r 'select(.tenant == "acme" and .task == "TASK").record' > record
@@ -191,6 +191,8 @@ agent-bailiff control revoke --config CONTROL --actor NAME --level task --record
 ```
 
 Control verifies that record against its writer pins again, so a doctored row cannot revoke another task. `docket verify --task ID` shows the records of one task, its grant included.
+
+`docket tasks` does not check the root inside a grant: `granted` and `expires_at` do not mean the root's issuer signature verifies or that the issuer's allowance covers its tenant, principal, budget or depth. A grant writer can therefore mark a task `granted` with a root no trusted issuer signed. `docket grants` checks both and reports such a grant as `invalid_grant`. Control checks both again before it revokes from a grant `record`, and refuses a root that fails (see Revoking from a grant).
 
 ### Revoking from a grant
 

@@ -11,9 +11,10 @@ from agent_warrant.task_root import issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_docket import make_entry
-from test_docket_report import ISSUER_PIN, PINS, Docket
+from test_docket_report import GRANT_WRITERS, ISSUER_PIN, PINS, Docket
 
 from agent_bailiff import cli
+from agent_bailiff.control import Control, ControlRefused
 from agent_bailiff.docket import Grant
 from agent_bailiff.docket import grants as grants_module
 from agent_bailiff.docket.grants import WILDCARD_NAMES_CAP, GrantReport
@@ -397,6 +398,36 @@ def test_a_decide_allow_without_a_cost_exits_2(docket, pin_files, issuers_file, 
     code, out, err = report(docket, pin_files, issuers_file, capsys=capsys)
     assert code == cli.EXIT_UNVERIFIED
     assert "line 1 lacks an op_id, cost, tool or resource" in err
+
+
+def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_control(
+    docket, pin_files, issuers_file, capsys
+):
+    forged = make_root(key=OTHER_KEY)
+    record = grant(docket, forged)
+    pins = [item for name in ("decide", "custodian") for item in ("--pin", str(pin_files[name]))]
+    pins += ["--control-pin", str(pin_files["control"]), "--grant-pin", str(pin_files["issuer"])]
+    assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == 0
+    [task] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", True, record.token)
+    code, [row], _ = json_report(docket, pin_files, issuers_file, capsys)
+    assert code == cli.EXIT_REFUSED
+    assert (row["status"], row["reason"], row["root"]) == ("invalid_grant", "bad_signature", forged.binding())
+    issuers = load_issuers(issuers_file)
+    control = Control(
+        "control",
+        {"issuer": GRANT_WRITERS["issuer"]},
+        None,
+        None,
+        None,
+        "control.writer",
+        resolver=issuers.resolver,
+        trust_policy=issuers.trust_policy,
+        grant_writers={"issuer"},
+    )
+    with pytest.raises(ControlRefused) as refused:
+        control.revoke(task["record"], "task", "ops", ISSUED)
+    assert refused.value.reason == "root_bad_signature"
 
 
 def roots_docket(docket):
