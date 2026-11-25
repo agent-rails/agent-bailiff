@@ -285,6 +285,11 @@ def load_effector(path: Path) -> EffectorSettings:
     return parse_effector(read_config(path, "effector config"))
 
 
+def load_issuers(path: Path) -> Issuers:
+    document = {"issuers": read_config(path, "issuers file")}
+    return _issuers(Section(document, "issuers file", frozenset({"issuers"})))
+
+
 def parse_effector(document: object) -> EffectorSettings:
     config = Section(document, "effector", EFFECTOR_KEYS)
     custodian = config.component("custodian")

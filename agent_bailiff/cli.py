@@ -26,6 +26,7 @@ from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, DocketArchiver
 from agent_bailiff.docket.client import DocketError
+from agent_bailiff.docket.grants import INVALID_GRANT, GrantReport, grant_header, grant_json_row, grant_table_row
 from agent_bailiff.docket.report import (
     RecordFilter,
     SeedCheck,
@@ -71,6 +72,7 @@ from agent_bailiff.service.settings import (
     load_decide,
     load_docket,
     load_effector,
+    load_issuers,
 )
 from agent_bailiff.signing import MAX_TOKEN_CHARS
 from agent_bailiff.strict_json import parse_strict_json
@@ -86,6 +88,7 @@ from agent_bailiff.task.issue import (
 
 PROG = "agent-bailiff"
 EXIT_REFUSED = 1
+EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 MAX_SECRET_BYTES = 65536
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
@@ -188,6 +191,26 @@ def _parser() -> argparse.ArgumentParser:
             )
             tasks.add_argument("--json", action="store_true", help="print one JSON object per task")
             tasks.set_defaults(handler=_list_tasks)
+            grants = component.add_parser(
+                "grants",
+                help="verify every record and print granted versus used per task root; advisory, exit 1 on an "
+                "invalid grant, 2 when the docket fails verification",
+            )
+            grants.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
+            grants.add_argument(
+                "--pin", type=Path, action="append", required=True, help="writer public key record; repeat"
+            )
+            grants.add_argument(
+                "--issuers",
+                type=Path,
+                required=True,
+                help="0600 JSON file holding the issuers section of decide's config; checks each grant's task root",
+            )
+            grants.add_argument(
+                "--archive", type=Path, help="read removed segments from this archive, so older grants are listed"
+            )
+            grants.add_argument("--json", action="store_true", help="print one JSON object per task root")
+            grants.set_defaults(handler=_report_grants)
             export = component.add_parser(
                 "export", help="export verified records as OTLP spans, resuming from a checkpoint (needs [otel])"
             )
@@ -242,7 +265,7 @@ def _parser() -> argparse.ArgumentParser:
                 "--once", action="store_true", help="archive every sealed segment and recheck receipts, then exit"
             )
             archive.set_defaults(handler=_archive_docket)
-            for reader in (verify, tasks, export, archive):
+            for reader in (verify, tasks, grants, export, archive):
                 reader.add_argument(
                     "--grant-pin",
                     type=Path,
@@ -611,6 +634,38 @@ def _list_tasks(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _report_grants(args: argparse.Namespace) -> int:
+    try:
+        issuers = load_issuers(args.issuers)
+        writers, grant_writers = _docket_pins([read_pin(path) for path in args.pin], args.grant_pin)
+        grants = GrantReport(issuers.resolver, issuers.trust_policy)
+        report = verify_records(
+            args.docket, writers, RecordFilter(), grants.add, archive=args.archive, grant_writers=grant_writers
+        )
+    except STARTUP_ERRORS + (InitError, ArchiveMismatch, SegmentMismatch, SegmentRemoved) as exc:
+        print(f"{PROG} docket grants refused: {exc}", file=sys.stderr)
+        return EXIT_UNVERIFIED
+    if not report.ok:
+        where = "the docket" if report.line is None else f"line {report.line}"
+        print(
+            f"{PROG} docket grants: {where} fails verification: {report.reason} {printable(report.detail)}; "
+            "no grants printed",
+            file=sys.stderr,
+        )
+        return EXIT_UNVERIFIED
+    rows = grants.rows()
+    if not args.json:
+        print(grant_header())
+    for row in rows:
+        print(grant_json_row(row) if args.json else grant_table_row(row))
+    invalid = sum(row.status == INVALID_GRANT for row in rows)
+    print(
+        f"{PROG} docket grants: {report.entries} records verified, {len(rows)} roots, {invalid} invalid grants",
+        file=sys.stderr,
+    )
+    return EXIT_REFUSED if invalid else 0
 
 
 def _verify_docket(args: argparse.Namespace) -> int:
