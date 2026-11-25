@@ -103,7 +103,7 @@ def test_every_ci_job_installs_from_the_hash_lock_and_the_smoke_job_only_adds_uv
             current.append(line.strip().removeprefix("- run:").strip())
     assert set(jobs) == {"test", "install-smoke", "quickstart-integration", "live-run-image"}
     assert jobs.pop("install-smoke") == [
-        "- uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3",
+        "- uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0",
         "python -m pip install --require-hashes -r requirements-ci.txt",
     ]
     locked = [
