@@ -33,6 +33,7 @@ class CustodianConfig:
     inflight_max: int = DEFAULT_INFLIGHT_MAX
     inflight_max_bytes: int = DEFAULT_INFLIGHT_MAX_BYTES
     inflight_per_tenant: int = DEFAULT_INFLIGHT_PER_TENANT
+    scope_v1_cutoff: int = 0
 
     def __post_init__(self) -> None:
         for name in ("custodian_id", "decider_id", "docket_writer"):
@@ -48,6 +49,7 @@ class CustodianConfig:
         for name in ("max_proof_age", "max_clearance_lifetime", "rate_limit", "rate_window", *INFLIGHT_FIELDS):
             _require_int(name, getattr(self, name), minimum=1)
         _require_int("skew_seconds", self.skew_seconds, minimum=0)
+        _require_int("scope_v1_cutoff", self.scope_v1_cutoff, minimum=0)
         _require_int("inflight_ttl", self.inflight_ttl, minimum=MIN_INFLIGHT_TTL)
         if self.max_clearance_lifetime > self.max_proof_age:
             raise ValueError("max_clearance_lifetime must not exceed max_proof_age")

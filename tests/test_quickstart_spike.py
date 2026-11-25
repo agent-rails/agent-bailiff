@@ -30,7 +30,7 @@ pytestmark = [
 
 TOOL, RESOURCE = "gitea.user.read", "gitea/user/self"
 ROUTES = ToolRoutes([ToolRoute("gitea", "get_me", TOOL, RESOURCE)])
-SCOPE = {"tools": ["gitea.user.read"], "resources": ["gitea/user/*"], "max_cost_per_call": 5}
+SCOPE = {"permissions": [{"tools": ["gitea.user.read"], "resources": ["gitea/user/*"], "max_cost_per_call": 5}]}
 CREDENTIAL = "gitea-pat"
 TARGET = "gitea"
 

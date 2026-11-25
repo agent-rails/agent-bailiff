@@ -49,6 +49,7 @@ DENY_ALL_POLICY = {"default": "deny", "rules": []}
 DEFAULT_MAX_PROOF_AGE = 60
 DEFAULT_RECONCILE_SECONDS = 10
 DEFAULT_SKEW_SECONDS = 5
+DEFAULT_SCOPE_V1_CUTOFF = 0
 DEFAULT_RATE_LIMIT = 60
 DEFAULT_RATE_WINDOW = 60
 DEFAULT_CATALOG = shipped_catalog("kubernetes")
@@ -90,6 +91,7 @@ def init_decide(
         "name": name,
         "key": str(directory / KEY),
         "max_proof_age": DEFAULT_MAX_PROOF_AGE,
+        "scope_v1_cutoff": DEFAULT_SCOPE_V1_CUTOFF,
         "reconcile_seconds": DEFAULT_RECONCILE_SECONDS,
         "custodians": sorted(custodians),
         "bindings": [],
@@ -132,6 +134,7 @@ def init_custodian(
         "decider": decide.component,
         "decide_keys": {decide.kid: encode_public_key(decide.public_key)},
         "max_proof_age": DEFAULT_MAX_PROOF_AGE,
+        "scope_v1_cutoff": DEFAULT_SCOPE_V1_CUTOFF,
         "max_clearance_lifetime": DEFAULT_MAX_PROOF_AGE,
         "skew_seconds": DEFAULT_SKEW_SECONDS,
         "rate_limit": DEFAULT_RATE_LIMIT,

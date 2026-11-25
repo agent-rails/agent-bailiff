@@ -50,11 +50,12 @@ AGENT_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(2, 34)))
 CHILD_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(3, 35)))
 WRITERS = {"decide": {"decide-1": DECIDE_KEY.public_key()}, "decide-b": {"decide-b-1": DECIDE_KEY.public_key()}}
 PINNED = {"decide-1": DECIDE_KEY.public_key()}
-SCOPE = {
+PERMISSION = {
     "tools": ["deploy.*", "signer.withdraw"],
     "resources": ["env/staging/*", "wallet/*"],
     "max_cost_per_call": 5,
 }
+SCOPE = {"permissions": [PERMISSION]}
 POLICY = {
     "default": "allow",
     "rules": [
@@ -379,7 +380,7 @@ def test_delegated_request_binds_the_leaf_link(make_decider, docket_paths):
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -433,7 +434,7 @@ def test_refusals_return_no_clearance_reserve_nothing_and_write_an_entry(
 def test_a_resource_grant_that_stops_inside_a_segment_is_refused_even_when_it_covers(
     make_decider, ledger, docket_paths, resources, resource
 ):
-    root = make_root(scope={**SCOPE, "resources": resources})
+    root = make_root(scope={"permissions": [{**PERMISSION, "resources": resources}]})
     decision = make_decider().check(make_request(root, resource=resource), NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
     [entry] = docket_entries(docket_paths)
@@ -455,7 +456,7 @@ def test_a_resource_grant_that_stops_inside_a_segment_is_refused_even_when_it_co
 def test_a_tool_grant_that_stops_inside_a_name_is_refused_even_when_it_covers(
     make_decider, ledger, docket_paths, tools, tool
 ):
-    root = make_root(scope={**SCOPE, "tools": tools})
+    root = make_root(scope={"permissions": [{**PERMISSION, "tools": tools}]})
     decision = make_decider().check(make_request(root, tool=tool), NOW)
     assert (decision.allowed, decision.reason, decision.clearance) == (False, "unbounded_scope", None)
     [entry] = docket_entries(docket_paths)
@@ -466,19 +467,19 @@ def test_a_tool_grant_that_stops_inside_a_name_is_refused_even_when_it_covers(
 
 @pytest.mark.parametrize("tools", [["deploy.service"], ["deploy.*"]])
 def test_an_exact_or_dot_tool_grant_is_allowed(make_decider, tools):
-    root = make_root(scope={**SCOPE, "tools": tools})
+    root = make_root(scope={"permissions": [{**PERMISSION, "tools": tools}]})
     decision = make_decider().check(make_request(root), NOW)
     assert (decision.allowed, decision.reason) == (True, "ok")
 
 
 def test_an_unbounded_tool_grant_in_a_delegated_leaf_is_refused(make_decider):
-    root = make_root(scope={**SCOPE, "tools": ["deploy.*"]})
+    root = make_root(scope={"permissions": [{**PERMISSION, "tools": ["deploy.*"]}]})
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -488,13 +489,13 @@ def test_an_unbounded_tool_grant_in_a_delegated_leaf_is_refused(make_decider):
 
 
 def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
-    root = make_root(scope={**SCOPE, "resources": ["env/*"]})
+    root = make_root(scope={"permissions": [{**PERMISSION, "resources": ["env/*"]}]})
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -504,13 +505,15 @@ def test_an_unbounded_grant_in_a_delegated_leaf_is_refused(make_decider):
 
 
 def test_an_unbounded_resource_grant_above_a_bounded_leaf_is_refused(make_decider):
-    root = make_root(scope={**SCOPE, "resources": ["env/staging-*"]})
+    root = make_root(scope={"permissions": [{**PERMISSION, "resources": ["env/staging-*"]}]})
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["deploy.service"], "resources": ["env/staging-x/*"], "max_cost_per_call": 2},
+        scope={
+            "permissions": [{"tools": ["deploy.service"], "resources": ["env/staging-x/*"], "max_cost_per_call": 2}]
+        },
         budget=10,
         ttl=600,
         now=NOW,
@@ -520,13 +523,15 @@ def test_an_unbounded_resource_grant_above_a_bounded_leaf_is_refused(make_decide
 
 
 def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused(make_decider, ledger, docket_paths):
-    root = make_root(scope={**SCOPE, "tools": ["gitea.issues_*"]})
+    root = make_root(scope={"permissions": [{**PERMISSION, "tools": ["gitea.issues_*"]}]})
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["gitea.issues_delete"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={
+            "permissions": [{"tools": ["gitea.issues_delete"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]
+        },
         budget=10,
         ttl=600,
         now=NOW,
@@ -541,13 +546,13 @@ def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused(make_decide
 
 
 def test_an_unbounded_tool_grant_in_a_middle_link_is_refused(make_decider):
-    root = make_root(scope={**SCOPE, "tools": ["deploy.*"]})
+    root = make_root(scope={"permissions": [{**PERMISSION, "tools": ["deploy.*"]}]})
     middle = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": ["deploy.serv_*"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -558,7 +563,7 @@ def test_an_unbounded_tool_grant_in_a_middle_link_is_refused(make_decider):
         middle,
         CHILD_KEY,
         child_subject=encode_public_key(leaf_key.public_key()),
-        scope={"tools": ["deploy.serv_api"], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": ["deploy.serv_api"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=5,
         ttl=600,
         now=NOW,

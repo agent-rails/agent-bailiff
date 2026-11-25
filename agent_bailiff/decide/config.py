@@ -6,7 +6,7 @@ from typing import Any
 from agent_guard.policy import Policy
 from agent_warrant.canonical import canonicalize
 from agent_warrant.encoding import sha256_b64u
-from agent_warrant.scope import validate_entry
+from agent_warrant.scope import Permission, validate_entry
 
 
 @dataclass(frozen=True)
@@ -31,11 +31,7 @@ class TargetBinding:
             raise ValueError(f"resource: {problem}")
 
     def matches(self, tenant: str, tool: str, resource: str) -> bool:
-        if (self.tenant, self.tool) != (tenant, tool):
-            return False
-        if self.resource.endswith("*"):
-            return resource.startswith(self.resource[:-1])
-        return self.resource == resource
+        return self.tenant == tenant and Permission((self.tool,), (self.resource,), 0).covers(tool, resource)
 
 
 @dataclass(frozen=True)
@@ -60,6 +56,7 @@ class DeciderConfig:
     max_proof_age: int
     bindings: tuple[TargetBinding, ...]
     docket_writer: str
+    scope_v1_cutoff: int = 0
 
     def __post_init__(self) -> None:
         for name in ("decider_id", "kid", "docket_writer"):
@@ -72,6 +69,9 @@ class DeciderConfig:
         age = self.max_proof_age
         if isinstance(age, bool) or not isinstance(age, int) or age <= 0:
             raise ValueError("max_proof_age must be a positive integer")
+        cutoff = self.scope_v1_cutoff
+        if isinstance(cutoff, bool) or not isinstance(cutoff, int) or cutoff < 0:
+            raise ValueError("scope_v1_cutoff must be a non-negative integer")
         object.__setattr__(self, "bindings", tuple(self.bindings))
         if not all(isinstance(item, TargetBinding) for item in self.bindings):
             raise TypeError("bindings must be TargetBinding records")

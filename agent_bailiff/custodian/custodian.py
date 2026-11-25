@@ -6,12 +6,11 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Protocol
 
 from agent_warrant.chain import ChainContext, ChainLink, verify_chain
 from agent_warrant.ledger import LedgerError, Operation, Reservation
 from agent_warrant.resolver import IssuerResolver
-from agent_warrant.scope import covers
 from agent_warrant.task_root import TaskRoot
 from agent_warrant.trust import IssuerTrustPolicy
 
@@ -36,7 +35,7 @@ from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
 from agent_bailiff.docket.entry import Entry, Record
-from agent_bailiff.scope_pattern import is_bounded_scope
+from agent_bailiff.scope_pattern import scope_refusal
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
 
@@ -117,7 +116,6 @@ class _Verified:
     leaf_binding: str
     snapshot: ArgsSnapshot
     token: str
-    leaf_scope: dict[str, Any]
 
 
 class _Refusal(Exception):
@@ -318,8 +316,9 @@ class Custodian:
             expected_audience=config.decider_id,
             expected_request_digest=digest,
             max_proof_age_seconds=config.max_proof_age,
+            scope_v1_cutoff=config.scope_v1_cutoff,
         )
-        if not chain.valid or chain.root is None or chain.leaf_scope is None or chain.leaf_subject is None:
+        if not chain.valid or chain.root is None or chain.leaf_subject is None:
             raise _Refusal("chain_invalid")
         root = chain.root
         leaf_binding = chain.links[-1].binding() if chain.links else root.binding()
@@ -336,9 +335,7 @@ class Custodian:
         }
         if any(getattr(clearance, name) != value for name, value in expected.items()):
             raise _Refusal("clearance_mismatch")
-        return _Verified(
-            clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token, chain.leaf_scope
-        )
+        return _Verified(clearance, root, chain.links, chain.leaf_subject, leaf_binding, snapshot, clearance_token)
 
     def _release_to_effector(
         self, verified: _Verified, binding: EffectorBinding, entry: Entry, now: int, started: int
@@ -544,11 +541,10 @@ class Custodian:
 
 
 def _check_scope(verified: _Verified) -> None:
-    chain_scopes = (verified.root.scope, *(link.scope for link in verified.links))
-    if not all(is_bounded_scope(granted) for granted in chain_scopes):
-        raise _Refusal("unbounded_scope")
-    if not covers(verified.leaf_scope, verified.clearance.tool, verified.clearance.resource):
-        raise _Refusal("out_of_scope")
+    clearance = verified.clearance
+    refusal = scope_refusal((verified.root, *verified.links), clearance.tool, clearance.resource, clearance.cost)
+    if refusal is not None:
+        raise _Refusal(refusal)
 
 
 def _warn_unredactable(header_value: str) -> None:

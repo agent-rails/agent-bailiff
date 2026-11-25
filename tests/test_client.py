@@ -280,7 +280,8 @@ def test_a_holder_key_that_is_not_the_leaf_subject_is_rejected():
         holder(CHILD_KEY)
 
 
-CHILD_SCOPE = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}
+CHILD_PERMISSION = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}
+CHILD_SCOPE = {"permissions": [CHILD_PERMISSION]}
 
 
 def test_a_delegated_holder_extends_the_chain_to_the_child_key():
@@ -307,9 +308,10 @@ def test_a_delegate_of_a_delegate_appends_to_the_chain():
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        ({"scope": {**CHILD_SCOPE, "resources": ["env/*"]}}, "does not narrow"),
-        ({"scope": {**CHILD_SCOPE, "tools": ["deploy.*", "admin.*"]}}, "does not narrow"),
-        ({"scope": {**CHILD_SCOPE, "max_cost_per_call": 6}}, "does not narrow"),
+        ({"scope": {"permissions": [{**CHILD_PERMISSION, "resources": ["env/*"]}]}}, "does not narrow"),
+        ({"scope": {"permissions": [{**CHILD_PERMISSION, "tools": ["deploy.*", "admin.*"]}]}}, "does not narrow"),
+        ({"scope": {"permissions": [{**CHILD_PERMISSION, "max_cost_per_call": 6}]}}, "does not narrow"),
+        ({"scope": CHILD_PERMISSION}, "v1 scope"),
         ({"budget": 101}, "budget"),
         ({"ttl": 0}, "ttl"),
     ],

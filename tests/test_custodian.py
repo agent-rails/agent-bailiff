@@ -441,7 +441,9 @@ def test_clearance_for_another_request_of_the_same_task_is_refused(make_custodia
 
 
 def test_request_outside_the_chain_scope_is_refused_and_recorded(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     assert make_custodian().release(token, request, NOW + 1) == Refused("out_of_scope")
@@ -456,7 +458,9 @@ def test_request_outside_the_chain_scope_is_refused_and_recorded(make_custodian,
     ],
 )
 def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(make_custodian, workdir, binding):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging-*"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root, resource="env/staging-x/api")
     token = sign_clearance(clearance_for(request, root))
     custodian = make_custodian(
@@ -479,7 +483,7 @@ def test_an_unbounded_leaf_grant_is_refused_and_recorded_even_with_a_clearance(m
 def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_clearance(
     make_custodian, workdir, tools, tool
 ):
-    root = make_root(scope={"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    root = make_root(scope={"permissions": [{"tools": tools, "resources": ["env/staging/*"], "max_cost_per_call": 5}]})
     request = make_request(root, tool=tool)
     token = sign_clearance(clearance_for(request, root))
     binding = CredentialBinding(TENANT, tool, "env/*", "deploy-api", "deploy.example", "Authorization", False)
@@ -490,13 +494,15 @@ def test_an_unbounded_leaf_tool_grant_is_refused_and_recorded_even_with_a_cleara
 
 def test_an_unbounded_root_tool_grant_above_an_exact_leaf_is_refused_and_recorded(make_custodian, workdir):
     tool = "gitea.issues_delete"
-    root = make_root(scope={"tools": ["gitea.issues_*"], "resources": ["env/staging/*"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["gitea.issues_*"], "resources": ["env/staging/*"], "max_cost_per_call": 5}]}
+    )
     link = delegate(
         root,
         root,
         AGENT_KEY,
         child_subject=encode_public_key(CHILD_KEY.public_key()),
-        scope={"tools": [tool], "resources": ["env/staging/*"], "max_cost_per_call": 2},
+        scope={"permissions": [{"tools": [tool], "resources": ["env/staging/*"], "max_cost_per_call": 2}]},
         budget=10,
         ttl=600,
         now=NOW,
@@ -890,7 +896,9 @@ def test_the_release_entry_records_the_time_the_release_took_in_whole_millisecon
 
 
 def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     make_custodian(monotonic_ns=SteppingClock(9)).release(token, request, NOW + 1)
@@ -899,7 +907,9 @@ def test_a_recorded_refusal_entry_records_the_time_the_refusal_took(make_custodi
 
 
 def test_a_clock_that_steps_back_still_records_the_refusal(make_custodian, workdir):
-    root = make_root(scope={"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5})
+    root = make_root(
+        scope={"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/web"], "max_cost_per_call": 5}]}
+    )
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
     make_custodian(monotonic_ns=BackwardsClock()).release(token, request, NOW + 1)

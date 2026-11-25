@@ -51,7 +51,7 @@ VERIFIED_WRITERS = {
     "custodian": {"custodian-1": CUSTODIAN_KEY.public_key()},
 }
 SINK_WRITERS = {**VERIFIED_WRITERS, "control": {"control-1": CONTROL_KEY.public_key()}}
-LINK_SCOPE = {"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}
+LINK_SCOPE = {"permissions": [{"tools": ["deploy.service"], "resources": ["env/staging/*"], "max_cost_per_call": 2}]}
 LEVELS = ("link", "task", "tenant", "root")
 
 

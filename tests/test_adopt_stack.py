@@ -26,7 +26,9 @@ UPSTREAM = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
 ROUTES = b.QUICKSTART_UPSTREAMS / json.loads((b.QUICKSTART_UPSTREAMS / "stub.json").read_text())["routes_file"]
 ISSUER_UID = b.ISSUER_UID
 ALLOWED = "stub/notes/allowed"
-SCOPE = {"tools": ["stub.read_note", "stub.write_note"], "resources": [ALLOWED], "max_cost_per_call": 1}
+SCOPE = {
+    "permissions": [{"tools": ["stub.read_note", "stub.write_note"], "resources": [ALLOWED], "max_cost_per_call": 1}]
+}
 REPLY_TIMEOUT_SECONDS = 30
 EXPIRY_DEADLINE_SECONDS = 10
 AGENT_USER = os.environ.get("AGENT_BAILIFF_TEST_AGENT_USER")

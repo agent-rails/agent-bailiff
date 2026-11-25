@@ -276,7 +276,9 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
     issue.add_argument("--principal", default=DEFAULT_PRINCIPAL)
     issue.add_argument("--purpose", required=True)
     issue.add_argument(
-        "--scope", required=True, help='JSON: {"tools": [...], "resources": [...], "max_cost_per_call": n}'
+        "--scope",
+        required=True,
+        help='JSON: {"permissions": [{"tools": [...], "resources": [...], "max_cost_per_call": n}, ...]}',
     )
     issue.add_argument("--budget", type=int, required=True)
     issue.add_argument("--ttl", type=int, default=DEFAULT_TTL_SECONDS, help="seconds, at most 86400")
