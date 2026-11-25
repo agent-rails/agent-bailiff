@@ -853,6 +853,12 @@ def _role_pins(
             owner = owners.setdefault(pin.component, flag)
             if owner != flag:
                 raise InitError(f"writer {pin.component} is pinned as both {owner} and {flag}")
+    names: dict[bytes, str] = {}
+    for pin in (pin for flag in flags for pin in pins[flag]):
+        name = names.setdefault(pin.public_key.public_bytes_raw(), pin.component)
+        if name != pin.component:
+            first, second = sorted((name, pin.component))
+            raise InitError(f"writers {first} and {second} are pinned with the same public key")
     roles = WriterRoles({hop: frozenset(pin.component for pin in pins[flag]) for hop, flag in role_flags.items()})
     grant_writers = frozenset(pin.component for pin in pins["--grant-pin"])
     return pinned_writers(pin for flag in flags for pin in pins[flag]), grant_writers, roles

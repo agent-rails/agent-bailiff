@@ -1084,6 +1084,18 @@ def test_a_writer_pinned_under_two_flags_is_refused(docket, pin_files, capsys, e
     assert f"docket tasks refused: writer decide is pinned as both {flags}" in captured.err
 
 
+def test_one_public_key_pinned_under_two_writer_names_is_refused(docket, workdir, pin_files, capsys):
+    alias = PublicKeyRecord("alias", key_id("alias", DECIDE_KEY.public_key()), DECIDE_KEY.public_key())
+    path = workdir / "alias.pub.json"
+    path.write_text(json.dumps(alias.to_document()))
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--pin", str(path)])
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_REFUSED
+    assert captured.out == ""
+    assert "docket tasks refused: writers alias and decide are pinned with the same public key" in captured.err
+
+
 TASK_ROLES = WriterRoles({name: frozenset({name}) for name in ("decide", "custodian", "control")})
 EFFECTOR_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(5, 37)))
 EFFECTOR_PIN = PublicKeyRecord("effector", key_id("effector", EFFECTOR_KEY.public_key()), EFFECTOR_KEY.public_key())
