@@ -65,6 +65,7 @@ from agent_bailiff.decide import (
     encode_clearance,
 )
 from agent_bailiff.docket import DocketClient, DocketSink, decode_record
+from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.sink import build_kid_index
 from agent_bailiff.signing import Refused as SigningRefused
 from agent_bailiff.signing import token_hash
@@ -575,6 +576,59 @@ def test_a_repeated_chain_refusal_is_recorded_once(make_custodian, workdir):
     for _ in range(3):
         assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
     assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+
+
+def unacknowledged(record):
+    raise DocketError("state_write_failed", "head not saved")
+
+
+def test_an_unacknowledged_chain_refusal_is_not_recorded_again(make_custodian, open_docket, workdir, caplog):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_custodian(scope_v1_cutoff=NOW, docket=AckDocket(inner, unacknowledged))
+    for _ in range(3):
+        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+    assert "recorded but its head was not saved" in caplog.text
+    assert "was not written" not in caplog.text
+
+
+class FailOnceDocket:
+    def __init__(self, inner, error):
+        self.inner = inner
+        self.error = error
+
+    def append(self, entry):
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        return self.inner.append(entry)
+
+
+@pytest.mark.parametrize(
+    "error, logged",
+    [
+        (DocketError("no_ack", "head fetch timed out"), "may be recorded"),
+        (DocketError("bad_ack", "head response is malformed"), "may be recorded"),
+        (DocketError("write_failed"), "may be recorded"),
+        (DocketError("docket_full"), "was not written"),
+        (OSError("docket sink is down"), "was not written"),
+    ],
+)
+def test_a_chain_refusal_not_known_to_be_recorded_is_tried_again(
+    make_custodian, open_docket, workdir, caplog, error, logged
+):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_custodian(scope_v1_cutoff=NOW, docket=FailOnceDocket(inner, error))
+    for _ in range(3):
+        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+    assert logged in caplog.text
 
 
 def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian, workdir):

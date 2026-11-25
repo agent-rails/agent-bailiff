@@ -90,7 +90,7 @@ Access granted by cloud IAM does not appear in RBAC. The dangerous-action review
 Alert on these effector log lines:
 - `effector RBAC drift:`: the effector refuses calls until the next clean check.
 - `over half its ... s freshness window`: a check took more than 60 s. At more than 120 s every call is refused.
-- `effector_refusal_unrecorded`: a refusal the docket did not acknowledge.
+- `effector_refusal_unrecorded`: a refusal the docket did not acknowledge. The entry may still be recorded.
 
 Each check logs its duration, request count and throttled count. Per account the dangerous-action reviews cost 172 cluster-scope reviews, whatever the tenant and cluster namespace counts. On 1.36.4-gke.2377000 the 344 reviews of both accounts took 10.1 to 10.2 s at 4 workers (p50 115 ms, p99 180 ms per review, 2026-11-23); the rules reviews and SubjectAccessReviews were not timed. At a similar per-review time, 4 workers fit roughly 2000 reviews in 60 s. The rules reviews still run once per account per namespace in the cluster. A check fails when it has not finished 60 s after it started (EFFECTOR.md), so a cluster with too many namespaces to review in 60 s keeps the gate closed rather than serving on a stale check.
 
