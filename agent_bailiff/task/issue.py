@@ -174,9 +174,9 @@ def _issue_locked(
 ) -> IssuedTask:
     current = _read_current(dir_fd, out_dir)
     pending = _read_pending(dir_fd, out_dir)
-    if pending is not None and current is not None and current.root == pending.task.root:
+    if pending is not None and current is not None and current == pending.task:
         if _request_of(pending.task) == _request_of(task):
-            _check_signed(pending, issuer_public_key, out_dir / PENDING_FILE_NAME)
+            _check_finishable(pending, issuer_public_key, out_dir)
             _discard_pending(dir_fd)
             return IssuedTask(out_dir / TASK_FILE_NAME, pending.task, pending.grant_id)
         _discard_pending(dir_fd)
@@ -223,7 +223,11 @@ def _check_resumable(
     pending: PendingTask, task: TaskFile, issuer_public_key: Ed25519PublicKey, out_dir: Path, now: int
 ) -> None:
     path = out_dir / PENDING_FILE_NAME
-    _check_signed(pending, issuer_public_key, path)
+    if not _is_signed(pending, issuer_public_key):
+        raise TaskIssueError(
+            f"{path} holds a root not signed by the current issuer key; grant may be recorded: "
+            f"grant_id {pending.grant_id}; check docket grants; remove it to issue"
+        )
     if _request_of(pending.task) != _request_of(task):
         raise TaskIssueError(
             f"{path} holds an unfinished issue of grant_id {pending.grant_id} for another request; "
@@ -236,15 +240,22 @@ def _check_resumable(
         )
 
 
-def _check_signed(pending: PendingTask, issuer_public_key: Ed25519PublicKey, path: Path) -> None:
+def _check_finishable(pending: PendingTask, issuer_public_key: Ed25519PublicKey, out_dir: Path) -> None:
+    if not _is_signed(pending, issuer_public_key):
+        raise TaskIssueError(
+            f"{out_dir / TASK_FILE_NAME} already holds this root; {out_dir / PENDING_FILE_NAME} is left over from "
+            f"an issue the current issuer key did not sign (grant_id {pending.grant_id}); "
+            "check docket grants and remove it"
+        )
+
+
+def _is_signed(pending: PendingTask, issuer_public_key: Ed25519PublicKey) -> bool:
     root = pending.task.root
     try:
         issuer_public_key.verify(b64u_decode(root.proof), root.signing_bytes())
     except (InvalidSignature, ValueError):
-        raise TaskIssueError(
-            f"{path} holds a root not signed by the current issuer key; grant may be recorded: "
-            f"grant_id {pending.grant_id}; check docket grants; remove it to issue"
-        ) from None
+        return False
+    return True
 
 
 def _request_of(task: TaskFile) -> tuple[Any, ...]:

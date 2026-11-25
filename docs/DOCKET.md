@@ -32,7 +32,7 @@ A release before grants refuses a grant. Upgrade every reader, and give each the
 
 The sink must be reachable: `task issue` runs on the sink host, as a uid in the sink's `allowed_uids`, with the docket socket. It holds an exclusive lock on the task directory; a second run fails with `another task issue is running in DIR; retry when it finishes`. Under the lock it:
 
-1. if `task.json.pending` holds the root already in `task.json`, an earlier run renamed it: for the same request (see Retrying task issue) it checks the pending root's signature, removes `task.json.pending`, fsyncs the directory and succeeds with that task and its `grant_id`, appending nothing; for another request it removes `task.json.pending` and goes on;
+1. if `task.json.pending` holds the task already in `task.json` (same root and decider id), an earlier run renamed it: for the same request (see Retrying task issue) it checks the pending root's signature, removes `task.json.pending`, fsyncs the directory and succeeds with that task and its `grant_id`, appending nothing; for another request it removes `task.json.pending` and goes on;
 2. refuses an agent key that already has a task in `task.json`, without appending: `DIR/task.json already holds a task for this agent key; run proxy keygen for a new key and issue to that`;
 3. writes `task.json.pending` (mode 0600, JSON with `version`, `grant_id`, `task_root` and `decider_id`) with a new `grant_id` to a temporary file, fsyncs it, renames it and fsyncs the directory, or reuses the one already there (see Retrying task issue);
 4. writes the task file to a temporary file (mode 0644) and fsyncs it;
@@ -54,6 +54,8 @@ A retry is refused when:
 - the issuer key given to this run does not verify the pending root, as after a key rotation or with a file `task issue` did not write: `DIR/task.json.pending holds a root not signed by the current issuer key; grant may be recorded: grant_id <id>; check docket grants; remove it to issue`;
 - the request differs: `DIR/task.json.pending holds an unfinished issue of grant_id <id> for another request; rerun that command to finish it, or check docket grants, revoke via control and remove it`;
 - the pending root has expired: `DIR/task.json.pending holds an unfinished issue whose root expired at <expires_at>; grant may be recorded: grant_id <id>; check docket grants; remove it to issue`.
+
+When `task.json.pending` holds the task already in `task.json` (step 1), the same request finishes even after the root has expired: the task is installed and its grant was appended before the rename, so finishing only removes `task.json.pending`. The `grant_id` it reports is the one in `task.json.pending`, not checked against the docket. If the issuer key given to this run does not verify that root, it refuses: `DIR/task.json already holds this root; DIR/task.json.pending is left over from an issue the current issuer key did not sign (grant_id <id>); check docket grants and remove it`. A `task.json.pending` with the root in `task.json` and another decider id is not finished; step 2 refuses it as a second task for the agent key.
 
 A grant can still name a root that no agent holds: the operator gives up after a lost acknowledgement, or the process dies between the append and the rename. That root is valid until it expires. Find it with `docket grants`, where it shows every pair unused, and revoke it from its grant (see Revoking from a grant).
 

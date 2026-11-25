@@ -594,9 +594,39 @@ def test_a_renamed_root_the_current_issuer_key_did_not_sign_is_refused(out_dir):
     task = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
     write(out_dir, task)
     (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
-    with pytest.raises(TaskIssueError, match="not signed by the current issuer key; .*: grant_id g-left;"):
+    with pytest.raises(TaskIssueError) as error:
         write(out_dir, issue_task(ROTATED_KEY, ISSUER, DECIDER, made, NOW), key=ROTATED_KEY)
+    assert str(error.value) == (
+        f"{out_dir / 'task.json'} already holds this root; {out_dir / 'task.json.pending'} is left over from an "
+        "issue the current issuer key did not sign (grant_id g-left); check docket grants and remove it"
+    )
     assert sorted(os.listdir(out_dir)) == ["task.json", "task.json.pending"]
+
+
+def test_a_pending_file_naming_another_decider_for_the_installed_root_is_not_finished(out_dir):
+    made = request()
+    installed = issue_task(ISSUER_KEY, ISSUER, "another-decider", made, NOW)
+    write(out_dir, installed)
+    planted = PendingTask("g-planted", TaskFile(installed.root, DECIDER))
+    (out_dir / "task.json.pending").write_bytes(planted.encode())
+    docket = FakeDocket(out_dir)
+    with pytest.raises(TaskIssueError, match="already holds a task for this agent key"):
+        write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW), docket)
+    assert docket.files_at_append == []
+    assert (current(out_dir), pending_of(out_dir)) == (installed, planted)
+
+
+def test_a_renamed_root_finishes_after_it_expired_without_a_grant(out_dir):
+    made = request()
+    task = issue_task(ISSUER_KEY, ISSUER, DECIDER, made, NOW)
+    write(out_dir, task)
+    (out_dir / "task.json.pending").write_bytes(PendingTask("g-left", task).encode())
+    late = task.root.expires_at + 10
+    docket = FakeDocket(out_dir)
+    finished = write(out_dir, issue_task(ISSUER_KEY, ISSUER, DECIDER, made, late), docket, late)
+    assert (finished.task, finished.grant_id) == (task, "g-left")
+    assert docket.files_at_append == []
+    assert os.listdir(out_dir) == ["task.json"]
 
 
 @pytest.mark.parametrize("content", [b"{}", b"not json", b'{"version": 1}'])
