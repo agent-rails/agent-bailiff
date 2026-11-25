@@ -116,7 +116,7 @@ The operator issues the task to that key:
 ```console
 $ docker compose --profile operator run --rm --no-deps -T task-issuer \
     --purpose triage-notes \
-    --scope '{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}' \
+    --scope '{"permissions": [{"tools": ["notes.read_note", "notes.write_note"], "resources": ["notes/todo"], "max_cost_per_call": 1}]}' \
     --budget 20 --subject=oa5bveQCZ3-a-9zg9TUN3MntJk9T_yIfkt7LoHUCtZ8
 agent-bailiff task issue: wrote /out/task.json, expires at 1795523898
 task-f0f2af5ac610e8db
