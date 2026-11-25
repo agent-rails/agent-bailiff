@@ -5,16 +5,25 @@ import sys
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
+from agent_warrant.resolver import IssuerResolver
+from agent_warrant.task_root import TaskRoot
+from agent_warrant.trust import IssuerTrustPolicy
+
 from agent_bailiff.docket.grant import Grant
+from agent_bailiff.docket.grants import check_grant_root
 from agent_bailiff.docket.report import grant_root, printable, utc
 from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
+from agent_bailiff.signing import Refused
 
 CONTROL_HOP = "control"
 CUSTODIAN_HOP = "custodian"
 DECIDE_HOP = "decide"
 TASK_HOPS = (DECIDE_HOP, CUSTODIAN_HOP, CONTROL_HOP)
-TASK_COLUMNS = ("tenant", "task", "principal", "first", "last", "allows", "releases", "refusals", "state")
+VERIFIED = "verified"
+UNVERIFIED = "unverified"
+INVALID = "invalid"
+TASK_COLUMNS = ("tenant", "task", "root", "principal", "first", "last", "allows", "releases", "refusals", "state")
 MAX_TRACKED_BYTES = 1 << 30
 ROW_BYTES = 1024
 KEY_BYTES = 256
@@ -27,6 +36,9 @@ class TaskRow:
     principal: str | None = None
     principal_conflict: bool = False
     roots: set[str] = field(default_factory=set)
+    root_status: str = UNVERIFIED
+    root_reason: str | None = None
+    invalid_grants: int = 0
     first: int = 0
     last: int = 0
     allows: int = 0
@@ -40,12 +52,15 @@ class TaskRow:
 
 
 class TaskList:
-    def __init__(self, roles: WriterRoles) -> None:
+    def __init__(self, roles: WriterRoles, resolver: IssuerResolver, trust_policy: IssuerTrustPolicy) -> None:
         missing = [hop for hop in TASK_HOPS if not roles.reads(hop)]
         if missing:
             raise ValueError(f"no writer is pinned for hop {missing[0]}")
         self._roles = roles
+        self._resolver = resolver
+        self._trust_policy = trust_policy
         self._rows: dict[tuple[str, str], TaskRow] = {}
+        self._untrusted_times: set[tuple[str, str]] = set()
         self._revoked_tasks: dict[tuple[str, str], str] = {}
         self._revoked_roots: dict[str, str] = {}
         self._revoked_tenants: dict[str, str] = {}
@@ -89,18 +104,42 @@ class TaskList:
         if root is None:
             self.undecodable_grants += 1
             return
+        refusal = check_grant_root(root, self._resolver, self._trust_policy)
+        if refusal is not None:
+            self._reject_grant(self._invalid_row(root.tenant_id, root.task_id, grant.at, verified.line), refusal)
+            return
         row = self._row(root.tenant_id, root.task_id, grant.at, verified.line)
-        row.granted = True
         self._add_root(row, root.binding(), verified.line)
+        self._accept_grant(row, root, verified)
+
+    def _accept_grant(self, row: TaskRow, root: TaskRoot, verified: VerifiedLine) -> None:
+        row.root_status, row.root_reason = VERIFIED, None
+        row.granted = True
         row.expires_at = max(row.expires_at or 0, root.expires_at)
         if row.record is None:
             self._set_record(row, verified)
+
+    def _reject_grant(self, row: TaskRow, refusal: Refused) -> None:
+        row.invalid_grants += 1
+        if row.root_status == UNVERIFIED:
+            row.root_status, row.root_reason = INVALID, refusal.reason
+
+    def _invalid_row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
+        row = self._rows.get((tenant, task))
+        if row is not None:
+            return row
+        row = self._row(tenant, task, at, line)
+        self._untrusted_times.add((tenant, task))
+        return row
 
     def _row(self, tenant: str, task: str, at: int, line: int) -> TaskRow:
         row = self._rows.get((tenant, task))
         if row is None:
             self._charge(ROW_BYTES + text_bytes(tenant) + text_bytes(task), line)
             row = self._rows[(tenant, task)] = TaskRow(tenant, task, first=at)
+        if (tenant, task) in self._untrusted_times:
+            self._untrusted_times.discard((tenant, task))
+            row.first = row.last = at
         row.first, row.last = min(row.first, at), max(row.last, at)
         return row
 
@@ -169,6 +208,7 @@ def task_table_row(row: TaskRow) -> str:
     values = (
         row.tenant,
         row.task,
+        row.root_status,
         row.principal,
         utc(row.first),
         utc(row.last),
@@ -187,6 +227,9 @@ def task_json_chunks(row: TaskRow) -> Iterator[str]:
         "principal": row.principal,
         "principal_conflict": row.principal_conflict,
         "roots": sorted(row.roots),
+        "root_status": row.root_status,
+        "root_reason": row.root_reason,
+        "invalid_grants": row.invalid_grants,
         "first": row.first,
         "last": row.last,
         "allows": row.allows,

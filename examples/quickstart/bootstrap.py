@@ -39,7 +39,14 @@ from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.scope_pattern import is_bounded_resource
 from agent_bailiff.service.init import InitError, read_pin
-from agent_bailiff.service.settings import ConfigError, load_control, load_custodian, load_decide, load_docket
+from agent_bailiff.service.settings import (
+    ConfigError,
+    load_control,
+    load_custodian,
+    load_decide,
+    load_docket,
+    load_issuers,
+)
 from agent_bailiff.strict_json import parse_strict_json
 
 DOCKET_UID = 10001
@@ -62,6 +69,7 @@ RUN = Path("/run/bailiff")
 PINS = Path("/pins")
 STATE_DIRS = (
     "docket", "decide", "custodian", "control", "rule", "issuer", "issuer-docket", "ledger", "gitea-admin",
+    "reader",
 )  # fmt: skip
 DIRS = {name: STATE / name for name in STATE_DIRS}
 SOCKETS = {name: RUN / name / f"{name}.sock" for name in ("docket", "decide", "custodian")}
@@ -74,6 +82,7 @@ ISSUER_DOCKET_KEY = DIRS["issuer-docket"] / "signing.key"
 ISSUER_DOCKET_STATE = DIRS["issuer-docket"] / "docket-state"
 GRANT_PIN = PINS / "issuer" / "issuer-docket.json"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
+READER_ISSUERS = DIRS["reader"] / "issuers.json"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
 
@@ -106,7 +115,8 @@ UPSTREAM_FIELDS = frozenset(
 )  # fmt: skip
 STACK_HOSTS = frozenset(
     {
-        "localhost", "issuer-init", "decide-init", "custodian-init", "control-init", "rule-init", "docket-init",
+        "localhost", "issuer-init", "decide-init", "custodian-init", "control-init", "rule-init", "reader-init",
+        "docket-init",
         "gateway-init", "bootstrap", "agent-key", "task-issuer", "gitea-task", "gitea-secret", "gitea-admin",
         "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
         "jaeger", "exporter", "rule",
@@ -311,14 +321,19 @@ def write_pin(path: Path, document: str) -> None:
 def replace_owned(path: Path, document: Any) -> bool:
     if json.loads(path.read_text()) == document:
         return False
+    write_owned(path, document)
+    return True
+
+
+def write_owned(path: Path, document: Any) -> None:
     staged = path.with_name(f".{path.name}.new")
+    staged.unlink(missing_ok=True)
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "wb") as target:
         target.write(json.dumps(document, indent=2, sort_keys=True).encode() + b"\n")
         target.flush()
         os.fsync(target.fileno())
     os.replace(staged, path)
-    return True
 
 
 def ensure_component(
@@ -473,6 +488,16 @@ def fill_control_issuers(component: str, outcome: str) -> str:
     changed = replace_owned(config, {**json.loads(config.read_text()), "issuers": issuers()})
     load_control(config)
     return "updated" if changed and outcome == "kept" else outcome
+
+
+def init_reader() -> str:
+    outcome = "created"
+    if READER_ISSUERS.exists():
+        outcome = "updated" if replace_owned(READER_ISSUERS, issuers()) else "kept"
+    else:
+        write_owned(READER_ISSUERS, issuers())
+    load_issuers(READER_ISSUERS)
+    return outcome
 
 
 def init_docket() -> str:
@@ -768,6 +793,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "custodian": init_custodian,
     "control": init_control,
     "rule": init_rule,
+    "reader": init_reader,
     "docket": init_docket,
     "gateway": init_gateway,
     "admin-secret": admin_secret,

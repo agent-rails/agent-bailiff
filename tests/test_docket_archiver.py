@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 from test_docket import make_entry
-from test_docket_report import OTHER_USER, PINS, WRITERS, Docket, filled, linux_cross_uid, run_as
+from test_docket_report import OTHER_USER, PINS, WRITERS, Docket, default_issuers, filled, linux_cross_uid, run_as
 from test_docket_report import cut as cut_docket
 
 from agent_bailiff import cli
@@ -449,7 +449,19 @@ def test_verify_without_the_archive_starts_at_the_base(layout, pin_files, capsys
 def tasks_command(layout, pin_files, capsys, *arguments):
     _, docket = layout
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", pin_files[name])]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), "--json", *map(str, arguments)])
+    issuers = ["--issuers", default_issuers(docket)]
+    code = cli.main(
+        [
+            "docket",
+            "tasks",
+            "--docket",
+            str(docket.path),
+            *map(str, pins),
+            *map(str, issuers),
+            "--json",
+            *map(str, arguments),
+        ]
+    )
     captured = capsys.readouterr()
     return code, [json.loads(line) for line in captured.out.splitlines()], captured.err
 
@@ -459,9 +471,11 @@ def test_tasks_with_the_archive_counts_records_in_removed_segments(layout, pin_f
     code, rows, err = tasks_command(layout, pin_files, capsys, "--archive", layout[0] / "archive")
     assert code == 0, err
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 3, 1, 1)]
+    assert "pass --archive" not in err
     code, rows, err = tasks_command(layout, pin_files, capsys)
     assert code == 0, err
     assert [(row["task"], row["allows"], row["releases"], row["refusals"]) for row in rows] == [("root-1", 2, 0, 0)]
+    assert "1 tasks have no verified grant in the read segments; if segments were removed, pass --archive" in err
 
 
 def test_tasks_refuses_an_archive_missing_a_removed_segment(layout, pin_files, capsys):

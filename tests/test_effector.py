@@ -9,6 +9,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
+from agent_warrant.resolver import PinnedResolver
+from agent_warrant.trust import IssuerTrustPolicy
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.client.client import REFUSAL_REASONS
@@ -502,7 +504,8 @@ def test_an_effector_refusal_is_not_counted_in_task_rows(token_file):
     instance.call(scale_params(), release_for(), NOW + 2)
     [entry] = docket.entries
     verified = VerifiedLine(1, Record("effector.homelab", 1, None, entry, "k", "t"), 0, 2)
-    tasks = TaskList(WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")}))
+    roles = WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")})
+    tasks = TaskList(roles, PinnedResolver({}), IssuerTrustPolicy({}))
     tasks.add(verified)
     assert (tasks.rows(), tasks.role_mismatches) == ([], 0)
 

@@ -13,7 +13,8 @@ from agent_warrant.task_root import issue_task_root
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_docket import make_entry
-from test_docket_report import GRANT_WRITERS, ISSUER_PIN, PINS, Docket
+from test_docket_report import GRANT_WRITERS, ISSUER_PIN, PINS, Docket, write_issuers
+from test_docket_report import issuers_document as report_issuers_document
 
 from agent_bailiff import cli
 from agent_bailiff.control import Control, ControlRefused
@@ -63,14 +64,9 @@ ROW_FIELDS = {
 
 
 def issuers_document(tenants=None):
-    return {
-        "issuer-a": {
-            "public_key": encode_public_key(ROOT_KEY.public_key()),
-            "max_budget": 1000,
-            "max_depth": 2,
-            "tenants": tenants or {"acme": {"principals": ["alice"], "principal_prefixes": []}},
-        }
-    }
+    return report_issuers_document(
+        ROOT_KEY, "issuer-a", tenants or {"acme": {"principals": ["alice"], "principal_prefixes": []}}
+    )
 
 
 def make_root(*, key=ROOT_KEY, issuer="issuer-a", task_id="task-1", tenant="acme", principal="alice", scope=SCOPE):
@@ -116,10 +112,7 @@ def pin_files(workdir):
 
 @pytest.fixture
 def issuers_file(workdir):
-    path = workdir / "issuers.json"
-    path.write_text(json.dumps(issuers_document()))
-    os.chmod(path, 0o600)
-    return path
+    return write_issuers(workdir / "issuers.json", issuers_document())
 
 
 def grant(docket, root, grant_id="g-1", at=ISSUED):
@@ -473,6 +466,15 @@ def test_an_unusable_issuers_file_exits_2(docket, pin_files, issuers_file, capsy
     assert "docket grants refused: issuers" in err
 
 
+def test_grants_refuse_an_empty_issuers_file(docket, pin_files, issuers_file, capsys):
+    grant(docket, make_root())
+    issuers_file.write_text("{}")
+    code, out, err = report(docket, pin_files, issuers_file, capsys=capsys)
+    assert code == cli.EXIT_UNVERIFIED
+    assert out == []
+    assert "docket grants refused: issuers file must name at least one issuer" in err
+
+
 def test_an_issuers_file_others_can_write_is_refused(docket, pin_files, issuers_file, capsys):
     os.chmod(issuers_file, 0o644)
     code, _, err = report(docket, pin_files, issuers_file, capsys=capsys)
@@ -487,16 +489,15 @@ def test_a_decide_allow_without_a_cost_exits_2(docket, pin_files, issuers_file, 
     assert "line 1 lacks an op_id, cost, tool or resource" in err
 
 
-def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_control(
-    docket, pin_files, issuers_file, capsys
-):
+def test_a_forged_root_is_invalid_in_tasks_and_grants_and_refused_by_control(docket, pin_files, issuers_file, capsys):
     forged = make_root(key=OTHER_KEY)
     record = grant(docket, forged)
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
-    pins += ["--grant-pin", str(pin_files["issuer"])]
-    assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == 0
+    pins += ["--grant-pin", str(pin_files["issuer"]), "--issuers", str(issuers_file)]
+    assert cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"]) == cli.EXIT_FORGED_GRANT
     [task] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", True, record.token)
+    assert (task["tenant"], task["task"], task["granted"], task["record"]) == ("acme", "task-1", False, None)
+    assert (task["root_status"], task["root_reason"], task["invalid_grants"]) == ("invalid", "bad_signature", 1)
     code, [row], _ = json_report(docket, pin_files, issuers_file, capsys)
     assert code == cli.EXIT_REFUSED
     assert (row["status"], row["reason"], row["root"]) == ("invalid_grant", "bad_signature", forged.binding())
@@ -513,7 +514,7 @@ def test_a_forged_root_is_granted_in_tasks_invalid_in_grants_and_refused_by_cont
         grant_writers={"issuer"},
     )
     with pytest.raises(ControlRefused) as refused:
-        control.revoke(task["record"], "task", "ops", ISSUED)
+        control.revoke(record.token, "task", "ops", ISSUED)
     assert refused.value.reason == "root_bad_signature"
 
 

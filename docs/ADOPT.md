@@ -211,18 +211,21 @@ To renew, run step 4 again: the agent user makes a new key, and the operator iss
 To stop a task now, the operator revokes it from the signed docket:
 
 ```console
+$ set -o pipefail
 $ docker compose --profile operator run --rm --no-deps -T --entrypoint python reader \
     -m agent_bailiff.cli docket tasks --docket /var/lib/bailiff/docket/docket.log \
     --decide-pin /pins/decide/decide.json --custodian-pin /pins/custodian/custodian.json \
     --control-pin /pins/control/control.json --control-pin /pins/rule/rule.json \
-    --grant-pin /pins/issuer/issuer-docket.json --json \
-  | jq -r 'select(.task == "task-f0f2af5ac610e8db").record' \
+    --grant-pin /pins/issuer/issuer-docket.json --issuers /var/lib/bailiff/reader/issuers.json --json \
+  | jq -r 'select(.tenant == "quickstart" and .task == "task-f0f2af5ac610e8db" and .root_status == "verified").record' \
   | docker compose --profile operator run --rm --no-deps -T control revoke \
     --config /var/lib/bailiff/control/config.json --actor operator --level task --record -
 {"action": "revoke", "entry_id": "f8b39d6075144028b685cf000ec13743", "handles": {"task": "task-f0f2af5ac610e8db", "tenant": "quickstart"}, "reason": "task", "trace_id": "d5e3fffdc4062c1688be463c7b6a243c"}
 ```
 
-After that, every call on the task is refused as `chain_invalid`. A task that has made no call is listed from its grant, and its `record` is the grant, so it is revoked the same way. Once the issuer records grants, `docket tasks` also needs the issuer's docket-writer public key as `--grant-pin`, and control needs that writer in its `grant_writers` and the issuer in its `issuers`. See [DOCKET.md](DOCKET.md) for `docket tasks`, `docket grants` and `docket verify`.
+`--issuers` is the reader's own issuers file, written by `reader-init` on each `docker compose up` from the issuer pin, as decide's `issuers` are. If you edit decide's `issuers` by hand, edit this file to match, or ROOT reads `invalid` for valid roots. The filter selects only a row whose task root an allowed issuer signed, so a grant forged in another tenant's name hands over no record. `pipefail` gives the pipeline a non-zero status when `docket tasks` exits non-zero, even though the revoke still runs on the selected verified row: 4 means the docket holds an invalid or undecodable grant, 3 that some records were not counted. Read its stderr when that happens.
+
+After the revoke, every call on the task is refused as `chain_invalid`. A task that has made no call is listed from its grant, and its `record` is the grant, so it is revoked the same way. Once the issuer records grants, `docket tasks` also needs the issuer's docket-writer public key as `--grant-pin`, and control needs that writer in its `grant_writers` and the issuer in its `issuers`. See [DOCKET.md](DOCKET.md) for `docket tasks`, `docket grants` and `docket verify`.
 
 To remove the stack and its volumes, including the issuer key and the stored credential:
 

@@ -300,7 +300,9 @@ def test_an_invalid_binding_handle_is_refused_without_an_entry(decider, make_con
 def test_every_task_row_record_is_revocable_at_the_task_level(decider, make_control, workdir):
     root, link = allowed_delegated_call(decider, workdir)
     assert not decider.check(make_request(root, (link,), CHILD_KEY, nonce="n-1", trace_id="trace-9"), NOW).allowed
-    tasks = TaskList(WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")}))
+    tasks = TaskList(
+        WriterRoles({hop: frozenset({hop}) for hop in ("decide", "custodian", "control")}), RESOLVER, TRUST_POLICY
+    )
     assert verify_records(workdir / "docket.log", SINK_WRITERS, RecordFilter(), tasks.add).ok
     [row] = tasks.rows()
     assert (row.principal, row.allows, row.refusals, row.principal_conflict) == (PRINCIPAL, 1, 1, False)

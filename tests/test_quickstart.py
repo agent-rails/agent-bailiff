@@ -63,16 +63,30 @@ def granted_roots(stack):
     return [json.loads(line) for line in output.splitlines()]
 
 
+def task_rows(stack):
+    pins = [
+        "--decide-pin", b.pin_path("decide"), "--custodian-pin", b.pin_path("custodian"),
+        "--control-pin", b.pin_path("control"), "--control-pin", b.pin_path("rule"), "--grant-pin", b.GRANT_PIN,
+    ]  # fmt: skip
+    reader = ["--profile", "operator", "run", "--rm", "--no-deps", "-T", "--entrypoint", "python", "reader"]
+    output = stack.compose(
+        *reader, "-m", "agent_bailiff.cli", "docket", "tasks", "--docket", DOCKET, *map(str, pins),
+        "--issuers", str(b.READER_ISSUERS), "--json",
+    )  # fmt: skip
+    return [json.loads(line) for line in output.splitlines()]
+
+
 def revoke_task(stack, task_id):
-    allows = [
-        row["token"]
-        for row in verified_rows(stack, task_id)
-        if row["writer"] == DECIDE and row["entry"]["decision"] == "allow"
+    rows = task_rows(stack)
+    [record] = [
+        row["record"]
+        for row in rows
+        if row["tenant"] == b.TENANT and row["task"] == task_id and row["root_status"] == "verified"
     ]
     arguments = ["--config", "/var/lib/bailiff/control/config.json", "--actor", "operator", "--level", "task"]
     output = stack.compose(
         "--profile", "operator", "run", "--rm", "--no-deps", "-T", "control", "revoke", *arguments, "--record", "-",
-        stdin=allows[-1] + "\n",
+        stdin=record + "\n",
     )  # fmt: skip
     return json.loads(output)
 

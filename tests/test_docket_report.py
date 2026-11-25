@@ -27,6 +27,7 @@ from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import ChainState, Verification, build_kid_index
 from agent_bailiff.docket.snapshot import Anchor, Snapshot, read_snapshot, snapshot_path, write_snapshot
 from agent_bailiff.keys import PublicKeyRecord, key_id
+from agent_bailiff.service.settings import load_issuers
 from agent_bailiff.signing import sign
 
 DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
@@ -207,9 +208,9 @@ def test_filters_select_records_but_every_record_is_verified(docket, pin_files, 
     assert f"4 records verified, {len(lines)} printed" in err
 
 
-def task_root(task_id, tenant="acme"):
+def task_root(task_id, tenant="acme", key=ROOT_KEY):
     return issue_task_root(
-        ROOT_KEY,
+        key,
         issuer="issuer.example",
         task_id=task_id,
         tenant_id=tenant,
@@ -222,6 +223,28 @@ def task_root(task_id, tenant="acme"):
         scope=ROOT_SCOPE,
         subject=encode_public_key(ROOT_KEY.public_key()),
     )
+
+
+def issuers_document(key=ROOT_KEY, issuer="issuer.example", tenants=None):
+    return {
+        issuer: {
+            "public_key": encode_public_key(key.public_key()),
+            "max_budget": 1000,
+            "max_depth": 2,
+            "tenants": tenants or {"acme": {"principals": ["carol"], "principal_prefixes": []}},
+        }
+    }
+
+
+def write_issuers(path, document):
+    path.write_text(json.dumps(document))
+    os.chmod(path, 0o600)
+    return path
+
+
+@pytest.fixture
+def issuers_file(workdir):
+    return write_issuers(workdir / "issuers.json", issuers_document())
 
 
 def grant_of(root, number=1, at=1_700_000_003):
@@ -875,9 +898,16 @@ def test_a_snapshot_of_a_sealed_segment_does_not_match_after_a_cut(docket, pin_f
     assert "does not match the docket: segment" in err
 
 
-def list_tasks(docket, pin_files, *arguments, capsys):
+def default_issuers(docket):
+    return write_issuers(docket.path.parent / "issuers.json", issuers_document())
+
+
+def list_tasks(docket, pin_files, *arguments, capsys, issuers=None):
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", pin_files[name])]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *map(str, pins), *arguments])
+    issuers = issuers or default_issuers(docket)
+    code = cli.main(
+        ["docket", "tasks", "--docket", str(docket.path), *map(str, pins), "--issuers", str(issuers), *arguments]
+    )
     captured = capsys.readouterr()
     return code, captured.out.splitlines(), captured.err
 
@@ -900,13 +930,13 @@ def test_tasks_prints_one_row_per_tenant_and_task(docket, pin_files, capsys):
     code, out, err = list_tasks(docket, pin_files, capsys=capsys)
     assert code == 0, err
     assert out[0].split("\t") == [
-        "TENANT", "TASK", "PRINCIPAL", "FIRST", "LAST", "ALLOWS", "RELEASES", "REFUSALS", "STATE"
+        "TENANT", "TASK", "ROOT", "PRINCIPAL", "FIRST", "LAST", "ALLOWS", "RELEASES", "REFUSALS", "STATE"
     ]  # fmt: skip
     rows = [row.split("\t") for row in out[1:]]
-    assert [(row[0], row[1], *row[5:]) for row in rows] == [
-        ("acme", "task-a", "1", "1", "1", "revoked"),
-        ("acme", "task-b", "1", "0", "0", "-"),
-        ("zeta", "task-a", "1", "0", "0", "-"),
+    assert [(row[0], row[1], row[2], *row[6:]) for row in rows] == [
+        ("acme", "task-a", "unverified", "1", "1", "1", "revoked"),
+        ("acme", "task-b", "unverified", "1", "0", "0", "-"),
+        ("zeta", "task-a", "unverified", "1", "0", "0", "-"),
     ]
     assert "6 records verified, 3 tasks" in err
 
@@ -915,7 +945,7 @@ def test_tasks_count_a_grant_whose_root_does_not_decode(docket, pin_files, grant
     task_docket(docket)
     docket.grant(Grant(grant_id="g-1", at=1_700_000_007, root_token="root.token"))
     code, out, err = list_tasks(docket, pin_files, "--grant-pin", str(grant_pin_file), capsys=capsys)
-    assert code == 0, err
+    assert code == cli.EXIT_FORGED_GRANT, err
     assert [tuple(row.split("\t")[:2]) for row in out[1:]] == [
         ("acme", "task-a"),
         ("acme", "task-b"),
@@ -947,7 +977,7 @@ def test_a_never_called_task_shows_in_the_table(docket, pin_files, grant_pin_fil
     code, out, err = list_tasks(docket, pin_files, "--grant-pin", str(grant_pin_file), capsys=capsys)
     assert code == 0, err
     assert out[1].split("\t") == [
-        "acme", "task-c", "-", "2023-11-14T22:13:23Z", "2023-11-14T22:13:23Z", "0", "0", "0", "-"
+        "acme", "task-c", "verified", "-", "2023-11-14T22:13:23Z", "2023-11-14T22:13:23Z", "0", "0", "0", "-"
     ]  # fmt: skip
 
 
@@ -1062,7 +1092,7 @@ def test_a_task_with_no_decide_record_has_no_record_for_control(docket, pin_file
 def test_tasks_requires_a_pin_for_each_role(docket, pin_files, capsys, missing):
     pins = [item for name in PINS if name != missing for item in (f"--{name}-pin", str(pin_files[name]))]
     with pytest.raises(SystemExit):
-        cli.main(["docket", "tasks", "--docket", str(docket.path), *pins])
+        cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--issuers", str(default_issuers(docket))])
     assert f"--{missing}-pin" in capsys.readouterr().err
 
 
@@ -1077,7 +1107,8 @@ def test_tasks_requires_a_pin_for_each_role(docket, pin_files, capsys, missing):
 )
 def test_a_writer_pinned_under_two_flags_is_refused(docket, pin_files, capsys, extra, flags):
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, extra, str(pin_files["decide"])])
+    issuers = ["--issuers", str(default_issuers(docket))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, *issuers, extra, str(pin_files["decide"])])
     captured = capsys.readouterr()
     assert code == cli.EXIT_REFUSED
     assert captured.out == ""
@@ -1089,7 +1120,8 @@ def test_one_public_key_pinned_under_two_writer_names_is_refused(docket, workdir
     path = workdir / "alias.pub.json"
     path.write_text(json.dumps(alias.to_document()))
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--pin", str(path)])
+    issuers = ["--issuers", str(default_issuers(docket))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, *issuers, "--pin", str(path)])
     captured = capsys.readouterr()
     assert code == cli.EXIT_REFUSED
     assert captured.out == ""
@@ -1101,8 +1133,9 @@ EFFECTOR_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(5, 37)))
 EFFECTOR_PIN = PublicKeyRecord("effector", key_id("effector", EFFECTOR_KEY.public_key()), EFFECTOR_KEY.public_key())
 
 
-def task_list(docket):
-    tasks = tasks_module.TaskList(TASK_ROLES)
+def task_list(docket, issuers=None):
+    issuers = load_issuers(issuers or default_issuers(docket))
+    tasks = tasks_module.TaskList(TASK_ROLES, issuers.resolver, issuers.trust_policy)
     writers = {**GRANT_WRITERS, "effector": {EFFECTOR_PIN.kid: EFFECTOR_PIN.public_key}}
     report = verify_records(docket.path, writers, RecordFilter(), tasks.add, grant_writers={"issuer"})
     assert report.ok, report
@@ -1209,14 +1242,17 @@ def test_tasks_warn_of_uncounted_records_before_the_rows_and_exit_3(docket, pin_
     monkeypatch.setattr(sys, "stdout", stream)
     monkeypatch.setattr(sys, "stderr", stream)
     pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
-    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, "--json"])
+    issuers = ["--issuers", str(default_issuers(docket))]
+    code = cli.main(["docket", "tasks", "--docket", str(docket.path), *pins, *issuers, "--json"])
     lines = stream.getvalue().splitlines()
     assert code == cli.EXIT_UNCOUNTED
-    assert lines[:2] == [
-        "agent-bailiff docket tasks: 2 records verified, 1 tasks",
+    assert lines[:3] == [
+        "agent-bailiff docket tasks: 2 records verified, 1 tasks, 0 verified, 1 unverified, 0 invalid grants",
+        "agent-bailiff docket tasks: 1 tasks have no verified grant in the read segments; "
+        "if segments were removed, pass --archive to read them",
         "agent-bailiff docket tasks: 1 records claim a hop their writer is not pinned for; they are not counted",
     ]
-    assert [json.loads(line)["principal"] for line in lines[2:]] == ["zoe"]
+    assert [json.loads(line)["principal"] for line in lines[3:]] == ["zoe"]
 
 
 def test_tasks_prints_nothing_from_a_docket_that_fails_verification(docket, pin_files, capsys):
@@ -1274,6 +1310,189 @@ def test_non_ascii_task_state_is_charged_at_its_stored_size(docket, pin_files, c
     stored = sum(sys.getsizeof(text) for text in (tenant, task, root, principal, docket.records[0].token))
     expected = tasks_module.ROW_BYTES + tasks_module.KEY_BYTES + stored
     assert task_state_bytes(docket, pin_files, capsys, monkeypatch) == expected
+
+
+FORGER_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(9, 41)))
+
+
+def granted_row(docket, pin_files, grant_pin_file, capsys, issuers=None):
+    code, out, err = list_tasks(
+        docket, pin_files, "--json", "--grant-pin", str(grant_pin_file), capsys=capsys, issuers=issuers
+    )
+    return code, json_rows(out), err
+
+
+def root_fields(row):
+    return row["root_status"], row["root_reason"], row["invalid_grants"]
+
+
+def test_tasks_requires_issuers(docket, pin_files, capsys):
+    pins = [item for name in ("decide", "custodian", "control") for item in (f"--{name}-pin", str(pin_files[name]))]
+    with pytest.raises(SystemExit):
+        cli.main(["docket", "tasks", "--docket", str(docket.path), *pins])
+    assert "--issuers" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("prepare", "message"),
+    [
+        (lambda path: path, "cannot open the issuers file"),
+        (lambda path: write_issuers(path, issuers_document()).chmod(0o644) or path, "must have mode 0o600"),
+        (lambda path: write_issuers(path, issuers_document()).write_text("{") or path, "issuers file"),
+        (lambda path: write_issuers(path, {}), "issuers file must name at least one issuer"),
+    ],
+)
+def test_tasks_refuse_an_issuers_file_they_cannot_load(docket, workdir, pin_files, capsys, prepare, message):
+    docket.grant(grant_of(task_root("task-c")))
+    code, out, err = list_tasks(docket, pin_files, capsys=capsys, issuers=prepare(workdir / "issuers.json"))
+    assert code == cli.EXIT_REFUSED
+    assert out == []
+    assert "docket tasks refused:" in err and message in err
+
+
+def test_a_grant_signed_by_an_allowed_issuer_is_verified(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c")))
+    code, [row], err = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert code == 0, err
+    assert root_fields(row) == ("verified", None, 0)
+    assert row["granted"] is True
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (issuers_document(issuer="issuer.other"), "unknown_issuer"),
+        (issuers_document(key=FORGER_KEY), "bad_signature"),
+        (issuers_document(tenants={"zeta": {"principals": ["carol"], "principal_prefixes": []}}), "issuer_not_allowed"),
+    ],
+)
+def test_a_grant_root_is_invalid_with_its_reason(docket, workdir, pin_files, grant_pin_file, capsys, document, reason):
+    docket.grant(grant_of(task_root("task-c")))
+    issuers = write_issuers(workdir / "issuers.json", document)
+    code, [row], err = granted_row(docket, pin_files, grant_pin_file, capsys, issuers=issuers)
+    assert code == cli.EXIT_FORGED_GRANT
+    assert root_fields(row) == ("invalid", reason, 1)
+    assert "1 tasks, 0 verified, 0 unverified, 1 invalid grants" in err
+
+
+def test_a_rotated_issuer_key_marks_old_roots_invalid_bad_signature(docket, workdir, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c"), 1))
+    docket.grant(grant_of(task_root("task-d", key=FORGER_KEY), 2, at=1_700_000_004))
+    issuers = write_issuers(workdir / "issuers.json", issuers_document(key=FORGER_KEY))
+    _, rows, _ = granted_row(docket, pin_files, grant_pin_file, capsys, issuers=issuers)
+    assert [(row["task"], *root_fields(row)) for row in rows] == [
+        ("task-c", "invalid", "bad_signature", 1),
+        ("task-d", "verified", None, 0),
+    ]
+
+
+def test_a_task_with_no_grant_is_unverified(docket, pin_files, capsys):
+    docket.append("decide", make_entry(1, handles={"tenant": "acme", "task": "task-a", "root": "root-a"}))
+    docket.append(
+        "custodian",
+        make_entry(2, handles={"tenant": "acme", "task": "task-b"}, hop="custodian", component="custodian"),
+    )
+    code, out, err = list_tasks(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    assert [(row["task"], *root_fields(row)) for row in json_rows(out)] == [
+        ("task-a", "unverified", None, 0),
+        ("task-b", "unverified", None, 0),
+    ]
+
+
+def test_an_invalid_grant_does_not_set_granted_expiry_record_or_roots(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY)))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["granted"], row["expires_at"], row["record"], row["record_line"]) == (False, None, None, None)
+    assert row["roots"] == []
+    assert root_fields(row) == ("invalid", "bad_signature", 1)
+
+
+@pytest.mark.parametrize("forged_first", [True, False])
+def test_a_forged_copy_beside_the_real_grant_keeps_verified(docket, pin_files, grant_pin_file, capsys, forged_first):
+    grants = [grant_of(task_root("task-c", key=FORGER_KEY), 1), grant_of(task_root("task-c"), 2)]
+    records = [docket.grant(grant) for grant in (grants if forged_first else grants[::-1])]
+    real = records[1] if forged_first else records[0]
+    code, [row], err = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert code == cli.EXIT_FORGED_GRANT
+    assert "1 tasks, 1 verified, 0 unverified, 1 invalid grants" in err
+    assert root_fields(row) == ("verified", None, 1)
+    assert (row["granted"], row["record"], row["expires_at"]) == (True, real.token, ROOT_EXPIRES_AT)
+
+
+def test_a_later_invalid_grant_keeps_the_first_reason(docket, workdir, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 1))
+    docket.grant(grant_of(task_root("task-c"), 2))
+    document = issuers_document(tenants={"zeta": {"principals": ["carol"], "principal_prefixes": []}})
+    issuers = write_issuers(workdir / "issuers.json", document)
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys, issuers=issuers)
+    assert root_fields(row) == ("invalid", "bad_signature", 2)
+
+
+def test_role_mismatch_beside_an_invalid_grant_exits_3_and_prints_both(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY)))
+    forged(docket, "custodian", 2, principal="mallory")
+    code, rows, err = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert code == cli.EXIT_UNCOUNTED
+    assert [(row["task"], row["root_status"]) for row in rows] == [("task-c", "invalid")]
+    assert "1 invalid grants" in err
+    assert "1 records claim a hop their writer is not pinned for" in err
+
+
+def test_the_archive_hint_shows_only_when_rows_are_unverified(docket, workdir, pin_files, grant_pin_file, capsys):
+    hint = "if segments were removed, pass --archive to read them"
+    docket.grant(grant_of(task_root("task-c")))
+    code, _, err = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (code, hint in err) == (0, False)
+    docket.append("decide", make_entry(2, handles={"tenant": "acme", "task": "task-a", "root": "root-a"}))
+    code, _, err = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert code == 0, err
+    assert "2 tasks, 1 verified, 1 unverified, 0 invalid grants" in err
+    assert f"1 tasks have no verified grant in the read segments; {hint}" in err
+
+
+def test_an_invalid_grant_does_not_move_first_or_last_of_an_existing_row(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 1, at=AT + 1))
+    handles = {"tenant": "acme", "task": "task-c", "root": "root-c"}
+    docket.append("decide", make_entry(5, handles=handles))
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 2, at=AT + 9))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["first"], row["last"]) == (AT + 5, AT + 5)
+    assert root_fields(row) == ("invalid", "bad_signature", 2)
+
+
+def test_an_invalid_grant_alone_opens_a_row(docket, pin_files, grant_pin_file, capsys):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), at=AT + 3))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["tenant"], row["task"], row["first"], row["last"]) == ("acme", "task-c", AT + 3, AT + 3)
+
+
+def test_a_row_opened_by_an_invalid_grant_takes_its_times_from_the_first_trusted_record(
+    docket, pin_files, grant_pin_file, capsys
+):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY), 1, at=2**40))
+    docket.grant(grant_of(task_root("task-c"), 2, at=AT + 3))
+    docket.append("decide", make_entry(5, handles={"tenant": "acme", "task": "task-c", "root": "root-c"}))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["first"], row["last"], row["root_status"]) == (AT + 3, AT + 5, "verified")
+
+
+def test_an_invalid_root_is_not_listed_and_its_revocation_does_not_mark_the_task(
+    docket, pin_files, grant_pin_file, capsys
+):
+    forged = replace(task_root("task-c", key=FORGER_KEY), purpose="evil")
+    real = task_root("task-c")
+    docket.grant(grant_of(forged, 1, at=AT + 1))
+    docket.grant(grant_of(real, 2, at=AT + 2))
+    docket.append("control", make_entry(3, hop="control", decision="revoke", handles={"root": forged.binding()}))
+    _, [row], _ = granted_row(docket, pin_files, grant_pin_file, capsys)
+    assert (row["roots"], row["revoked_by"], row["root_status"]) == ([real.binding()], None, "verified")
+
+
+def test_invalid_grants_are_charged_to_the_state_budget(docket):
+    docket.grant(grant_of(task_root("task-c", key=FORGER_KEY)))
+    tasks = task_list(docket)
+    assert tasks._tracked == tasks_module.ROW_BYTES + sum(map(sys.getsizeof, ("acme", "task-c")))
 
 
 def test_a_json_task_row_is_written_in_chunks_that_join_to_one_document():

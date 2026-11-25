@@ -287,6 +287,8 @@ def load_effector(path: Path) -> EffectorSettings:
 
 def load_issuers(path: Path) -> Issuers:
     document = {"issuers": read_config(path, "issuers file")}
+    if document["issuers"] == {}:
+        raise ConfigError("issuers file must name at least one issuer")
     return _issuers(Section(document, "issuers file", frozenset({"issuers"})))
 
 

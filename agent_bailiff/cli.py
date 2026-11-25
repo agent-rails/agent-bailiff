@@ -46,6 +46,8 @@ from agent_bailiff.docket.tasks import (
     CONTROL_HOP,
     CUSTODIAN_HOP,
     DECIDE_HOP,
+    UNVERIFIED,
+    VERIFIED,
     TaskList,
     task_header,
     task_json_chunks,
@@ -100,6 +102,7 @@ EXIT_REFUSED = 1
 EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 EXIT_UNCOUNTED = 3
+EXIT_FORGED_GRANT = 4
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
 GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
@@ -185,7 +188,9 @@ def _parser() -> argparse.ArgumentParser:
             )
             verify.set_defaults(handler=_verify_docket)
             tasks = component.add_parser(
-                "tasks", help="verify every record and print one row per task; --json rows carry a record to revoke"
+                "tasks",
+                help="verify every record and print one row per task; --json rows carry a record to revoke; exit 4 "
+                "on an invalid or undecodable grant, 3 when records are not counted",
             )
             tasks.add_argument("--docket", type=Path, required=True, help="the docket file; needs read access only")
             tasks.add_argument(
@@ -215,6 +220,12 @@ def _parser() -> argparse.ArgumentParser:
                 action="append",
                 required=True,
                 help="control's public key record; only its revocations set STATE; repeat",
+            )
+            tasks.add_argument(
+                "--issuers",
+                type=Path,
+                required=True,
+                help="0600 JSON file holding the issuers section of decide's config; checks each grant's task root",
             )
             tasks.add_argument(
                 "--archive", type=Path, help="read removed segments from this archive, so older tasks are listed"
@@ -646,8 +657,9 @@ def _run_docket(args: argparse.Namespace) -> int:
 
 def _list_tasks(args: argparse.Namespace) -> int:
     try:
+        issuers = load_issuers(args.issuers)
         writers, grant_writers, roles = _role_pins(args, TASK_ROLE_FLAGS)
-        tasks = TaskList(roles)
+        tasks = TaskList(roles, issuers.resolver, issuers.trust_policy)
         report = verify_records(
             args.docket, writers, RecordFilter(), tasks.add, archive=args.archive, grant_writers=grant_writers
         )
@@ -662,7 +674,20 @@ def _list_tasks(args: argparse.Namespace) -> int:
         )
         return EXIT_REFUSED
     rows = tasks.rows()
-    print(f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks", file=sys.stderr)
+    verified = sum(row.root_status == VERIFIED for row in rows)
+    unverified = sum(row.root_status == UNVERIFIED for row in rows)
+    invalid = sum(row.invalid_grants for row in rows)
+    print(
+        f"{PROG} docket tasks: {report.entries} records verified, {len(rows)} tasks, {verified} verified, "
+        f"{unverified} unverified, {invalid} invalid grants",
+        file=sys.stderr,
+    )
+    if unverified and args.archive is None:
+        print(
+            f"{PROG} docket tasks: {unverified} tasks have no verified grant in the read segments; "
+            "if segments were removed, pass --archive to read them",
+            file=sys.stderr,
+        )
     if tasks.undecodable_grants:
         print(
             f"{PROG} docket tasks: {tasks.undecodable_grants} grants hold a task root that does not decode; "
@@ -679,7 +704,9 @@ def _list_tasks(args: argparse.Namespace) -> int:
             sys.stdout.write("\n")
         else:
             print(task_table_row(row))
-    return EXIT_UNCOUNTED if tasks.role_mismatches else 0
+    if tasks.role_mismatches:
+        return EXIT_UNCOUNTED
+    return EXIT_FORGED_GRANT if invalid or tasks.undecodable_grants else 0
 
 
 def _report_grants(args: argparse.Namespace) -> int:
