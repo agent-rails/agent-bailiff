@@ -41,13 +41,16 @@ for top in sorted(os.listdir("/v")):
 json.dump(hits, sys.stdout)
 """
 DOCKET_SCRIPT = """
-import base64, json, sys
+import base64, itertools, json, sys
+exported = int(sys.argv[1])
 rows = []
 with open("/v/docket-data/docket.log", "rb") as docket:
-    for line, raw in enumerate(docket, 1):
+    for line, raw in enumerate(itertools.islice(docket, exported), 1):
         encoded = raw.split(b".", 1)[0]
         body = json.loads(base64.urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4)))
         rows.append([line, body["typ"], body.get("entry_id")])
+if len(rows) != exported:
+    sys.exit(f"docket.log holds {len(rows)} lines but {exported} are exported")
 json.dump(rows, sys.stdout)
 """
 AGENT_SCAN = """
@@ -108,8 +111,8 @@ def jaeger_spans(stack):
     exported = wait_for_export(stack)["exported"]
     wanted = {
         span_id_for(entry_id): line
-        for line, typ, entry_id in stack.probe(DOCKET_SCRIPT)
-        if line <= exported and typ == ENTRY_TYP
+        for line, typ, entry_id in stack.probe(DOCKET_SCRIPT, arguments=[str(exported)])
+        if typ == ENTRY_TYP
     }
     deadline = time.monotonic() + JAEGER_TIMEOUT_SECONDS
     while True:
