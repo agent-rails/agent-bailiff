@@ -638,7 +638,7 @@ def stored_credential(upstream: Upstream) -> str | None:
     settings = load_custodian(DIRS["custodian"] / "config.json")
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
-        return store.get(TENANT, upstream.credential_id, upstream.target).decode()
+        return store.get(TENANT, upstream.credential_id, upstream.target).secret.decode()
     except CredentialUnavailable:
         return None
     finally:

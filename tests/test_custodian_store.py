@@ -1,10 +1,15 @@
+import base64
+import logging
 import os
 import sqlite3
 import stat
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_bailiff.custodian import (
     BackendError,
@@ -13,9 +18,25 @@ from agent_bailiff.custodian import (
     LocalBackend,
     OwnedFileError,
     credential_context,
+    files,
 )
+from agent_bailiff.custodian.files import create_owned
+from agent_bailiff.custodian.store import StoredCredential, UnredactableCredential
 
 SECRET = b"Bearer deploy-secret-value"
+SHORT = b"Bearer short-key"
+BINDING = ("tenant-a", "deploy-api", "deploy.example")
+OLD_SCHEMA = """
+CREATE TABLE credentials (
+    tenant TEXT NOT NULL,
+    credential_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    wrapped_dek BLOB NOT NULL,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    PRIMARY KEY (tenant, credential_id, target)
+);
+"""
 
 
 @pytest.fixture
@@ -106,22 +127,22 @@ def test_unwrap_under_another_context_fails(backend):
 
 def test_stored_credential_round_trips_and_is_not_stored_in_plaintext(state, store):
     store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
-    assert store.get("tenant-a", "deploy-api", "deploy.example") == SECRET
+    assert store.get("tenant-a", "deploy-api", "deploy.example") == StoredCredential(SECRET, None)
     assert SECRET not in (state / "credentials.db").read_bytes()
     assert stat.S_IMODE(os.lstat(state / "credentials.db").st_mode) == 0o600
 
 
 def test_put_replaces_a_credential(store):
     store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
-    store.put("tenant-a", "deploy-api", "deploy.example", b"rotated")
-    assert store.get("tenant-a", "deploy-api", "deploy.example") == b"rotated"
+    store.put("tenant-a", "deploy-api", "deploy.example", b"Bearer rotated-secret")
+    assert store.get("tenant-a", "deploy-api", "deploy.example").secret == b"Bearer rotated-secret"
 
 
 def test_reopened_store_decrypts_with_the_loaded_kek(state, store):
     store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
     reopened = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
     try:
-        assert reopened.get("tenant-a", "deploy-api", "deploy.example") == SECRET
+        assert reopened.get("tenant-a", "deploy-api", "deploy.example").secret == SECRET
     finally:
         reopened.close()
 
@@ -152,7 +173,9 @@ def test_missing_credential_is_unavailable(store):
 def test_row_moved_to_another_binding_fails_its_aad(state, store, moved):
     store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
     connection = sqlite3.connect(state / "credentials.db")
-    connection.execute("INSERT INTO credentials SELECT ?, ?, ?, wrapped_dek, nonce, ciphertext FROM credentials", moved)
+    connection.execute(
+        "INSERT INTO credentials SELECT ?, ?, ?, wrapped_dek, nonce, ciphertext, exception FROM credentials", moved
+    )
     connection.commit()
     connection.close()
     with pytest.raises(CredentialUnavailable, match="does not decrypt"):
@@ -212,3 +235,162 @@ def test_a_short_write_under_a_file_size_limit_leaves_no_kek(state):
     assert done.returncode == 3, done.stdout + done.stderr
     assert "cannot write the kek" in done.stdout
     assert not (state / "kek").exists()
+
+
+def basic(pair):
+    return b"Basic " + base64.b64encode(pair)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        b"short-key",
+        SHORT,
+        basic(b"deploy-user:shortpw"),
+        basic(b"deploy-user:\xff\xfe-not-utf-8-password"),
+        basic(b"deploy-user-without-a-separator"),
+        b"Basic not-base64-at-all!",
+    ],
+)
+def test_put_refuses_a_credential_echo_redaction_cannot_cover(store, secret):
+    with pytest.raises(ValueError, match="cannot be redacted from results"):
+        store.put(*BINDING, secret)
+    with pytest.raises(CredentialUnavailable, match="no credential"):
+        store.get(*BINDING)
+
+
+@pytest.mark.parametrize(
+    "secret", [b"Bearer caf\xc3\xa9-secret-value", b" Bearer deploy-secret", b"Bearer deploy\nsecret"]
+)
+def test_put_refuses_a_secret_that_is_not_a_header_value(store, secret):
+    with pytest.raises(ValueError, match="printable ASCII"):
+        store.put(*BINDING, secret)
+    with pytest.raises(CredentialUnavailable, match="no credential"):
+        store.get(*BINDING)
+
+
+def test_put_names_the_problem_without_the_credential(store):
+    with pytest.raises(UnredactableCredential) as raised:
+        store.put(*BINDING, basic(b"deploy-user:\xff\xfe-not-utf-8-password"))
+    assert str(raised.value) == (
+        "credential cannot be redacted from results: its basic token is not base64 of a UTF-8 user:password"
+    )
+    with pytest.raises(UnredactableCredential) as raised:
+        store.put(*BINDING, SHORT)
+    assert "shorter than 12 characters" in str(raised.value) and "short-key" not in str(raised.value)
+
+
+def test_an_accepted_exception_is_stored_with_the_credential_and_logged(state, store, caplog):
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
+        store.put(*BINDING, SHORT, accept_unredactable=True)
+    assert store.get(*BINDING) == StoredCredential(SHORT, "unredactable")
+    assert "'deploy-api'" in caplog.text and "unredactable exception" in caplog.text
+    assert "short-key" not in caplog.text
+    connection = sqlite3.connect(state / "credentials.db")
+    try:
+        assert connection.execute("SELECT exception FROM credentials").fetchall() == [("unredactable",)]
+    finally:
+        connection.close()
+
+
+def test_an_exception_for_a_credential_that_can_be_redacted_is_refused(store):
+    with pytest.raises(ValueError, match="can be redacted"):
+        store.put(*BINDING, SECRET, accept_unredactable=True)
+    with pytest.raises(CredentialUnavailable, match="no credential"):
+        store.get(*BINDING)
+
+
+def test_storing_again_without_the_exception_clears_it(store):
+    store.put(*BINDING, SHORT, accept_unredactable=True)
+    store.put(*BINDING, SECRET)
+    assert store.get(*BINDING) == StoredCredential(SECRET, None)
+
+
+@pytest.mark.parametrize(
+    ("secret", "accept", "exception"),
+    [(SECRET, False, "unredactable"), (SHORT, True, None), (SHORT, True, "another")],
+)
+def test_an_exception_changed_in_the_file_does_not_decrypt(state, store, secret, accept, exception):
+    store.put(*BINDING, secret, accept_unredactable=accept)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = ?", (exception,))
+    connection.commit()
+    connection.close()
+    with pytest.raises(CredentialUnavailable, match="does not decrypt"):
+        store.get(*BINDING)
+
+
+def legacy_store(path, backend, secret):
+    create_owned(path, "credential store", b"")
+    connection = sqlite3.connect(path)
+    connection.executescript(OLD_SCHEMA)
+    context = credential_context(*BINDING)
+    dek = os.urandom(32)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
+    connection.execute(
+        "INSERT INTO credentials VALUES (?, ?, ?, ?, ?, ?)", (*BINDING, backend.wrap(dek, context), nonce, ciphertext)
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_opening_an_older_store_adds_the_exception_column_and_keeps_its_credentials(state, backend):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SHORT)
+    store = CredentialStore.open(path, backend)
+    try:
+        assert store.get(*BINDING) == StoredCredential(SHORT, None)
+    finally:
+        store.close()
+    connection = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(credentials)")]
+    finally:
+        connection.close()
+    assert columns[-1] == "exception"
+    CredentialStore.open(path, backend).close()
+
+
+def test_opening_a_database_without_the_credentials_table_is_refused(state, backend):
+    create_owned(state / "empty.db", "credential store", b"")
+    with pytest.raises(OwnedFileError, match="not a usable database"):
+        CredentialStore.open(state / "empty.db", backend)
+
+
+def test_opening_a_migrated_store_does_not_wait_for_a_writer(state, store, backend, monkeypatch):
+    store.put(*BINDING, SECRET)
+    monkeypatch.setattr(files, "BUSY_TIMEOUT_SECONDS", 0)
+    writer = sqlite3.connect(state / "credentials.db", isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        reopened = CredentialStore.open(state / "credentials.db", backend)
+        reopened.close()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_concurrent_opens_of_an_older_store_add_the_column_once(state, backend):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SECRET)
+    barrier = threading.Barrier(8)
+
+    def open_store():
+        barrier.wait()
+        CredentialStore.open(path, backend).close()
+
+    with ThreadPoolExecutor(8) as pool:
+        for future in [pool.submit(open_store) for _ in range(8)]:
+            future.result()
+    connection = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(credentials)")]
+    finally:
+        connection.close()
+    assert columns.count("exception") == 1
+    store = CredentialStore.open(path, backend)
+    try:
+        assert store.get(*BINDING) == StoredCredential(SECRET, None)
+    finally:
+        store.close()

@@ -24,6 +24,7 @@ from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
+from agent_bailiff.custodian.store import UnredactableCredential
 from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, DocketArchiver
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.grants import INVALID_GRANT, GrantReport, grant_header, grant_json_row, grant_table_row
@@ -331,6 +332,11 @@ def _parser() -> argparse.ArgumentParser:
             put.add_argument("--tenant", required=True)
             put.add_argument("--credential-id", required=True)
             put.add_argument("--target", required=True)
+            put.add_argument(
+                "--accept-unredactable",
+                action="store_true",
+                help="store a credential echo redaction cannot cover; the exception is recorded with it",
+            )
             put.set_defaults(handler=_put_credential)
     control = commands.add_parser("control", help="revoke or suspend from a docket record; run as decide's uid")
     actions = control.add_subparsers(dest="action", required=True)
@@ -1035,7 +1041,16 @@ def _task_issue(args: argparse.Namespace) -> int:
 def _put_credential(args: argparse.Namespace) -> int:
     try:
         secret = _read_secret()
-        run.put_credential(load_custodian(args.config), args.tenant, args.credential_id, args.target, secret)
+        run.put_credential(
+            load_custodian(args.config),
+            args.tenant,
+            args.credential_id,
+            args.target,
+            secret,
+            accept_unredactable=args.accept_unredactable,
+        )
+    except UnredactableCredential as exc:
+        return _refused("put-credential", f"{exc}; store a longer credential or pass --accept-unredactable")
     except STARTUP_ERRORS as exc:
         return _refused("put-credential", exc)
     print("stored")
@@ -1115,7 +1130,7 @@ def _stop_on_signals() -> threading.Event:
     return stop
 
 
-def _refused(command: str, exc: BaseException) -> int:
+def _refused(command: str, exc: BaseException | str) -> int:
     print(f"{PROG} {command} refused: {exc}", file=sys.stderr)
     return EXIT_REFUSED
 

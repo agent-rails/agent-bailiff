@@ -210,10 +210,18 @@ def start_custodian(settings: CustodianSettings) -> RunningCustodian:
     return RunningCustodian(custodian, server, tuple(opened))
 
 
-def put_credential(settings: CustodianSettings, tenant: str, credential_id: str, target: str, secret: bytes) -> None:
+def put_credential(
+    settings: CustodianSettings,
+    tenant: str,
+    credential_id: str,
+    target: str,
+    secret: bytes,
+    *,
+    accept_unredactable: bool = False,
+) -> None:
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
-        store.put(tenant, credential_id, target, secret)
+        store.put(tenant, credential_id, target, secret, accept_unredactable=accept_unredactable)
     finally:
         store.close()
 

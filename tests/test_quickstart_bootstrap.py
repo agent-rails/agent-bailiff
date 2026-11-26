@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from agent_warrant.identity import encode_public_key
@@ -13,6 +14,8 @@ from cryptography.x509.oid import NameOID
 from test_quickstart_stack import b
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
+from agent_bailiff.custodian.backend import LocalBackend
+from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.keys import load_signing_key
 
@@ -449,3 +452,17 @@ def test_init_gateway_writes_keeps_and_removes_the_ca(tmp_path, monkeypatch):
     assert b.init_gateway() == "updated"
     assert not (tmp_path / "ca.pem").exists()
     assert "policies" not in json.loads((tmp_path / "gateway.json").read_text())["mcp"]["targets"][0]
+
+
+def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypatch):
+    state = tmp_path / "custodian"
+    state.mkdir(mode=0o700)
+    os.chmod(state, 0o700)
+    backend = LocalBackend.generate(state / "kek")
+    store = CredentialStore.create(state / "credentials.db", backend)
+    store.put(b.TENANT, "gitea", "https://gitea.example", b"token " + b"a" * 40)
+    store.close()
+    settings = SimpleNamespace(credentials=state / "credentials.db", kek=state / "kek")
+    monkeypatch.setattr(b, "load_custodian", lambda path: settings)
+    upstream = SimpleNamespace(credential_id="gitea", target="https://gitea.example")
+    assert b.stored_credential(upstream) == "token " + "a" * 40

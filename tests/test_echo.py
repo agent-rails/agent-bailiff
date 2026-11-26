@@ -16,7 +16,7 @@ from agent_bailiff.custodian.echo import (
     UnreadableResult,
     needles,
     redact,
-    too_short_to_redact,
+    redaction_problem,
 )
 
 TOKEN = "s3cr3t-T0ken/with+chars=="
@@ -117,7 +117,19 @@ def test_short_needles_are_dropped():
     ["tok-1234", "Bearer short-key", "Basic dXNlcjpzaG9ydHB3"],
 )
 def test_a_credential_with_any_form_under_the_needle_length_is_too_short_to_redact(header):
-    assert too_short_to_redact(header) is True
+    assert redaction_problem(header) == "a form of it is shorter than 12 characters"
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"Basic {base64.b64encode(b'user-long-name:\xff\xfe-password-long').decode()}",
+        f"Basic {base64.b64encode(b'user-long-name-without-a-separator').decode()}",
+        "Basic not-base64-at-all!",
+    ],
+)
+def test_a_basic_token_that_is_not_a_utf8_user_password_cannot_be_redacted(header):
+    assert redaction_problem(header) == "its basic token is not base64 of a UTF-8 user:password"
 
 
 @pytest.mark.parametrize(
@@ -125,7 +137,7 @@ def test_a_credential_with_any_form_under_the_needle_length_is_too_short_to_reda
     [HEADER, f"Basic {base64.b64encode(b'user-long-name:password-long').decode()}", "Bearer long-enough-token"],
 )
 def test_a_credential_with_every_form_at_the_needle_length_is_redactable(header):
-    assert too_short_to_redact(header) is False
+    assert redaction_problem(header) is None
 
 
 def test_no_hit_returns_none():
@@ -245,3 +257,10 @@ def test_a_mutated_result_over_the_cap_is_oversize():
     assert len(raw) <= MAX_RESULT_BYTES
     with pytest.raises(Oversize):
         redact(raw, needles(HEADER))
+
+
+@pytest.mark.parametrize("pair", [b"user-long-name:", b":password-long"])
+def test_a_basic_token_with_an_empty_user_or_password_can_be_redacted(pair):
+    header = f"Basic {base64.b64encode(pair).decode()}"
+    assert redaction_problem(header) is None
+    assert pair.decode() in needles(header)
