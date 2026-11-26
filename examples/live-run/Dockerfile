@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 node:22.23.5-slim@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc AS claude
+FROM --platform=linux/amd64 node:26.13.0-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS claude
 
 WORKDIR /opt/claude
 COPY examples/live-run/package.json examples/live-run/package-lock.json ./
