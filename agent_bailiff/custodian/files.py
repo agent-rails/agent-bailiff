@@ -64,22 +64,29 @@ def create_owned(path: Path, label: str, content: bytes) -> None:
             raise OSError(errno.EIO, f"wrote {written} of {len(content)} bytes")
         os.fsync(fd)
     except BaseException as exc:
-        os.close(fd)
-        _remove_partial(path, label)
-        if isinstance(exc, OSError):
-            raise OwnedFileError(f"cannot write the {label}: {exc.strerror}") from None
-        raise
+        problems = _discard_partial(fd, path, label)
+        if not isinstance(exc, OSError):
+            for problem in problems:
+                exc.add_note(problem)
+            raise
+        raise OwnedFileError("; ".join([f"cannot write the {label}: {exc.strerror}", *problems])) from None
     os.close(fd)
     _sync_parent(path)
 
 
-def _remove_partial(path: Path, label: str) -> None:
+def _discard_partial(fd: int, path: Path, label: str) -> list[str]:
+    problems = []
+    try:
+        os.close(fd)
+    except OSError as exc:
+        problems.append(f"cannot close the partly written {label}: {exc.strerror}")
     try:
         os.unlink(path)
     except FileNotFoundError:
-        return
+        pass
     except OSError as exc:
-        raise OwnedFileError(f"cannot remove the partly written {label} at {path}: {exc.strerror}") from None
+        problems.append(f"cannot remove the partly written {label} at {path}: {exc.strerror}")
+    return problems
 
 
 def replace_at(dir_fd: int, name: str, label: str, content: bytes, mode: int) -> None:
