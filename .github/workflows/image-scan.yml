@@ -8,13 +8,56 @@ on:
 permissions:
   contents: read
 
+env:
+  TRIVY_VERSION: 0.76.2
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+
 jobs:
+  db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - id: key
+        run: echo "key=trivy-db-${TRIVY_VERSION}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy-cache/db
+          key: ${{ steps.key.outputs.key }}
+      - name: Install trivy
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  %s\n' "$TRIVY_SHA256" "$archive" > "$RUNNER_TEMP/trivy.sha256"
+          sha256sum --check --strict "$RUNNER_TEMP/trivy.sha256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+      - name: Download the vulnerability database
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: '"$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
+
   scan:
+    needs: db
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: quickstart
+            build: --file examples/quickstart/Dockerfile --target quickstart
+          - image: quickstart-trace
+            build: --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt
+          - image: webhook
+            build: --file deploy/kubernetes/Dockerfile.webhook
+          - image: minter
+            build: --file deploy/gke/Dockerfile.minter
+          - image: live-run
+            build: --file examples/live-run/Dockerfile
     env:
-      TRIVY_VERSION: 0.76.2
-      TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+      IMAGE: agent-bailiff-${{ matrix.image }}:scan
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,17 +69,25 @@ jobs:
           printf '%s  %s\n' "$TRIVY_SHA256" "$archive" > "$RUNNER_TEMP/trivy.sha256"
           sha256sum --check --strict "$RUNNER_TEMP/trivy.sha256"
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
-      - name: Build images
-        run: |
-          docker build --file examples/quickstart/Dockerfile --target quickstart --tag agent-bailiff-quickstart:scan .
-          docker build --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt --tag agent-bailiff-quickstart-trace:scan .
-          docker build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:scan .
-          docker build --file deploy/gke/Dockerfile.minter --tag agent-bailiff-minter:scan .
-          docker build --file examples/live-run/Dockerfile --tag agent-bailiff-live-run:scan .
-      - name: Scan images
-        run: |
-          status=0
-          for image in agent-bailiff-quickstart:scan agent-bailiff-quickstart-trace:scan agent-bailiff-webhook:scan agent-bailiff-minter:scan agent-bailiff-live-run:scan; do
-            "$RUNNER_TEMP/trivy" image --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --exit-code 1 --no-progress "$image" || status=1
-          done
-          exit "$status"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy-cache/db
+          key: ${{ needs.db.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Build image
+        run: docker build ${{ matrix.build }} --tag "$IMAGE" .
+      - name: Scan image
+        run: >-
+          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update
+          --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
+          --exit-code 1 --no-progress "$IMAGE"
+
+  image-scan:
+    if: always()
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "$RESULT" = success
+        env:
+          RESULT: ${{ needs.scan.result }}

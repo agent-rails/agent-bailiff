@@ -129,8 +129,25 @@ def test_every_image_scan_exception_is_scoped_explained_and_expiring():
         assert now < expires <= now + timedelta(days=MAX_IGNORE_DAYS), entry
 
 
-def test_the_image_scan_applies_the_exceptions():
-    assert "--ignorefile .trivyignore.yaml" in IMAGE_SCAN.read_text()
+def test_the_image_scan_applies_and_reports_the_exceptions():
+    text = IMAGE_SCAN.read_text()
+    assert "--ignorefile .trivyignore.yaml --show-suppressed" in text
+
+
+def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
+    text = IMAGE_SCAN.read_text()
+    assert set(re.findall(r"^            build: --file (\S+)", text, re.MULTILINE)) == set(tracked_image_files())
+    assert "    strategy:\n      fail-fast: false\n      matrix:\n" in text
+    assert "    if: always()\n    needs: scan\n" in text
+    assert 'test "$RESULT" = success' in text
+
+
+def test_the_image_scan_downloads_the_database_once_per_day():
+    text = IMAGE_SCAN.read_text()
+    assert "key=trivy-db-${TRIVY_VERSION}-$(date -u +%F)" in text
+    assert "--download-db-only" in text
+    assert "key: ${{ needs.db.outputs.key }}\n          fail-on-cache-miss: true\n" in text
+    assert "--skip-db-update" in text
 
 
 def test_every_python_stage_installs_the_fixed_libzstd():
