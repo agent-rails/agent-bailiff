@@ -1,0 +1,1510 @@
+{
+  "recorded_at": "2026-11-26T11:22:29+00:00",
+  "host": {
+    "machine": "arm64",
+    "system": "Darwin",
+    "release": "25.6.0",
+    "cpu": "Apple M1 Max",
+    "cpus": 10,
+    "python": "3.13.15",
+    "grpcio": "1.85.3",
+    "protobuf": "7.36.2",
+    "load_average_at_start": [
+      7.34,
+      7.0,
+      7.06
+    ]
+  },
+  "measured_at": "a gRPC client in a separate process calling CheckResponse on the redactor socket through the relay, without agentgateway; RedactorProcessor over a real Custodian, in-flight map and docket sink thread",
+  "workers": 1,
+  "max_concurrent_rpcs": 16,
+  "deadline_s": 10,
+  "calls_per_client": {
+    "1": 32,
+    "4": 8,
+    "16": 2,
+    "32": 2,
+    "64": 2
+  },
+  "probe": "wake lag past a 10 ms sleep by another thread in the redactor process, a proxy for how long the scan holds the GIL from the request processor that shares the process",
+  "idle_probe_lag_p50_ms": 1.97,
+  "idle_probe_lag_p99_ms": 3.89,
+  "settings": [
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.03,
+      "throughput_per_s": 1035.0,
+      "p50_ms": 0.86,
+      "p99_ms": 3.11,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.53,
+      "probe_lag_p99_ms": 2.71
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.02,
+      "throughput_per_s": 1348.5,
+      "p50_ms": 2.82,
+      "p99_ms": 3.52,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.57,
+      "probe_lag_p99_ms": 2.57
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.03,
+      "throughput_per_s": 1267.4,
+      "p50_ms": 9.83,
+      "p99_ms": 14.29,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.71,
+      "probe_lag_p99_ms": 2.89
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 59,
+        "RESOURCE_EXHAUSTED": 5
+      },
+      "wall_s": 0.04,
+      "throughput_per_s": 1319.0,
+      "p50_ms": 18.36,
+      "p99_ms": 26.48,
+      "shed_rate": 0.078,
+      "probe_lag_p50_ms": 2.0,
+      "probe_lag_p99_ms": 2.66
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 76,
+        "RESOURCE_EXHAUSTED": 52
+      },
+      "wall_s": 0.07,
+      "throughput_per_s": 1057.6,
+      "p50_ms": 31.17,
+      "p99_ms": 38.24,
+      "shed_rate": 0.406,
+      "probe_lag_p50_ms": 2.12,
+      "probe_lag_p99_ms": 2.52
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.09,
+      "throughput_per_s": 373.0,
+      "p50_ms": 2.52,
+      "p99_ms": 3.85,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.51,
+      "probe_lag_p99_ms": 2.6
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.07,
+      "throughput_per_s": 450.7,
+      "p50_ms": 8.68,
+      "p99_ms": 10.1,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.56,
+      "probe_lag_p99_ms": 3.06
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.07,
+      "throughput_per_s": 434.1,
+      "p50_ms": 33.48,
+      "p99_ms": 37.56,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 1.61,
+      "probe_lag_p99_ms": 2.57
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 39,
+        "RESOURCE_EXHAUSTED": 25
+      },
+      "wall_s": 0.09,
+      "throughput_per_s": 415.4,
+      "p50_ms": 34.47,
+      "p99_ms": 57.96,
+      "shed_rate": 0.391,
+      "probe_lag_p50_ms": 1.54,
+      "probe_lag_p99_ms": 3.21
+    },
+    {
+      "shape": "text",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 45,
+        "RESOURCE_EXHAUSTED": 83
+      },
+      "wall_s": 0.14,
+      "throughput_per_s": 318.2,
+      "p50_ms": 59.82,
+      "p99_ms": 93.72,
+      "shed_rate": 0.648,
+      "probe_lag_p50_ms": 1.14,
+      "probe_lag_p99_ms": 2.91
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.25,
+      "throughput_per_s": 130.4,
+      "p50_ms": 7.57,
+      "p99_ms": 8.48,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 3.15,
+      "probe_lag_p99_ms": 5.55
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.26,
+      "throughput_per_s": 122.2,
+      "p50_ms": 31.57,
+      "p99_ms": 42.38,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.8,
+      "probe_lag_p99_ms": 5.91
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.26,
+      "throughput_per_s": 121.6,
+      "p50_ms": 111.96,
+      "p99_ms": 142.87,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.52,
+      "probe_lag_p99_ms": 5.77
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 31
+      },
+      "wall_s": 0.32,
+      "throughput_per_s": 103.2,
+      "p50_ms": 163.93,
+      "p99_ms": 225.78,
+      "shed_rate": 0.484,
+      "probe_lag_p50_ms": 2.51,
+      "probe_lag_p99_ms": 6.0
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 95
+      },
+      "wall_s": 0.41,
+      "throughput_per_s": 81.4,
+      "p50_ms": 152.07,
+      "p99_ms": 270.91,
+      "shed_rate": 0.742,
+      "probe_lag_p50_ms": 2.52,
+      "probe_lag_p99_ms": 8.81
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.47,
+      "throughput_per_s": 67.4,
+      "p50_ms": 14.44,
+      "p99_ms": 16.45,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 4.71,
+      "probe_lag_p99_ms": 6.27
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.42,
+      "throughput_per_s": 76.9,
+      "p50_ms": 50.85,
+      "p99_ms": 72.71,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.6,
+      "probe_lag_p99_ms": 6.74
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.43,
+      "throughput_per_s": 73.7,
+      "p50_ms": 204.64,
+      "p99_ms": 384.68,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.83,
+      "probe_lag_p99_ms": 7.89
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 31
+      },
+      "wall_s": 0.55,
+      "throughput_per_s": 59.8,
+      "p50_ms": 202.97,
+      "p99_ms": 478.64,
+      "shed_rate": 0.484,
+      "probe_lag_p50_ms": 2.52,
+      "probe_lag_p99_ms": 7.63
+    },
+    {
+      "shape": "text",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 96
+      },
+      "wall_s": 0.6,
+      "throughput_per_s": 53.4,
+      "p50_ms": 243.53,
+      "p99_ms": 542.56,
+      "shed_rate": 0.75,
+      "probe_lag_p50_ms": 2.33,
+      "probe_lag_p99_ms": 7.44
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.52,
+      "throughput_per_s": 61.2,
+      "p50_ms": 16.06,
+      "p99_ms": 17.77,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 6.05,
+      "probe_lag_p99_ms": 7.23
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.51,
+      "throughput_per_s": 62.3,
+      "p50_ms": 63.8,
+      "p99_ms": 76.07,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.61,
+      "probe_lag_p99_ms": 9.31
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.51,
+      "throughput_per_s": 62.8,
+      "p50_ms": 212.75,
+      "p99_ms": 300.02,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.54,
+      "probe_lag_p99_ms": 7.96
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 32
+      },
+      "wall_s": 0.62,
+      "throughput_per_s": 51.3,
+      "p50_ms": 289.35,
+      "p99_ms": 486.69,
+      "shed_rate": 0.5,
+      "probe_lag_p50_ms": 2.54,
+      "probe_lag_p99_ms": 8.43
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 96
+      },
+      "wall_s": 0.78,
+      "throughput_per_s": 41.2,
+      "p50_ms": 322.83,
+      "p99_ms": 525.48,
+      "shed_rate": 0.75,
+      "probe_lag_p50_ms": 2.52,
+      "probe_lag_p99_ms": 7.87
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.98,
+      "throughput_per_s": 32.6,
+      "p50_ms": 29.77,
+      "p99_ms": 33.12,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.55,
+      "probe_lag_p99_ms": 11.54
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.87,
+      "throughput_per_s": 36.8,
+      "p50_ms": 103.55,
+      "p99_ms": 188.15,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.57,
+      "probe_lag_p99_ms": 12.59
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.87,
+      "throughput_per_s": 36.8,
+      "p50_ms": 403.14,
+      "p99_ms": 716.25,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 2.56,
+      "probe_lag_p99_ms": 11.64
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 34,
+        "RESOURCE_EXHAUSTED": 30
+      },
+      "wall_s": 1.01,
+      "throughput_per_s": 33.7,
+      "p50_ms": 460.85,
+      "p99_ms": 896.46,
+      "shed_rate": 0.469,
+      "probe_lag_p50_ms": 2.54,
+      "probe_lag_p99_ms": 11.66
+    },
+    {
+      "shape": "text",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 95
+      },
+      "wall_s": 1.34,
+      "throughput_per_s": 24.7,
+      "p50_ms": 548.33,
+      "p99_ms": 1093.18,
+      "shed_rate": 0.742,
+      "probe_lag_p50_ms": 3.75,
+      "probe_lag_p99_ms": 13.9
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.04,
+      "throughput_per_s": 30.8,
+      "p50_ms": 32.15,
+      "p99_ms": 37.84,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.13,
+      "probe_lag_p99_ms": 15.64
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.16,
+      "throughput_per_s": 27.5,
+      "p50_ms": 126.71,
+      "p99_ms": 259.04,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.02,
+      "probe_lag_p99_ms": 16.37
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.0,
+      "throughput_per_s": 31.9,
+      "p50_ms": 446.82,
+      "p99_ms": 500.69,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.04,
+      "probe_lag_p99_ms": 12.19
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 32
+      },
+      "wall_s": 1.22,
+      "throughput_per_s": 26.1,
+      "p50_ms": 512.1,
+      "p99_ms": 665.17,
+      "shed_rate": 0.5,
+      "probe_lag_p50_ms": 4.83,
+      "probe_lag_p99_ms": 12.15
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 38,
+        "RESOURCE_EXHAUSTED": 90
+      },
+      "wall_s": 1.64,
+      "throughput_per_s": 23.1,
+      "p50_ms": 865.32,
+      "p99_ms": 996.19,
+      "shed_rate": 0.703,
+      "probe_lag_p50_ms": 4.22,
+      "probe_lag_p99_ms": 8.75
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.91,
+      "throughput_per_s": 16.8,
+      "p50_ms": 57.75,
+      "p99_ms": 67.94,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.02,
+      "probe_lag_p99_ms": 20.36
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.7,
+      "throughput_per_s": 18.9,
+      "p50_ms": 207.48,
+      "p99_ms": 335.41,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.02,
+      "probe_lag_p99_ms": 26.05
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 1.74,
+      "throughput_per_s": 18.4,
+      "p50_ms": 815.14,
+      "p99_ms": 1514.16,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.03,
+      "probe_lag_p99_ms": 20.86
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 32
+      },
+      "wall_s": 1.82,
+      "throughput_per_s": 17.6,
+      "p50_ms": 637.31,
+      "p99_ms": 1279.7,
+      "shed_rate": 0.5,
+      "probe_lag_p50_ms": 5.03,
+      "probe_lag_p99_ms": 21.34
+    },
+    {
+      "shape": "text",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 95
+      },
+      "wall_s": 1.97,
+      "throughput_per_s": 16.7,
+      "p50_ms": 619.2,
+      "p99_ms": 1595.89,
+      "shed_rate": 0.742,
+      "probe_lag_p50_ms": 4.36,
+      "probe_lag_p99_ms": 18.53
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.18,
+      "throughput_per_s": 180.9,
+      "p50_ms": 5.47,
+      "p99_ms": 6.07,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 6.24,
+      "probe_lag_p99_ms": 6.87
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.17,
+      "throughput_per_s": 187.1,
+      "p50_ms": 20.98,
+      "p99_ms": 25.29,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.62,
+      "probe_lag_p99_ms": 6.64
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.17,
+      "throughput_per_s": 186.6,
+      "p50_ms": 77.81,
+      "p99_ms": 95.97,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.51,
+      "probe_lag_p99_ms": 8.03
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 50,
+        "RESOURCE_EXHAUSTED": 14
+      },
+      "wall_s": 0.27,
+      "throughput_per_s": 182.4,
+      "p50_ms": 140.87,
+      "p99_ms": 183.54,
+      "shed_rate": 0.219,
+      "probe_lag_p50_ms": 5.65,
+      "probe_lag_p99_ms": 10.2
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 66,
+        "RESOURCE_EXHAUSTED": 62
+      },
+      "wall_s": 0.38,
+      "throughput_per_s": 171.7,
+      "p50_ms": 183.89,
+      "p99_ms": 274.15,
+      "shed_rate": 0.484,
+      "probe_lag_p50_ms": 5.59,
+      "probe_lag_p99_ms": 8.69
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.25,
+      "throughput_per_s": 128.2,
+      "p50_ms": 7.67,
+      "p99_ms": 8.48,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.5,
+      "probe_lag_p99_ms": 6.33
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.24,
+      "throughput_per_s": 132.6,
+      "p50_ms": 29.45,
+      "p99_ms": 38.82,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 4.94,
+      "probe_lag_p99_ms": 5.38
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 0.24,
+      "throughput_per_s": 134.9,
+      "p50_ms": 115.38,
+      "p99_ms": 125.86,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.02,
+      "probe_lag_p99_ms": 6.4
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 35,
+        "RESOURCE_EXHAUSTED": 29
+      },
+      "wall_s": 0.27,
+      "throughput_per_s": 129.3,
+      "p50_ms": 116.97,
+      "p99_ms": 153.67,
+      "shed_rate": 0.453,
+      "probe_lag_p50_ms": 5.04,
+      "probe_lag_p99_ms": 7.13
+    },
+    {
+      "shape": "records",
+      "size": "64KiB",
+      "result_bytes": 65536,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 35,
+        "RESOURCE_EXHAUSTED": 93
+      },
+      "wall_s": 0.29,
+      "throughput_per_s": 120.7,
+      "p50_ms": 151.35,
+      "p99_ms": 206.32,
+      "shed_rate": 0.727,
+      "probe_lag_p50_ms": 4.94,
+      "probe_lag_p99_ms": 6.12
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 2.65,
+      "throughput_per_s": 12.1,
+      "p50_ms": 82.0,
+      "p99_ms": 94.58,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 10.62,
+      "probe_lag_p99_ms": 14.77
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 2.62,
+      "throughput_per_s": 12.2,
+      "p50_ms": 326.29,
+      "p99_ms": 446.89,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.13,
+      "probe_lag_p99_ms": 21.14
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 2.64,
+      "throughput_per_s": 12.1,
+      "p50_ms": 1274.68,
+      "p99_ms": 1767.21,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.1,
+      "probe_lag_p99_ms": 18.16
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 34,
+        "RESOURCE_EXHAUSTED": 30
+      },
+      "wall_s": 2.85,
+      "throughput_per_s": 11.9,
+      "p50_ms": 1440.18,
+      "p99_ms": 2203.14,
+      "shed_rate": 0.469,
+      "probe_lag_p50_ms": 5.16,
+      "probe_lag_p99_ms": 21.44
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 34,
+        "RESOURCE_EXHAUSTED": 94
+      },
+      "wall_s": 2.91,
+      "throughput_per_s": 11.7,
+      "p50_ms": 1319.36,
+      "p99_ms": 1613.75,
+      "shed_rate": 0.734,
+      "probe_lag_p50_ms": 5.08,
+      "probe_lag_p99_ms": 12.72
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 3.05,
+      "throughput_per_s": 10.5,
+      "p50_ms": 93.97,
+      "p99_ms": 101.97,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 8.74,
+      "probe_lag_p99_ms": 18.58
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 2.95,
+      "throughput_per_s": 10.8,
+      "p50_ms": 365.98,
+      "p99_ms": 523.36,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 6.91,
+      "probe_lag_p99_ms": 34.29
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 2.99,
+      "throughput_per_s": 10.7,
+      "p50_ms": 1300.24,
+      "p99_ms": 2803.01,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.37,
+      "probe_lag_p99_ms": 31.96
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 34,
+        "RESOURCE_EXHAUSTED": 30
+      },
+      "wall_s": 3.25,
+      "throughput_per_s": 10.5,
+      "p50_ms": 1281.43,
+      "p99_ms": 2979.47,
+      "shed_rate": 0.469,
+      "probe_lag_p50_ms": 5.2,
+      "probe_lag_p99_ms": 27.07
+    },
+    {
+      "shape": "records",
+      "size": "1MiB",
+      "result_bytes": 1048576,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 35,
+        "RESOURCE_EXHAUSTED": 93
+      },
+      "wall_s": 3.39,
+      "throughput_per_s": 10.3,
+      "p50_ms": 913.12,
+      "p99_ms": 3253.56,
+      "shed_rate": 0.727,
+      "probe_lag_p50_ms": 5.15,
+      "probe_lag_p99_ms": 30.53
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 5.27,
+      "throughput_per_s": 6.1,
+      "p50_ms": 163.23,
+      "p99_ms": 173.6,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 10.52,
+      "probe_lag_p99_ms": 19.2
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 5.3,
+      "throughput_per_s": 6.0,
+      "p50_ms": 652.04,
+      "p99_ms": 822.09,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.09,
+      "probe_lag_p99_ms": 22.39
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 5.56,
+      "throughput_per_s": 5.8,
+      "p50_ms": 2507.66,
+      "p99_ms": 2932.49,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.97,
+      "probe_lag_p99_ms": 23.13
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 32
+      },
+      "wall_s": 5.33,
+      "throughput_per_s": 6.0,
+      "p50_ms": 2351.78,
+      "p99_ms": 3331.37,
+      "shed_rate": 0.5,
+      "probe_lag_p50_ms": 5.15,
+      "probe_lag_p99_ms": 18.58
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 95
+      },
+      "wall_s": 5.93,
+      "throughput_per_s": 5.6,
+      "p50_ms": 2748.12,
+      "p99_ms": 4391.3,
+      "shed_rate": 0.742,
+      "probe_lag_p50_ms": 5.08,
+      "probe_lag_p99_ms": 19.98
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 6.12,
+      "throughput_per_s": 5.2,
+      "p50_ms": 184.14,
+      "p99_ms": 239.12,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 10.95,
+      "probe_lag_p99_ms": 20.07
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 5.88,
+      "throughput_per_s": 5.4,
+      "p50_ms": 733.36,
+      "p99_ms": 1025.01,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.23,
+      "probe_lag_p99_ms": 31.43
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 5.91,
+      "throughput_per_s": 5.4,
+      "p50_ms": 2953.29,
+      "p99_ms": 5492.6,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.14,
+      "probe_lag_p99_ms": 32.71
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "OK": 32,
+        "RESOURCE_EXHAUSTED": 32
+      },
+      "wall_s": 6.12,
+      "throughput_per_s": 5.2,
+      "p50_ms": 2751.48,
+      "p99_ms": 5791.85,
+      "shed_rate": 0.5,
+      "probe_lag_p50_ms": 7.97,
+      "probe_lag_p99_ms": 32.34
+    },
+    {
+      "shape": "records",
+      "size": "2MiB",
+      "result_bytes": 2097152,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 37,
+        "RESOURCE_EXHAUSTED": 91
+      },
+      "wall_s": 7.55,
+      "throughput_per_s": 4.9,
+      "p50_ms": 2483.25,
+      "p99_ms": 7091.31,
+      "shed_rate": 0.711,
+      "probe_lag_p50_ms": 5.15,
+      "probe_lag_p99_ms": 32.03
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 10.61,
+      "throughput_per_s": 3.0,
+      "p50_ms": 328.55,
+      "p99_ms": 349.59,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 10.37,
+      "probe_lag_p99_ms": 19.32
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 10.72,
+      "throughput_per_s": 3.0,
+      "p50_ms": 1323.22,
+      "p99_ms": 1596.81,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.08,
+      "probe_lag_p99_ms": 19.67
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 10.68,
+      "throughput_per_s": 3.0,
+      "p50_ms": 4904.17,
+      "p99_ms": 6191.32,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.13,
+      "probe_lag_p99_ms": 21.97
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "DEADLINE_EXCEEDED": 2,
+        "OK": 37,
+        "RESOURCE_EXHAUSTED": 25
+      },
+      "wall_s": 13.03,
+      "throughput_per_s": 2.8,
+      "p50_ms": 6758.6,
+      "p99_ms": 9995.83,
+      "shed_rate": 0.391,
+      "probe_lag_p50_ms": 5.07,
+      "probe_lag_p99_ms": 17.77
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": false,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "OK": 33,
+        "RESOURCE_EXHAUSTED": 95
+      },
+      "wall_s": 11.44,
+      "throughput_per_s": 2.9,
+      "p50_ms": 5027.48,
+      "p99_ms": 8735.1,
+      "shed_rate": 0.742,
+      "probe_lag_p50_ms": 5.06,
+      "probe_lag_p99_ms": 18.56
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 1,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 12.19,
+      "throughput_per_s": 2.6,
+      "p50_ms": 376.13,
+      "p99_ms": 412.76,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 9.28,
+      "probe_lag_p99_ms": 26.1
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 4,
+      "calls": 32,
+      "outcomes": {
+        "OK": 32
+      },
+      "wall_s": 11.87,
+      "throughput_per_s": 2.7,
+      "p50_ms": 1514.46,
+      "p99_ms": 2212.05,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.16,
+      "probe_lag_p99_ms": 37.16
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 16,
+      "calls": 32,
+      "outcomes": {
+        "DEADLINE_EXCEEDED": 2,
+        "OK": 30
+      },
+      "wall_s": 12.06,
+      "throughput_per_s": 2.5,
+      "p50_ms": 5143.84,
+      "p99_ms": 9562.38,
+      "shed_rate": 0.0,
+      "probe_lag_p50_ms": 5.15,
+      "probe_lag_p99_ms": 38.27
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 32,
+      "calls": 64,
+      "outcomes": {
+        "DEADLINE_EXCEEDED": 19,
+        "OK": 20,
+        "RESOURCE_EXHAUSTED": 25
+      },
+      "wall_s": 14.56,
+      "throughput_per_s": 1.4,
+      "p50_ms": 4474.92,
+      "p99_ms": 9114.97,
+      "shed_rate": 0.391,
+      "probe_lag_p50_ms": 5.18,
+      "probe_lag_p99_ms": 36.3
+    },
+    {
+      "shape": "records",
+      "size": "4MiB",
+      "result_bytes": 4193280,
+      "match": true,
+      "concurrency": 64,
+      "calls": 128,
+      "outcomes": {
+        "DEADLINE_EXCEEDED": 7,
+        "OK": 27,
+        "RESOURCE_EXHAUSTED": 94
+      },
+      "wall_s": 13.76,
+      "throughput_per_s": 2.0,
+      "p50_ms": 3740.56,
+      "p99_ms": 9678.14,
+      "shed_rate": 0.734,
+      "probe_lag_p50_ms": 5.08,
+      "probe_lag_p99_ms": 28.37
+    }
+  ]
+}
