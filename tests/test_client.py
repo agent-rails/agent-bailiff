@@ -447,6 +447,21 @@ def test_a_json_rpc_error_is_outcome_unknown(client, stub):
     assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown("jsonrpc_error_-32603")
 
 
+@pytest.mark.parametrize(
+    ("status", "message", "detail"),
+    [
+        (200, "guardrail check failed", "jsonrpc_error_-32603"),
+        (500, "failed to send message", "http_500"),
+    ],
+)
+def test_a_gateway_shed_after_the_upstream_acted_is_sent_once(client, stub, sleeps, status, message, detail):
+    stub.responders["tools/call"] = [reply(status=status, error={"code": -32603, "message": message})]
+    assert client.call("deploy", "deploy_service", ARGS) == OutcomeUnknown(detail)
+    assert len(stub.calls()) == 1
+    assert sleeps == []
+    assert client.retries == 0
+
+
 @pytest.mark.parametrize("reason", sorted(RESPONSE_REASONS))
 def test_a_response_phase_refusal_is_outcome_unknown(client, stub, reason):
     stub.responders["tools/call"] = [reply(error={"code": -32001, "message": reason})]
