@@ -310,6 +310,35 @@ def test_logging_that_adds_filters_or_ships_access_log_fields_is_refused(logging
     assert any("config.logging" in problem for problem in problems_after(change))
 
 
+def test_tracing_and_metrics_without_fields_are_accepted():
+    def change(config):
+        config["config"]["tracing"] = {"otlpEndpoint": "http://127.0.0.1:4317"}
+        config["config"]["metrics"] = {"remove": ["gen_ai.request.model"]}
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "telemetry"),
+    [
+        ("tracing", {"otlpEndpoint": "http://127.0.0.1:4317", "fields": {"add": {"err": "mcp.error.message"}}}),
+        ("metrics", {"fields": {"add": {"err": "mcp.error.message"}}}),
+        ("tracing", None),
+        ("metrics", []),
+    ],
+)
+def test_tracing_or_metrics_that_add_fields_are_refused(key, telemetry):
+    def change(config):
+        config["config"][key] = telemetry
+
+    assert any(
+        problem.startswith(f"config.{key} must be an object without fields") for problem in problems_after(change)
+    )
+
+
+ACCESS_LOG_PROBLEMS = ("frontendPolicies must be exactly", "frontendPolicies.accessLog.remove is missing")
+
+
 def test_an_access_log_removing_more_fields_is_accepted():
     def change(config):
         config["frontendPolicies"]["accessLog"]["remove"].append("http.path")
@@ -346,7 +375,7 @@ def test_an_access_log_that_can_keep_upstream_error_text_is_refused(frontend):
         else:
             config["frontendPolicies"] = frontend
 
-    assert any("frontendPolicies" in problem for problem in problems_after(change))
+    assert any(problem.startswith(ACCESS_LOG_PROBLEMS) for problem in problems_after(change))
 
 
 def test_check_config_refuses_a_redactor_on_another_socket(owned_files):

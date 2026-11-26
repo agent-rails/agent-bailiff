@@ -508,7 +508,8 @@ def test_without_the_access_log_removal_the_gateway_logs_the_error_echo(stack, b
     del config["frontendPolicies"]
     assert any("frontendPolicies" in problem for problem in validate_gateway_config(config, stack["expected"]))
     log = gateway_log_after_error_echo(stack, binary, workdir / "unfiltered", config)
-    assert f'mcp.error.message="upstream rejected {DEPLOY_SECRET.decode()}"' in log, log
+    field = f'mcp.error.message="upstream rejected {DEPLOY_SECRET.decode()}"'
+    assert log.count(DEPLOY_SECRET.decode()) == 1 and field in log, log
 
 
 def test_a_json_access_log_also_drops_the_error_echo(stack, binary, workdir):

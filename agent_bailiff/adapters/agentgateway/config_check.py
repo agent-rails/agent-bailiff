@@ -97,6 +97,7 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
     if isinstance(config, dict):
         _only_keys(problems, "config", config, CONFIG_KEYS)
         _check_logging(problems, config.get("logging", {}))
+        _check_telemetry_fields(problems, config)
     else:
         problems.append("config must be an object")
     mcp = document.get("mcp")
@@ -119,6 +120,16 @@ def _check_logging(problems: list[str], logging: object) -> None:
             "config.logging may set only level and format; its other keys add, filter or ship access-log fields "
             "outside frontendPolicies.accessLog"
         )
+
+
+def _check_telemetry_fields(problems: list[str], config: Mapping[str, Any]) -> None:
+    for key in ("tracing", "metrics"):
+        telemetry = config.get(key, {})
+        if not isinstance(telemetry, dict) or "fields" in telemetry:
+            problems.append(
+                f"config.{key} must be an object without fields; added fields can carry upstream error text "
+                "that frontendPolicies.accessLog does not remove"
+            )
 
 
 def _check_access_log(problems: list[str], frontend: object) -> None:
