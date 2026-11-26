@@ -108,6 +108,7 @@ class Upstream(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), UpstreamHandler)
         self.requests = []
         self.call_result = {"content": [{"type": "text", "text": "deployed"}]}
+        self.call_reply = None
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -141,6 +142,17 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_response(202)
             self.end_headers()
             return
+        if body["method"] == "tools/call" and self.server.call_reply:
+            content_type, data = self.server.call_reply(body["id"], self.headers["authorization"])
+        else:
+            content_type, data = "application/json", self.result(body)
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def result(self, body):
         results = {
             "initialize": {
                 "protocolVersion": body.get("params", {}).get("protocolVersion", "2025-06-18"),
@@ -150,12 +162,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             "tools/list": {"tools": [{"name": "deploy_service", "inputSchema": {"type": "object"}}]},
             "tools/call": self.server.call_result,
         }
-        data = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": results.get(body["method"], {})}).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        return json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": results.get(body["method"], {})}).encode()
 
     def do_GET(self):
         self.send_response(405)
@@ -236,6 +243,10 @@ class Agent:
         return self.send(message, headers)
 
     def send(self, message, headers=None):
+        status, text = self.exchange(message, headers)
+        return status, _json_rpc(text)
+
+    def exchange(self, message, headers=None):
         request_headers = {
             "content-type": "application/json",
             "accept": "application/json, text/event-stream",
@@ -248,9 +259,9 @@ class Agent:
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 self.session = response.headers.get("mcp-session-id") or self.session
-                return response.status, _json_rpc(response.read().decode())
+                return response.status, response.read().decode()
         except urllib.error.HTTPError as error:
-            return error.code, _json_rpc(error.read().decode())
+            return error.code, error.read().decode()
 
 
 def _json_rpc(text):
@@ -384,6 +395,72 @@ def test_a_result_without_an_echo_reaches_the_agent_unchanged(stack):
     request = make_request()
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
     assert status == 200 and body["result"] == {"content": [{"type": "text", "text": "deployed"}]}, body
+
+
+def stream_events(text):
+    return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def event_stream(*messages):
+    return "text/event-stream", "".join(
+        f"event: message\ndata: {json.dumps(message)}\n\n" for message in messages
+    ).encode()
+
+
+def deployed(call_id):
+    return {"jsonrpc": "2.0", "id": call_id, "result": {"content": [{"type": "text", "text": "deployed"}]}}
+
+
+def error_echoing(call_id, credential):
+    error = {"code": -32000, "message": f"upstream rejected {credential}"}
+    return "application/json", json.dumps({"jsonrpc": "2.0", "id": call_id, "error": error}).encode()
+
+
+SIDE_MESSAGES = {
+    "notification": lambda credential: {
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {"level": "info", "data": f"using {credential}"},
+    },
+    "server_request": lambda credential: {
+        "jsonrpc": "2.0",
+        "id": "s-1",
+        "method": "elicitation/create",
+        "params": {"message": f"confirm {credential}", "requestedSchema": {"type": "object", "properties": {}}},
+    },
+}
+
+
+def alerts(workdir):
+    return [entry for entry in docket_entries(workdir) if entry.decision == "alert"]
+
+
+def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(stack, workdir):
+    stack["upstream"].call_reply = error_echoing
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
+    assert status == 200 and body["error"] == {"code": -32000, "message": echo}, body
+    assert f'mcp.error.message="{echo}"' in stack["gateway"].log()
+    assert alerts(workdir) == []
+
+
+@pytest.mark.parametrize("kind", sorted(SIDE_MESSAGES))
+def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, workdir, kind):
+    stack["upstream"].call_reply = lambda call_id, credential: event_stream(
+        SIDE_MESSAGES[kind](credential), deployed(call_id)
+    )
+    request = make_request()
+    call = {"method": "tools/call", "params": {"name": "deploy_service", "arguments": request.args}}
+    status, text = stack["agent"].exchange({"jsonrpc": "2.0", "id": 7, **call}, agent_headers(request))
+    side, result = stream_events(text)
+    expected = SIDE_MESSAGES[kind](DEPLOY_SECRET.decode())
+    assert status == 200 and DEPLOY_SECRET.decode() in json.dumps(side), text
+    assert side["method"] == expected["method"], text
+    assert {key: side["params"][key] for key in expected["params"]} == expected["params"], text
+    assert result == deployed(7)
+    assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
+    assert alerts(workdir) == []
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])
