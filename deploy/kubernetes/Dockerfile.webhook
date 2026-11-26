@@ -1,5 +1,8 @@
 FROM python:3.13.18-slim@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libzstd1=1.5.7+dfsg-1+deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
 COPY deploy/kubernetes/webhook-requirements.txt /tmp/requirements.txt
