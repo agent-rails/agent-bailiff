@@ -12,8 +12,8 @@ RUN apt-get update \
     && apt-get dist-clean
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DISABLE_AUTOUPDATER=1 AGENT_BAILIFF_CACHE=/opt/agent-bailiff \
     PATH=/opt/claude/node_modules/.bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ADD --checksum=sha256:33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e --chmod=0755 \
-    https://dl.k8s.io/release/v1.36.5/bin/linux/amd64/kubectl /usr/local/bin/kubectl
+ADD --checksum=sha256:9a1b55af2795b25dd288dbef62387db9b5530087ab918d28c6ad067f2e3cb07c --chmod=0755 \
+    https://dl.k8s.io/release/v1.37.3/bin/linux/amd64/kubectl /usr/local/bin/kubectl
 ADD --checksum=sha256:1b2fc01a2de29ca113bbb6258b5cae7b1eb3c724071c09d687a449132f2f42f8 --chmod=0755 \
     https://github.com/agentgateway/agentgateway/releases/download/v1.7.0/agentgateway-linux-amd64 \
     /opt/agent-bailiff/agentgateway/v1.7.0/agentgateway-linux-amd64

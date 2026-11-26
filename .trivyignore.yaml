@@ -1,0 +1,37 @@
+{
+  "vulnerabilities": [
+    {
+      "id": "CVE-2026-78661",
+      "paths": [
+        "usr/local/bin/kubectl"
+      ],
+      "purls": [
+        "pkg:golang/golang.org/x/net@v0.57.0"
+      ],
+      "statement": "golang.org/x/net v0.57.0 in kubectl v1.37.3, the current stable release; no kubectl release ships the fix. The live-run harness runs kubectl itself, with fixed arguments, against the API server in the operator's kubeconfig; the agent cannot change that kubeconfig or kubectl's environment. A kubeconfig with a proxy-url or a hostile server would expose kubectl to an untrusted HTTP peer.",
+      "expired_at": "2026-12-26T00:00:00Z"
+    },
+    {
+      "id": "CVE-2026-78669",
+      "paths": [
+        "usr/local/bin/kubectl"
+      ],
+      "purls": [
+        "pkg:golang/golang.org/x/net@v0.57.0"
+      ],
+      "statement": "golang.org/x/net v0.57.0 in kubectl v1.37.3, the current stable release; no kubectl release ships the fix. The live-run harness runs kubectl itself, with fixed arguments, against the API server in the operator's kubeconfig; the agent cannot change that kubeconfig or kubectl's environment. A kubeconfig with a proxy-url or a hostile server would expose kubectl to an untrusted HTTP peer.",
+      "expired_at": "2026-12-26T00:00:00Z"
+    },
+    {
+      "id": "CVE-2026-56851",
+      "paths": [
+        "usr/local/bin/kubectl"
+      ],
+      "purls": [
+        "pkg:golang/golang.org/x/text@v0.40.0"
+      ],
+      "statement": "golang.org/x/text v0.40.0 in kubectl v1.37.3, the current stable release; no kubectl release ships the fix. The live-run harness runs kubectl itself, with fixed arguments, against the API server in the operator's kubeconfig; the agent cannot change that kubeconfig or kubectl's environment. A kubeconfig with a proxy-url or a hostile server would expose kubectl to an untrusted HTTP peer.",
+      "expired_at": "2026-12-26T00:00:00Z"
+    }
+  ]
+}
