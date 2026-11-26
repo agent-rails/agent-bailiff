@@ -291,7 +291,7 @@ def test_request_and_response_servers_share_one_private_directory(running, respo
     assert caught.value.code() == grpc.StatusCode.UNIMPLEMENTED
 
 
-def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, workdir):
+def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, workdir, caplog):
     redactor = RecordingRedactor()
     redactor.release.clear()
     responding(redactor)
@@ -311,9 +311,58 @@ def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, w
             codes.add(error.code())
     assert grpc.StatusCode.RESOURCE_EXHAUSTED in codes
     assert len(redactor.messages) == 1
+    sheds = [record.getMessage() for record in caplog.records if "shed a response check" in record.getMessage()]
+    assert sheds[0] == (
+        f"shed a response check over the {RESPONSE_MAX_CONCURRENT_RPCS} concurrent check limit "
+        "after the upstream acted (1 shed since start)"
+    )
     redactor.release.set()
     for thread in waiting:
         thread.join(30)
+    assert check_response(socket_path).mutated == b'{"content":[]}'
+
+
+def test_a_response_check_abandoned_while_queued_never_reaches_the_redactor(responding, workdir):
+    redactor = RecordingRedactor()
+    redactor.release.clear()
+    responding(redactor)
+    socket_path = workdir / "s" / "redactor.sock"
+    first = threading.Thread(target=lambda: _ignore_errors(lambda: check_response(socket_path, timeout=20)))
+    first.start()
+    assert redactor.entered.wait(5)
+    with pytest.raises(grpc.RpcError) as caught:
+        check_response(socket_path, timeout=0.5)
+    assert caught.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+    redactor.release.set()
+    first.join(10)
+    time.sleep(0.5)
+    assert len(redactor.messages) == 1
+
+
+def test_a_shed_response_check_frees_no_slot_it_did_not_take(responding, workdir):
+    redactor = RecordingRedactor()
+    redactor.release.clear()
+    responding(redactor)
+    socket_path = workdir / "s" / "redactor.sock"
+    waiting = [
+        threading.Thread(target=lambda: _ignore_errors(lambda: check_response(socket_path, timeout=20)))
+        for _ in range(RESPONSE_MAX_CONCURRENT_RPCS)
+    ]
+    for thread in waiting:
+        thread.start()
+    assert redactor.entered.wait(5)
+    deadline = time.monotonic() + 10
+    shed = 0
+    while shed < 3 and time.monotonic() < deadline:
+        try:
+            check_response(socket_path, timeout=0.5)
+        except grpc.RpcError as error:
+            shed += error.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert shed == 3
+    redactor.release.set()
+    for thread in waiting:
+        thread.join(30)
+    assert len(redactor.messages) == RESPONSE_MAX_CONCURRENT_RPCS
     assert check_response(socket_path).mutated == b'{"content":[]}'
 
 

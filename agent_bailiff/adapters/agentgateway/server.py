@@ -32,6 +32,7 @@ DEFAULT_WORKERS = 8
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_MAX_CONCURRENT_RPCS = 256
 RESPONSE_MAX_CONCURRENT_RPCS = 16
+RESPONSE_GRPC_THREADS = 2 * RESPONSE_MAX_CONCURRENT_RPCS
 ACCEPT_POLL_SECONDS = 0.2
 CHUNK_BYTES = 65536
 
@@ -48,6 +49,38 @@ class ExtMcpResponseProcessor(Protocol):
 
 class ProcessorLocked(Exception):
     pass
+
+
+class ResponseAdmission:
+    def __init__(self, processor: ExtMcpResponseProcessor, workers: int, limit: int) -> None:
+        self._processor = processor
+        self._limit = limit
+        self._admitted = threading.BoundedSemaphore(limit)
+        self._scanning = threading.BoundedSemaphore(workers)
+        self._shed = 0
+        self._shed_lock = threading.Lock()
+
+    def check_response(self, message: ext_mcp_pb2.McpResponse, context: Any) -> ext_mcp_pb2.McpResponseResult:
+        if not self._admitted.acquire(blocking=False):
+            self._log_shed()
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "response check limit reached")
+        try:
+            with self._scanning:
+                if not context.is_active():
+                    context.abort(grpc.StatusCode.CANCELLED, "response check abandoned while queued")
+                return self._processor.check_response(message)
+        finally:
+            self._admitted.release()
+
+    def _log_shed(self) -> None:
+        with self._shed_lock:
+            self._shed += 1
+            total = self._shed
+        logger.warning(
+            "shed a response check over the %d concurrent check limit after the upstream acted (%d shed since start)",
+            self._limit,
+            total,
+        )
 
 
 class ProcessorServer:
@@ -223,10 +256,10 @@ def request_handlers(processor: ExtMcpProcessor) -> dict[str, grpc.RpcMethodHand
     }
 
 
-def response_handlers(processor: ExtMcpResponseProcessor) -> dict[str, grpc.RpcMethodHandler]:
+def response_handlers(admission: ResponseAdmission) -> dict[str, grpc.RpcMethodHandler]:
     return {
         "CheckResponse": grpc.unary_unary_rpc_method_handler(
-            lambda message, _context: processor.check_response(message),
+            admission.check_response,
             request_deserializer=ext_mcp_pb2.McpResponse.FromString,
             response_serializer=ext_mcp_pb2.McpResponseResult.SerializeToString,
         )
@@ -245,13 +278,13 @@ def response_server(
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= MAX_RESPONSE_WORKERS:
         raise ValueError(f"response workers must be an integer between 1 and {MAX_RESPONSE_WORKERS}")
     return ProcessorServer(
-        response_handlers(processor),
+        response_handlers(ResponseAdmission(processor, workers, RESPONSE_MAX_CONCURRENT_RPCS)),
         socket_path,
         private_dir,
         gateway_uid=gateway_uid,
         socket_gid=socket_gid,
-        workers=workers,
-        max_concurrent_rpcs=RESPONSE_MAX_CONCURRENT_RPCS,
+        workers=RESPONSE_GRPC_THREADS,
+        max_concurrent_rpcs=RESPONSE_GRPC_THREADS,
         grpc_socket_name=RESPONSE_GRPC_SOCKET_NAME,
     )
 
