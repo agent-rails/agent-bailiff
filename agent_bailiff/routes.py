@@ -139,7 +139,7 @@ class ToolRoutes:
             try:
                 routes.append(_document_route(item))
             except ValueError as error:
-                raise ValueError(f"route {index} ({name!r}): {error}") from None
+                raise ValueError(f"route {index} ({name!r:.80}): {error}") from None
         for item in document.get("catalogs", []):
             if not isinstance(item, dict) or set(item) != DOCUMENT_CATALOG_FIELDS:
                 raise ValueError("each catalog must have exactly the fields name, service")

@@ -67,6 +67,7 @@ def document_route(**changes):
         ({**ROUTE, "name": "close_issue", "tool": "gitea.*"}, "route 1 ('close_issue'): tool must be"),
         ({"service": "gitea"}, "route 1 (None): each route must have exactly the fields"),
         ("not a route", "route 1 (None): each route must have exactly the fields"),
+        ({**ROUTE, "name": "x" * 1000, "resource": ""}, f"route 1 ('{'x' * 79}): resource must be"),
     ],
 )
 def test_a_bad_document_route_is_named_by_index_and_name(second, expected):
