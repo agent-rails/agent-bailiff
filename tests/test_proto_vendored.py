@@ -135,21 +135,59 @@ def test_the_image_scan_applies_and_reports_the_exceptions():
     assert "--ignorefile .trivyignore.yaml --show-suppressed" in text
 
 
-def test_the_image_scan_runs_on_pull_requests_that_change_an_image():
+def copied_image_inputs():
+    build_args = re.findall(r"--build-arg (\w+)=(\S+)", IMAGE_SCAN.read_text())
+    sources = set()
+    for path in tracked_image_files():
+        text = (ROOT / path).read_text().replace("\\\n", " ")
+        values = [*re.findall(r"^ARG (\w+)=(\S+)", text, re.MULTILINE), *build_args]
+        for instruction in re.findall(r"^(?:COPY|ADD) (.+)$", text, re.MULTILINE):
+            words = instruction.split()
+            if any(word.startswith("--from=") for word in words):
+                continue
+            for source in [word for word in words if not word.startswith("--")][:-1]:
+                if "://" in source:
+                    continue
+                names = re.findall(r"\$\{(\w+)\}", source)
+                assert len(names) <= 1, source
+                if not names:
+                    sources.add(source)
+                    continue
+                expanded = {value for name, value in values if name == names[0]}
+                assert expanded, source
+                sources.update(source.replace(f"${{{names[0]}}}", value) for value in expanded)
+    return sources
+
+
+def test_the_image_scan_runs_on_every_pull_request_and_scans_when_an_image_input_changes():
     text = IMAGE_SCAN.read_text()
-    paths = re.search(r"^on:\n  pull_request:\n    paths:\n((?:      - \S+\n)+)  schedule:\n", text, re.MULTILINE)
-    assert paths
-    assert set(re.findall(r"- (\S+)", paths.group(1))) == {
+    assert "on:\n  pull_request:\n  schedule:\n" in text
+    assert '    - cron: "23 5 * * 1"\n  workflow_dispatch:\n' in text
+    diff = re.search(
+        r'^          changed="\$\(git diff --name-only "origin/\$BASE_REF\.\.\.HEAD" -- \\\n'
+        r'((?:            \S+(?: \\|\)")\n)+)',
+        text,
+        re.MULTILINE,
+    )
+    assert diff
+    listed = re.findall(r"^            ([^\s)]+)(?: \\|\)\")$", diff.group(1), re.MULTILINE)
+    assert len(listed) == len(diff.group(1).splitlines())
+    assert set(listed) == {
+        *copied_image_inputs(),
         *tracked_image_files(),
+        ".dockerignore",
         ".github/workflows/image-scan.yml",
         ".trivyignore.yaml",
-        "deploy/kubernetes/webhook-requirements.txt",
-        "examples/live-run/package-lock.json",
-        "examples/live-run/package.json",
-        "examples/quickstart/trace-requirements.txt",
-        "requirements-ci.txt",
+        "pyproject.toml",
     }
-    assert '    - cron: "23 5 * * 1"\n  workflow_dispatch:\n' in text
+    included = re.findall(r"^!(\S+)$", (ROOT / ".dockerignore").read_text(), re.MULTILINE)
+    assert included
+    assert all(any(path == entry or path.startswith(f"{entry}/") for entry in listed) for path in included), included
+    assert "          persist-credentials: false\n          fetch-depth: 0\n" in text
+    assert "          EVENT: ${{ github.event_name }}\n          BASE_REF: ${{ github.base_ref }}\n" in text
+    assert 'if [ "$EVENT" != pull_request ]; then\n            echo "images=true" >> "$GITHUB_OUTPUT"\n' in text
+    assert "  db:\n    needs: changes\n    if: needs.changes.outputs.images == 'true'\n" in text
+    assert "  scan:\n    needs: db\n" in text
 
 
 def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
@@ -160,8 +198,14 @@ def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
     assert 'read -ra build <<< "$BUILD"\n          docker build "${build[@]}" --tag "$IMAGE" .\n' in text
     runs = re.findall(r"^ +(?:- )?run: (?:[|>]-?\n((?:(?: {10,}.*)?\n)+)|(.*)\n)", text, re.MULTILINE)
     assert runs and not any("${{" in block + line for block, line in runs)
-    assert "    if: always()\n    needs: scan\n" in text
-    assert 'test "$RESULT" = success' in text
+    assert "    if: always()\n    needs: [changes, db, scan]\n" in text
+    assert (
+        '      - run: test "$RESULTS" = "success true success success"'
+        ' || test "$RESULTS" = "success false skipped skipped"\n'
+        "        env:\n"
+        "          RESULTS: ${{ needs.changes.result }} ${{ needs.changes.outputs.images }}"
+        " ${{ needs.db.result }} ${{ needs.scan.result }}\n"
+    ) in text
 
 
 def test_the_image_scan_downloads_the_database_once_per_day():

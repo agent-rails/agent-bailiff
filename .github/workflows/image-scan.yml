@@ -2,18 +2,6 @@ name: image-scan
 
 on:
   pull_request:
-    paths:
-      - .github/workflows/image-scan.yml
-      - .trivyignore.yaml
-      - deploy/gke/Dockerfile.minter
-      - deploy/kubernetes/Dockerfile.webhook
-      - deploy/kubernetes/webhook-requirements.txt
-      - examples/live-run/Dockerfile
-      - examples/live-run/package-lock.json
-      - examples/live-run/package.json
-      - examples/quickstart/Dockerfile
-      - examples/quickstart/trace-requirements.txt
-      - requirements-ci.txt
   schedule:
     - cron: "23 5 * * 1"
   workflow_dispatch:
@@ -26,7 +14,66 @@ env:
   TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.diff.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "origin/$BASE_REF...HEAD" -- \
+            .dockerignore \
+            .github/workflows/image-scan.yml \
+            .trivyignore.yaml \
+            LICENSE \
+            README.md \
+            agent_bailiff \
+            deploy/gke/Dockerfile.minter \
+            deploy/gke/mint_tokens.py \
+            deploy/kubernetes/Dockerfile.webhook \
+            deploy/kubernetes/webhook-requirements.txt \
+            examples/live-run/Dockerfile \
+            examples/live-run/entrypoint.sh \
+            examples/live-run/kubernetes.py \
+            examples/live-run/package-lock.json \
+            examples/live-run/package.json \
+            examples/live-run/run.py \
+            examples/live-run/shim.py \
+            examples/live-run/upstream.py \
+            examples/quickstart/Dockerfile \
+            examples/quickstart/agent.py \
+            examples/quickstart/baseline.py \
+            examples/quickstart/bootstrap.py \
+            examples/quickstart/gateway.json \
+            examples/quickstart/proxy_bench.py \
+            examples/quickstart/rule.py \
+            examples/quickstart/stub-upstream/server.py \
+            examples/quickstart/trace-requirements.txt \
+            examples/quickstart/upstreams \
+            pyproject.toml \
+            requirements-ci.txt)"
+          echo "$changed"
+          if [ -n "$changed" ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=false" >> "$GITHUB_OUTPUT"
+          fi
+
   db:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -108,10 +155,10 @@ jobs:
 
   image-scan:
     if: always()
-    needs: scan
+    needs: [changes, db, scan]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - run: test "$RESULT" = success
+      - run: test "$RESULTS" = "success true success success" || test "$RESULTS" = "success false skipped skipped"
         env:
-          RESULT: ${{ needs.scan.result }}
+          RESULTS: ${{ needs.changes.result }} ${{ needs.changes.outputs.images }} ${{ needs.db.result }} ${{ needs.scan.result }}
