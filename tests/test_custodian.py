@@ -644,6 +644,30 @@ def test_a_chain_refusal_not_known_to_be_recorded_is_tried_again(
     assert logged in caplog.text
 
 
+@pytest.mark.parametrize(
+    "error, outcome",
+    [
+        (DocketError("state_write_failed"), "was recorded but its head was not saved"),
+        (DocketError("no_ack", "head fetch timed out"), "was not acknowledged and may be recorded"),
+        (DocketError("overloaded"), "was not written"),
+        (OSError("docket sink is down"), "was not written"),
+    ],
+)
+def test_a_refusal_docket_warning_names_its_operation(make_custodian, open_docket, caplog, error, outcome):
+    root = make_v1_root()
+    request = make_request(root)
+    token = sign_clearance(clearance_for(request, root))
+    clearance = decode_clearance(token, WRITERS["decide"], max_lifetime=MAX_PROOF_AGE)
+    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
+    custodian = make_custodian(scope_v1_cutoff=NOW, docket=FailOnceDocket(inner, error))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    assert (
+        f"docket entry for custodian refusal (tenant {clearance.tenant!r}, task {clearance.task!r}, "
+        f"op {clearance.op_id!r}, reason chain_refused) {outcome}" in caplog.text
+    )
+
+
 def test_a_chain_refused_under_a_forged_clearance_is_not_recorded(make_custodian, workdir):
     root = make_v1_root()
     request = make_request(root)
