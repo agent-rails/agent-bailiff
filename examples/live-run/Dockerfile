@@ -6,6 +6,10 @@ RUN npm ci --no-audit --no-fund && ./node_modules/.bin/claude --version
 
 FROM --platform=linux/amd64 python:3.13.18-slim@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends --only-upgrade libzstd1 \
+    && dpkg --compare-versions "$(dpkg-query --show --showformat='${Version}' libzstd1)" ge 1.5.7+dfsg-1+deb13u1 \
+    && apt-get dist-clean
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DISABLE_AUTOUPDATER=1 AGENT_BAILIFF_CACHE=/opt/agent-bailiff \
     PATH=/opt/claude/node_modules/.bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ADD --checksum=sha256:33bc88a24c3b09cf55bfd59e6ca977881b61fc3f25ab65bc80c65b430248648e --chmod=0755 \
