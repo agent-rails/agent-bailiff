@@ -4,6 +4,13 @@
     "statsAddr": "127.0.0.1:15020",
     "readinessAddr": "127.0.0.1:15021"
   },
+  "frontendPolicies": {
+    "accessLog": {
+      "remove": [
+        "mcp.error.message"
+      ]
+    }
+  },
   "mcp": {
     "port": 8080,
     "statefulMode": "stateless",

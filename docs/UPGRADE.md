@@ -1,8 +1,19 @@
 # Upgrading
 
+- [Access log](#access-log)
 - [Credential checks](#credential-checks)
 - [Permission scopes](#permission-scopes)
 - [Docket grants](#docket-grants)
+
+## Access log
+
+check-config now requires the gateway config to carry, at the top level:
+
+```json
+"frontendPolicies": {"accessLog": {"remove": ["mcp.error.message"]}}
+```
+
+agentgateway logs the text of an upstream JSON-RPC error as `mcp.error.message`, and that text can echo a released credential. A config without it, with any other `frontendPolicies` or access-log setting, with `config.logging` keys other than `level` and `format`, or with `fields` under `config.tracing` or `config.metrics`, fails check-config. Where startup runs check-config first, as the quickstart's `gateway-check` and `examples/live-run` do, the gateway then does not start; agentgateway itself starts without the block, so a deployment that skips check-config keeps logging the error text. Add the block to your `gateway.json` before upgrading; the quickstart template and `examples/live-run` already have it. To roll back, an earlier release refuses the unknown `frontendPolicies` key, so remove the block.
 
 ## Credential checks
 

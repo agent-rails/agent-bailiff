@@ -326,6 +326,7 @@ class Deployment:
                 "statsAddr": f"127.0.0.1:{free_port()}",
                 "readinessAddr": f"127.0.0.1:{free_port()}",
             },
+            "frontendPolicies": {"accessLog": {"remove": ["mcp.error.message"]}},
             "mcp": {
                 "port": self.gateway_port,
                 "statefulMode": "stateless",

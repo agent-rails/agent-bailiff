@@ -16,8 +16,9 @@ from agent_bailiff.custodian.config import MAX_UPSTREAM_TIMEOUT
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
-TOP_LEVEL_KEYS = frozenset({"config", "mcp"})
+TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
+LOGGING_KEYS = frozenset({"level", "format"})
 MCP_KEYS = frozenset(
     {"port", "targets", "policies", "statefulMode", "prefixMode", "failureMode", "server", "sseKeepAlive"}
     | {"dnsRebindingProtection"}
@@ -45,6 +46,7 @@ AGENT_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "c
 CHAIN_HEADER_PREFIX = "x-bailiff-"
 REMOVE_PATH = "$.mcp.policies.requestHeaderModifier.remove"
 CLEARANCE_EXPRESSION = f"mcpGuardrails.{CLEARANCE_KEY}"
+ACCESS_LOG_REMOVED_FIELDS = frozenset({"mcp.error.message"})
 
 REFUSAL_SHAPE = (
     "has(mcp.result.isError) && mcp.result.isError == true"
@@ -94,6 +96,8 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
     config = document.get("config", {})
     if isinstance(config, dict):
         _only_keys(problems, "config", config, CONFIG_KEYS)
+        _check_logging(problems, config.get("logging", {}))
+        _check_telemetry_fields(problems, config)
     else:
         problems.append("config must be an object")
     mcp = document.get("mcp")
@@ -105,8 +109,52 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         problems.append('mcp.statefulMode must be "stateless"; the stateful event stream reaches upstreams unchecked')
     _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
     _check_policies(problems, mcp.get("policies"), expected)
+    _check_access_log(problems, document.get("frontendPolicies"))
     _check_credential_headers(problems, document, expected.credential_headers)
     return tuple(problems)
+
+
+def _check_logging(problems: list[str], logging: object) -> None:
+    if not isinstance(logging, dict) or not set(logging) <= LOGGING_KEYS:
+        problems.append(
+            "config.logging may set only level and format; its other keys add, filter or ship access-log fields "
+            "outside frontendPolicies.accessLog"
+        )
+
+
+def _check_telemetry_fields(problems: list[str], config: Mapping[str, Any]) -> None:
+    for key in ("tracing", "metrics"):
+        telemetry = config.get(key, {})
+        if not isinstance(telemetry, dict) or "fields" in telemetry:
+            problems.append(
+                f"config.{key} must be an object without fields; added fields can carry upstream error text "
+                "that frontendPolicies.accessLog does not remove"
+            )
+
+
+def _check_access_log(problems: list[str], frontend: object) -> None:
+    access_log = frontend.get("accessLog") if isinstance(frontend, dict) else None
+    remove = access_log.get("remove") if isinstance(access_log, dict) else None
+    if (
+        not isinstance(frontend, dict)
+        or set(frontend) != {"accessLog"}
+        or not isinstance(access_log, dict)
+        or set(access_log) != {"remove"}
+        or not isinstance(remove, list)
+        or not all(isinstance(name, str) for name in remove)
+        or len(set(remove)) != len(remove)
+    ):
+        problems.append(
+            'frontendPolicies must be exactly {"accessLog": {"remove": [unique field names]}}; '
+            "the access log keeps upstream error text, which can echo a released credential"
+        )
+        return
+    missing = sorted(ACCESS_LOG_REMOVED_FIELDS - set(remove))
+    if missing:
+        problems.append(
+            f"frontendPolicies.accessLog.remove is missing {', '.join(missing)}; "
+            "upstream error text can echo a released credential"
+        )
 
 
 def _check_targets(
