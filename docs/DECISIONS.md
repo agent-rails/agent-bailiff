@@ -151,7 +151,7 @@ The defence stops at what the call designates and what the docket sees. Argument
 
 ## D23. Python images raise libzstd1 to a floor
 
-**Decision:** every python image stage first runs `apt-get install --only-upgrade libzstd1` and fails the build unless the installed version is at least `1.5.7+dfsg-1+deb13u1` (CVE-2026-124851, DSA-6657-1), then runs `apt-get dist-clean` as the base does. A test requires the step directly after each python `FROM`. Remove the step once the pinned python base ships that version or later.
+**Decision:** every python image stage first runs `apt-get install --only-upgrade libzstd1` and fails the build unless the installed version is at least `1.5.7+dfsg-1+deb13u1` (CVE-2026-124851, DSA-6657-1), then runs `apt-get dist-clean` as the base does. A test requires the step directly after each python `FROM`, and the image scan reads the installed version in each built image and fails below the floor. Remove the step once the pinned python base ships that version or later.
 
 **Why:** the newest `python:3.13.18-slim` digest still ships `1.5.7+dfsg-1`, and its OpenSSL links libzstd. A floor accepts later Debian fixes and later bases, which an exact pin refuses, and still fails loudly if the image would carry the affected version. It covers only Debian's libzstd: the live-run image's `claude` and `agentgateway` binaries carry their own zstd, which this does not change.
 

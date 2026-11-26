@@ -14,11 +14,12 @@ STUBS = ROOT / "agent_bailiff" / "adapters" / "agentgateway" / "_proto"
 SCAN_IGNORES = ROOT / ".trivyignore.yaml"
 IMAGE_SCAN = ROOT / ".github" / "workflows" / "image-scan.yml"
 MAX_IGNORE_DAYS = 31
+LIBZSTD_FLOOR = "1.5.7+dfsg-1+deb13u1"
 LIBZSTD_UPGRADE = (
     "RUN apt-get update \\\n"
     "    && apt-get install --yes --no-install-recommends --only-upgrade libzstd1 \\\n"
     "    && dpkg --compare-versions \"$(dpkg-query --show --showformat='${Version}' libzstd1)\" "
-    "ge 1.5.7+dfsg-1+deb13u1 \\\n"
+    f"ge {LIBZSTD_FLOOR} \\\n"
     "    && apt-get dist-clean\n"
 )
 PYTHON_STAGES = 4
@@ -165,6 +166,13 @@ def test_the_image_scan_downloads_the_database_once_per_day():
     assert "--download-db-only" in text
     assert "key: ${{ needs.db.outputs.key }}\n          fail-on-cache-miss: true\n" in text
     assert "--skip-db-update" in text
+
+
+def test_the_image_scan_checks_libzstd_in_the_built_image():
+    text = IMAGE_SCAN.read_text()
+    assert f"LIBZSTD_FLOOR: {LIBZSTD_FLOOR}\n" in text
+    assert "--entrypoint dpkg-query \"$IMAGE\" --show --showformat='${Version}' libzstd1" in text
+    assert 'dpkg --compare-versions "$version" ge "$LIBZSTD_FLOOR"' in text
 
 
 def test_every_python_stage_installs_the_fixed_libzstd():

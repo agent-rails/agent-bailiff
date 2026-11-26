@@ -71,6 +71,7 @@ jobs:
             build: --file examples/live-run/Dockerfile
     env:
       IMAGE: agent-bailiff-${{ matrix.image }}:scan
+      LIBZSTD_FLOOR: 1.5.7+dfsg-1+deb13u1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,6 +90,11 @@ jobs:
           fail-on-cache-miss: true
       - name: Build image
         run: docker build ${{ matrix.build }} --tag "$IMAGE" .
+      - name: Check libzstd1
+        run: |
+          version="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${Version}' libzstd1)"
+          echo "libzstd1 $version"
+          dpkg --compare-versions "$version" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
           "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update
