@@ -13,10 +13,11 @@ WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
 
 
-def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contexts=1):
+def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contexts=1, cluster=None):
+    entry = {"server": server, "certificate-authority-data": "Y2E="} if cluster is None else cluster
     return {
         "contexts": [{"name": context, "context": {"cluster": context, "user": context}}] * contexts,
-        "clusters": [{"name": context, "cluster": {"server": server, "certificate-authority-data": "Y2E="}}],
+        "clusters": [{"name": context, "cluster": entry}],
         "users": [{"name": context, "user": user or {"client-certificate-data": "Y2VydA=="}}],
     }
 
@@ -47,6 +48,47 @@ def test_the_kubeconfig_is_minified_and_pointed_at_the_orbstack_host(kubectl_vie
 def test_a_server_other_than_loopback_is_unchanged(kubectl_view):
     kubectl_view(view(server="https://k8s.orb.local:26443"))
     assert launch.minify_kubeconfig("orbstack")["clusters"][0]["cluster"]["server"] == "https://k8s.orb.local:26443"
+
+
+CA = {"certificate-authority-data": "Y2E="}
+ORBSTACK_SERVER = {"server": "https://127.0.0.1:26443"}
+
+
+@pytest.mark.parametrize(
+    ("cluster", "message"),
+    [
+        ({**ORBSTACK_SERVER, **CA, "proxy-url": "http://proxy:3128"}, r"sets \['proxy-url'\]"),
+        ({**ORBSTACK_SERVER, **CA, "insecure-skip-tls-verify": True}, r"sets \['insecure-skip-tls-verify'\]"),
+        ({**ORBSTACK_SERVER, **CA, "tls-server-name": "k8s.orb.local"}, r"sets \['tls-server-name'\]"),
+        (ORBSTACK_SERVER, "no certificate-authority-data"),
+        ({**ORBSTACK_SERVER, "certificate-authority-data": ""}, "no certificate-authority-data"),
+        ({"server": "http://127.0.0.1:26443", **CA}, "is not https"),
+        ({"server": "https://user:pw@127.0.0.1:26443", **CA}, "is not https"),
+        ({"server": "https://127.0.0.1:26443/proxy", **CA}, "is not https"),
+        ({"server": "https://127.0.0.1:26443?x=1", **CA}, "is not https"),
+        ({"server": "https://127.0.0.1:26443#x", **CA}, "is not https"),
+        ({"server": "https://127.0.0.1:99999", **CA}, "invalid port"),
+        (CA, "is not https"),
+        ({"server": "https://evil.example:26443", **CA}, "is not \\['127.0.0.1', 'k8s.orb.local'\\] with a port"),
+        ({"server": "https://127.0.0.1", **CA}, "with a port"),
+    ],
+    ids=[
+        "proxy-url", "insecure", "tls-server-name", "no-ca", "empty-ca", "http", "userinfo", "path", "query",
+        "fragment", "bad-port", "no-server", "other-host", "no-port",
+    ],
+)  # fmt: skip
+def test_a_cluster_entry_outside_the_allowlist_is_refused(kubectl_view, cluster, message):
+    kubectl_view(view(cluster=cluster))
+    with pytest.raises(RuntimeError, match=message):
+        launch.minify_kubeconfig("orbstack")
+
+
+def test_the_orbstack_server_is_rebuilt_from_its_port(kubectl_view):
+    kubectl_view(view(server="https://127.0.0.1:26443/"))
+    assert launch.minify_kubeconfig("orbstack")["clusters"][0]["cluster"] == {
+        "server": "https://k8s.orb.local:26443",
+        **CA,
+    }
 
 
 @pytest.mark.parametrize("context", [*PRODUCTION, "kind-dev"])
@@ -123,6 +165,24 @@ def test_a_gke_context_outside_the_given_project_is_refused_before_kubectl(monke
 )
 def test_a_gke_context_that_is_not_the_labelled_probe_cluster_is_refused(gke_probe, cluster, message):
     gke_probe(cluster)
+    with pytest.raises(RuntimeError, match=message):
+        launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
+
+
+@pytest.mark.parametrize("server", ["https://34.1.2.3:443", "https://34.1.2.3/"])
+def test_the_gke_server_may_name_port_443(gke_probe, server):
+    gke_probe(server=server)
+    config = launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
+    assert config["clusters"][0]["cluster"]["server"] == server
+
+
+@pytest.mark.parametrize(
+    ("server", "message"),
+    [("https://34.1.2.3:8443", "is not the endpoint"), ("http://34.1.2.3", "is not https")],
+    ids=["other-port", "http"],
+)
+def test_a_gke_server_on_another_port_or_scheme_is_refused(gke_probe, server, message):
+    gke_probe(server=server)
     with pytest.raises(RuntimeError, match=message):
         launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
 
