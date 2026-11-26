@@ -67,6 +67,7 @@ def document_route(**changes):
         ({**ROUTE, "name": "close_issue", "tool": "gitea.*"}, "route 1 ('close_issue'): tool must be"),
         ({"service": "gitea"}, "route 1 (None): each route must have exactly the fields"),
         ("not a route", "route 1 (None): each route must have exactly the fields"),
+        ({**ROUTE, "name": "x" * 1000, "resource": ""}, f"route 1 ('{'x' * 79}): resource must be"),
     ],
 )
 def test_a_bad_document_route_is_named_by_index_and_name(second, expected):
@@ -140,3 +141,10 @@ def test_a_catalog_route_placeholder_must_be_a_whole_segment(resource):
     schema = (Argument("namespace", "label"), Argument("name", "label"))
     with pytest.raises(ValueError, match="whole resource segment"):
         ToolRoute("k8s", "x", "k8s.x", resource, schema)
+
+
+def test_a_duplicate_route_error_caps_the_echoed_names():
+    route = {**ROUTE, "name": "n" * 1000}
+    with pytest.raises(ValueError) as raised:
+        ToolRoutes.from_document({"routes": [route, route]})
+    assert len(str(raised.value)) < 300
