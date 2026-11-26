@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +50,20 @@ class UnredactableCredential(ValueError):
 class StoredCredential:
     secret: bytes = field(repr=False)
     exception: str | None
+
+
+@dataclass(frozen=True)
+class CredentialProblem:
+    tenant: str
+    credential_id: str
+    target: str
+    problem: str
+
+
+@dataclass(frozen=True)
+class CredentialCheck:
+    checked: int
+    problems: tuple[CredentialProblem, ...]
 
 
 def credential_context(tenant: str, credential_id: str, target: str, exception: str | None = None) -> bytes:
@@ -147,7 +162,85 @@ class CredentialStore:
             raise CredentialUnavailable("credential store is unreadable") from None
         if row is None:
             raise CredentialUnavailable("no credential is stored for this binding")
-        wrapped, nonce, ciphertext, exception = row
+        return self._decrypt(tenant, credential_id, target, *row)
+
+    def check(self, required: Iterable[tuple[str, str, str]] = ()) -> CredentialCheck:
+        try:
+            with self._lock:
+                self._pinned.check()
+                rows = self._connection.execute(
+                    "SELECT tenant, credential_id, target, wrapped_dek, nonce, ciphertext, exception "
+                    "FROM credentials ORDER BY tenant, credential_id, target"
+                ).fetchall()
+        except (sqlite3.Error, OwnedFileError):
+            raise CredentialUnavailable("credential store is unreadable") from None
+        problems = []
+        for row in rows:
+            problem = self._row_problem(*row)
+            if problem is not None:
+                problems.append(problem)
+        stored = {tuple(row[:3]) for row in rows}
+        for key in sorted(set(required) - stored):
+            problems.append(CredentialProblem(*key, "no credential is stored for this binding"))
+        return CredentialCheck(len(rows), tuple(problems))
+
+    def _row_problem(
+        self,
+        tenant: object,
+        credential_id: object,
+        target: object,
+        wrapped: object,
+        nonce: object,
+        ciphertext: object,
+        exception: object,
+    ) -> CredentialProblem | None:
+        if not (
+            isinstance(tenant, str)
+            and isinstance(credential_id, str)
+            and isinstance(target, str)
+            and isinstance(wrapped, bytes)
+            and isinstance(nonce, bytes)
+            and isinstance(ciphertext, bytes)
+            and (exception is None or isinstance(exception, str))
+        ):
+            return CredentialProblem(
+                _shown(tenant), _shown(credential_id), _shown(target), "credential row is malformed"
+            )
+        problem = self._release_problem(tenant, credential_id, target, wrapped, nonce, ciphertext, exception)
+        return None if problem is None else CredentialProblem(tenant, credential_id, target, problem)
+
+    def _release_problem(
+        self,
+        tenant: str,
+        credential_id: str,
+        target: str,
+        wrapped: bytes,
+        nonce: bytes,
+        ciphertext: bytes,
+        exception: str | None,
+    ) -> str | None:
+        try:
+            stored = self._decrypt(tenant, credential_id, target, wrapped, nonce, ciphertext, exception)
+        except CredentialUnavailable as exc:
+            return str(exc)
+        value = header_value(stored.secret)
+        if value is None:
+            return "credential is not printable ASCII with no leading or trailing space or tab"
+        problem = redaction_problem(value)
+        if problem is not None and stored.exception is None:
+            return f"credential cannot be redacted from results and has no accepted exception: {problem}"
+        return None
+
+    def _decrypt(
+        self,
+        tenant: str,
+        credential_id: str,
+        target: str,
+        wrapped: bytes,
+        nonce: bytes,
+        ciphertext: bytes,
+        exception: str | None,
+    ) -> StoredCredential:
         try:
             context = credential_context(tenant, credential_id, target, exception)
             dek = self._backend.unwrap(wrapped, context)
@@ -176,3 +269,7 @@ def _add_exception_column(connection: sqlite3.Connection) -> None:
 
 def _has_exception_column(connection: sqlite3.Connection) -> bool:
     return "exception" in {row[1] for row in connection.execute("PRAGMA table_info(credentials)")}
+
+
+def _shown(value: object) -> str:
+    return value if isinstance(value, str) else repr(value)

@@ -26,7 +26,7 @@ from agent_bailiff.custodian.claims import ClaimsStore
 from agent_bailiff.custodian.config import CustodianConfig
 from agent_bailiff.custodian.custodian import Custodian
 from agent_bailiff.custodian.release import ReleaseSigner
-from agent_bailiff.custodian.store import CredentialStore
+from agent_bailiff.custodian.store import CredentialCheck, CredentialStore
 from agent_bailiff.decide.config import DeciderConfig
 from agent_bailiff.decide.decider import Decider
 from agent_bailiff.docket.client import DocketClient
@@ -222,6 +222,20 @@ def put_credential(
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
         store.put(tenant, credential_id, target, secret, accept_unredactable=accept_unredactable)
+    finally:
+        store.close()
+
+
+def check_credentials(settings: CustodianSettings) -> CredentialCheck:
+    bindings = BindingTable.load(settings.bindings)
+    required = {
+        (binding.tenant, binding.credential_id, binding.target)
+        for binding in bindings.credential_bindings
+        if not binding.canary
+    }
+    store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
+    try:
+        return store.check(required)
     finally:
         store.close()
 

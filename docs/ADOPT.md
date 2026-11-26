@@ -94,6 +94,8 @@ $ docker compose run --rm --no-deps -T custodian -m agent_bailiff.cli custodian 
 stored
 ```
 
+`custodian check-credentials --config /var/lib/bailiff/custodian/config.json` lists every stored credential the custodian would refuse to release, and every binding with no stored credential, and exits 1 if there is any. Run it after upgrading, before restarting the custodian ([UPGRADE.md](UPGRADE.md)).
+
 Give the task directory to the issuer's uid (10007). Compose does not create it, and it must not be group or other writable:
 
 ```console
