@@ -32,7 +32,7 @@ otel = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-warrant", specifier = "==0.4.0" },
+    { name = "agent-warrant", specifier = "==0.4.1" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "grpcio", specifier = "==1.85.3" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = "==1.85.3" },
@@ -48,14 +48,14 @@ provides-extras = ["dev", "otel"]
 
 [[package]]
 name = "agent-warrant"
-version = "0.4.0"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/39/05/e1a1821290d79ddaf1793c55dd6de727b13feb61d27e575f2384dff8f9f5/agent_warrant-0.4.0.tar.gz", hash = "sha256:3b940ab3c4852ab369ccf4977dbe4131d63342a99a5a49f6450735546bc47f37", size = 120247, upload-time = "2026-11-24T14:35:51.172Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/77/5c20c49556d26b23cac843d55a831d083f5f811d17648a6eb6766bcd5c37/agent_warrant-0.4.1.tar.gz", hash = "sha256:6672b1d871474c3789cd865c4187da3c9649dd14e2c4690929f4ddb046154675", size = 121668, upload-time = "2026-11-26T09:21:54.386Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/91/3ec06d3a24c1fa96d8e1782c4f61577dfff8497bd3e42a8b3d1e377deeba/agent_warrant-0.4.0-py3-none-any.whl", hash = "sha256:56667739c19fcfba42cca80462e19a75ffb8ad88bee80b6210f7604e9885fbf8", size = 61959, upload-time = "2026-11-24T14:35:49.956Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/1e/9be45f56361a40d9c7d28cd6db678846c22a0e5259c44e09e8d150e6120a/agent_warrant-0.4.1-py3-none-any.whl", hash = "sha256:59e912c64561f0c8247c7c9a451f444e384891dad56d6165e982e8ac5754320e", size = 62461, upload-time = "2026-11-26T09:21:53.073Z" },
 ]
 
 [[package]]

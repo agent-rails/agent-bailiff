@@ -398,7 +398,8 @@ class Custodian:
         )
         try:
             reservation = self._ledger.reservation_readonly(clearance.tenant, clearance.task, clearance.op_id)
-        except LedgerError:
+        except LedgerError as err:
+            logger.warning("reservation for op %s could not be read: %r", clearance.op_id, str(err))
             raise _Refusal("ledger_unavailable") from None
         if reservation is None:
             raise _Refusal("reservation_missing")
