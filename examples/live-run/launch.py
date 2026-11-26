@@ -4,6 +4,8 @@ harness in one container and writes its result JSON. See README.md."""
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import re
@@ -26,6 +28,7 @@ PROBE_LABEL = "purpose"
 ORBSTACK_HOST = "k8s.orb.local"
 ORBSTACK_HOSTS = frozenset({"127.0.0.1", ORBSTACK_HOST})
 CLUSTER_KEYS = frozenset({"server", "certificate-authority-data"})
+USER_KEYS = frozenset({"client-certificate-data", "client-key-data", "token"})
 GKE_PORTS = (None, 443)
 READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
@@ -78,13 +81,31 @@ def platform_of(context: str) -> str:
     return "gke" if GKE_PROBE.fullmatch(context) else "upstream"
 
 
+def check_user(user: dict[str, Any]) -> None:
+    if "exec" in user or "auth-provider" in user:
+        raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
+    extra = sorted(set(user) - USER_KEYS)
+    if extra:
+        raise RuntimeError(f"the kubeconfig user sets {extra}; only {sorted(USER_KEYS)} are allowed")
+    if not all(isinstance(value, str) and value for value in user.values()):
+        raise RuntimeError("the kubeconfig user values must be non-empty strings")
+
+
 def check_cluster(cluster: dict[str, Any]) -> tuple[str, int | None]:
     extra = sorted(set(cluster) - CLUSTER_KEYS)
     if extra:
         raise RuntimeError(f"the kubeconfig cluster sets {extra}; only {sorted(CLUSTER_KEYS)} are allowed")
-    if not cluster.get("certificate-authority-data"):
+    authority = cluster.get("certificate-authority-data")
+    if not isinstance(authority, str) or not authority:
         raise RuntimeError("the kubeconfig cluster has no certificate-authority-data")
-    server = urllib.parse.urlsplit(cluster.get("server") or "")
+    try:
+        base64.b64decode(authority, validate=True)
+    except binascii.Error as error:
+        raise RuntimeError("the kubeconfig certificate-authority-data is not base64") from error
+    text = cluster.get("server")
+    if not isinstance(text, str) or not text.isprintable() or text != text.strip():
+        raise RuntimeError("the kubeconfig server is not a printable string without surrounding whitespace")
+    server = urllib.parse.urlsplit(text)
     if (
         server.scheme != "https"
         or not server.hostname
@@ -93,11 +114,11 @@ def check_cluster(cluster: dict[str, Any]) -> tuple[str, int | None]:
         or server.query
         or server.fragment
     ):
-        raise RuntimeError(f"the kubeconfig server {cluster.get('server')!r} is not https://<host>[:<port>]")
+        raise RuntimeError("the kubeconfig server is not https://<host>[:<port>] with no user info, path or query")
     try:
         return server.hostname, server.port
     except ValueError as error:
-        raise RuntimeError(f"the kubeconfig server {cluster['server']!r} has an invalid port") from error
+        raise RuntimeError("the kubeconfig server has an invalid port") from error
 
 
 def check_gke_probe(project: str, location: str, host: str, port: int | None) -> None:
@@ -141,16 +162,15 @@ def minify_kubeconfig(
         raise RuntimeError(f"the minified kubeconfig names context {view['contexts'][0]['name']!r}, not {context!r}")
     if applier_token is not None:
         view["users"][0]["user"] = {"token": applier_token}
-    user = view["users"][0].get("user") or {}
-    if "exec" in user or "auth-provider" in user:
-        raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
+    check_user(view["users"][0].get("user") or {})
     cluster = view["clusters"][0]["cluster"]
     host, port = check_cluster(cluster)
     if probe is not None:
         check_gke_probe(probe["project"], probe["location"], host, port)
+        cluster["server"] = f"https://{host}"
         return view
     if host not in ORBSTACK_HOSTS or port is None:
-        raise RuntimeError(f"the kubeconfig server {cluster['server']} is not {sorted(ORBSTACK_HOSTS)} with a port")
+        raise RuntimeError(f"the kubeconfig server host {host} is not one of {sorted(ORBSTACK_HOSTS)} with a port")
     cluster["server"] = f"https://{ORBSTACK_HOST}:{port}"
     return view
 

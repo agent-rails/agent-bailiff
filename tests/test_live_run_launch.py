@@ -68,19 +68,73 @@ ORBSTACK_SERVER = {"server": "https://127.0.0.1:26443"}
         ({"server": "https://127.0.0.1:26443?x=1", **CA}, "is not https"),
         ({"server": "https://127.0.0.1:26443#x", **CA}, "is not https"),
         ({"server": "https://127.0.0.1:99999", **CA}, "invalid port"),
-        (CA, "is not https"),
-        ({"server": "https://evil.example:26443", **CA}, "is not \\['127.0.0.1', 'k8s.orb.local'\\] with a port"),
+        (CA, "not a printable string"),
+        ({"server": 123, **CA}, "not a printable string"),
+        ({"server": ["https://127.0.0.1:26443"], **CA}, "not a printable string"),
+        ({"server": " https://127.0.0.1:26443", **CA}, "not a printable string"),
+        ({"server": "https://127.0.0.1:26443\n", **CA}, "not a printable string"),
+        ({"server": "https://127.0.\t0.1:26443", **CA}, "not a printable string"),
+        ({**ORBSTACK_SERVER, "certificate-authority-data": True}, "no certificate-authority-data"),
+        ({**ORBSTACK_SERVER, "certificate-authority-data": "not base64!"}, "is not base64"),
+        ({"server": "https://evil.example:26443", **CA}, "host evil.example is not one of"),
+        ({"server": "https://[::1]:26443", **CA}, "host ::1 is not one of"),
+        ({"server": "https://[::ffff:127.0.0.1]:26443", **CA}, "is not one of"),
+        ({"server": "https://k8s.orb.local.:26443", **CA}, "is not one of"),
+        ({"server": "https://2130706433:26443", **CA}, "is not one of"),
         ({"server": "https://127.0.0.1", **CA}, "with a port"),
     ],
     ids=[
         "proxy-url", "insecure", "tls-server-name", "no-ca", "empty-ca", "http", "userinfo", "path", "query",
-        "fragment", "bad-port", "no-server", "other-host", "no-port",
+        "fragment", "bad-port", "no-server", "int-server", "list-server", "leading-space", "newline", "tab",
+        "bool-ca", "ca-not-base64", "other-host", "ipv6", "mapped-ipv6", "trailing-dot", "decimal-ip", "no-port",
     ],
 )  # fmt: skip
 def test_a_cluster_entry_outside_the_allowlist_is_refused(kubectl_view, cluster, message):
     kubectl_view(view(cluster=cluster))
     with pytest.raises(RuntimeError, match=message):
         launch.minify_kubeconfig("orbstack")
+
+
+@pytest.mark.parametrize(
+    "server", ["https://user:hunter2@127.0.0.1:26443", "https://127.0.0.1:26443?token=hunter2", "https://h:hunter2"]
+)
+def test_a_refused_server_is_not_echoed(kubectl_view, server):
+    kubectl_view(view(server=server))
+    with pytest.raises(RuntimeError) as refusal:
+        launch.minify_kubeconfig("orbstack")
+    assert "hunter2" not in str(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("user", "message"),
+    [
+        ({"tokenFile": "/var/run/token"}, r"sets \['tokenFile'\]"),
+        ({"username": "admin", "password": "pw"}, r"sets \['password', 'username'\]"),
+        ({"token": "t", "as": "system:admin"}, r"sets \['as'\]"),
+        ({"token": "t", "as-groups": ["system:masters"]}, r"sets \['as-groups'\]"),
+        ({"token": "t", "as-uid": "0"}, r"sets \['as-uid'\]"),
+        ({"token": "t", "as-user-extra": {"k": ["v"]}}, r"sets \['as-user-extra'\]"),
+        ({"token": "t", "extensions": []}, r"sets \['extensions'\]"),
+        ({"client-certificate": "/c", "client-key": "/k"}, r"sets \['client-certificate', 'client-key'\]"),
+        ({"token": ""}, "non-empty strings"),
+        ({"token": 1}, "non-empty strings"),
+    ],
+    ids=[
+        "token-file", "basic", "as", "as-groups", "as-uid", "as-user-extra", "extensions", "cert-files", "empty", "int",
+    ],
+)  # fmt: skip
+def test_a_user_entry_outside_the_allowlist_is_refused(kubectl_view, user, message):
+    kubectl_view(view(user=user))
+    with pytest.raises(RuntimeError, match=message):
+        launch.minify_kubeconfig("orbstack")
+
+
+@pytest.mark.parametrize(
+    "user", [{"token": "t"}, {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}], ids=["token", "cert"]
+)
+def test_a_static_user_credential_is_kept(kubectl_view, user):
+    kubectl_view(view(user=user))
+    assert launch.minify_kubeconfig("orbstack")["users"][0]["user"] == user
 
 
 def test_the_orbstack_server_is_rebuilt_from_its_port(kubectl_view):
@@ -169,17 +223,22 @@ def test_a_gke_context_that_is_not_the_labelled_probe_cluster_is_refused(gke_pro
         launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
 
 
-@pytest.mark.parametrize("server", ["https://34.1.2.3:443", "https://34.1.2.3/"])
-def test_the_gke_server_may_name_port_443(gke_probe, server):
+@pytest.mark.parametrize("server", ["https://34.1.2.3:443", "https://34.1.2.3/", "HTTPS://34.1.2.3"])
+def test_the_gke_server_is_rebuilt_from_the_endpoint(gke_probe, server):
     gke_probe(server=server)
     config = launch.minify_kubeconfig(GKE_PROBE, applier_token="applier", gke_project="engineering-scratch-pad")
-    assert config["clusters"][0]["cluster"]["server"] == server
+    assert config["clusters"][0]["cluster"]["server"] == GKE_SERVER
 
 
 @pytest.mark.parametrize(
     ("server", "message"),
-    [("https://34.1.2.3:8443", "is not the endpoint"), ("http://34.1.2.3", "is not https")],
-    ids=["other-port", "http"],
+    [
+        ("https://34.1.2.3:8443", "is not the endpoint"),
+        ("http://34.1.2.3", "is not https"),
+        ("https://34.1.2.3/api", "is not https"),
+        ("https://34.1.\t2.3", "not a printable string"),
+    ],
+    ids=["other-port", "http", "path", "tab"],
 )
 def test_a_gke_server_on_another_port_or_scheme_is_refused(gke_probe, server, message):
     gke_probe(server=server)
