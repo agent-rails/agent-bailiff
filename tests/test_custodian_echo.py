@@ -387,3 +387,16 @@ def test_an_echoed_effector_release_token_is_redacted(make_custodian, issue, wor
     checked = custodian.check_response(token, call_result(f"release was {result.header_value}"), NOW + 2)
     assert json.loads(checked.result)["content"][0]["text"] == f"release was {MARKER}"
     assert [entry.reason for entry in custodian_entries(workdir)] == ["ok", "credential_echo"]
+
+
+def test_each_release_of_an_unredactable_credential_is_refused_recorded_and_logged(
+    make_custodian, issue, state, workdir, caplog
+):
+    store_unchecked(state, b"Bearer short-key")
+    request, token = issue()
+    custodian = make_custodian(monotonic_ns=Clock())
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        for _ in range(3):
+            assert custodian.release(token, request, NOW + 1) == Refused("credential_unredactable")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["credential_unredactable"] * 3
+    assert caplog.text.count("no accepted exception") == 3

@@ -257,3 +257,10 @@ def test_a_mutated_result_over_the_cap_is_oversize():
     assert len(raw) <= MAX_RESULT_BYTES
     with pytest.raises(Oversize):
         redact(raw, needles(HEADER))
+
+
+@pytest.mark.parametrize("pair", [b"user-long-name:", b":password-long"])
+def test_a_basic_token_with_an_empty_user_or_password_can_be_redacted(pair):
+    header = f"Basic {base64.b64encode(pair).decode()}"
+    assert redaction_problem(header) is None
+    assert pair.decode() in needles(header)
