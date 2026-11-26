@@ -5,7 +5,8 @@ import os
 import socket
 import stat
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol
@@ -32,7 +33,10 @@ DEFAULT_WORKERS = 8
 DEFAULT_MAX_CONNECTIONS = 64
 DEFAULT_MAX_CONCURRENT_RPCS = 256
 RESPONSE_MAX_CONCURRENT_RPCS = 16
+RESPONSE_GRPC_THREADS = 2 * RESPONSE_MAX_CONCURRENT_RPCS
 ACCEPT_POLL_SECONDS = 0.2
+SCAN_WAIT_POLL_SECONDS = 0.1
+SHED_LOG_INTERVAL_SECONDS = 10.0
 CHUNK_BYTES = 65536
 
 logger = logging.getLogger(__name__)
@@ -48,6 +52,66 @@ class ExtMcpResponseProcessor(Protocol):
 
 class ProcessorLocked(Exception):
     pass
+
+
+class ResponseAdmission:
+    def __init__(
+        self,
+        processor: ExtMcpResponseProcessor,
+        workers: int,
+        limit: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._processor = processor
+        self._limit = limit
+        self._clock = clock
+        self._admitted = threading.BoundedSemaphore(limit)
+        self._scanning = threading.BoundedSemaphore(workers)
+        self._shed_lock = threading.Lock()
+        self._shed = 0
+        self._unreported = 0
+        self._reported_at: float | None = None
+
+    def check_response(self, message: ext_mcp_pb2.McpResponse, context: Any) -> ext_mcp_pb2.McpResponseResult:
+        if not self._admitted.acquire(blocking=False):
+            self._record_shed()
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "response check limit reached")
+        try:
+            if not self._wait_to_scan(context):
+                context.abort(grpc.StatusCode.CANCELLED, "response check abandoned while queued")
+            try:
+                return self._processor.check_response(message)
+            finally:
+                self._scanning.release()
+        finally:
+            self._admitted.release()
+
+    def _wait_to_scan(self, context: Any) -> bool:
+        while context.is_active():
+            if self._scanning.acquire(timeout=SCAN_WAIT_POLL_SECONDS):
+                if context.is_active():
+                    return True
+                self._scanning.release()
+                return False
+        return False
+
+    def _record_shed(self) -> None:
+        now = self._clock()
+        with self._shed_lock:
+            self._shed += 1
+            self._unreported += 1
+            if self._reported_at is not None and now - self._reported_at < SHED_LOG_INTERVAL_SECONDS:
+                return
+            count, total = self._unreported, self._shed
+            self._unreported = 0
+            self._reported_at = now
+        logger.warning(
+            "shed %d response checks over the %d concurrent check limit after the upstream acted"
+            " since the last report (%d shed since start)",
+            count,
+            self._limit,
+            total,
+        )
 
 
 class ProcessorServer:
@@ -223,10 +287,10 @@ def request_handlers(processor: ExtMcpProcessor) -> dict[str, grpc.RpcMethodHand
     }
 
 
-def response_handlers(processor: ExtMcpResponseProcessor) -> dict[str, grpc.RpcMethodHandler]:
+def response_handlers(admission: ResponseAdmission) -> dict[str, grpc.RpcMethodHandler]:
     return {
         "CheckResponse": grpc.unary_unary_rpc_method_handler(
-            lambda message, _context: processor.check_response(message),
+            admission.check_response,
             request_deserializer=ext_mcp_pb2.McpResponse.FromString,
             response_serializer=ext_mcp_pb2.McpResponseResult.SerializeToString,
         )
@@ -245,13 +309,13 @@ def response_server(
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= MAX_RESPONSE_WORKERS:
         raise ValueError(f"response workers must be an integer between 1 and {MAX_RESPONSE_WORKERS}")
     return ProcessorServer(
-        response_handlers(processor),
+        response_handlers(ResponseAdmission(processor, workers, RESPONSE_MAX_CONCURRENT_RPCS)),
         socket_path,
         private_dir,
         gateway_uid=gateway_uid,
         socket_gid=socket_gid,
-        workers=workers,
-        max_concurrent_rpcs=RESPONSE_MAX_CONCURRENT_RPCS,
+        workers=RESPONSE_GRPC_THREADS,
+        max_concurrent_rpcs=RESPONSE_GRPC_THREADS,
         grpc_socket_name=RESPONSE_GRPC_SOCKET_NAME,
     )
 
