@@ -21,15 +21,15 @@ The credential checks release checks each credential when it is stored and when 
 
 ### Stored credentials
 
-The custodian and `put-credential` add a nullable `exception` column the first time they open an existing store; stored rows keep decrypting. A stored credential that fails the check has no exception, so the custodian now refuses it as `credential_unredactable`, the agent sees `release_refused`, and the custodian logs `stored credential '<id>' for target '<target>' cannot be redacted from results and has no accepted exception: <problem>`. The earlier release released it, with the warning `released credential, or its decoded basic password, is shorter than 12 characters and cannot be redacted from results` for a short form and no warning for a Basic token that does not decode. That warning does not name the credential. A stored value that is not a valid header value is refused as `credential_unavailable`, as the earlier release did, and `--accept-unredactable` does not cover it. Before restarting the custodian, run `check-credentials` as the custodian's uid. It reads every stored credential and prints one JSON line, with `tenant`, `credential_id`, `target` and `problem`, for each credential the custodian would refuse to release, never the credential itself, and exits 1 if there is any:
+The custodian, `put-credential` and `check-credentials` add a nullable `exception` column the first time they open an existing store; stored rows keep decrypting. A stored credential that fails the check has no exception, so the custodian now refuses it as `credential_unredactable`, the agent sees `release_refused`, and the custodian logs `stored credential '<id>' for target '<target>' cannot be redacted from results and has no accepted exception: <problem>`. The earlier release released it, with the warning `released credential, or its decoded basic password, is shorter than 12 characters and cannot be redacted from results` for a short form and no warning for a Basic token that does not decode. That warning does not name the credential. A stored value that is not a valid header value is refused as `credential_unavailable`, as the earlier release did, and `--accept-unredactable` does not cover it. Before restarting the custodian, run `check-credentials` as the custodian's uid. It reads every stored credential and the binding table, and prints one JSON line, with `tenant`, `credential_id`, `target` and `problem`, for each stored credential the custodian would refuse to release and each non-canary binding with no stored credential. It never prints the stored secret value; it does print the identifiers as provisioned. It exits 1 if there is any line:
 
 ```console
 $ agent-bailiff custodian check-credentials --config /var/lib/bailiff/custodian/config.json
 {"credential_id": "notes-token", "problem": "credential cannot be redacted from results and has no accepted exception: ...", "target": "notes", "tenant": "quickstart"}
-agent-bailiff check-credentials: 1 of 3 would be refused at release
+agent-bailiff check-credentials: 1 would be refused at release; 3 stored
 ```
 
-Store each listed credential again with the new `put-credential`; the ones it refuses need a longer credential or `--accept-unredactable`. Run the check again until it exits 0.
+Store each listed credential again with the new `put-credential`; the ones it refuses need a longer credential or `--accept-unredactable`. Run the check again until it exits 0. Exit 0 covers the stored credentials and the binding table only; the other release checks still run at release.
 
 ### Rollback
 
