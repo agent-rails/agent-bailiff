@@ -1,7 +1,20 @@
 # Upgrading
 
+- [Credential checks](#credential-checks)
 - [Permission scopes](#permission-scopes)
 - [Docket grants](#docket-grants)
+
+## Credential checks
+
+The credential checks release checks each credential when it is stored and when it is released (D22 in [DECISIONS.md](DECISIONS.md)). `put-credential` refuses a value that is not printable ASCII without leading or trailing space or tab, a Basic token that is not base64 of a UTF-8 `user:password`, and a value with a form under 12 characters that echo redaction would match (D20). `--accept-unredactable` stores such a value with an `unredactable` exception and logs a warning.
+
+### Stored credentials
+
+The custodian and `put-credential` add a nullable `exception` column the first time they open an existing store; stored rows keep decrypting. A stored credential that fails the check has no exception, so the custodian now refuses it as `credential_unredactable`, the agent sees `release_refused`, and the custodian logs `stored credential '<id>' for target '<target>' cannot be redacted from results and has no accepted exception: <problem>`. The earlier release released it, with the warning `released credential, or its decoded basic password, is shorter than 12 characters and cannot be redacted from results` for a short form and no warning for a Basic token that does not decode. That warning does not name the credential. Before restarting the custodian, store each credential again with the new `put-credential`; the ones it refuses need a longer credential or `--accept-unredactable`.
+
+### Rollback
+
+An earlier release ignores the `exception` column. It cannot decrypt a credential stored with an exception, because the exception is part of its encryption context, and refuses it as `credential_unavailable`; store it again with the earlier `put-credential`. That leaves the column set, so after upgrading again the custodian refuses the credential as `credential_unavailable` until it is stored again with the new `put-credential`.
 
 ## Permission scopes
 

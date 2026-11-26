@@ -40,7 +40,7 @@ Each component is meant to run as its own OS user. Decide, custodian and docket 
 ## What it does not protect
 
 - For credential bindings, the upstream MCP server receives the credential and is trusted. Catalog tools go to the effector instead; its limits are in [docs/EFFECTOR.md](docs/EFFECTOR.md).
-- Echo redaction is best-effort suppression of literal forms in the call's own result, not a containment boundary. JSON-RPC error text, event-stream side messages, forms under 12 characters such as short Basic passwords, and transformed or split echoes are not redacted; see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- Echo redaction is best-effort suppression of literal forms in the call's own result, not a containment boundary. JSON-RPC error text, event-stream side messages, forms under 12 characters such as short Basic passwords (refused when stored, unless the owner accepts the exception), and transformed or split echoes are not redacted; see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 - Root on the host can read every component's keys.
 - A completed effect is not undone.
 - Suspension is checked by decide before it issues a clearance and by the custodian just before it claims a release. A release that has already passed the custodian's check completes.

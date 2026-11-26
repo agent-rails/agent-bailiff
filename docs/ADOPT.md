@@ -85,7 +85,7 @@ $ docker compose up --build --detach --wait
 
 Compose reads `.env` from this directory for every later command. Without these variables it falls back to the bundled stub upstream and `./tasks` without an error, so keep the file. The gateway listens on `127.0.0.1:18090` (`GATEWAY_PORT`). Any local user can connect to that port, but a call goes through only with a valid task and the agent's key.
 
-Store the credential. The custodian reads it from stdin. Keep the token file mode 0600, owned by the operator, and delete it once the command prints `stored`, or pipe the token from a secret manager:
+Store the credential. The custodian reads it from stdin. Keep the token file mode 0600, owned by the operator, and delete it once the command prints `stored`, or pipe the token from a secret manager. The command refuses a credential that echo redaction cannot cover, such as one with a form under 12 characters (D22 in [DECISIONS.md](DECISIONS.md)):
 
 ```console
 $ docker compose run --rm --no-deps -T custodian -m agent_bailiff.cli custodian put-credential \
@@ -241,7 +241,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - With `ca_file` in the upstream config, the gateway trusts only those certificates for the upstream, not the system roots.
 - The agent user can read its own key and `task.json`, so anything running as that user can make calls within the task until it expires or is revoked.
 
-- Echo redaction is best-effort suppression of literal forms in a call's own result, not a containment boundary. A form under 12 characters, such as a short Basic password, an echo split across strings or transformed, JSON-RPC error text and event-stream side messages are not redacted. The proxy never shows the model error text or side messages, but any client that reaches the gateway port directly, the agent user included, can read them. Prefer short-lived, target-bound credentials.
+- Echo redaction is best-effort suppression of literal forms in a call's own result, not a containment boundary. A form under 12 characters, such as a short Basic password (`put-credential` refuses one unless stored with `--accept-unredactable`), an echo split across strings or transformed, JSON-RPC error text and event-stream side messages are not redacted. The proxy never shows the model error text or side messages, but any client that reaches the gateway port directly, the agent user included, can read them. Prefer short-lived, target-bound credentials.
 
 ## Upgrading to echo redaction
 
