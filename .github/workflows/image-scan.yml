@@ -96,9 +96,10 @@ jobs:
           docker build "${build[@]}" --tag "$IMAGE" .
       - name: Check libzstd1
         run: |
-          version="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${Version}' libzstd1)"
-          echo "libzstd1 $version"
-          dpkg --compare-versions "$version" ge "$LIBZSTD_FLOOR"
+          status="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${db:Status-Abbrev} ${Version}' libzstd1)"
+          echo "libzstd1 $status"
+          test "${status:0:4}" = "ii  "
+          dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
           "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update

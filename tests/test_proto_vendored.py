@@ -175,8 +175,12 @@ def test_the_image_scan_downloads_the_database_once_per_day():
 def test_the_image_scan_checks_libzstd_in_the_built_image():
     text = IMAGE_SCAN.read_text()
     assert f"LIBZSTD_FLOOR: {LIBZSTD_FLOOR}\n" in text
-    assert "--entrypoint dpkg-query \"$IMAGE\" --show --showformat='${Version}' libzstd1" in text
-    assert 'dpkg --compare-versions "$version" ge "$LIBZSTD_FLOOR"' in text
+    assert (
+        '--entrypoint dpkg-query "$IMAGE" --show --showformat=\'${db:Status-Abbrev} ${Version}\' libzstd1)"\n'
+        '          echo "libzstd1 $status"\n'
+        '          test "${status:0:4}" = "ii  "\n'
+        '          dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"\n'
+    ) in text
 
 
 def test_every_python_stage_installs_the_fixed_libzstd():
