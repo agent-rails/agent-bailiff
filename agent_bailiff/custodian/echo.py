@@ -46,8 +46,13 @@ def needles(header_value: str) -> tuple[str, ...]:
     return tuple(sorted(kept, key=lambda needle: (-len(needle), needle)))
 
 
-def too_short_to_redact(header_value: str) -> bool:
-    return any(len(form) < MIN_NEEDLE_LENGTH for form in _forms(header_value) if form)
+def redaction_problem(header_value: str) -> str | None:
+    parts = header_value.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "basic" and len(_basic_forms(parts[1])) != 2:
+        return "its basic token is not base64 of a UTF-8 user:password"
+    if any(len(form) < MIN_NEEDLE_LENGTH for form in _forms(header_value) if form):
+        return f"a form of it is shorter than {MIN_NEEDLE_LENGTH} characters"
+    return None
 
 
 def redact(result: bytes, needles: Sequence[str]) -> Redaction | None:

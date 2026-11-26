@@ -1,15 +1,18 @@
 import base64
 import json
 import logging
+import os
+import sqlite3
 
 import pytest
 import test_custodian
 import test_custodian_release
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from test_custodian import DEPLOY_SECRET, Refused, Released, custodian_entries
 from test_decide import NOW, TENANT, make_root
 
 from agent_bailiff.client.client import REFUSAL_REASONS
-from agent_bailiff.custodian import ClaimsStore, CredentialStore, CustodianConfig, LocalBackend
+from agent_bailiff.custodian import ClaimsStore, CredentialStore, CustodianConfig, LocalBackend, credential_context
 from agent_bailiff.custodian import custodian as custodian_module
 from agent_bailiff.custodian.config import (
     DEFAULT_INFLIGHT_MAX,
@@ -153,25 +156,67 @@ def test_a_release_holds_the_released_value_under_the_clearance_hash(make_custod
     assert held.entry.clearance_digest == token_hash(token)
 
 
-def test_a_credential_too_short_to_redact_is_released_with_a_warning(make_custodian, issue, state, caplog):
+def store_unchecked(state, secret):
+    backend = LocalBackend.load(state / "kek")
+    binding = (TENANT, "deploy-api", "deploy.example")
+    context = credential_context(*binding)
+    dek = os.urandom(32)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute(
+        "INSERT OR REPLACE INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (*binding, backend.wrap(dek, context), nonce, ciphertext),
+    )
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("secret", "problem", "hidden"),
+    [
+        (b"Bearer short-key", "shorter than 12 characters", ["short-key"]),
+        (b"Basic dXNlcjpzaG9ydHB3", "shorter than 12 characters", ["dXNlcjpzaG9ydHB3", "shortpw"]),
+        (
+            b"Basic " + base64.b64encode(b"deploy-user:\xff\xfepw"),
+            "not base64 of a UTF-8 user:password",
+            [base64.b64encode(b"deploy-user:\xff\xfepw").decode()],
+        ),
+    ],
+)
+def test_a_stored_credential_echo_redaction_cannot_cover_is_refused(
+    make_custodian, issue, state, workdir, caplog, secret, problem, hidden
+):
+    store_unchecked(state, secret)
+    request, token = issue()
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1) == Refused(
+            "credential_unredactable"
+        )
+    assert "no accepted exception" in caplog.text and problem in caplog.text
+    assert "'deploy-api'" in caplog.text
+    assert not any(value in caplog.text for value in hidden)
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["credential_unredactable"]
+
+
+def test_a_refused_unredactable_credential_leaves_the_op_id_releasable(make_custodian, issue, state):
+    store_unchecked(state, b"Bearer short-key")
+    request, token = issue()
+    custodian = make_custodian(monotonic_ns=Clock())
+    assert custodian.release(token, request, NOW + 1) == Refused("credential_unredactable")
+    store_unchecked(state, DEPLOY_SECRET)
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+
+
+def test_a_credential_with_an_accepted_exception_is_released_with_a_warning(make_custodian, issue, state, caplog):
     store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
-    store.put(TENANT, "deploy-api", "deploy.example", b"Bearer short-key")
+    store.put(TENANT, "deploy-api", "deploy.example", b"Basic dXNlcjpzaG9ydHB3", accept_unredactable=True)
     store.close()
     request, token = issue()
     with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
         assert isinstance(make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1), Released)
-    assert "cannot be redacted" in caplog.text
-    assert "short-key" not in caplog.text
-
-
-def test_a_short_basic_password_is_released_with_a_warning(make_custodian, issue, state, caplog):
-    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
-    store.put(TENANT, "deploy-api", "deploy.example", b"Basic dXNlcjpzaG9ydHB3")
-    store.close()
-    request, token = issue()
-    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
-        assert isinstance(make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1), Released)
-    assert "cannot be redacted" in caplog.text
+    assert "accepted exception and cannot be redacted" in caplog.text
     assert "dXNlcjpzaG9ydHB3" not in caplog.text
     assert "shortpw" not in caplog.text
 

@@ -17,19 +17,12 @@ from agent_warrant.trust import IssuerTrustPolicy
 from agent_bailiff.custodian.bindings import Binding, BindingTable, CredentialBinding, EffectorBinding
 from agent_bailiff.custodian.claims import ClaimsStore, ClaimsUnavailable
 from agent_bailiff.custodian.config import CustodianConfig
-from agent_bailiff.custodian.echo import (
-    MIN_NEEDLE_LENGTH,
-    Oversize,
-    UnreadableResult,
-    needles,
-    redact,
-    too_short_to_redact,
-)
+from agent_bailiff.custodian.echo import Oversize, UnreadableResult, needles, redact, redaction_problem
 from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, InflightReleases
 from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
-from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
+from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable, header_value
 from agent_bailiff.decide.clearance import Clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
@@ -488,12 +481,21 @@ class Custodian:
 
     def _decrypt(self, binding: CredentialBinding) -> str:
         try:
-            secret = self._store.get(binding.tenant, binding.credential_id, binding.target)
+            stored = self._store.get(binding.tenant, binding.credential_id, binding.target)
         except CredentialUnavailable:
             raise _Refusal("credential_unavailable") from None
-        value = _header_value(secret)
+        value = header_value(stored.secret)
         if value is None:
             raise _Refusal("credential_unavailable")
+        problem = redaction_problem(value)
+        if problem is not None and stored.exception is None:
+            logger.warning(
+                "stored credential %r for target %r cannot be redacted from results and has no accepted exception: %s",
+                binding.credential_id,
+                binding.target,
+                problem,
+            )
+            raise _Refusal("credential_unredactable")
         return value
 
     def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str, started: int) -> None:
@@ -609,22 +611,7 @@ def _check_scope(verified: _Verified) -> None:
         raise _Refusal(refusal)
 
 
-def _warn_unredactable(header_value: str) -> None:
-    if too_short_to_redact(header_value):
-        logger.warning(
-            "released credential, or its decoded basic password, is shorter than %d characters"
-            " and cannot be redacted from results",
-            MIN_NEEDLE_LENGTH,
-        )
-
-
-def _header_value(secret: bytes) -> str | None:
-    try:
-        value = secret.decode("ascii")
-    except UnicodeDecodeError:
-        return None
-    if not value or value != value.strip(" \t"):
-        return None
-    if not all(character in " \t" or "!" <= character <= "~" for character in value):
-        return None
-    return value
+def _warn_unredactable(value: str) -> None:
+    problem = redaction_problem(value)
+    if problem is not None:
+        logger.warning("released credential has an accepted exception and cannot be redacted from results: %s", problem)
