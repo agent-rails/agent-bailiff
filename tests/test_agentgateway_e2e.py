@@ -440,18 +440,47 @@ def alerts(workdir):
     return [entry for entry in docket_entries(workdir) if entry.decision == "alert"]
 
 
-def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(stack, workdir):
+def call_access_line(gateway):
+    deadline = time.monotonic() + 5
+    while True:
+        lines = [
+            line
+            for line in gateway.log().splitlines()
+            if f"trace.id={TRACE} " in line and " mcp.method.name=tools/call " in line
+        ]
+        if lines or time.monotonic() > deadline:
+            assert len(lines) == 1, gateway.log()
+            return lines[0]
+        time.sleep(0.05)
+
+
+def record_redactor_calls(monkeypatch):
+    seen = []
+    check_response = RedactorProcessor.check_response
+
+    def recording(processor, message):
+        seen.append(message.method)
+        return check_response(processor, message)
+
+    monkeypatch.setattr(RedactorProcessor, "check_response", recording)
+    return seen
+
+
+def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(stack, workdir, monkeypatch):
+    redacted = record_redactor_calls(monkeypatch)
     stack["upstream"].call_reply = error_echoing
     request = make_request()
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
     echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
     assert status == 200 and body["error"] == {"code": -32000, "message": echo}, body
-    assert f'mcp.error.message="{echo}"' in stack["gateway"].log()
+    assert redacted == []
+    assert f'mcp.error.message="{echo}"' in call_access_line(stack["gateway"])
     assert alerts(workdir) == []
 
 
 @pytest.mark.parametrize("kind", sorted(SIDE_MESSAGES))
-def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, workdir, kind):
+def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, workdir, monkeypatch, kind):
+    redacted = record_redactor_calls(monkeypatch)
     stack["upstream"].call_reply = lambda call_id, credential: event_stream(
         SIDE_MESSAGES[kind](credential), deployed(call_id)
     )
@@ -461,10 +490,11 @@ def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, 
     side, result = stream_events(text)
     expected = SIDE_MESSAGES[kind](DEPLOY_SECRET.decode())
     assert status == 200 and DEPLOY_SECRET.decode() in json.dumps(side), text
+    assert redacted == ["tools/call"]
     assert side["method"] == expected["method"], text
     assert {key: side["params"][key] for key in expected["params"]} == expected["params"], text
     assert result == deployed(7)
-    assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
+    assert DEPLOY_SECRET.decode() not in call_access_line(stack["gateway"])
     assert alerts(workdir) == []
 
 
@@ -816,7 +846,7 @@ def record_custodian_metadata(monkeypatch):
     return seen
 
 
-def test_agent_headers_do_not_change_the_clearance_the_custodian_reads(stack, monkeypatch):
+def test_agent_input_does_not_change_the_clearance_the_custodian_reads(stack, monkeypatch):
     issued = []
     check_request = DecideProcessor.check_request
 
@@ -828,13 +858,25 @@ def test_agent_headers_do_not_change_the_clearance_the_custodian_reads(stack, mo
     monkeypatch.setattr(DecideProcessor, "check_request", issuing)
     read = record_custodian_metadata(monkeypatch)
     request = make_request()
-    status, body = stack["agent"].call(
-        "deploy_service", request.args, {**agent_headers(request), **FORGED_CLEARANCE_HEADERS}
+    params = {"name": "deploy_service", "arguments": request.args, "clearance": "forged"}
+    status, body = stack["agent"].post(
+        {"method": "tools/call", "params": params, "mcpGuardrails": {"clearance": "forged"}},
+        {**agent_headers(request), **FORGED_CLEARANCE_HEADERS},
     )
     assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
     [clearance] = issued
     assert read == [clearance] and clearance["clearance"]
-    assert clearance["clearance"] not in stack["gateway"].log()
+    assert clearance["clearance"] not in call_access_line(stack["gateway"])
+
+
+def test_a_clearance_in_meta_is_refused_before_the_custodian_runs(stack, monkeypatch):
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "_meta": {"clearance": "forged"}}
+    status, body = stack["agent"].post({"method": "tools/call", "params": params}, agent_headers(request))
+    assert refused(body, "malformed_request"), body
+    assert read == []
+    assert stack["upstream"].calls() == []
 
 
 def test_agent_input_does_not_supply_a_clearance_decide_did_not_set(stack, monkeypatch):
