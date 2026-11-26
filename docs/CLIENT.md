@@ -76,7 +76,7 @@ sub_agent = BailiffClient(url, Holder(task_root, links, sub_agent_key, decider_i
 - `OutcomeUnknown` from a JSON-RPC error carries only the error code (`jsonrpc_error_<code>`), never the error text, and event-stream messages for other ids are dropped. Neither passes the gateway's echo redaction, so this keeps an echoed credential from the agent.
 - The classification relies on the gateway running a config that passed check-config. A client pointed at a gateway without the guard cannot tell an upstream's text from a refusal.
 - A non-200 status after the gateway forwarded the call, such as an upstream rejecting the released credential, is `OutcomeUnknown`.
-- An `OutcomeUnknown` from a `response_*` refusal means the upstream ran the call and may have acted; only its result was withheld. The custodian records the refusal in the docket (see AGENTGATEWAY.md). Reconcile against the target before going on, and do not retry a call that is not idempotent.
+- An `OutcomeUnknown` from a `response_*` refusal means the upstream ran the call and may have acted; only its result was withheld. The custodian tries to record the refusal in the docket; some cases are only logged (see AGENTGATEWAY.md). Reconcile against the target before going on, and do not retry a call that is not idempotent.
 - After `OutcomeUnknown`, do not assume the call failed. Preparing the call again is a new operation with a new nonce and spends budget again.
 - `GatewayError` is raised only by session setup and `tools/list`.
 
