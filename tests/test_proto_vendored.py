@@ -103,12 +103,14 @@ def test_every_image_scan_exception_is_scoped_explained_and_expiring():
     entries = json.loads(SCAN_IGNORES.read_text())["vulnerabilities"]
     assert entries
     for entry in entries:
-        assert set(entry) == {"id", "paths", "statement", "expired_at"}, entry
+        assert set(entry) == {"id", "paths", "purls", "statement", "expired_at"}, entry
         assert re.fullmatch(r"CVE-\d{4}-\d+", entry["id"])
         assert entry["paths"] and all(entry["paths"]), entry
+        assert entry["purls"] and all(re.fullmatch(r"pkg:\w+/\S+@\S+", purl) for purl in entry["purls"]), entry
         assert entry["statement"].strip(), entry
         expires = datetime.strptime(entry["expired_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-        assert expires - datetime.now(UTC) <= timedelta(days=MAX_IGNORE_DAYS), entry
+        now = datetime.now(UTC)
+        assert now < expires <= now + timedelta(days=MAX_IGNORE_DAYS), entry
 
 
 def test_the_image_scan_applies_the_exceptions():
