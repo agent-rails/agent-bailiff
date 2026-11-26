@@ -60,6 +60,7 @@ RESPONSE_REASONS = frozenset(
     }
 )
 MAX_RECORDED_REFUSALS = 65536
+REFUSAL_ENTRY = "docket entry for custodian refusal (tenant %r, task %r, op %r, reason %s)"
 
 logger = logging.getLogger(__name__)
 
@@ -511,19 +512,15 @@ class Custodian:
             )
         except DocketError as exc:
             if exc.reason == "state_write_failed":
-                logger.warning(
-                    "docket entry for a custodian refusal was recorded but its head was not saved", exc_info=True
-                )
+                logger.warning(f"{REFUSAL_ENTRY} was recorded but its head was not saved", *key, exc_info=True)
                 return
             if exc.reason in UNACKNOWLEDGED:
-                logger.warning(
-                    "docket entry for a custodian refusal was not acknowledged and may be recorded", exc_info=True
-                )
+                logger.warning(f"{REFUSAL_ENTRY} was not acknowledged and may be recorded", *key, exc_info=True)
             else:
-                logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
+                logger.warning(f"{REFUSAL_ENTRY} was not written", *key, exc_info=True)
             self._forget_refusal(key)
         except Exception:
-            logger.warning("docket entry for a custodian refusal was not written", exc_info=True)
+            logger.warning(f"{REFUSAL_ENTRY} was not written", *key, exc_info=True)
             self._forget_refusal(key)
 
     def _forget_refusal(self, key: tuple[str, str, str, str]) -> None:
