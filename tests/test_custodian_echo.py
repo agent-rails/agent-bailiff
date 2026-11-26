@@ -3,13 +3,23 @@ import json
 import logging
 import os
 import sqlite3
+from dataclasses import replace
 
 import pytest
 import test_custodian
 import test_custodian_release
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from test_custodian import DEPLOY_SECRET, Refused, Released, custodian_entries
-from test_decide import NOW, TENANT, make_root
+from test_custodian import (
+    DEPLOY_SECRET,
+    FORGER_KEY,
+    SIGNER_CUSTODIAN_ID,
+    Refused,
+    Released,
+    clearance_for,
+    custodian_entries,
+    sign_clearance,
+)
+from test_decide import NOW, TENANT, make_request, make_root
 
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian import ClaimsStore, CredentialStore, CustodianConfig, LocalBackend, credential_context
@@ -317,11 +327,12 @@ def test_an_unknown_clearance_is_unmatched(make_custodian, issue):
 
 
 @pytest.mark.parametrize("token", [None, "", 7])
-def test_a_missing_clearance_is_refused(make_custodian, issue, token):
+def test_a_missing_clearance_is_refused(make_custodian, issue, workdir, token):
     custodian, _, _ = released(make_custodian, issue)
     assert custodian.check_response(token, call_result(SECRET), NOW + 2) == ResponseRefused(
         "response_clearance_missing"
     )
+    assert [entry.decision for entry in custodian_entries(workdir)] == ["release"]
 
 
 def test_a_non_ascii_clearance_is_unmatched(make_custodian, issue):
@@ -340,8 +351,8 @@ def test_an_oversize_redacted_result_is_refused(make_custodian, issue):
     assert custodian.check_response(token, raw, NOW + 2) == ResponseRefused("response_oversize")
 
 
-def test_an_internal_error_is_refused(make_custodian, issue, monkeypatch, caplog):
-    custodian, token, _ = released(make_custodian, issue)
+def test_an_internal_error_is_refused(make_custodian, issue, workdir, monkeypatch, caplog):
+    custodian, token, result = released(make_custodian, issue)
 
     def explode(result, needles):
         raise RuntimeError("boom")
@@ -352,6 +363,8 @@ def test_an_internal_error_is_refused(make_custodian, issue, monkeypatch, caplog
             "response_internal_error"
         )
     assert "deploy-secret" not in caplog.text
+    assert result.op_id in caplog.text
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["ok", "response_internal_error"]
 
 
 def test_an_expired_release_is_unmatched(make_custodian, issue):
@@ -400,3 +413,114 @@ def test_each_release_of_an_unredactable_credential_is_refused_recorded_and_logg
             assert custodian.release(token, request, NOW + 1) == Refused("credential_unredactable")
     assert [entry.reason for entry in custodian_entries(workdir)] == ["credential_unredactable"] * 3
     assert caplog.text.count("no accepted exception") == 3
+
+
+class FailRefusalOnceDocket:
+    def __init__(self, inner):
+        self.inner = inner
+        self.failed = False
+
+    def append(self, entry):
+        if not self.failed and entry.decision == "refuse":
+            self.failed = True
+            raise OSError("docket sink is down")
+        return self.inner.append(entry)
+
+
+OVERSIZE = json.dumps({"text": "é" * 1_000_000 + SECRET}, ensure_ascii=False).encode()
+
+
+@pytest.mark.parametrize(("raw", "reason"), [(b'{"a": NaN}', "response_unreadable"), (OVERSIZE, "response_oversize")])
+def test_a_refused_result_is_recorded_under_its_release(make_custodian, issue, workdir, raw, reason):
+    custodian, token, result = released(make_custodian, issue)
+    assert custodian.check_response(token, raw, NOW + 2) == ResponseRefused(reason)
+    release_entry, refusal = custodian_entries(workdir)
+    assert (refusal.decision, refusal.reason, refusal.parent_entry, refusal.at) == (
+        "refuse",
+        reason,
+        result.entry_id,
+        NOW + 2,
+    )
+    assert (refusal.op_id, refusal.trace_id, refusal.handles) == (
+        release_entry.op_id,
+        release_entry.trace_id,
+        release_entry.handles,
+    )
+    assert refusal.clearance_digest == token_hash(token)
+    assert (refusal.performed, refusal.credential_tier, refusal.latency_ms) == (False, None, None)
+
+
+def test_a_result_after_its_release_expired_is_recorded_once_under_the_decide_entry(
+    make_custodian, issue, workdir, caplog
+):
+    clock = Clock()
+    request, token = issue()
+    custodian = make_custodian(monotonic_ns=clock)
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    clock.now += TTL_NS
+    later = NOW + DEFAULT_INFLIGHT_TTL + 1
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        for _ in range(2):
+            assert custodian.check_response(token, call_result("ok"), later) == ResponseRefused("response_unmatched")
+    release_entry, refusal = custodian_entries(workdir)
+    assert (refusal.decision, refusal.reason, refusal.at, refusal.parent_entry) == (
+        "refuse",
+        "response_unmatched",
+        later,
+        release_entry.parent_entry,
+    )
+    assert (refusal.op_id, refusal.trace_id, refusal.tenant, refusal.task_root) == (
+        release_entry.op_id,
+        release_entry.trace_id,
+        release_entry.tenant,
+        release_entry.task_root,
+    )
+    assert refusal.handles == {name: release_entry.handles[name] for name in ("task", "tenant", "root")}
+    assert refusal.clearance_digest == token_hash(token)
+    assert refusal.latency_ms is None
+    assert caplog.text.count(f"call result for op {release_entry.op_id}") == 2
+
+
+def test_an_unmatched_result_after_a_restart_is_recorded(make_custodian, issue, workdir):
+    request, token = issue()
+    assert isinstance(make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1), Released)
+    restarted = make_custodian(monotonic_ns=Clock())
+    assert restarted.check_response(token, call_result("ok"), NOW + 2) == ResponseRefused("response_unmatched")
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["ok", "response_unmatched"]
+
+
+@pytest.mark.parametrize("variant", ["forged", "other_custodian", "garbage", "non_ascii"])
+def test_an_unmatched_result_with_an_unverified_clearance_is_only_logged(
+    make_custodian, workdir, caplog, issue, variant
+):
+    root = make_root()
+    issue(root)
+    clearance = clearance_for(make_request(root), root)
+    tokens = {
+        "forged": sign_clearance(clearance, FORGER_KEY),
+        "other_custodian": sign_clearance(replace(clearance, aud=SIGNER_CUSTODIAN_ID)),
+        "garbage": "not.a-clearance",
+        "non_ascii": "clé",
+    }
+    custodian = make_custodian(monotonic_ns=Clock())
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert custodian.check_response(tokens[variant], call_result("ok"), NOW + 2) == ResponseRefused(
+            "response_unmatched"
+        )
+    assert "clearance does not verify" in caplog.text
+    assert custodian_entries(workdir) == []
+
+
+def test_an_unmatched_refusal_the_docket_did_not_take_is_recorded_on_the_next_result(
+    make_custodian, issue, open_docket, workdir, caplog
+):
+    root = make_root()
+    issue(root)
+    token = sign_clearance(clearance_for(make_request(root), root))
+    docket = FailRefusalOnceDocket(open_docket("custodian", "custodian-1", test_custodian.CUSTODIAN_KEY))
+    custodian = make_custodian(docket=docket, monotonic_ns=Clock())
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        for _ in range(3):
+            assert custodian.check_response(token, call_result("ok"), NOW + 2) == ResponseRefused("response_unmatched")
+    assert "response_unmatched) was not written" in caplog.text
+    assert [entry.reason for entry in custodian_entries(workdir)] == ["response_unmatched"]
