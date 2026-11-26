@@ -247,22 +247,22 @@ def test_the_fetcher_replaces_an_unreadable_installed_token(token_dir):
 
 
 @pytest.mark.parametrize(
-    ("source", "message"),
+    ("make_source", "message"),
     [
-        (lambda project, name: b"not json", "not JSON"),
-        (secret(extra="x"), "exactly effector, audit"),
-        (secret(audit=account_token("effector-audit", lifetime=3600)), "does not live at most 600 s"),
-        (secret(effector=account_token("effector", issued=int(time.time()) - 560)), "expires within 60 s"),
-        (secret(effector=account_token("effector-audit"), audit=account_token("effector")), "names"),
-        (secret(effector=account_token("default")), "names 'system:serviceaccount:bailiff-system:default'"),
-        (secret(effector=account_token("effector", issued=int(time.time()) + 100000)), "issued in the future"),
-        (secret(effector=account_token("effector") + "é"), "not an ASCII JWT"),
-        (secret(effector="a.b"), "not an ASCII JWT"),
+        (lambda: lambda project, name: b"not json", "not JSON"),
+        (lambda: secret(extra="x"), "exactly effector, audit"),
+        (lambda: secret(audit=account_token("effector-audit", lifetime=3600)), "does not live at most 600 s"),
+        (lambda: secret(effector=account_token("effector", issued=int(time.time()) - 560)), "expires within 60 s"),
+        (lambda: secret(effector=account_token("effector-audit"), audit=account_token("effector")), "names"),
+        (lambda: secret(effector=account_token("default")), "names 'system:serviceaccount:bailiff-system:default'"),
+        (lambda: secret(effector=account_token("effector", issued=int(time.time()) + 100000)), "issued in the future"),
+        (lambda: secret(effector=account_token("effector") + "é"), "not an ASCII JWT"),
+        (lambda: secret(effector="a.b"), "not an ASCII JWT"),
     ],
 )
-def test_the_fetcher_writes_nothing_from_a_bad_secret(token_dir, source, message):
+def test_the_fetcher_writes_nothing_from_a_bad_secret(token_dir, make_source, message):
     with pytest.raises(fetch_tokens.FetchError, match=message):
-        fetch(token_dir, source)
+        fetch(token_dir, make_source())
     assert list(token_dir["effector"].parent.iterdir()) == []
 
 
