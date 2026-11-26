@@ -1,6 +1,19 @@
 name: image-scan
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/image-scan.yml
+      - .trivyignore.yaml
+      - deploy/gke/Dockerfile.minter
+      - deploy/kubernetes/Dockerfile.webhook
+      - deploy/kubernetes/webhook-requirements.txt
+      - examples/live-run/Dockerfile
+      - examples/live-run/package-lock.json
+      - examples/live-run/package.json
+      - examples/quickstart/Dockerfile
+      - examples/quickstart/trace-requirements.txt
+      - requirements-ci.txt
   schedule:
     - cron: "23 5 * * 1"
   workflow_dispatch:

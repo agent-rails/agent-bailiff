@@ -134,6 +134,23 @@ def test_the_image_scan_applies_and_reports_the_exceptions():
     assert "--ignorefile .trivyignore.yaml --show-suppressed" in text
 
 
+def test_the_image_scan_runs_on_pull_requests_that_change_an_image():
+    text = IMAGE_SCAN.read_text()
+    paths = re.search(r"^on:\n  pull_request:\n    paths:\n((?:      - \S+\n)+)  schedule:\n", text, re.MULTILINE)
+    assert paths
+    assert set(re.findall(r"- (\S+)", paths.group(1))) == {
+        *tracked_image_files(),
+        ".github/workflows/image-scan.yml",
+        ".trivyignore.yaml",
+        "deploy/kubernetes/webhook-requirements.txt",
+        "examples/live-run/package-lock.json",
+        "examples/live-run/package.json",
+        "examples/quickstart/trace-requirements.txt",
+        "requirements-ci.txt",
+    }
+    assert '    - cron: "23 5 * * 1"\n  workflow_dispatch:\n' in text
+
+
 def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
     text = IMAGE_SCAN.read_text()
     assert set(re.findall(r"^            build: --file (\S+)", text, re.MULTILINE)) == set(tracked_image_files())
