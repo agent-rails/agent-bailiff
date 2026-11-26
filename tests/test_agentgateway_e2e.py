@@ -26,7 +26,12 @@ from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entrie
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.processors import (
+    CustodianProcessor,
+    DecideProcessor,
+    RedactorProcessor,
+    passed,
+)
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.custodian.echo import MARKER
@@ -108,6 +113,7 @@ class Upstream(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), UpstreamHandler)
         self.requests = []
         self.call_result = {"content": [{"type": "text", "text": "deployed"}]}
+        self.call_reply = None
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -141,6 +147,17 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_response(202)
             self.end_headers()
             return
+        if body["method"] == "tools/call" and self.server.call_reply:
+            content_type, data = self.server.call_reply(body["id"], self.headers["authorization"])
+        else:
+            content_type, data = "application/json", self.result(body)
+        self.send_response(200)
+        self.send_header("content-type", content_type)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def result(self, body):
         results = {
             "initialize": {
                 "protocolVersion": body.get("params", {}).get("protocolVersion", "2025-06-18"),
@@ -150,12 +167,7 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             "tools/list": {"tools": [{"name": "deploy_service", "inputSchema": {"type": "object"}}]},
             "tools/call": self.server.call_result,
         }
-        data = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": results.get(body["method"], {})}).encode()
-        self.send_response(200)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        return json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": results.get(body["method"], {})}).encode()
 
     def do_GET(self):
         self.send_response(405)
@@ -236,6 +248,10 @@ class Agent:
         return self.send(message, headers)
 
     def send(self, message, headers=None):
+        status, text = self.exchange(message, headers)
+        return status, _json_rpc(text)
+
+    def exchange(self, message, headers=None):
         request_headers = {
             "content-type": "application/json",
             "accept": "application/json, text/event-stream",
@@ -248,9 +264,9 @@ class Agent:
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 self.session = response.headers.get("mcp-session-id") or self.session
-                return response.status, _json_rpc(response.read().decode())
+                return response.status, response.read().decode()
         except urllib.error.HTTPError as error:
-            return error.code, _json_rpc(error.read().decode())
+            return error.code, error.read().decode()
 
 
 def _json_rpc(text):
@@ -384,6 +400,102 @@ def test_a_result_without_an_echo_reaches_the_agent_unchanged(stack):
     request = make_request()
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
     assert status == 200 and body["result"] == {"content": [{"type": "text", "text": "deployed"}]}, body
+
+
+def stream_events(text):
+    return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def event_stream(*messages):
+    return "text/event-stream", "".join(
+        f"event: message\ndata: {json.dumps(message)}\n\n" for message in messages
+    ).encode()
+
+
+def deployed(call_id):
+    return {"jsonrpc": "2.0", "id": call_id, "result": {"content": [{"type": "text", "text": "deployed"}]}}
+
+
+def error_echoing(call_id, credential):
+    error = {"code": -32000, "message": f"upstream rejected {credential}"}
+    return "application/json", json.dumps({"jsonrpc": "2.0", "id": call_id, "error": error}).encode()
+
+
+SIDE_MESSAGES = {
+    "notification": lambda credential: {
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {"level": "info", "data": f"using {credential}"},
+    },
+    "server_request": lambda credential: {
+        "jsonrpc": "2.0",
+        "id": "s-1",
+        "method": "elicitation/create",
+        "params": {"message": f"confirm {credential}", "requestedSchema": {"type": "object", "properties": {}}},
+    },
+}
+
+
+def alerts(workdir):
+    return [entry for entry in docket_entries(workdir) if entry.decision == "alert"]
+
+
+def call_access_line(gateway):
+    deadline = time.monotonic() + 5
+    while True:
+        lines = [
+            line
+            for line in gateway.log().splitlines()
+            if f"trace.id={TRACE} " in line and " mcp.method.name=tools/call " in line
+        ]
+        if lines or time.monotonic() > deadline:
+            assert len(lines) == 1, gateway.log()
+            return lines[0]
+        time.sleep(0.05)
+
+
+def record_redactor_calls(monkeypatch):
+    seen = []
+    check_response = RedactorProcessor.check_response
+
+    def recording(processor, message):
+        seen.append(message.method)
+        return check_response(processor, message)
+
+    monkeypatch.setattr(RedactorProcessor, "check_response", recording)
+    return seen
+
+
+def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(stack, workdir, monkeypatch):
+    redacted = record_redactor_calls(monkeypatch)
+    stack["upstream"].call_reply = error_echoing
+    request = make_request()
+    status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
+    echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
+    assert status == 200 and body["error"] == {"code": -32000, "message": echo}, body
+    assert redacted == []
+    assert f'mcp.error.message="{echo}"' in call_access_line(stack["gateway"])
+    assert alerts(workdir) == []
+
+
+@pytest.mark.parametrize("kind", sorted(SIDE_MESSAGES))
+def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, workdir, monkeypatch, kind):
+    redacted = record_redactor_calls(monkeypatch)
+    stack["upstream"].call_reply = lambda call_id, credential: event_stream(
+        SIDE_MESSAGES[kind](credential), deployed(call_id)
+    )
+    request = make_request()
+    call = {"method": "tools/call", "params": {"name": "deploy_service", "arguments": request.args}}
+    status, text = stack["agent"].exchange({"jsonrpc": "2.0", "id": 7, **call}, agent_headers(request))
+    side, result = stream_events(text)
+    expected = SIDE_MESSAGES[kind](DEPLOY_SECRET.decode())
+    assert status == 200 and DEPLOY_SECRET.decode() in json.dumps(side), text
+    assert redacted == ["tools/call"]
+    assert side["method"] == expected["method"], text
+    assert {key: side["params"][key] for key in expected["params"]} == expected["params"], text
+    assert result == deployed(7)
+    assert DEPLOY_SECRET.decode() not in call_access_line(stack["gateway"])
+    assert alerts(workdir) == []
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])
@@ -707,6 +819,83 @@ def test_the_custodian_sees_agent_headers_without_agent_credentials(stack, monke
     [names] = seen
     assert set(EXTRA_AGENT_HEADERS) <= names
     assert not {"authorization", "proxy-authorization", "cookie"} & names
+
+
+FORGED_CLEARANCE_HEADERS = {
+    "clearance": "forged",
+    "extmcp": "forged",
+    "mcpguardrails": "forged",
+    "mcpguardrails.clearance": "forged",
+    "x-bailiff-clearance": "forged",
+}
+
+
+def metadata_values(struct):
+    return {key: value.string_value for key, value in struct.fields.items()}
+
+
+def record_custodian_metadata(monkeypatch):
+    seen = []
+    check_request = CustodianProcessor.check_request
+
+    def recording(processor, message):
+        seen.append(metadata_values(message.metadata_context))
+        return check_request(processor, message)
+
+    monkeypatch.setattr(CustodianProcessor, "check_request", recording)
+    return seen
+
+
+def test_agent_input_does_not_change_the_clearance_the_custodian_reads(stack, monkeypatch):
+    issued = []
+    check_request = DecideProcessor.check_request
+
+    def issuing(processor, message):
+        result = check_request(processor, message)
+        issued.append(metadata_values(result.metadata))
+        return result
+
+    monkeypatch.setattr(DecideProcessor, "check_request", issuing)
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "clearance": "forged"}
+    status, body = stack["agent"].post(
+        {"method": "tools/call", "params": params, "mcpGuardrails": {"clearance": "forged"}},
+        {**agent_headers(request), **FORGED_CLEARANCE_HEADERS},
+    )
+    assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
+    [clearance] = issued
+    assert read == [clearance] and clearance["clearance"]
+    assert clearance["clearance"] not in call_access_line(stack["gateway"])
+
+
+def test_a_clearance_in_meta_is_refused_before_the_custodian_runs(stack, monkeypatch):
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "_meta": {"clearance": "forged"}}
+    status, body = stack["agent"].post({"method": "tools/call", "params": params}, agent_headers(request))
+    assert refused(body, "malformed_request"), body
+    assert read == []
+    assert stack["upstream"].calls() == []
+
+
+def test_agent_input_does_not_supply_a_clearance_decide_did_not_set(stack, monkeypatch):
+    monkeypatch.setattr(DecideProcessor, "_check", lambda processor, message: passed())
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    params = {
+        "name": "deploy_service",
+        "arguments": request.args,
+        "clearance": "forged",
+        "_meta": {"clearance": "forged"},
+    }
+    status, body = stack["agent"].post(
+        {"method": "tools/call", "params": params, "mcpGuardrails": {"clearance": "forged"}},
+        {**agent_headers(request), **FORGED_CLEARANCE_HEADERS},
+    )
+    assert refused(body, "clearance_missing"), body
+    assert read == [{}]
+    assert stack["upstream"].calls() == []
 
 
 def test_free_ports_are_distinct_within_one_call():
