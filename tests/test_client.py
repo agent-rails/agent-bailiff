@@ -62,6 +62,7 @@ sink = test_agentgateway_e2e.sink
 state = test_agentgateway_e2e.state
 workdir = test_agentgateway_e2e.workdir
 writer = test_agentgateway_e2e.writer
+stack_options = test_agentgateway_e2e.stack_options
 stack = test_agentgateway_e2e.stack
 
 

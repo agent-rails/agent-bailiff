@@ -23,6 +23,7 @@ from test_agentgateway_config import CUSTODIAN, DECIDE, REDACTOR, gateway_config
 from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
+from test_custodian_echo import Clock
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
@@ -34,6 +35,7 @@ from agent_bailiff.adapters.agentgateway.processors import (
 )
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
+from agent_bailiff.custodian.config import DEFAULT_INFLIGHT_TTL
 from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.docket import decode_record
 from agent_bailiff.docket.sink import build_kid_index
@@ -114,6 +116,7 @@ class Upstream(ThreadingHTTPServer):
         self.requests = []
         self.call_result = {"content": [{"type": "text", "text": "deployed"}]}
         self.call_reply = None
+        self.call_stream = None
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -147,6 +150,9 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.send_response(202)
             self.end_headers()
             return
+        if body["method"] == "tools/call" and self.server.call_stream:
+            self.stream(self.server.call_stream(body["id"], self.headers["authorization"]))
+            return
         if body["method"] == "tools/call" and self.server.call_reply:
             content_type, data = self.server.call_reply(body["id"], self.headers["authorization"])
         else:
@@ -156,6 +162,17 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def stream(self, messages):
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.end_headers()
+        try:
+            for message in messages:
+                self.wfile.write(f"event: message\ndata: {json.dumps(message)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def result(self, body):
         results = {
@@ -297,9 +314,14 @@ def agent_headers(request):
 
 
 @pytest.fixture
-def stack(binary, workdir, private, make_decider, make_custodian):
+def stack_options():
+    return {}
+
+
+@pytest.fixture
+def stack(binary, workdir, private, make_decider, make_custodian, stack_options):
     upstream = Upstream()
-    custodian = make_custodian()
+    custodian = make_custodian(monotonic_ns=stack_options.get("monotonic_ns"))
     sockets = {
         "decide": workdir / "d" / "decide.sock",
         "custodian": workdir / "c" / "custodian.sock",
@@ -330,6 +352,8 @@ def stack(binary, workdir, private, make_decider, make_custodian):
     config = gateway_config(
         sockets["decide"], sockets["custodian"], upstream.url, sorted(CREDENTIAL_HEADERS), sockets["redactor"]
     )
+    if "timeout" in stack_options:
+        config["mcp"]["policies"]["timeout"] = stack_options["timeout"]
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
     config["config"] = {
         "adminAddr": f"127.0.0.1:{admin}",
@@ -496,6 +520,87 @@ def test_an_echo_in_an_event_stream_side_message_reaches_a_direct_client(stack, 
     assert result == deployed(7)
     assert DEPLOY_SECRET.decode() not in call_access_line(stack["gateway"])
     assert alerts(workdir) == []
+
+
+SHORT_TIMEOUTS = {"requestTimeout": "1s", "backendRequestTimeout": "1s"}
+IDLE_TIMEOUTS = {**SHORT_TIMEOUTS, "responseIdleTimeout": "1s"}
+SILENCE_SECONDS = 2.5
+
+
+def progress(step):
+    return {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": "p-1", "progress": step}}
+
+
+def stream_call(stack, messages):
+    stack["upstream"].call_stream = messages
+    request = make_request()
+    params = {"name": "deploy_service", "arguments": request.args, "_meta": {"progressToken": "p-1"}}
+    return stack["agent"].exchange(
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": params}, agent_headers(request)
+    )
+
+
+def silent_then_deployed(call_id, credential):
+    time.sleep(SILENCE_SECONDS)
+    yield deployed(call_id)
+
+
+def progress_then_silent(call_id, credential):
+    yield progress(1)
+    time.sleep(SILENCE_SECONDS)
+    yield deployed(call_id)
+
+
+@pytest.mark.parametrize("stack_options", [{"timeout": SHORT_TIMEOUTS}])
+def test_upstream_timeouts_do_not_bound_an_event_stream_body_after_its_headers(stack):
+    status, text = stream_call(stack, silent_then_deployed)
+    assert status == 200 and stream_events(text) == [deployed(7)], text
+
+
+@pytest.mark.parametrize("stack_options", [{"timeout": IDLE_TIMEOUTS}])
+def test_a_response_idle_timeout_cuts_a_silent_event_stream_after_the_upstream_acted(stack):
+    started = time.monotonic()
+    with pytest.raises(http.client.IncompleteRead) as cut:
+        stream_call(stack, progress_then_silent)
+    assert 1 <= time.monotonic() - started < SILENCE_SECONDS
+    assert stream_events(cut.value.partial.decode()) == [progress(1.0)]
+    assert len(stack["upstream"].calls()) == 1
+
+
+@pytest.mark.parametrize("stack_options", [{"timeout": IDLE_TIMEOUTS}])
+def test_a_response_idle_timeout_does_not_bound_an_event_stream_that_keeps_sending(stack):
+    steps = 8
+
+    def chatty_then_deployed(call_id, credential):
+        for step in range(steps):
+            yield progress(step)
+            time.sleep(0.4)
+        yield deployed(call_id)
+
+    started = time.monotonic()
+    status, text = stream_call(stack, chatty_then_deployed)
+    assert time.monotonic() - started >= 3
+    assert status == 200 and stream_events(text) == [*map(progress, map(float, range(steps))), deployed(7)], text
+
+
+CUSTODIAN_CLOCK = Clock()
+
+
+@pytest.mark.parametrize("stack_options", [{"monotonic_ns": CUSTODIAN_CLOCK}])
+def test_a_stream_result_after_inflight_ttl_fails_as_unmatched_after_the_upstream_acted(stack, workdir):
+    def deployed_after_ttl(call_id, credential):
+        yield progress(1)
+        CUSTODIAN_CLOCK.now += (DEFAULT_INFLIGHT_TTL + 1) * 1_000_000_000
+        yield deployed(call_id)
+
+    status, text = stream_call(stack, deployed_after_ttl)
+    unmatched = {"jsonrpc": "2.0", "id": 7, "error": {"code": -32001, "message": "response_unmatched"}}
+    assert status == 200 and stream_events(text) == [progress(1.0), unmatched], text
+    assert len(stack["upstream"].calls()) == 1
+    assert [(entry.hop, entry.decision) for entry in docket_entries(workdir)] == [
+        ("decide", "allow"),
+        ("custodian", "release"),
+    ]
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])
