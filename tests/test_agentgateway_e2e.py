@@ -479,28 +479,46 @@ def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_but_not_the_access_
     assert alerts(workdir) == []
 
 
-def test_without_the_access_log_removal_the_gateway_logs_the_error_echo(stack, binary, workdir):
-    config = copy.deepcopy(stack["config"])
-    del config["frontendPolicies"]
+def gateway_log_after_error_echo(stack, binary, directory, config):
     admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
-    config["config"] = {
-        "adminAddr": f"127.0.0.1:{admin}",
-        "statsAddr": f"127.0.0.1:{stats}",
-        "readinessAddr": f"127.0.0.1:{readiness}",
-    }
-    assert any("frontendPolicies" in problem for problem in validate_gateway_config(config, stack["expected"]))
-    directory = workdir / "unfiltered"
+    config["config"].update(
+        {
+            "adminAddr": f"127.0.0.1:{admin}",
+            "statsAddr": f"127.0.0.1:{stats}",
+            "readinessAddr": f"127.0.0.1:{readiness}",
+        }
+    )
     directory.mkdir()
     gateway = Gateway(binary, config, directory)
     try:
         stack["upstream"].call_reply = error_echoing
         request = make_request()
-        status, body = Agent(gateway.port).call("deploy_service", request.args, agent_headers(request))
-        echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
-        assert body.get("error", {}).get("message") == echo, body
-        assert f'mcp.error.message="{echo}"' in call_access_line(gateway)
+        _, body = Agent(gateway.port).call("deploy_service", request.args, agent_headers(request))
+        assert body.get("error", {}).get("message") == f"upstream rejected {DEPLOY_SECRET.decode()}", body
+        deadline = time.monotonic() + 5
+        while TRACE not in gateway.log() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return gateway.log()
     finally:
         gateway.stop()
+
+
+def test_without_the_access_log_removal_the_gateway_logs_the_error_echo(stack, binary, workdir):
+    config = copy.deepcopy(stack["config"])
+    del config["frontendPolicies"]
+    assert any("frontendPolicies" in problem for problem in validate_gateway_config(config, stack["expected"]))
+    log = gateway_log_after_error_echo(stack, binary, workdir / "unfiltered", config)
+    assert f'mcp.error.message="upstream rejected {DEPLOY_SECRET.decode()}"' in log, log
+
+
+def test_a_json_access_log_also_drops_the_error_echo(stack, binary, workdir):
+    config = copy.deepcopy(stack["config"])
+    config["config"]["logging"] = {"format": "json"}
+    assert validate_gateway_config(config, stack["expected"]) == ()
+    log = gateway_log_after_error_echo(stack, binary, workdir / "json", config)
+    calls = [line for line in log.splitlines() if TRACE in line and "tools/call" in line]
+    assert len(calls) == 1 and calls[0].lstrip().startswith("{"), log
+    assert "mcp.error.message" not in log and DEPLOY_SECRET.decode() not in log, log
 
 
 @pytest.mark.parametrize("kind", sorted(SIDE_MESSAGES))

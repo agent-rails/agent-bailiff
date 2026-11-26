@@ -285,6 +285,31 @@ def test_missing_or_unbounded_upstream_timeouts_are_refused(timeout):
     assert any("timeout" in problem for problem in problems_after(change))
 
 
+def test_a_logging_level_and_format_are_accepted():
+    def change(config):
+        config["config"]["logging"] = {"level": "debug", "format": "json"}
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    "logging",
+    [
+        None,
+        "info",
+        {"fields": {"add": {"auth": "request.headers.authorization"}}},
+        {"filter": "true"},
+        {"database": {"url": "postgres://bailiff@127.0.0.1/logs"}},
+        {"level": "info", "fields": {"remove": ["mcp.error.message"]}},
+    ],
+)
+def test_logging_that_adds_filters_or_ships_access_log_fields_is_refused(logging):
+    def change(config):
+        config["config"]["logging"] = logging
+
+    assert any("config.logging" in problem for problem in problems_after(change))
+
+
 def test_an_access_log_removing_more_fields_is_accepted():
     def change(config):
         config["frontendPolicies"]["accessLog"]["remove"].append("http.path")

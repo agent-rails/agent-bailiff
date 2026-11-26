@@ -13,7 +13,7 @@ check-config now requires the gateway config to carry, at the top level:
 "frontendPolicies": {"accessLog": {"remove": ["mcp.error.message"]}}
 ```
 
-agentgateway logs the text of an upstream JSON-RPC error as `mcp.error.message`, and that text can echo a released credential. A config without it, or with any other `frontendPolicies` or access-log setting, fails check-config, and the gateway does not start. Add the block to your `gateway.json` before upgrading; the quickstart template and `examples/live-run` already have it. To roll back, an earlier release refuses the unknown `frontendPolicies` key, so remove the block.
+agentgateway logs the text of an upstream JSON-RPC error as `mcp.error.message`, and that text can echo a released credential. A config without it, with any other `frontendPolicies` or access-log setting, or with `config.logging` keys other than `level` and `format`, fails check-config, and the gateway does not start. Add the block to your `gateway.json` before upgrading; the quickstart template and `examples/live-run` already have it. To roll back, an earlier release refuses the unknown `frontendPolicies` key, so remove the block.
 
 ## Credential checks
 

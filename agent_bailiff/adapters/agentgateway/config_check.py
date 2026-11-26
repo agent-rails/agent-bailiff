@@ -18,6 +18,7 @@ from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_pl
 
 TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
+LOGGING_KEYS = frozenset({"level", "format"})
 MCP_KEYS = frozenset(
     {"port", "targets", "policies", "statefulMode", "prefixMode", "failureMode", "server", "sseKeepAlive"}
     | {"dnsRebindingProtection"}
@@ -95,6 +96,7 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
     config = document.get("config", {})
     if isinstance(config, dict):
         _only_keys(problems, "config", config, CONFIG_KEYS)
+        _check_logging(problems, config.get("logging", {}))
     else:
         problems.append("config must be an object")
     mcp = document.get("mcp")
@@ -109,6 +111,14 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
     _check_access_log(problems, document.get("frontendPolicies"))
     _check_credential_headers(problems, document, expected.credential_headers)
     return tuple(problems)
+
+
+def _check_logging(problems: list[str], logging: object) -> None:
+    if not isinstance(logging, dict) or not set(logging) <= LOGGING_KEYS:
+        problems.append(
+            "config.logging may set only level and format; its other keys add, filter or ship access-log fields "
+            "outside frontendPolicies.accessLog"
+        )
 
 
 def _check_access_log(problems: list[str], frontend: object) -> None:
