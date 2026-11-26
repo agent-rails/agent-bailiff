@@ -227,9 +227,15 @@ def put_credential(
 
 
 def check_credentials(settings: CustodianSettings) -> CredentialCheck:
+    bindings = BindingTable.load(settings.bindings)
+    required = {
+        (binding.tenant, binding.credential_id, binding.target)
+        for binding in bindings.credential_bindings
+        if not binding.canary
+    }
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
-        return store.check()
+        return store.check(required)
     finally:
         store.close()
 

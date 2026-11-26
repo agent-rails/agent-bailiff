@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import logging
 import os
 import sqlite3
@@ -478,3 +479,34 @@ def test_check_of_a_store_changed_after_open_is_refused(state, store, backend):
     replace_with_another_store(state / "credentials.db", backend)
     with pytest.raises(CredentialUnavailable, match="unreadable"):
         store.check()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("tenant", b"tenant-a"),
+        ("nonce", "not-bytes"),
+        ("nonce", 7),
+        ("ciphertext", "not-bytes"),
+        ("wrapped_dek", 7),
+    ],
+)
+def test_check_reports_a_malformed_row_without_stopping(state, store, column, value):
+    store.put(*BINDING, SECRET)
+    store.put("tenant-a", "other-api", "deploy.example", SECRET)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute(f"UPDATE credentials SET {column} = ? WHERE credential_id = 'deploy-api'", (value,))
+    connection.commit()
+    connection.close()
+    check = store.check()
+    assert check.checked == 2
+    assert [found.problem for found in check.problems] == ["credential row is malformed"]
+    assert all(isinstance(field, str) for field in dataclasses.astuple(check.problems[0]))
+
+
+def test_check_reports_a_required_binding_with_no_stored_credential(store):
+    store.put(*BINDING, SECRET)
+    missing = ("tenant-b", "deploy-api", "deploy.example")
+    assert store.check({BINDING, missing}) == CredentialCheck(
+        1, (CredentialProblem(*missing, "no credential is stored for this binding"),)
+    )

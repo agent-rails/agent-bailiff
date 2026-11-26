@@ -1071,10 +1071,10 @@ def _check_credentials(args: argparse.Namespace) -> int:
     for problem in check.problems:
         print(json.dumps(dataclasses.asdict(problem), sort_keys=True))
     if check.problems:
-        refused = len(check.problems)
-        print(f"{PROG} check-credentials: {refused} of {check.checked} would be refused at release", file=sys.stderr)
+        found = len(check.problems)
+        print(f"{PROG} check-credentials: {found} would be refused at release; {check.checked} stored", file=sys.stderr)
         return EXIT_REFUSED
-    print(f"{PROG} check-credentials: {check.checked} credentials checked", file=sys.stderr)
+    print(f"{PROG} check-credentials: none would be refused at release; {check.checked} stored", file=sys.stderr)
     return 0
 
 
