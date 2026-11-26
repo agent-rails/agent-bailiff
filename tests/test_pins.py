@@ -11,7 +11,7 @@ from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parent.parent
 PINS = {
-    "agent-warrant==0.4.0",
+    "agent-warrant==0.4.1",
     "toolcall-authz==0.3.0",
     "cryptography==50.0.2",
     "grpcio==1.85.3",
