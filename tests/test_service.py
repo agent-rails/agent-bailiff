@@ -2,6 +2,7 @@ import asyncio
 import copy
 import io
 import json
+import logging
 import os
 import shutil
 import signal
@@ -24,9 +25,10 @@ from test_decide import AGENT_KEY, ISSUER_ID, ISSUER_KEY, NOW, POLICY, PRINCIPAL
 from agent_bailiff import cli
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.control.suspension import create_suspension_directory, suspension_directory
-from agent_bailiff.custodian import ClaimsStore, CredentialStore, LocalBackend
+from agent_bailiff.custodian import ClaimsStore, CredentialStore, CredentialUnavailable, LocalBackend
 from agent_bailiff.custodian.echo import MARKER
 from agent_bailiff.custodian.files import OwnedFileError
+from agent_bailiff.custodian.store import StoredCredential
 from agent_bailiff.docket import DocketClient, Grant, decode_record, encode_record
 from agent_bailiff.docket.entry import Entry
 from agent_bailiff.docket.manifest import MAX_MANIFEST_BYTES, entry_bytes_bound
@@ -795,6 +797,52 @@ def test_put_credential_refuses_an_empty_or_oversized_secret(deployment, stdin, 
     finally:
         sys.stdin = original
     assert result == cli.EXIT_REFUSED
+
+
+def put_credential(deployment, stdin, *extra):
+    directory = deployment.custodian
+    CredentialStore.create(directory / "credentials.db", LocalBackend.generate(directory / "kek")).close()
+    original = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(stdin))
+    try:
+        arguments = ["custodian", "put-credential", "--config", str(deployment.paths["custodian"])]
+        return cli.main(arguments + ["--tenant", TENANT, "--credential-id", "c", "--target", "t", *extra])
+    finally:
+        sys.stdin = original
+
+
+def stored(deployment):
+    directory = deployment.custodian
+    store = CredentialStore.open(directory / "credentials.db", LocalBackend.load(directory / "kek"))
+    try:
+        return store.get(TENANT, "c", "t")
+    finally:
+        store.close()
+
+
+def test_put_credential_refuses_a_short_credential_and_names_the_exception_flag(deployment, capsys):
+    assert put_credential(deployment, b"Bearer short-key\n") == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "stored" not in captured.out
+    assert "put-credential refused: credential cannot be redacted from results" in captured.err
+    assert "--accept-unredactable" in captured.err and "short-key" not in captured.err
+    with pytest.raises(CredentialUnavailable):
+        stored(deployment)
+
+
+def test_put_credential_records_an_accepted_exception(deployment, capsys, caplog):
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
+        assert put_credential(deployment, b"Bearer short-key\n", "--accept-unredactable") == 0
+    assert capsys.readouterr().out == "stored\n"
+    assert "accepted unredactable exception" in caplog.text
+    assert stored(deployment) == StoredCredential(b"Bearer short-key", "unredactable")
+
+
+def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployment, capsys):
+    assert put_credential(deployment, SECRET + b"\n", "--accept-unredactable") == cli.EXIT_REFUSED
+    assert "can be redacted" in capsys.readouterr().err
+    with pytest.raises(CredentialUnavailable):
+        stored(deployment)
 
 
 def test_check_config_runs_the_adapter_check_unchanged(tmp_path, capsys):
