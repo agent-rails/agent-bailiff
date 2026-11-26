@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -843,6 +844,80 @@ def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployme
     assert "can be redacted" in capsys.readouterr().err
     with pytest.raises(CredentialUnavailable):
         stored(deployment)
+
+
+def check_credentials(deployment):
+    return cli.main(["custodian", "check-credentials", "--config", str(deployment.paths["custodian"])])
+
+
+def store_bound(deployment, secret, **options):
+    directory = deployment.custodian
+    store = CredentialStore.create(directory / "credentials.db", LocalBackend.generate(directory / "kek"))
+    try:
+        store.put(TENANT, "deploy-api", "deploy.example", secret, **options)
+    finally:
+        store.close()
+
+
+def test_check_credentials_passes_a_store_release_accepts(deployment, capsys):
+    store_bound(deployment, b"Bearer short-key", accept_unredactable=True)
+    assert check_credentials(deployment) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "check-credentials: none would be refused at release; 1 stored" in captured.err
+
+
+def test_check_credentials_lists_a_credential_release_would_refuse(deployment, capsys):
+    store_bound(deployment, SECRET)
+    connection = sqlite3.connect(deployment.custodian / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = 'unredactable'")
+    connection.commit()
+    connection.close()
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert [json.loads(line) for line in captured.out.splitlines()] == [
+        {
+            "credential_id": "deploy-api",
+            "problem": "credential does not decrypt under its binding",
+            "target": "deploy.example",
+            "tenant": TENANT,
+        }
+    ]
+    assert "1 would be refused at release; 1 stored" in captured.err
+    assert SECRET.decode() not in captured.out + captured.err
+
+
+def test_check_credentials_lists_a_binding_with_no_stored_credential(deployment, capsys):
+    directory = deployment.custodian
+    CredentialStore.create(directory / "credentials.db", LocalBackend.generate(directory / "kek")).close()
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "credential_id": "deploy-api",
+        "problem": "no credential is stored for this binding",
+        "target": "deploy.example",
+        "tenant": TENANT,
+    }
+    assert "1 would be refused at release; 0 stored" in captured.err
+
+
+def test_check_credentials_prints_a_malformed_row(deployment, capsys):
+    store_bound(deployment, SECRET)
+    connection = sqlite3.connect(deployment.custodian / "credentials.db")
+    connection.execute("UPDATE credentials SET tenant = ?", (b"tenant-a",))
+    connection.commit()
+    connection.close()
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    problems = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(found["tenant"], found["problem"]) for found in problems] == [
+        ("b'tenant-a'", "credential row is malformed"),
+        (TENANT, "no credential is stored for this binding"),
+    ]
+
+
+def test_check_credentials_refuses_a_missing_store(deployment, capsys):
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    assert "check-credentials refused" in capsys.readouterr().err
 
 
 def test_check_config_runs_the_adapter_check_unchanged(tmp_path, capsys):

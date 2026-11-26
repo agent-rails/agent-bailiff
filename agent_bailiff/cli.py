@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -24,7 +25,7 @@ from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
 from agent_bailiff.custodian.files import OwnedFileError
-from agent_bailiff.custodian.store import UnredactableCredential
+from agent_bailiff.custodian.store import CredentialUnavailable, UnredactableCredential
 from agent_bailiff.docket.archiver import ArchiveMismatch, ArchiverLocked, DocketArchiver
 from agent_bailiff.docket.client import DocketError
 from agent_bailiff.docket.grants import INVALID_GRANT, GrantReport, grant_header, grant_json_row, grant_table_row
@@ -338,6 +339,11 @@ def _parser() -> argparse.ArgumentParser:
                 help="store a credential echo redaction cannot cover; the exception is recorded with it",
             )
             put.set_defaults(handler=_put_credential)
+            check = component.add_parser(
+                "check-credentials", help="list stored credentials the custodian would refuse to release"
+            )
+            check.add_argument("--config", type=Path, required=True)
+            check.set_defaults(handler=_check_credentials)
     control = commands.add_parser("control", help="revoke or suspend from a docket record; run as decide's uid")
     actions = control.add_subparsers(dest="action", required=True)
     revoke = actions.add_parser("revoke", help="revoke the record's handle at one level")
@@ -1054,6 +1060,21 @@ def _put_credential(args: argparse.Namespace) -> int:
     except STARTUP_ERRORS as exc:
         return _refused("put-credential", exc)
     print("stored")
+    return 0
+
+
+def _check_credentials(args: argparse.Namespace) -> int:
+    try:
+        check = run.check_credentials(load_custodian(args.config))
+    except (CredentialUnavailable, *STARTUP_ERRORS) as exc:
+        return _refused("check-credentials", exc)
+    for problem in check.problems:
+        print(json.dumps(dataclasses.asdict(problem), sort_keys=True))
+    if check.problems:
+        found = len(check.problems)
+        print(f"{PROG} check-credentials: {found} would be refused at release; {check.checked} stored", file=sys.stderr)
+        return EXIT_REFUSED
+    print(f"{PROG} check-credentials: none would be refused at release; {check.checked} stored", file=sys.stderr)
     return 0
 
 

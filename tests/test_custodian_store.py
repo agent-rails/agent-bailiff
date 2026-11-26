@@ -1,4 +1,5 @@
 import base64
+import dataclasses
 import logging
 import os
 import sqlite3
@@ -21,7 +22,7 @@ from agent_bailiff.custodian import (
     files,
 )
 from agent_bailiff.custodian.files import create_owned
-from agent_bailiff.custodian.store import StoredCredential, UnredactableCredential
+from agent_bailiff.custodian.store import CredentialCheck, CredentialProblem, StoredCredential, UnredactableCredential
 
 SECRET = b"Bearer deploy-secret-value"
 SHORT = b"Bearer short-key"
@@ -394,3 +395,118 @@ def test_concurrent_opens_of_an_older_store_add_the_column_once(state, backend):
         assert store.get(*BINDING) == StoredCredential(SECRET, None)
     finally:
         store.close()
+
+
+def insert_unchecked(path, backend, binding, secret, exception=None):
+    context = credential_context(*binding, exception)
+    dek = os.urandom(32)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO credentials VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (*binding, backend.wrap(dek, context), nonce, ciphertext, exception),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_check_of_an_empty_store_finds_nothing(store):
+    assert store.check() == CredentialCheck(0, ())
+
+
+def test_check_passes_redactable_credentials_and_accepted_exceptions(store):
+    store.put(*BINDING, SECRET)
+    store.put("tenant-a", "short-api", "deploy.example", SHORT, accept_unredactable=True)
+    assert store.check() == CredentialCheck(2, ())
+
+
+@pytest.mark.parametrize(
+    ("secret", "problem"),
+    [
+        (SHORT, "shorter than 12 characters"),
+        (basic(b"deploy-user:shortpw"), "shorter than 12 characters"),
+        (basic(b"deploy-user:\xff\xfe-not-utf-8-password"), "not base64 of a UTF-8 user:password"),
+        (b"Bearer caf\xc3\xa9-secret-value", "not printable ASCII"),
+        (b" Bearer deploy-secret-value", "not printable ASCII"),
+    ],
+)
+def test_check_reports_a_credential_release_would_refuse(state, store, backend, secret, problem):
+    insert_unchecked(state / "credentials.db", backend, BINDING, secret)
+    check = store.check()
+    assert check.checked == 1
+    assert [(found.tenant, found.credential_id, found.target) for found in check.problems] == [BINDING]
+    assert problem in check.problems[0].problem
+    assert secret.decode("latin-1").strip() not in check.problems[0].problem
+
+
+def test_check_reports_a_credential_that_does_not_decrypt(state, store):
+    store.put(*BINDING, SECRET)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = 'unredactable'")
+    connection.commit()
+    connection.close()
+    assert store.check() == CredentialCheck(
+        1, (CredentialProblem(*BINDING, "credential does not decrypt under its binding"),)
+    )
+
+
+def test_check_reports_every_failing_credential_in_order(state, store, backend):
+    store.put(*BINDING, SECRET)
+    insert_unchecked(state / "credentials.db", backend, ("tenant-b", "z-api", "deploy.example"), SHORT)
+    insert_unchecked(state / "credentials.db", backend, ("tenant-a", "a-api", "deploy.example"), SHORT)
+    check = store.check()
+    assert check.checked == 3
+    assert [found.tenant + "/" + found.credential_id for found in check.problems] == [
+        "tenant-a/a-api",
+        "tenant-b/z-api",
+    ]
+
+
+def test_check_of_a_legacy_store_reports_its_unchecked_credentials(state, backend):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SHORT)
+    store = CredentialStore.open(path, backend)
+    try:
+        check = store.check()
+    finally:
+        store.close()
+    assert check.checked == 1 and "shorter than 12 characters" in check.problems[0].problem
+
+
+def test_check_of_a_store_changed_after_open_is_refused(state, store, backend):
+    store.put(*BINDING, SECRET)
+    replace_with_another_store(state / "credentials.db", backend)
+    with pytest.raises(CredentialUnavailable, match="unreadable"):
+        store.check()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("tenant", b"tenant-a"),
+        ("nonce", "not-bytes"),
+        ("nonce", 7),
+        ("ciphertext", "not-bytes"),
+        ("wrapped_dek", 7),
+    ],
+)
+def test_check_reports_a_malformed_row_without_stopping(state, store, column, value):
+    store.put(*BINDING, SECRET)
+    store.put("tenant-a", "other-api", "deploy.example", SECRET)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute(f"UPDATE credentials SET {column} = ? WHERE credential_id = 'deploy-api'", (value,))
+    connection.commit()
+    connection.close()
+    check = store.check()
+    assert check.checked == 2
+    assert [found.problem for found in check.problems] == ["credential row is malformed"]
+    assert all(isinstance(field, str) for field in dataclasses.astuple(check.problems[0]))
+
+
+def test_check_reports_a_required_binding_with_no_stored_credential(store):
+    store.put(*BINDING, SECRET)
+    missing = ("tenant-b", "deploy-api", "deploy.example")
+    assert store.check({BINDING, missing}) == CredentialCheck(
+        1, (CredentialProblem(*missing, "no credential is stored for this binding"),)
+    )
