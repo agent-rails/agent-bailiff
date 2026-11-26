@@ -35,7 +35,7 @@ workdir = test_custodian.workdir
 writer = test_custodian.writer
 ledger_path = test_custodian.ledger_path
 
-pytestmark = pytest.mark.skipif(
+bench = pytest.mark.skipif(
     os.environ.get("AGENT_BAILIFF_TEST_REDACTOR_BENCH") != "1",
     reason="set AGENT_BAILIFF_TEST_REDACTOR_BENCH=1 to load the response redactor to failure",
 )
@@ -52,6 +52,9 @@ CALLS_PER_SETTING = 32
 MIN_CALLS_PER_CLIENT = 2
 PROBE_INTERVAL_SECONDS = 0.01
 DRAIN_SECONDS = 30
+DRIVER_REPLY_SECONDS = 120
+DRIVER_POLL_SECONDS = 0.5
+DRIVER_EXIT_SECONDS = 30
 
 
 def calls_per_client(concurrency):
@@ -231,6 +234,79 @@ def wait_drained(redactor):
     assert redactor.active == 0
 
 
+def start_driver(target):
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    driver = context.Process(target=target, args=(child,), daemon=True)
+    try:
+        driver.start()
+    except BaseException:
+        parent.close()
+        raise
+    finally:
+        child.close()
+    return parent, driver
+
+
+def receive(connection, driver, timeout):
+    deadline = time.monotonic() + timeout
+    while not connection.poll(DRIVER_POLL_SECONDS):
+        if not driver.is_alive():
+            raise AssertionError(f"the load driver exited with code {driver.exitcode} before it replied")
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the load driver sent no result within {timeout} s")
+    try:
+        return connection.recv()
+    except EOFError:
+        driver.join(DRIVER_EXIT_SECONDS)
+        raise AssertionError(f"the load driver exited with code {driver.exitcode} before it replied") from None
+
+
+def stop_driver(connection, driver):
+    if driver.is_alive():
+        driver.kill()
+    driver.join()
+    connection.close()
+
+
+def grid(socket_path):
+    index = 0
+    for shape in SHAPES:
+        for label, size in SIZES.items():
+            for match in (False, True):
+                for concurrency in CONCURRENCY:
+                    per_client = calls_per_client(concurrency)
+                    yield {
+                        "shape": shape,
+                        "label": label,
+                        "size": size,
+                        "match": match,
+                        "concurrency": concurrency,
+                        "calls_per_client": per_client,
+                        "socket": str(socket_path),
+                        "clearances": [f"bench-{index}-{number}" for number in range(concurrency * per_client)],
+                    }
+                    index += 1
+
+
+def fail_before_replying(connection):
+    connection.recv()
+    raise RuntimeError("the load driver failed before it replied")
+
+
+def test_a_load_driver_that_dies_before_replying_fails_the_run():
+    parent, driver = start_driver(fail_before_replying)
+    try:
+        parent.send({})
+        started = time.monotonic()
+        with pytest.raises(AssertionError, match="exited with code 1 before it replied"):
+            receive(parent, driver, DRIVER_REPLY_SECONDS)
+        assert time.monotonic() - started < DRIVER_REPLY_SECONDS
+    finally:
+        stop_driver(parent, driver)
+
+
+@bench
 @pytest.mark.parametrize("workers", [1, 2])
 def test_redactor_load(make_custodian, issue, workdir, private, workers):
     custodian = make_custodian(inflight_max=4096, inflight_per_tenant=4096)
@@ -240,44 +316,28 @@ def test_redactor_load(make_custodian, issue, workdir, private, workers):
     redactor = CountingRedactor(RedactorProcessor(custodian, clock=lambda: NOW + 2))
     socket_path = workdir / "s" / "redactor.sock"
     server = response_server(redactor, socket_path, private("redactor-grpc"), gateway_uid=os.geteuid(), workers=workers)
-    server.start()
-    context = multiprocessing.get_context("spawn")
-    parent, child = context.Pipe()
-    driver = context.Process(target=drive, args=(child,), daemon=True)
-    recorded = host()
-    with Probe() as idle:
-        time.sleep(1)
+    connection = driver = None
     settings = []
     try:
-        driver.start()
-        for shape in SHAPES:
-            for label, size in SIZES.items():
-                for match in (False, True):
-                    for concurrency in CONCURRENCY:
-                        per_client = calls_per_client(concurrency)
-                        names = [f"bench-{len(settings)}-{number}" for number in range(concurrency * per_client)]
-                        setting = {
-                            "shape": shape,
-                            "label": label,
-                            "size": size,
-                            "match": match,
-                            "concurrency": concurrency,
-                            "calls_per_client": per_client,
-                            "socket": str(socket_path),
-                            "clearances": names,
-                        }
-                        seed(custodian, held, names)
-                        with Probe() as probe:
-                            parent.send(setting)
-                            measured = parent.recv()
-                            wait_drained(redactor)
-                        unseed(custodian, names)
-                        settings.append(summarize(setting, measured, probe))
-        parent.send(None)
-        driver.join(30)
+        server.start()
+        recorded = host()
+        with Probe() as idle:
+            time.sleep(1)
+        connection, driver = start_driver(drive)
+        for setting in grid(socket_path):
+            seed(custodian, held, setting["clearances"])
+            with Probe() as probe:
+                connection.send(setting)
+                measured = receive(connection, driver, DRIVER_REPLY_SECONDS)
+                wait_drained(redactor)
+            unseed(custodian, setting["clearances"])
+            settings.append(summarize(setting, measured, probe))
+        connection.send(None)
+        driver.join(DRIVER_EXIT_SECONDS)
+        assert driver.exitcode == 0
     finally:
-        if driver.is_alive():
-            driver.kill()
+        if driver is not None:
+            stop_driver(connection, driver)
         server.close()
     now = datetime.now(UTC)
     baseline = {
