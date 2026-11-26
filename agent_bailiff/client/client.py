@@ -30,6 +30,7 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 STREAM_CHUNK_BYTES = 64 * 1024
 SETUP_ATTEMPTS = 3
 MAX_TOOL_PAGES = 10
+MAX_TOOL_LIST_BYTES = MAX_RESPONSE_BYTES
 BACKOFF_BASE_SECONDS = 0.2
 BACKOFF_CAP_SECONDS = 2.0
 RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
@@ -256,11 +257,15 @@ class BailiffClient:
         names: set[str] = set()
         cursors: set[str] = set()
         params: dict[str, Any] = {}
+        listed_bytes = 0
         for _ in range(MAX_TOOL_PAGES):
             result = self._setup_request("tools/list", params)["result"]
             page = result.get("tools")
             if not isinstance(page, list) or not all(isinstance(tool, dict) for tool in page):
                 raise GatewayError("tools/list returned no tool list")
+            listed_bytes += len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode())
+            if listed_bytes > MAX_TOOL_LIST_BYTES:
+                raise GatewayError(f"tools/list returned more than {MAX_TOOL_LIST_BYTES} bytes")
             for tool in page:
                 name = tool.get("name")
                 if not isinstance(name, str):
