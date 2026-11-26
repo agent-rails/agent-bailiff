@@ -641,10 +641,17 @@ def test_a_stream_result_after_inflight_ttl_fails_as_unmatched_after_the_upstrea
     unmatched = {"jsonrpc": "2.0", "id": 7, "error": {"code": -32001, "message": "response_unmatched"}}
     assert status == 200 and stream_events(text) == [progress(1.0), unmatched], text
     assert len(stack["upstream"].calls()) == 1
-    assert [(entry.hop, entry.decision) for entry in docket_entries(workdir)] == [
+    allow, release, refusal = docket_entries(workdir)
+    assert [(entry.hop, entry.decision) for entry in (allow, release, refusal)] == [
         ("decide", "allow"),
         ("custodian", "release"),
+        ("custodian", "refuse"),
     ]
+    assert (refusal.reason, refusal.op_id, refusal.parent_entry) == (
+        "response_unmatched",
+        release.op_id,
+        allow.entry_id,
+    )
 
 
 @pytest.mark.parametrize("meta", [{"progressToken": 2}, {"progressToken": "p-1"}])

@@ -23,7 +23,7 @@ from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable, header_value
-from agent_bailiff.decide.clearance import Clearance, verify_clearance
+from agent_bailiff.decide.clearance import Clearance, decode_clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
 from agent_bailiff.decide.request import OperationRequest
@@ -195,17 +195,20 @@ class Custodian:
             return ResponseRefused("response_clearance_missing")
         release = self._inflight.take(token_hash(clearance_token)) if clearance_token.isascii() else None
         if release is None:
-            logger.warning("no in-flight release matches a call result")
+            self._record_unmatched(clearance_token, now)
             return ResponseRefused("response_unmatched")
         op_id = release.entry.op_id
         try:
             redaction = redact(result, needles(release.header_value))
         except UnreadableResult:
             logger.warning("call result for op %s is not a readable JSON object", op_id)
-            return ResponseRefused("response_unreadable")
+            return self._refuse_response(release, "response_unreadable", now)
         except Oversize:
             logger.warning("redacted call result for op %s is over the size cap", op_id)
-            return ResponseRefused("response_oversize")
+            return self._refuse_response(release, "response_oversize", now)
+        except Exception:
+            logger.exception("custodian response check for op %s failed with an internal error", op_id)
+            return self._refuse_response(release, "response_internal_error", now)
         if redaction is None:
             return ResponseChecked(None)
         logger.error(
@@ -213,6 +216,41 @@ class Custodian:
         )
         self._alert_echo(release, now)
         return ResponseChecked(redaction.result)
+
+    def _refuse_response(self, release: InflightRelease, reason: str, now: int) -> ResponseRefused:
+        entry = release.entry
+        refusal = replace(
+            entry,
+            entry_id=uuid.uuid4().hex,
+            decision="refuse",
+            reason=reason,
+            parent_entry=release.release_entry_id,
+            at=now,
+        )
+        self._append_refusal((release.tenant, entry.handles["task"], str(entry.op_id), reason), refusal)
+        return ResponseRefused(reason)
+
+    def _record_unmatched(self, clearance_token: str, now: int) -> None:
+        clearance = self._signed_clearance(clearance_token)
+        if clearance is None:
+            logger.warning("no in-flight release matches a call result whose clearance does not verify")
+            return
+        logger.warning("no in-flight release matches the call result for op %s", clearance.op_id)
+        reason = "response_unmatched"
+        key = (clearance.tenant, clearance.task, clearance.op_id, reason)
+        if not self._mark_refusal(key):
+            return
+        entry = _clearance_entry(clearance, clearance_token, self._config.custodian_id, now)
+        self._append_refusal(key, replace(entry, entry_id=uuid.uuid4().hex, reason=reason))
+
+    def _signed_clearance(self, clearance_token: str) -> Clearance | None:
+        config = self._config
+        clearance = decode_clearance(clearance_token, config.decide_keys, max_lifetime=config.max_clearance_lifetime)
+        if isinstance(clearance, SigningRefused):
+            return None
+        if (clearance.iss, clearance.aud) != (config.decider_id, config.custodian_id):
+            return None
+        return clearance
 
     def _alert_echo(self, release: InflightRelease, now: int) -> None:
         alert = replace(
@@ -502,16 +540,18 @@ class Custodian:
         key = (clearance.tenant, clearance.task, clearance.op_id, reason)
         if reason in ONCE_REFUSALS and not self._mark_refusal(key):
             return
+        refusal = replace(
+            entry,
+            entry_id=uuid.uuid4().hex,
+            decision="refuse",
+            reason=reason,
+            latency_ms=self._elapsed_ms(started),
+        )
+        self._append_refusal(key, refusal)
+
+    def _append_refusal(self, key: tuple[str, str, str, str], refusal: Entry) -> None:
         try:
-            self._docket.append(
-                replace(
-                    entry,
-                    entry_id=uuid.uuid4().hex,
-                    decision="refuse",
-                    reason=reason,
-                    latency_ms=self._elapsed_ms(started),
-                )
-            )
+            self._docket.append(refusal)
         except DocketError as exc:
             if exc.reason == "state_write_failed":
                 logger.warning(f"{REFUSAL_ENTRY} was recorded but its head was not saved", *key, exc_info=True)
@@ -530,29 +570,8 @@ class Custodian:
             self._recorded_refusals.pop(key, None)
 
     def _record_chain_refusal(self, refusal: _ChainRefused, now: int, started: int) -> None:
-        clearance = refusal.clearance
-        handles = {"task": clearance.task, "tenant": clearance.tenant, "root": clearance.root_binding}
-        if clearance.leaf_binding != clearance.root_binding:
-            handles["link"] = clearance.leaf_binding
-        entry = Entry(
-            entry_id=HOP,
-            trace_id=clearance.trace_id,
-            hop=HOP,
-            component=self._config.custodian_id,
-            decision="refuse",
-            at=now,
-            op_id=clearance.op_id,
-            parent_entry=clearance.entry_id,
-            tenant=clearance.tenant,
-            task_root=clearance.root_binding,
-            tool=clearance.tool,
-            resource=clearance.resource,
-            args_digest=clearance.args_digest,
-            cost=clearance.cost,
-            clearance_digest=token_hash(refusal.token),
-            handles=handles,
-        )
-        self._record_refusal(clearance, entry, "chain_refused", started)
+        entry = _clearance_entry(refusal.clearance, refusal.token, self._config.custodian_id, now)
+        self._record_refusal(refusal.clearance, entry, "chain_refused", started)
 
     def _elapsed_ms(self, started: int) -> int:
         return max(0, (self._monotonic_ns() - started) // 1_000_000)
@@ -581,6 +600,30 @@ class Custodian:
         ):
             logger.error("docket acknowledgement does not match the release entry")
             raise _UnacknowledgedRelease
+
+
+def _clearance_entry(clearance: Clearance, token: str, component: str, now: int) -> Entry:
+    handles = {"task": clearance.task, "tenant": clearance.tenant, "root": clearance.root_binding}
+    if clearance.leaf_binding != clearance.root_binding:
+        handles["link"] = clearance.leaf_binding
+    return Entry(
+        entry_id=HOP,
+        trace_id=clearance.trace_id,
+        hop=HOP,
+        component=component,
+        decision="refuse",
+        at=now,
+        op_id=clearance.op_id,
+        parent_entry=clearance.entry_id,
+        tenant=clearance.tenant,
+        task_root=clearance.root_binding,
+        tool=clearance.tool,
+        resource=clearance.resource,
+        args_digest=clearance.args_digest,
+        cost=clearance.cost,
+        clearance_digest=token_hash(token),
+        handles=handles,
+    )
 
 
 def _match_clearance(clearance: Clearance, request: OperationRequest, digest: str, snapshot: ArgsSnapshot) -> None:
