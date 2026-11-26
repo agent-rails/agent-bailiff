@@ -127,14 +127,15 @@ class ShiftedExpiryReader:
 
 
 class UnavailableReservationReader:
-    def __init__(self, inner):
+    def __init__(self, inner, message="ledger error: attempt to write a readonly database"):
         self.inner = inner
+        self.message = message
 
     def is_revoked(self, context):
         return self.inner.is_revoked(context)
 
     def reservation_readonly(self, tenant_id, task_id, op_id):
-        raise LedgerUnavailable("ledger error: attempt to write a readonly database")
+        raise LedgerUnavailable(self.message)
 
 
 @pytest.fixture
@@ -699,9 +700,20 @@ def test_an_unreadable_reservation_is_refused_and_logs_the_ledger_error(make_cus
     custodian = make_custodian(ledger=UnavailableReservationReader(reader))
     with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
         assert custodian.release(token, request, NOW + 1) == Refused("ledger_unavailable")
-    assert "reservation for a release could not be read: ledger error: attempt to write a readonly database" in (
-        caplog.text
+    clearance = decode_clearance(token, WRITERS["decide"], max_lifetime=MAX_PROOF_AGE)
+    assert (
+        f"reservation for op {clearance.op_id} could not be read: "
+        "'ledger error: attempt to write a readonly database'" in caplog.text
     )
+
+
+def test_a_ledger_error_is_logged_on_one_line(make_custodian, issue, reader, caplog):
+    request, token = issue()
+    custodian = make_custodian(ledger=UnavailableReservationReader(reader, "bad\nforged release line"))
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.custodian"):
+        assert custodian.release(token, request, NOW + 1) == Refused("ledger_unavailable")
+    assert "could not be read: 'bad\\nforged release line'" in caplog.text
+    assert "\nforged" not in caplog.text
 
 
 def test_second_release_of_an_op_id_is_refused_also_after_a_restart(make_custodian, issue):
