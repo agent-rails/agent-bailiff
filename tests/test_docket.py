@@ -35,6 +35,7 @@ from agent_bailiff.docket import (
     encode_record,
     repair,
 )
+from agent_bailiff.docket import client as client_module
 from agent_bailiff.docket import manifest as manifest_module
 from agent_bailiff.docket import sink as sink_module
 from agent_bailiff.docket.client import UNACKNOWLEDGED
@@ -54,6 +55,7 @@ from agent_bailiff.docket.protocol import (
     decode_response,
     encode_frame,
     encode_response,
+    read_frame,
 )
 from agent_bailiff.docket.report import RecordFilter, verify_docket, verify_records
 from agent_bailiff.docket.sink import ChainState, build_kid_index, docket_lock_path
@@ -1075,6 +1077,61 @@ def test_an_unsafe_state_directory_after_an_append_is_unacknowledged(paths, star
     assert error.value.reason == "state_write_failed"
     assert error.value.reason in UNACKNOWLEDGED
     assert len(lines(paths[0])) == 1
+
+
+def test_a_state_name_failure_after_an_append_is_unacknowledged(paths, start_sink, monkeypatch):
+    start_sink()
+    client = decide_client(paths)
+
+    def no_entropy(size):
+        raise OSError(errno.EIO, "no entropy")
+
+    monkeypatch.setattr(client_module.os, "urandom", no_entropy)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    monkeypatch.undo()
+    assert error.value.reason == "state_write_failed"
+    assert len(lines(paths[0])) == 1
+    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.lock"]
+
+
+def test_a_failed_state_rename_after_an_append_leaves_no_temporary_file(paths, start_sink, monkeypatch):
+    start_sink()
+    client = decide_client(paths)
+
+    def no_rename(*args, **kwargs):
+        raise OSError(errno.EIO, "rename failed")
+
+    monkeypatch.setattr(client_module.os, "rename", no_rename)
+    with pytest.raises(DocketError) as error:
+        client.append(make_entry(1))
+    monkeypatch.undo()
+    assert error.value.reason == "state_write_failed"
+    assert len(lines(paths[0])) == 1
+    assert sorted(path.name for path in state_dir(paths).iterdir()) == ["decide.lock"]
+
+
+@pytest.mark.parametrize("reason", ["no_ack", "bad_ack", "state_write_failed"])
+def test_a_sink_refusal_naming_a_client_reason_is_a_plain_refusal(paths, reason):
+    socket_path = paths[1]
+    socket_path.parent.mkdir(mode=0o700)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(socket_path))
+        server.listen(1)
+
+        def refuse():
+            connection, _ = server.accept()
+            with connection:
+                read_frame(connection, MAX_FRAME_BYTES)
+                connection.sendall(encode_response({"ok": False, "reason": reason}))
+
+        thread = threading.Thread(target=refuse)
+        thread.start()
+        with pytest.raises(DocketError) as error:
+            decide_client(paths).append(make_entry(1))
+        thread.join(5)
+    assert error.value.reason == "refused"
+    assert error.value.reason not in UNACKNOWLEDGED
 
 
 @pytest.mark.parametrize("content", [b"", b"garbage", b'{"seq":0,"hash":"x"}', b'{"seq":1}'])

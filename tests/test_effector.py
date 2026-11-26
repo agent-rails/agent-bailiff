@@ -2,6 +2,8 @@ import base64
 import errno
 import json
 import os
+import shutil
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -12,11 +14,13 @@ import pytest
 from agent_warrant.resolver import PinnedResolver
 from agent_warrant.trust import IssuerTrustPolicy
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_docket import RunningSink
 
 from agent_bailiff.client.client import REFUSAL_REASONS
 from agent_bailiff.custodian.release import ReleaseSigner
 from agent_bailiff.decide.clearance import Clearance, encode_clearance
 from agent_bailiff.decide.identity import snapshot_args
+from agent_bailiff.docket import DocketClient, DocketError, DocketSink
 from agent_bailiff.docket.entry import Record
 from agent_bailiff.docket.roles import WriterRoles
 from agent_bailiff.docket.sink import VerifiedLine
@@ -32,6 +36,7 @@ CATALOG = OperationCatalog.load(
 )
 DECIDE_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(20, 52)))
 CUSTODIAN_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(21, 53)))
+EFFECTOR_DOCKET_KEY = Ed25519PrivateKey.from_private_bytes(bytes(range(22, 54)))
 CONFIG = ReleaseCheckConfig(
     effector_id="effector.homelab",
     custodian_id="custodian.example",
@@ -521,21 +526,68 @@ class FailingDocket:
         return Record(writer="someone-else", seq=1, prev=None, entry=entry, kid="k", token="t")
 
 
+def refusal_events(caplog):
+    return [json.loads(item.message) for item in caplog.records if "effector_refusal_unrecorded" in item.message]
+
+
 @pytest.mark.parametrize(
-    "failure", [ConnectionError("docket down"), OSError(errno.ENOSPC, "no space left on device"), "unacknowledged"]
+    "failure, status",
+    [
+        (ConnectionError("docket down"), "unacknowledged"),
+        (OSError(errno.ENOSPC, "no space left on device"), "unacknowledged"),
+        (DocketError("docket_full"), "not_written"),
+        (DocketError("no_ack", "head fetch timed out"), "unacknowledged"),
+        (DocketError("write_failed"), "unacknowledged"),
+        (DocketError("state_write_failed", "head not saved"), "head_unsaved"),
+        ("unacknowledged", "unacknowledged"),
+    ],
 )
-def test_a_refusal_the_docket_does_not_record_is_still_refused_and_logged(token_file, caplog, failure):
+def test_a_refusal_the_docket_does_not_record_is_still_refused_and_logged(token_file, caplog, failure, status):
     instance, transport, _ = effector(token_file, docket=FailingDocket(failure), rbac_healthy=False)
     assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_rbac_unverified"
     assert transport.requests == []
-    [event] = [json.loads(item.message) for item in caplog.records if "effector_refusal_unrecorded" in item.message]
+    [event] = refusal_events(caplog)
     assert event == {
         "event": "effector_refusal_unrecorded",
+        "docket": status,
         "op_id": "op-scale_deployment-3",
         "reason": "rbac_unverified",
         "task": "task-1",
         "tenant": "tenant-a",
     }
+
+
+@pytest.fixture
+def docket_dir():
+    path = Path(tempfile.mkdtemp(prefix="be-", dir="/tmp"))
+    os.chmod(path, 0o700)
+    yield path
+    shutil.rmtree(path)
+
+
+def test_a_refusal_acknowledged_but_not_saved_is_logged_as_head_unsaved(token_file, caplog, docket_dir):
+    writers = {"effector.homelab": {"effector-1": EFFECTOR_DOCKET_KEY.public_key()}}
+    sink = RunningSink(DocketSink(docket_dir / "docket.log", docket_dir / "s" / "docket.sock", writers, {os.geteuid()}))
+    state_dir = docket_dir / "state"
+    state_dir.mkdir(mode=0o700)
+    client = DocketClient(
+        docket_dir / "s" / "docket.sock",
+        "effector.homelab",
+        "effector-1",
+        EFFECTOR_DOCKET_KEY,
+        sink_uid=os.geteuid(),
+        state_dir=state_dir,
+    )
+    try:
+        instance, _, _ = effector(token_file, docket=client, rbac_healthy=False)
+        os.chmod(state_dir, 0o770)
+        assert instance.call(scale_params(), release_for(), NOW + 2)["content"][0]["text"] == "effector_rbac_unverified"
+    finally:
+        os.chmod(state_dir, 0o700)
+        client.close()
+        sink.stop()
+    assert len((docket_dir / "docket.log").read_text().splitlines()) == 1
+    assert [event["docket"] for event in refusal_events(caplog)] == ["head_unsaved"]
 
 
 def test_a_release_refused_after_its_claim_is_consumed(token_file):

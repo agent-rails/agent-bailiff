@@ -30,6 +30,7 @@ STATE_MODE = 0o600
 MAX_STATE_BYTES = 256
 CHAIN_REFUSALS = frozenset({"wrong_seq", "broken_prev"})
 UNACKNOWLEDGED = frozenset({"no_ack", "bad_ack", "state_write_failed", "write_failed"})
+LOCAL_REASONS = frozenset({"no_ack", "bad_ack", "state_write_failed"})
 WRITER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -174,21 +175,26 @@ class DocketClient:
 
     def _save_acked(self, head: Head) -> None:
         content = canonicalize({"seq": head.seq, "hash": head.hash})
-        temporary = f"{self._state_name}.{os.urandom(8).hex()}.tmp"
         directory_fd = self._open_state_dir("state_write_failed")
+        temporary = None
         try:
+            name = f"{self._state_name}.{os.urandom(8).hex()}.tmp"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-            fd = os.open(temporary, flags, STATE_MODE, dir_fd=directory_fd)
+            fd = os.open(name, flags, STATE_MODE, dir_fd=directory_fd)
+            temporary = name
             with os.fdopen(fd, "wb") as state:
                 state.write(content)
                 state.flush()
                 os.fsync(state.fileno())
             os.rename(temporary, self._state_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            temporary = None
             os.fsync(directory_fd)
         except OSError as exc:
+            if temporary is not None:
+                _unlink_quietly(temporary, directory_fd)
             raise DocketError("state_write_failed", str(exc)) from exc
         finally:
-            os.close(directory_fd)
+            _close_quietly(directory_fd)
 
     def _open_state_dir(self, reason: str) -> int:
         try:
@@ -215,7 +221,9 @@ class DocketClient:
             raise DocketError("no_ack", str(exc)) from exc
         if response["ok"] is not True:
             reason = response.get("reason")
-            raise DocketError(reason if isinstance(reason, str) else "refused")
+            if not isinstance(reason, str) or reason in LOCAL_REASONS:
+                raise DocketError("refused", f"sink reason {reason!r}" if isinstance(reason, str) else "")
+            raise DocketError(reason)
         return response
 
     def _check_sink(self, connection: socket.socket) -> None:
@@ -225,6 +233,20 @@ class DocketClient:
             raise DocketError("sink_not_trusted", str(exc)) from exc
         if uid != self._sink_uid:
             raise DocketError("sink_not_trusted", f"sink peer uid {uid} is not {self._sink_uid}")
+
+
+def _close_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _unlink_quietly(name: str, directory_fd: int) -> None:
+    try:
+        os.unlink(name, dir_fd=directory_fd)
+    except OSError:
+        pass
 
 
 def _early_refusal(connection: socket.socket, send_error: OSError) -> dict[str, Any]:

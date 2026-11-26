@@ -578,19 +578,20 @@ def test_a_repeated_chain_refusal_is_recorded_once(make_custodian, workdir):
     assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
 
 
-def unacknowledged(record):
-    raise DocketError("state_write_failed", "head not saved")
-
-
-def test_an_unacknowledged_chain_refusal_is_not_recorded_again(make_custodian, open_docket, workdir, caplog):
+def test_a_chain_refusal_acknowledged_but_not_saved_is_not_recorded_again(make_custodian, workdir, caplog):
     root = make_v1_root()
     request = make_request(root)
     token = sign_clearance(clearance_for(request, root))
-    inner = open_docket("custodian", "custodian-1", CUSTODIAN_KEY)
-    custodian = make_custodian(scope_v1_cutoff=NOW, docket=AckDocket(inner, unacknowledged))
-    for _ in range(3):
-        assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    custodian = make_custodian(scope_v1_cutoff=NOW)
+    state_dir = workdir / "custodian-state"
+    os.chmod(state_dir, 0o770)
+    try:
+        for _ in range(3):
+            assert custodian.release(token, request, NOW + 1) == Refused("chain_invalid")
+    finally:
+        os.chmod(state_dir, 0o700)
     assert [entry.reason for entry in custodian_entries(workdir)] == ["chain_refused"]
+    assert not (state_dir / "custodian.head").exists()
     assert "recorded but its head was not saved" in caplog.text
     assert "was not written" not in caplog.text
 

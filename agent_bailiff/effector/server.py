@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
+from agent_bailiff.docket.client import UNACKNOWLEDGED, DocketError
 from agent_bailiff.docket.entry import Entry, Record
 from agent_bailiff.effector.catalog import LABEL, CatalogOperation, KubernetesCall, OperationCatalog
 from agent_bailiff.effector.kubernetes import KubernetesClient
@@ -131,8 +132,14 @@ class Effector:
 
     def _refuse(self, checked: CheckedCall, reason: str, now: int) -> dict[str, Any]:
         handles = {"tenant": checked.release.tenant, "task": checked.release.task}
-        if not self._record(replace(self._entry(checked, "refuse", now), reason=reason, handles=handles)):
-            event = {"event": "effector_refusal_unrecorded", "op_id": checked.release.op_id, "reason": reason}
+        status = self._append(replace(self._entry(checked, "refuse", now), reason=reason, handles=handles))
+        if status != "recorded":
+            event = {
+                "event": "effector_refusal_unrecorded",
+                "docket": status,
+                "op_id": checked.release.op_id,
+                "reason": reason,
+            }
             event.update(handles)
             logger.error("%s", json.dumps(event, sort_keys=True))
         return _error(reason)
@@ -156,12 +163,22 @@ class Effector:
         )
 
     def _record(self, entry: Entry) -> bool:
+        return self._append(entry) == "recorded"
+
+    def _append(self, entry: Entry) -> str:
         try:
             record = self._docket.append(entry)
+        except DocketError as exc:
+            logger.error("effector docket entry was not acknowledged: %s", exc)
+            if exc.reason == "state_write_failed":
+                return "head_unsaved"
+            return "unacknowledged" if exc.reason in UNACKNOWLEDGED else "not_written"
         except Exception:
             logger.exception("effector docket entry was not acknowledged")
-            return False
-        return isinstance(record, Record) and record.entry == entry and record.writer == self._config.docket_writer
+            return "unacknowledged"
+        if isinstance(record, Record) and record.entry == entry and record.writer == self._config.docket_writer:
+            return "recorded"
+        return "unacknowledged"
 
 
 def _error(reason: str) -> dict[str, Any]:
