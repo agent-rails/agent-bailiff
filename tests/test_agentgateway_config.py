@@ -45,6 +45,7 @@ def gateway_config(
 ):
     return {
         "config": {"adminAddr": "127.0.0.1:15000"},
+        "frontendPolicies": {"accessLog": {"remove": ["mcp.error.message"]}},
         "mcp": {
             "port": 3000,
             "statefulMode": "stateless",
@@ -282,6 +283,45 @@ def test_missing_or_unbounded_upstream_timeouts_are_refused(timeout):
             config["mcp"]["policies"]["timeout"] = timeout
 
     assert any("timeout" in problem for problem in problems_after(change))
+
+
+def test_an_access_log_removing_more_fields_is_accepted():
+    def change(config):
+        config["frontendPolicies"]["accessLog"]["remove"].append("http.path")
+
+    assert problems_after(change) == ()
+
+
+@pytest.mark.parametrize(
+    "frontend",
+    [
+        None,
+        {},
+        [],
+        {"accessLog": None},
+        {"accessLog": {}},
+        {"accessLog": {"remove": []}},
+        {"accessLog": {"remove": ["http.path"]}},
+        {"accessLog": {"remove": "mcp.error.message"}},
+        {"accessLog": {"remove": ["mcp.error.message", 1]}},
+        {"accessLog": {"remove": ["mcp.error.message", "mcp.error.message"]}},
+        {"accessLog": {"remove": ["MCP.ERROR.MESSAGE"]}},
+        {"logging": {"remove": ["mcp.error.message"]}},
+        {"accessLog": {"remove": ["mcp.error.message"]}, "tracing": {}},
+        {"accessLog": {"remove": ["mcp.error.message"], "preset": "otel"}},
+        {"accessLog": {"remove": ["mcp.error.message"], "add": {"auth": "request.headers.authorization"}}},
+        {"accessLog": {"remove": ["mcp.error.message"], "filter": "true"}},
+        {"accessLog": {"remove": ["mcp.error.message"], "otlp": {}}},
+    ],
+)
+def test_an_access_log_that_can_keep_upstream_error_text_is_refused(frontend):
+    def change(config):
+        if frontend is None:
+            del config["frontendPolicies"]
+        else:
+            config["frontendPolicies"] = frontend
+
+    assert any("frontendPolicies" in problem for problem in problems_after(change))
 
 
 def test_check_config_refuses_a_redactor_on_another_socket(owned_files):

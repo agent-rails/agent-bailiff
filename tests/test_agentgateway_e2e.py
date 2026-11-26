@@ -466,7 +466,7 @@ def record_redactor_calls(monkeypatch):
     return seen
 
 
-def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(stack, workdir, monkeypatch):
+def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_but_not_the_access_log(stack, workdir, monkeypatch):
     redacted = record_redactor_calls(monkeypatch)
     stack["upstream"].call_reply = error_echoing
     request = make_request()
@@ -474,8 +474,33 @@ def test_an_echo_in_a_json_rpc_error_reaches_a_direct_client_and_the_access_log(
     echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
     assert status == 200 and body["error"] == {"code": -32000, "message": echo}, body
     assert redacted == []
-    assert f'mcp.error.message="{echo}"' in call_access_line(stack["gateway"])
+    line = call_access_line(stack["gateway"])
+    assert "mcp.error.message" not in line and DEPLOY_SECRET.decode() not in line, line
     assert alerts(workdir) == []
+
+
+def test_without_the_access_log_removal_the_gateway_logs_the_error_echo(stack, binary, workdir):
+    config = copy.deepcopy(stack["config"])
+    del config["frontendPolicies"]
+    admin, stats, readiness, config["mcp"]["port"] = free_ports(4)
+    config["config"] = {
+        "adminAddr": f"127.0.0.1:{admin}",
+        "statsAddr": f"127.0.0.1:{stats}",
+        "readinessAddr": f"127.0.0.1:{readiness}",
+    }
+    assert any("frontendPolicies" in problem for problem in validate_gateway_config(config, stack["expected"]))
+    directory = workdir / "unfiltered"
+    directory.mkdir()
+    gateway = Gateway(binary, config, directory)
+    try:
+        stack["upstream"].call_reply = error_echoing
+        request = make_request()
+        status, body = Agent(gateway.port).call("deploy_service", request.args, agent_headers(request))
+        echo = f"upstream rejected {DEPLOY_SECRET.decode()}"
+        assert body.get("error", {}).get("message") == echo, body
+        assert f'mcp.error.message="{echo}"' in call_access_line(gateway)
+    finally:
+        gateway.stop()
 
 
 @pytest.mark.parametrize("kind", sorted(SIDE_MESSAGES))
