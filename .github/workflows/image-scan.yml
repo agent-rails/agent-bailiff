@@ -97,6 +97,14 @@ jobs:
       - name: Download the vulnerability database
         if: steps.cache.outputs.cache-hit != 'true'
         run: '"$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
+      - name: Check the vulnerability database is fresh
+        run: |
+          metadata="$RUNNER_TEMP/trivy-cache/db/metadata.json"
+          jq . "$metadata"
+          updated="$(jq -er .UpdatedAt "$metadata")"
+          test "$(date -u -d "$updated" +%s)" -ge "$(( $(date -u +%s) - DB_MAX_AGE_SECONDS ))"
+        env:
+          DB_MAX_AGE_SECONDS: 172800
 
   scan:
     needs: db
@@ -149,7 +157,7 @@ jobs:
           dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
-          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update
+          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
           --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
           --exit-code 1 --no-progress "$IMAGE"
 

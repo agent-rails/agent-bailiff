@@ -213,7 +213,21 @@ def test_the_image_scan_downloads_the_database_once_per_day():
     assert "key=trivy-db-${TRIVY_VERSION}-$(date -u +%F)" in text
     assert "--download-db-only" in text
     assert "key: ${{ needs.db.outputs.key }}\n          fail-on-cache-miss: true\n" in text
-    assert "--skip-db-update" in text
+    assert "--skip-db-update --skip-java-db-update\n" in text
+
+
+def test_the_image_scan_refuses_a_database_older_than_two_days():
+    text = IMAGE_SCAN.read_text()
+    assert (
+        '          metadata="$RUNNER_TEMP/trivy-cache/db/metadata.json"\n'
+        '          jq . "$metadata"\n'
+        '          updated="$(jq -er .UpdatedAt "$metadata")"\n'
+        '          test "$(date -u -d "$updated" +%s)" -ge "$(( $(date -u +%s) - DB_MAX_AGE_SECONDS ))"\n'
+        "        env:\n"
+        "          DB_MAX_AGE_SECONDS: 172800\n"
+        "\n"
+        "  scan:\n"
+    ) in text
 
 
 def test_the_image_scan_checks_libzstd_in_the_built_image():
