@@ -11,9 +11,12 @@ PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
 STUBS = ROOT / "agent_bailiff" / "adapters" / "agentgateway" / "_proto"
 LIBZSTD_UPGRADE = (
     "RUN apt-get update \\\n"
-    "    && apt-get install --yes --no-install-recommends libzstd1=1.5.7+dfsg-1+deb13u1 \\\n"
-    "    && rm -rf /var/lib/apt/lists/*\n"
+    "    && apt-get install --yes --no-install-recommends --only-upgrade libzstd1 \\\n"
+    "    && dpkg --compare-versions \"$(dpkg-query --show --showformat='${Version}' libzstd1)\" "
+    "ge 1.5.7+dfsg-1+deb13u1 \\\n"
+    "    && apt-get dist-clean\n"
 )
+PYTHON_STAGES = 4
 
 
 def pinned_sha256():
@@ -85,10 +88,18 @@ def test_the_committed_stubs_match_a_fresh_generation(tmp_path):
     }
 
 
-def test_every_image_builds_from_one_digest_pinned_python_base():
-    tracked = subprocess.run(
-        ["git", "ls-files", "*Dockerfile*"], cwd=ROOT, capture_output=True, text=True, check=True
+def tracked_image_files():
+    return subprocess.run(
+        ["git", "ls-files", ":(icase)*dockerfile*", ":(icase)*containerfile*"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.split()
+
+
+def test_every_image_builds_from_one_digest_pinned_python_base():
+    tracked = tracked_image_files()
     images = [
         match
         for path in tracked
@@ -100,15 +111,13 @@ def test_every_image_builds_from_one_digest_pinned_python_base():
 
 
 def test_every_python_stage_installs_the_fixed_libzstd():
-    tracked = subprocess.run(
-        ["git", "ls-files", "*Dockerfile*"], cwd=ROOT, capture_output=True, text=True, check=True
-    ).stdout.split()
+    tracked = tracked_image_files()
     stages = [
         stage
         for path in tracked
         for stage in re.split(r"^(?=FROM )", (ROOT / path).read_text(), flags=re.MULTILINE)
         if re.match(r"FROM (?:--platform=\S+ )?python:", stage)
     ]
-    assert len(stages) == len(tracked)
+    assert len(stages) >= PYTHON_STAGES
     for stage in stages:
         assert re.search(r"^FROM \S.*\n\n" + re.escape(LIBZSTD_UPGRADE), stage, re.MULTILINE), stage
