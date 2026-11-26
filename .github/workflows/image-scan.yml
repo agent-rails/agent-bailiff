@@ -89,7 +89,11 @@ jobs:
           key: ${{ needs.db.outputs.key }}
           fail-on-cache-miss: true
       - name: Build image
-        run: docker build ${{ matrix.build }} --tag "$IMAGE" .
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          read -ra build <<< "$BUILD"
+          docker build "${build[@]}" --tag "$IMAGE" .
       - name: Check libzstd1
         run: |
           version="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${Version}' libzstd1)"

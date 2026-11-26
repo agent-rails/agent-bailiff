@@ -156,6 +156,10 @@ def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
     text = IMAGE_SCAN.read_text()
     assert set(re.findall(r"^            build: --file (\S+)", text, re.MULTILINE)) == set(tracked_image_files())
     assert "    strategy:\n      fail-fast: false\n      matrix:\n" in text
+    assert "          BUILD: ${{ matrix.build }}\n" in text
+    assert 'read -ra build <<< "$BUILD"\n          docker build "${build[@]}" --tag "$IMAGE" .\n' in text
+    runs = re.findall(r"^ +(?:- )?run: (?:[|>]-?\n((?:(?: {10,}.*)?\n)+)|(.*)\n)", text, re.MULTILINE)
+    assert runs and not any("${{" in block + line for block, line in runs)
     assert "    if: always()\n    needs: scan\n" in text
     assert 'test "$RESULT" = success' in text
 
