@@ -37,6 +37,6 @@ jobs:
         run: |
           status=0
           for image in agent-bailiff-quickstart:scan agent-bailiff-quickstart-trace:scan agent-bailiff-webhook:scan agent-bailiff-minter:scan agent-bailiff-live-run:scan; do
-            "$RUNNER_TEMP/trivy" image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$image" || status=1
+            "$RUNNER_TEMP/trivy" image --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --exit-code 1 --no-progress "$image" || status=1
           done
           exit "$status"

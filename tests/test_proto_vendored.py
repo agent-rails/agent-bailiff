@@ -1,14 +1,19 @@
 import hashlib
+import json
 import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "adapters" / "agentgateway" / "scripts" / "generate_proto.sh"
 PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
 STUBS = ROOT / "agent_bailiff" / "adapters" / "agentgateway" / "_proto"
+SCAN_IGNORES = ROOT / ".trivyignore.yaml"
+IMAGE_SCAN = ROOT / ".github" / "workflows" / "image-scan.yml"
+MAX_IGNORE_DAYS = 31
 
 
 def pinned_sha256():
@@ -92,3 +97,19 @@ def test_every_image_builds_from_one_digest_pinned_python_base():
     bases = {image for image in images if image.startswith("python:")}
     assert len(tracked) >= 4 and len(bases) == 1, bases
     assert re.fullmatch(r"python:3\.13\.\d+-slim@sha256:[0-9a-f]{64}", bases.pop())
+
+
+def test_every_image_scan_exception_is_scoped_explained_and_expiring():
+    entries = json.loads(SCAN_IGNORES.read_text())["vulnerabilities"]
+    assert entries
+    for entry in entries:
+        assert set(entry) == {"id", "paths", "statement", "expired_at"}, entry
+        assert re.fullmatch(r"CVE-\d{4}-\d+", entry["id"])
+        assert entry["paths"] and all(entry["paths"]), entry
+        assert entry["statement"].strip(), entry
+        expires = datetime.strptime(entry["expired_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        assert expires - datetime.now(UTC) <= timedelta(days=MAX_IGNORE_DAYS), entry
+
+
+def test_the_image_scan_applies_the_exceptions():
+    assert "--ignorefile .trivyignore.yaml" in IMAGE_SCAN.read_text()
