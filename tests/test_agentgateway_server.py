@@ -13,8 +13,10 @@ from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.processors import passed, refuse
 from agent_bailiff.adapters.agentgateway.server import (
     RESPONSE_MAX_CONCURRENT_RPCS,
+    SHED_LOG_INTERVAL_SECONDS,
     ProcessorLocked,
     ProcessorServer,
+    ResponseAdmission,
     request_handlers,
     response_server,
 )
@@ -311,10 +313,10 @@ def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, w
             codes.add(error.code())
     assert grpc.StatusCode.RESOURCE_EXHAUSTED in codes
     assert len(redactor.messages) == 1
-    sheds = [record.getMessage() for record in caplog.records if "shed a response check" in record.getMessage()]
+    sheds = [record.getMessage() for record in caplog.records if "response checks over" in record.getMessage()]
     assert sheds[0] == (
-        f"shed a response check over the {RESPONSE_MAX_CONCURRENT_RPCS} concurrent check limit "
-        "after the upstream acted (1 shed since start)"
+        f"shed 1 response checks over the {RESPONSE_MAX_CONCURRENT_RPCS} concurrent check limit "
+        "after the upstream acted since the last report (1 shed since start)"
     )
     redactor.release.set()
     for thread in waiting:
@@ -322,48 +324,109 @@ def test_response_checks_run_one_at_a_time_and_shed_past_the_limit(responding, w
     assert check_response(socket_path).mutated == b'{"content":[]}'
 
 
-def test_a_response_check_abandoned_while_queued_never_reaches_the_redactor(responding, workdir):
-    redactor = RecordingRedactor()
-    redactor.release.clear()
-    responding(redactor)
-    socket_path = workdir / "s" / "redactor.sock"
-    first = threading.Thread(target=lambda: _ignore_errors(lambda: check_response(socket_path, timeout=20)))
-    first.start()
-    assert redactor.entered.wait(5)
-    with pytest.raises(grpc.RpcError) as caught:
-        check_response(socket_path, timeout=0.5)
-    assert caught.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
-    redactor.release.set()
-    first.join(10)
-    time.sleep(0.5)
-    assert len(redactor.messages) == 1
+class Aborted(Exception):
+    def __init__(self, code):
+        self.code = code
 
 
-def test_a_shed_response_check_frees_no_slot_it_did_not_take(responding, workdir):
-    redactor = RecordingRedactor()
-    redactor.release.clear()
-    responding(redactor)
-    socket_path = workdir / "s" / "redactor.sock"
-    waiting = [
-        threading.Thread(target=lambda: _ignore_errors(lambda: check_response(socket_path, timeout=20)))
-        for _ in range(RESPONSE_MAX_CONCURRENT_RPCS)
-    ]
-    for thread in waiting:
-        thread.start()
-    assert redactor.entered.wait(5)
-    deadline = time.monotonic() + 10
-    shed = 0
-    while shed < 3 and time.monotonic() < deadline:
+class FakeContext:
+    def __init__(self):
+        self.active = True
+
+    def is_active(self):
+        return self.active
+
+    def abort(self, code, _details):
+        raise Aborted(code)
+
+
+class GatedRedactor:
+    def __init__(self):
+        self.messages = []
+        self.entered = threading.Semaphore(0)
+        self.release = threading.Event()
+
+    def check_response(self, message):
+        self.messages.append(message)
+        self.entered.release()
+        assert self.release.wait(10)
+        return passed()
+
+
+class AdmissionCall:
+    def __init__(self, admission, context=None):
+        self.context = context or FakeContext()
+        self.code = None
+        self.thread = threading.Thread(target=self._run, args=(admission,))
+        self.thread.start()
+
+    def _run(self, admission):
         try:
-            check_response(socket_path, timeout=0.5)
-        except grpc.RpcError as error:
-            shed += error.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
-    assert shed == 3
+            admission.check_response(ext_mcp_pb2.McpResponse(method="tools/call"), self.context)
+        except Aborted as aborted:
+            self.code = aborted.code
+
+    def join(self):
+        self.thread.join(10)
+        assert not self.thread.is_alive()
+
+
+def shed_code(admission):
+    with pytest.raises(Aborted) as caught:
+        admission.check_response(ext_mcp_pb2.McpResponse(method="tools/call"), FakeContext())
+    return caught.value.code
+
+
+def test_a_response_check_abandoned_while_queued_frees_its_slot_unscanned():
+    redactor = GatedRedactor()
+    admission = ResponseAdmission(redactor, workers=1, limit=2)
+    scanning = AdmissionCall(admission)
+    assert redactor.entered.acquire(timeout=5)
+    abandoned = AdmissionCall(admission)
+    assert shed_code(admission) == grpc.StatusCode.RESOURCE_EXHAUSTED
+    abandoned.context.active = False
+    abandoned.join()
+    assert abandoned.code == grpc.StatusCode.CANCELLED
+    queued = AdmissionCall(admission)
     redactor.release.set()
-    for thread in waiting:
-        thread.join(30)
-    assert len(redactor.messages) == RESPONSE_MAX_CONCURRENT_RPCS
-    assert check_response(socket_path).mutated == b'{"content":[]}'
+    scanning.join()
+    queued.join()
+    assert queued.code is None
+    assert len(redactor.messages) == 2
+
+
+def test_a_shed_response_check_frees_no_slot_it_did_not_take():
+    redactor = GatedRedactor()
+    admission = ResponseAdmission(redactor, workers=2, limit=2)
+    held = [AdmissionCall(admission) for _ in range(2)]
+    for _ in held:
+        assert redactor.entered.acquire(timeout=5)
+    assert [shed_code(admission) for _ in range(3)] == [grpc.StatusCode.RESOURCE_EXHAUSTED] * 3
+    assert shed_code(admission) == grpc.StatusCode.RESOURCE_EXHAUSTED
+    redactor.release.set()
+    for call in held:
+        call.join()
+    assert [call.code for call in held] == [None, None]
+    assert len(redactor.messages) == 2
+
+
+def test_sheds_are_logged_at_most_once_per_interval_with_the_count_since_the_last_line(caplog):
+    now = [100.0]
+    redactor = GatedRedactor()
+    admission = ResponseAdmission(redactor, workers=1, limit=1, clock=lambda: now[0])
+    held = AdmissionCall(admission)
+    assert redactor.entered.acquire(timeout=5)
+    for at in (0.0, 0.0, 1.0, SHED_LOG_INTERVAL_SECONDS - 0.1, SHED_LOG_INTERVAL_SECONDS, SHED_LOG_INTERVAL_SECONDS):
+        now[0] = 100.0 + at
+        shed_code(admission)
+    redactor.release.set()
+    held.join()
+    assert [record.getMessage() for record in caplog.records] == [
+        "shed 1 response checks over the 1 concurrent check limit after the upstream acted"
+        " since the last report (1 shed since start)",
+        "shed 4 response checks over the 1 concurrent check limit after the upstream acted"
+        " since the last report (5 shed since start)",
+    ]
 
 
 @pytest.mark.parametrize("workers", [0, 3])
