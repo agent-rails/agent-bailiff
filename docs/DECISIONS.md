@@ -149,6 +149,12 @@ The defence stops at what the call designates and what the docket sees. Argument
 
 **Why:** the release-time warning reached neither the agent nor the person who stored the credential, and came only once the credential was in use. The operator storing it is the one who can replace it. Binding the exception into the encryption context means a write to the store file cannot add or remove an exception without the key encryption key, and a row an earlier `put-credential` rewrote under a recorded exception does not decrypt, instead of being released under a stale exception. The binding gives no freshness: restoring an earlier complete row for the same binding, which needs write access to the store file, still decrypts, with the exception that row was stored with. Tokens of other schemes stay opaque: the redactor knows no structure in them, so a short field inside a longer token is neither matched nor checked. See [UPGRADE.md](UPGRADE.md) for stores written by an earlier release.
 
+## D23. Python images raise libzstd1 to a floor
+
+**Decision:** every python image stage first runs `apt-get install --only-upgrade libzstd1` and fails the build unless the installed version is at least `1.5.7+dfsg-1+deb13u1` (CVE-2026-124851, DSA-6657-1), then runs `apt-get dist-clean` as the base does. A test requires the step directly after each python `FROM`. Remove the step once the pinned python base ships that version or later.
+
+**Why:** the newest `python:3.13.18-slim` digest still ships `1.5.7+dfsg-1`, and its OpenSSL links libzstd. A floor accepts later Debian fixes and later bases, which an exact pin refuses, and still fails loudly if the image would carry the affected version. It covers only Debian's libzstd: the live-run image's `claude` and `agentgateway` binaries carry their own zstd, which this does not change.
+
 ## Deferred
 
 - Target-bound minting and an OpenBao or KMS key backend, with a release-only custodian key.
