@@ -29,6 +29,8 @@ ORBSTACK_HOST = "k8s.orb.local"
 ORBSTACK_HOSTS = frozenset({"127.0.0.1", ORBSTACK_HOST})
 CLUSTER_KEYS = frozenset({"server", "certificate-authority-data"})
 USER_KEYS = frozenset({"client-certificate-data", "client-key-data", "token"})
+TOKEN_FORM = frozenset({"token"})
+CERTIFICATE_FORM = frozenset({"client-certificate-data", "client-key-data"})
 GKE_PORTS = (None, 443)
 READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
@@ -87,8 +89,15 @@ def check_user(user: dict[str, Any]) -> None:
     extra = sorted(set(user) - USER_KEYS)
     if extra:
         raise RuntimeError(f"the kubeconfig user sets {extra}; only {sorted(USER_KEYS)} are allowed")
-    if not all(isinstance(value, str) and value for value in user.values()):
-        raise RuntimeError("the kubeconfig user values must be non-empty strings")
+    if not all(isinstance(value, str) and value and value.isprintable() for value in user.values()):
+        raise RuntimeError("the kubeconfig user values must be non-empty printable strings")
+    if set(user) not in (TOKEN_FORM, CERTIFICATE_FORM):
+        raise RuntimeError("the kubeconfig user must hold a token alone or a client certificate and key")
+    for key in CERTIFICATE_FORM & set(user):
+        try:
+            base64.b64decode(user[key], validate=True)
+        except binascii.Error as error:
+            raise RuntimeError(f"the kubeconfig {key} is not base64") from error
 
 
 def check_cluster(cluster: dict[str, Any]) -> tuple[str, int | None]:
@@ -109,6 +118,7 @@ def check_cluster(cluster: dict[str, Any]) -> tuple[str, int | None]:
     if (
         server.scheme != "https"
         or not server.hostname
+        or ":" in server.hostname
         or server.username is not None
         or server.path not in ("", "/")
         or server.query

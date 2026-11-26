@@ -11,6 +11,7 @@ import launch  # noqa: E402
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
+CERT_USER = {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}
 
 
 def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contexts=1, cluster=None):
@@ -18,7 +19,7 @@ def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contex
     return {
         "contexts": [{"name": context, "context": {"cluster": context, "user": context}}] * contexts,
         "clusters": [{"name": context, "cluster": entry}],
-        "users": [{"name": context, "user": user or {"client-certificate-data": "Y2VydA=="}}],
+        "users": [{"name": context, "user": CERT_USER if user is None else user}],
     }
 
 
@@ -77,8 +78,8 @@ ORBSTACK_SERVER = {"server": "https://127.0.0.1:26443"}
         ({**ORBSTACK_SERVER, "certificate-authority-data": True}, "no certificate-authority-data"),
         ({**ORBSTACK_SERVER, "certificate-authority-data": "not base64!"}, "is not base64"),
         ({"server": "https://evil.example:26443", **CA}, "host evil.example is not one of"),
-        ({"server": "https://[::1]:26443", **CA}, "host ::1 is not one of"),
-        ({"server": "https://[::ffff:127.0.0.1]:26443", **CA}, "is not one of"),
+        ({"server": "https://[::1]:26443", **CA}, "is not https://"),
+        ({"server": "https://[::ffff:127.0.0.1]:26443", **CA}, "is not https://"),
         ({"server": "https://k8s.orb.local.:26443", **CA}, "is not one of"),
         ({"server": "https://2130706433:26443", **CA}, "is not one of"),
         ({"server": "https://127.0.0.1", **CA}, "with a port"),
@@ -116,11 +117,18 @@ def test_a_refused_server_is_not_echoed(kubectl_view, server):
         ({"token": "t", "as-user-extra": {"k": ["v"]}}, r"sets \['as-user-extra'\]"),
         ({"token": "t", "extensions": []}, r"sets \['extensions'\]"),
         ({"client-certificate": "/c", "client-key": "/k"}, r"sets \['client-certificate', 'client-key'\]"),
-        ({"token": ""}, "non-empty strings"),
-        ({"token": 1}, "non-empty strings"),
+        ({"token": ""}, "non-empty printable strings"),
+        ({"token": 1}, "non-empty printable strings"),
+        ({"token": "a\r\nX: y"}, "non-empty printable strings"),
+        ({}, "a token alone or a client certificate and key"),
+        ({"client-key-data": "a2V5"}, "a token alone or a client certificate and key"),
+        ({"token": "t", **CERT_USER}, "a token alone"),
+        ({**CERT_USER, "client-certificate-data": "not base64!"}, "client-certificate-data is not base64"),
+        ({**CERT_USER, "client-key-data": "%%%"}, "client-key-data is not base64"),
     ],
     ids=[
         "token-file", "basic", "as", "as-groups", "as-uid", "as-user-extra", "extensions", "cert-files", "empty", "int",
+        "crlf-token", "no-credential", "key-only", "token-and-cert", "cert-not-base64", "key-not-base64",
     ],
 )  # fmt: skip
 def test_a_user_entry_outside_the_allowlist_is_refused(kubectl_view, user, message):
