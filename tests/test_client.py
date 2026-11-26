@@ -579,6 +579,23 @@ def test_tools_list_with_more_than_ten_pages_is_refused(client, stub):
     assert stub.methods().count("tools/list") == 10
 
 
+def big_tool_page(index, cursor):
+    page = {"tools": [{"name": f"tool_{index}", "description": "x" * 2 * 1024 * 1024}], "nextCursor": cursor}
+    return reply(page)
+
+
+def test_tools_list_pages_that_together_exceed_the_byte_budget_are_refused(client, stub):
+    stub.responders["tools/list"] = [big_tool_page(0, "c1"), big_tool_page(1, "c2"), tool_page(2, None)]
+    with pytest.raises(GatewayError, match=f"more than {4 * 1024 * 1024} bytes of tools"):
+        client.list_tools()
+    assert stub.methods().count("tools/list") == 2
+
+
+def test_tools_list_pages_within_the_byte_budget_are_merged(client, stub):
+    stub.responders["tools/list"] = [big_tool_page(0, "c1"), tool_page(1, None)]
+    assert [tool["name"] for tool in client.list_tools()] == ["tool_0", "tool_1"]
+
+
 def test_tools_list_restarts_from_the_first_page_after_a_session_expires_mid_listing(client, stub):
     stub.responders["tools/list"] = [tool_page(0, "c1"), reply(status=404), tool_page(0, "c1"), tool_page(1, None)]
     assert client.list_tools() == [{"name": "tool_0"}, {"name": "tool_1"}]
