@@ -5,6 +5,8 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -16,6 +18,7 @@ from agent_bailiff.custodian import (
     LocalBackend,
     OwnedFileError,
     credential_context,
+    files,
 )
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import StoredCredential, UnredactableCredential
@@ -353,3 +356,41 @@ def test_opening_a_database_without_the_credentials_table_is_refused(state, back
     create_owned(state / "empty.db", "credential store", b"")
     with pytest.raises(OwnedFileError, match="not a usable database"):
         CredentialStore.open(state / "empty.db", backend)
+
+
+def test_opening_a_migrated_store_does_not_wait_for_a_writer(state, store, backend, monkeypatch):
+    store.put(*BINDING, SECRET)
+    monkeypatch.setattr(files, "BUSY_TIMEOUT_SECONDS", 0)
+    writer = sqlite3.connect(state / "credentials.db", isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        reopened = CredentialStore.open(state / "credentials.db", backend)
+        reopened.close()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+
+def test_concurrent_opens_of_an_older_store_add_the_column_once(state, backend):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SECRET)
+    barrier = threading.Barrier(8)
+
+    def open_store():
+        barrier.wait()
+        CredentialStore.open(path, backend).close()
+
+    with ThreadPoolExecutor(8) as pool:
+        for future in [pool.submit(open_store) for _ in range(8)]:
+            future.result()
+    connection = sqlite3.connect(path)
+    try:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(credentials)")]
+    finally:
+        connection.close()
+    assert columns.count("exception") == 1
+    store = CredentialStore.open(path, backend)
+    try:
+        assert store.get(*BINDING) == StoredCredential(SECRET, None)
+    finally:
+        store.close()

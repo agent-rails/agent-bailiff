@@ -162,12 +162,17 @@ class CredentialStore:
 
 
 def _add_exception_column(connection: sqlite3.Connection) -> None:
+    if _has_exception_column(connection):
+        return
     connection.execute("BEGIN IMMEDIATE")
     try:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(credentials)")}
-        if "exception" not in columns:
+        if not _has_exception_column(connection):
             connection.execute(ADD_EXCEPTION)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+def _has_exception_column(connection: sqlite3.Connection) -> bool:
+    return "exception" in {row[1] for row in connection.execute("PRAGMA table_info(credentials)")}
