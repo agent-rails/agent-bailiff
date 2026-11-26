@@ -4,6 +4,8 @@ harness in one container and writes its result JSON. See README.md."""
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import re
@@ -24,6 +26,12 @@ GKE_PROBE = re.compile(r"gke_(?P<project>[a-z0-9-]+)_(?P<location>[a-z0-9-]+)_ba
 PROBE_CLUSTER = "bailiff-probe"
 PROBE_LABEL = "purpose"
 ORBSTACK_HOST = "k8s.orb.local"
+ORBSTACK_HOSTS = frozenset({"127.0.0.1", ORBSTACK_HOST})
+CLUSTER_KEYS = frozenset({"server", "certificate-authority-data"})
+USER_KEYS = frozenset({"client-certificate-data", "client-key-data", "token"})
+TOKEN_FORM = frozenset({"token"})
+CERTIFICATE_FORM = frozenset({"client-certificate-data", "client-key-data"})
+GKE_PORTS = (None, 443)
 READ_CATALOG = "kubernetes-read"
 ROOT = "/live"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -75,7 +83,55 @@ def platform_of(context: str) -> str:
     return "gke" if GKE_PROBE.fullmatch(context) else "upstream"
 
 
-def check_gke_probe(project: str, location: str, server: str) -> None:
+def check_user(user: dict[str, Any]) -> None:
+    if "exec" in user or "auth-provider" in user:
+        raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
+    extra = sorted(set(user) - USER_KEYS)
+    if extra:
+        raise RuntimeError(f"the kubeconfig user sets {extra}; only {sorted(USER_KEYS)} are allowed")
+    if not all(isinstance(value, str) and value and value.isprintable() for value in user.values()):
+        raise RuntimeError("the kubeconfig user values must be non-empty printable strings")
+    if set(user) not in (TOKEN_FORM, CERTIFICATE_FORM):
+        raise RuntimeError("the kubeconfig user must hold a token alone or a client certificate and key")
+    for key in CERTIFICATE_FORM & set(user):
+        try:
+            base64.b64decode(user[key], validate=True)
+        except binascii.Error as error:
+            raise RuntimeError(f"the kubeconfig {key} is not base64") from error
+
+
+def check_cluster(cluster: dict[str, Any]) -> tuple[str, int | None]:
+    extra = sorted(set(cluster) - CLUSTER_KEYS)
+    if extra:
+        raise RuntimeError(f"the kubeconfig cluster sets {extra}; only {sorted(CLUSTER_KEYS)} are allowed")
+    authority = cluster.get("certificate-authority-data")
+    if not isinstance(authority, str) or not authority:
+        raise RuntimeError("the kubeconfig cluster has no certificate-authority-data")
+    try:
+        base64.b64decode(authority, validate=True)
+    except binascii.Error as error:
+        raise RuntimeError("the kubeconfig certificate-authority-data is not base64") from error
+    text = cluster.get("server")
+    if not isinstance(text, str) or not text.isprintable() or text != text.strip():
+        raise RuntimeError("the kubeconfig server is not a printable string without surrounding whitespace")
+    server = urllib.parse.urlsplit(text)
+    if (
+        server.scheme != "https"
+        or not server.hostname
+        or ":" in server.hostname
+        or server.username is not None
+        or server.path not in ("", "/")
+        or server.query
+        or server.fragment
+    ):
+        raise RuntimeError("the kubeconfig server is not https://<host>[:<port>] with no user info, path or query")
+    try:
+        return server.hostname, server.port
+    except ValueError as error:
+        raise RuntimeError("the kubeconfig server has an invalid port") from error
+
+
+def check_gke_probe(project: str, location: str, host: str, port: int | None) -> None:
     output = subprocess.run(
         ["gcloud", "container", "clusters", "describe", PROBE_CLUSTER, "--project", project, "--location", location,
          "--format", "json"],
@@ -84,8 +140,8 @@ def check_gke_probe(project: str, location: str, server: str) -> None:
     cluster = json.loads(output)
     if (cluster.get("resourceLabels") or {}).get(PROBE_LABEL) != PROBE_CLUSTER:
         raise RuntimeError(f"cluster {PROBE_CLUSTER} in {project} has no label {PROBE_LABEL}={PROBE_CLUSTER}")
-    if urllib.parse.urlsplit(server).hostname != cluster.get("endpoint"):
-        raise RuntimeError(f"the kubeconfig server {server} is not the endpoint of {PROBE_CLUSTER} in {project}")
+    if host != cluster.get("endpoint") or port not in GKE_PORTS:
+        raise RuntimeError(f"the kubeconfig server {host}:{port} is not the endpoint of {PROBE_CLUSTER} in {project}")
 
 
 def minify_kubeconfig(
@@ -116,15 +172,16 @@ def minify_kubeconfig(
         raise RuntimeError(f"the minified kubeconfig names context {view['contexts'][0]['name']!r}, not {context!r}")
     if applier_token is not None:
         view["users"][0]["user"] = {"token": applier_token}
-    user = view["users"][0].get("user") or {}
-    if "exec" in user or "auth-provider" in user:
-        raise RuntimeError("the kubeconfig user runs a credential plugin; the container needs a static credential")
+    check_user(view["users"][0].get("user") or {})
     cluster = view["clusters"][0]["cluster"]
+    host, port = check_cluster(cluster)
     if probe is not None:
-        check_gke_probe(probe["project"], probe["location"], cluster["server"])
-    server = urllib.parse.urlsplit(cluster["server"])
-    if server.hostname == "127.0.0.1":
-        cluster["server"] = server._replace(netloc=f"{ORBSTACK_HOST}:{server.port}").geturl()
+        check_gke_probe(probe["project"], probe["location"], host, port)
+        cluster["server"] = f"https://{host}"
+        return view
+    if host not in ORBSTACK_HOSTS or port is None:
+        raise RuntimeError(f"the kubeconfig server host {host} is not one of {sorted(ORBSTACK_HOSTS)} with a port")
+    cluster["server"] = f"https://{ORBSTACK_HOST}:{port}"
     return view
 
 

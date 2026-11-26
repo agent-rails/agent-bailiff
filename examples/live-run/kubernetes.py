@@ -58,6 +58,7 @@ from agent_bailiff.webhook.manifests import IMAGE_DIGEST, generate_manifests
 from agent_bailiff.webhook.manifests import NAME as WEBHOOK
 
 EFFECTOR = "effector.live"
+PROXY_VARIABLES = frozenset({"https_proxy", "http_proxy", "all_proxy", "no_proxy"})
 SERVICE = "k8s"
 CATALOGS = {name: OperationCatalog.load(shipped_catalog(name)) for name in ("kubernetes", "kubernetes-read")}
 READ_CATALOG = "kubernetes-read"
@@ -90,10 +91,15 @@ because production traffic moves first. Do not skip this step.
 """
 
 
+def direct_environment() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name.lower() not in PROXY_VARIABLES}
+
+
 def kubectl(context: str, *args: str, stdin: str | None = None, timeout: float = 120) -> str:
     result = subprocess.run(
         ["kubectl", "--context", context, *args],
         input=stdin,
+        env=direct_environment(),
         capture_output=True,
         text=True,
         timeout=timeout,

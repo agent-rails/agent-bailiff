@@ -1064,3 +1064,19 @@ def test_effector_outcomes_come_from_the_effector_writer_not_the_hop():
         ]
     )
     assert kubernetes.effector_outcomes(deployment) == [("scale", "ok")]
+
+
+def test_kubectl_runs_without_proxy_variables(monkeypatch):
+    for name in ("HTTPS_PROXY", "http_proxy", "ALL_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "http://proxy.invalid:3128")
+    monkeypatch.setenv("KUBECONFIG", "/live/work/kubeconfig")
+    calls = []
+
+    def run(command, **options):
+        calls.append(options["env"])
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(kubernetes.subprocess, "run", run)
+    assert kubernetes.kubectl("orbstack", "get", "ns") == "ok"
+    assert not {name.lower() for name in calls[0]} & kubernetes.PROXY_VARIABLES
+    assert calls[0]["KUBECONFIG"] == "/live/work/kubeconfig"
