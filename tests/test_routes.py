@@ -141,3 +141,10 @@ def test_a_catalog_route_placeholder_must_be_a_whole_segment(resource):
     schema = (Argument("namespace", "label"), Argument("name", "label"))
     with pytest.raises(ValueError, match="whole resource segment"):
         ToolRoute("k8s", "x", "k8s.x", resource, schema)
+
+
+def test_a_duplicate_route_error_caps_the_echoed_names():
+    route = {**ROUTE, "name": "n" * 1000}
+    with pytest.raises(ValueError) as raised:
+        ToolRoutes.from_document({"routes": [route, route]})
+    assert len(str(raised.value)) < 300

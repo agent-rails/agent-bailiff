@@ -263,9 +263,9 @@ class BailiffClient:
             page = result.get("tools")
             if not isinstance(page, list) or not all(isinstance(tool, dict) for tool in page):
                 raise GatewayError("tools/list returned no tool list")
-            listed_bytes += len(json.dumps(page, separators=(",", ":")).encode())
+            listed_bytes += len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode())
             if listed_bytes > MAX_TOOL_LIST_BYTES:
-                raise GatewayError(f"tools/list returned more than {MAX_TOOL_LIST_BYTES} bytes of tools")
+                raise GatewayError(f"tools/list returned more than {MAX_TOOL_LIST_BYTES} bytes")
             for tool in page:
                 name = tool.get("name")
                 if not isinstance(name, str):

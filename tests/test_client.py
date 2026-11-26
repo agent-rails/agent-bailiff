@@ -586,7 +586,7 @@ def big_tool_page(index, cursor):
 
 def test_tools_list_pages_that_together_exceed_the_byte_budget_are_refused(client, stub):
     stub.responders["tools/list"] = [big_tool_page(0, "c1"), big_tool_page(1, "c2"), tool_page(2, None)]
-    with pytest.raises(GatewayError, match=f"more than {4 * 1024 * 1024} bytes of tools"):
+    with pytest.raises(GatewayError, match=f"more than {4 * 1024 * 1024} bytes"):
         client.list_tools()
     assert stub.methods().count("tools/list") == 2
 
@@ -594,6 +594,26 @@ def test_tools_list_pages_that_together_exceed_the_byte_budget_are_refused(clien
 def test_tools_list_pages_within_the_byte_budget_are_merged(client, stub):
     stub.responders["tools/list"] = [big_tool_page(0, "c1"), tool_page(1, None)]
     assert [tool["name"] for tool in client.list_tools()] == ["tool_0", "tool_1"]
+
+
+def test_tools_list_counts_non_ascii_tools_by_their_utf8_size(client, stub):
+    def page(index, cursor):
+        tools = {"tools": [{"name": f"tool_{index}", "description": "\u754c" * 600_000}]}
+        return reply(tools | ({"nextCursor": cursor} if cursor else {}))
+
+    stub.responders["tools/list"] = [page(0, "c1"), page(1, None)]
+    assert [tool["name"] for tool in client.list_tools()] == ["tool_0", "tool_1"]
+
+
+def test_tools_list_counts_padding_outside_the_tools_against_the_budget(client, stub):
+    padded = [
+        reply({"tools": [{"name": f"tool_{index}"}], "nextCursor": f"c{index + 1}", "padding": "x" * 3 * 1024 * 1024})
+        for index in range(3)
+    ]
+    stub.responders["tools/list"] = padded
+    with pytest.raises(GatewayError, match=f"more than {4 * 1024 * 1024} bytes"):
+        client.list_tools()
+    assert stub.methods().count("tools/list") == 2
 
 
 def test_tools_list_restarts_from_the_first_page_after_a_session_expires_mid_listing(client, stub):
