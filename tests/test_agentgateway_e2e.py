@@ -167,9 +167,12 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.end_headers()
-        for message in messages:
-            self.wfile.write(f"event: message\ndata: {json.dumps(message)}\n\n".encode())
-            self.wfile.flush()
+        try:
+            for message in messages:
+                self.wfile.write(f"event: message\ndata: {json.dumps(message)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def result(self, body):
         results = {
@@ -538,25 +541,29 @@ def stream_call(stack, messages):
 
 
 def silent_then_deployed(call_id, credential):
+    time.sleep(SILENCE_SECONDS)
+    yield deployed(call_id)
+
+
+def progress_then_silent(call_id, credential):
     yield progress(1)
     time.sleep(SILENCE_SECONDS)
     yield deployed(call_id)
 
 
 @pytest.mark.parametrize("stack_options", [{"timeout": SHORT_TIMEOUTS}])
-def test_upstream_timeouts_do_not_bound_an_event_stream_body(stack):
-    started = time.monotonic()
+def test_upstream_timeouts_do_not_bound_an_event_stream_body_after_its_headers(stack):
     status, text = stream_call(stack, silent_then_deployed)
-    assert time.monotonic() - started >= SILENCE_SECONDS
-    assert status == 200 and stream_events(text) == [progress(1.0), deployed(7)], text
+    assert status == 200 and stream_events(text) == [deployed(7)], text
 
 
 @pytest.mark.parametrize("stack_options", [{"timeout": IDLE_TIMEOUTS}])
 def test_a_response_idle_timeout_cuts_a_silent_event_stream_after_the_upstream_acted(stack):
     started = time.monotonic()
-    with pytest.raises(http.client.IncompleteRead):
-        stream_call(stack, silent_then_deployed)
-    assert time.monotonic() - started < SILENCE_SECONDS
+    with pytest.raises(http.client.IncompleteRead) as cut:
+        stream_call(stack, progress_then_silent)
+    assert 1 <= time.monotonic() - started < SILENCE_SECONDS
+    assert stream_events(cut.value.partial.decode()) == [progress(1.0)]
     assert len(stack["upstream"].calls()) == 1
 
 
