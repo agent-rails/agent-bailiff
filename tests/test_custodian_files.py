@@ -5,7 +5,7 @@ import stat
 import pytest
 
 from agent_bailiff.custodian import files
-from agent_bailiff.custodian.files import OwnedFileError, commit_at, replace_at, stage_at
+from agent_bailiff.custodian.files import OwnedFileError, commit_at, create_owned, replace_at, stage_at
 
 TARGET = "target.json"
 LABEL = "target file"
@@ -156,3 +156,88 @@ def test_a_failed_replace_keeps_the_target(directory, dir_fd, monkeypatch, call)
     monkeypatch.undo()
     assert os.listdir(directory) == [TARGET]
     assert (directory / TARGET).read_bytes() == b"old"
+
+
+@pytest.fixture
+def opened(monkeypatch):
+    real_open = files.os.open
+    fds = []
+
+    def recording_open(*args, **kwargs):
+        fds.append(real_open(*args, **kwargs))
+        return fds[-1]
+
+    monkeypatch.setattr(files.os, "open", recording_open)
+    return fds
+
+
+def assert_closed(fd):
+    with pytest.raises(OSError) as raised:
+        os.fstat(fd)
+    assert raised.value.errno == errno.EBADF
+
+
+def test_create_owned_removes_the_file_when_the_write_fails(directory, opened, monkeypatch):
+    monkeypatch.setattr(files.os, "fsync", no_space)
+    with pytest.raises(OwnedFileError, match="cannot write the target file: No space left on device"):
+        create_owned(directory / "new.json", LABEL, b"x")
+    assert os.listdir(directory) == [TARGET]
+    assert_closed(opened[-1])
+
+
+def test_create_owned_removes_the_file_and_reraises_an_error_that_is_not_an_os_error(directory, opened, monkeypatch):
+    def interrupted(fd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(files.os, "fsync", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        create_owned(directory / "new.json", LABEL, b"x")
+    assert os.listdir(directory) == [TARGET]
+    assert_closed(opened[-1])
+
+
+def test_create_owned_names_the_partial_file_it_cannot_remove(directory, opened, monkeypatch):
+    def denied(path):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(files.os, "fsync", no_space)
+    monkeypatch.setattr(files.os, "unlink", denied)
+    path = directory / "new.json"
+    with pytest.raises(OwnedFileError, match=f"cannot remove the partly written target file at {path}: Permission"):
+        create_owned(path, LABEL, b"x")
+    assert path.exists()
+    assert_closed(opened[-1])
+
+
+def test_create_owned_removes_the_file_when_closing_it_fails(directory, opened, monkeypatch):
+    real_close = files.os.close
+    closed = []
+
+    def failing_close(fd):
+        closed.append(fd)
+        real_close(fd)
+        if len(closed) == 1:
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(files.os, "fsync", no_space)
+    monkeypatch.setattr(files.os, "close", failing_close)
+    with pytest.raises(OwnedFileError, match="No space left on device; cannot close the partly written target file"):
+        create_owned(directory / "new.json", LABEL, b"x")
+    assert os.listdir(directory) == [TARGET]
+
+
+def test_create_owned_keeps_an_interrupt_when_the_file_cannot_be_removed(directory, opened, monkeypatch):
+    def interrupted(fd):
+        raise KeyboardInterrupt
+
+    def denied(path):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(files.os, "fsync", interrupted)
+    monkeypatch.setattr(files.os, "unlink", denied)
+    with pytest.raises(KeyboardInterrupt) as raised:
+        create_owned(directory / "new.json", LABEL, b"x")
+    assert raised.value.__notes__ == [
+        f"cannot remove the partly written target file at {directory / 'new.json'}: Permission denied"
+    ]
+    assert_closed(opened[-1])

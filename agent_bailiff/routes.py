@@ -116,10 +116,10 @@ class ToolRoutes:
                 raise TypeError("routes must be ToolRoute records")
             key = (route.service, route.name)
             if key in table:
-                raise ValueError(f"duplicate route for tool {route.name!r} on service {route.service!r}")
+                raise ValueError(f"duplicate route for tool {route.name!r:.80} on service {route.service!r:.80}")
             operation = (route.tool, route.resource)
             if operation in operations:
-                raise ValueError(f"tool {route.tool!r} on resource {route.resource!r} is routed more than once")
+                raise ValueError(f"tool {route.tool!r:.80} on resource {route.resource!r:.80} is routed more than once")
             table[key] = route
             operations.add(operation)
         self._table = table
@@ -139,7 +139,7 @@ class ToolRoutes:
             try:
                 routes.append(_document_route(item))
             except ValueError as error:
-                raise ValueError(f"route {index} ({name!r}): {error}") from None
+                raise ValueError(f"route {index} ({name!r:.80}): {error}") from None
         for item in document.get("catalogs", []):
             if not isinstance(item, dict) or set(item) != DOCUMENT_CATALOG_FIELDS:
                 raise ValueError("each catalog must have exactly the fields name, service")
