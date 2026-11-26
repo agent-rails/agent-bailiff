@@ -200,6 +200,28 @@ def test_a_stored_credential_echo_redaction_cannot_cover_is_refused(
     assert [entry.reason for entry in custodian_entries(workdir)] == ["credential_unredactable"]
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        b"Bearer short-key",
+        b"Basic dXNlcjpzaG9ydHB3",
+        b"Basic " + base64.b64encode(b"deploy-user:\xff\xfepw"),
+        b"Bearer caf\xc3\xa9-secret-value",
+        DEPLOY_SECRET,
+    ],
+)
+def test_the_store_check_reports_exactly_the_credentials_release_refuses(make_custodian, issue, state, secret):
+    store_unchecked(state, secret)
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    try:
+        check = store.check()
+    finally:
+        store.close()
+    request, token = issue()
+    released = make_custodian(monotonic_ns=Clock()).release(token, request, NOW + 1)
+    assert bool(check.problems) == isinstance(released, Refused)
+
+
 def test_a_refused_unredactable_credential_leaves_the_op_id_releasable(make_custodian, issue, state):
     store_unchecked(state, b"Bearer short-key")
     request, token = issue()

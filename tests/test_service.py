@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -843,6 +844,46 @@ def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployme
     assert "can be redacted" in capsys.readouterr().err
     with pytest.raises(CredentialUnavailable):
         stored(deployment)
+
+
+def check_credentials(deployment):
+    return cli.main(["custodian", "check-credentials", "--config", str(deployment.paths["custodian"])])
+
+
+def test_check_credentials_passes_a_store_release_accepts(deployment, capsys):
+    assert put_credential(deployment, b"Bearer short-key\n", "--accept-unredactable") == 0
+    capsys.readouterr()
+    assert check_credentials(deployment) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "check-credentials: 1 credentials checked" in captured.err
+
+
+def test_check_credentials_lists_a_credential_release_would_refuse(deployment, capsys):
+    assert put_credential(deployment, SECRET + b"\n") == 0
+    directory = deployment.custodian
+    connection = sqlite3.connect(directory / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = 'unredactable'")
+    connection.commit()
+    connection.close()
+    capsys.readouterr()
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert [json.loads(line) for line in captured.out.splitlines()] == [
+        {
+            "credential_id": "c",
+            "problem": "credential does not decrypt under its binding",
+            "target": "t",
+            "tenant": TENANT,
+        }
+    ]
+    assert "1 of 1 would be refused at release" in captured.err
+    assert SECRET.decode() not in captured.out + captured.err
+
+
+def test_check_credentials_refuses_a_missing_store(deployment, capsys):
+    assert check_credentials(deployment) == cli.EXIT_REFUSED
+    assert "check-credentials refused" in capsys.readouterr().err
 
 
 def test_check_config_runs_the_adapter_check_unchanged(tmp_path, capsys):
