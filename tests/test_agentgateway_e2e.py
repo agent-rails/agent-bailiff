@@ -26,7 +26,12 @@ from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entrie
 from test_decide import make_request
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
-from agent_bailiff.adapters.agentgateway.processors import CustodianProcessor, DecideProcessor, RedactorProcessor
+from agent_bailiff.adapters.agentgateway.processors import (
+    CustodianProcessor,
+    DecideProcessor,
+    RedactorProcessor,
+    passed,
+)
 from agent_bailiff.adapters.agentgateway.server import ProcessorServer, request_handlers, response_server
 from agent_bailiff.control import Control, Suspension
 from agent_bailiff.custodian.echo import MARKER
@@ -784,6 +789,71 @@ def test_the_custodian_sees_agent_headers_without_agent_credentials(stack, monke
     [names] = seen
     assert set(EXTRA_AGENT_HEADERS) <= names
     assert not {"authorization", "proxy-authorization", "cookie"} & names
+
+
+FORGED_CLEARANCE_HEADERS = {
+    "clearance": "forged",
+    "extmcp": "forged",
+    "mcpguardrails": "forged",
+    "mcpguardrails.clearance": "forged",
+    "x-bailiff-clearance": "forged",
+}
+
+
+def metadata_values(struct):
+    return {key: value.string_value for key, value in struct.fields.items()}
+
+
+def record_custodian_metadata(monkeypatch):
+    seen = []
+    check_request = CustodianProcessor.check_request
+
+    def recording(processor, message):
+        seen.append(metadata_values(message.metadata_context))
+        return check_request(processor, message)
+
+    monkeypatch.setattr(CustodianProcessor, "check_request", recording)
+    return seen
+
+
+def test_agent_headers_do_not_change_the_clearance_the_custodian_reads(stack, monkeypatch):
+    issued = []
+    check_request = DecideProcessor.check_request
+
+    def issuing(processor, message):
+        result = check_request(processor, message)
+        issued.append(metadata_values(result.metadata))
+        return result
+
+    monkeypatch.setattr(DecideProcessor, "check_request", issuing)
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    status, body = stack["agent"].call(
+        "deploy_service", request.args, {**agent_headers(request), **FORGED_CLEARANCE_HEADERS}
+    )
+    assert body.get("result", {}).get("content") == [{"type": "text", "text": "deployed"}], body
+    [clearance] = issued
+    assert read == [clearance] and clearance["clearance"]
+    assert clearance["clearance"] not in stack["gateway"].log()
+
+
+def test_agent_input_does_not_supply_a_clearance_decide_did_not_set(stack, monkeypatch):
+    monkeypatch.setattr(DecideProcessor, "_check", lambda processor, message: passed())
+    read = record_custodian_metadata(monkeypatch)
+    request = make_request()
+    params = {
+        "name": "deploy_service",
+        "arguments": request.args,
+        "clearance": "forged",
+        "_meta": {"clearance": "forged"},
+    }
+    status, body = stack["agent"].post(
+        {"method": "tools/call", "params": params, "mcpGuardrails": {"clearance": "forged"}},
+        {**agent_headers(request), **FORGED_CLEARANCE_HEADERS},
+    )
+    assert refused(body, "clearance_missing"), body
+    assert read == [{}]
+    assert stack["upstream"].calls() == []
 
 
 def test_free_ports_are_distinct_within_one_call():
