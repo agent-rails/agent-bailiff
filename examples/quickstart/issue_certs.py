@@ -305,16 +305,22 @@ def check(
         return [str(error)]
     if ca.not_valid_after_utc <= deadline:
         problems.append(f"the CA expires at {ca.not_valid_after_utc.isoformat()}")
-    for service in services:
+    for service, settings in services.items():
         try:
-            problems.extend(check_leaf(certs, service, ca, deadline, keys=keys))
+            problems.extend(check_leaf(certs, service, settings.names, ca, deadline, keys=keys))
         except CertError as error:
             problems.append(str(error))
     return problems
 
 
 def check_leaf(
-    certs: Path, service: str, ca: x509.Certificate, deadline: datetime.datetime, *, keys: bool
+    certs: Path,
+    service: str,
+    names: Sequence[str],
+    ca: x509.Certificate,
+    deadline: datetime.datetime,
+    *,
+    keys: bool,
 ) -> list[str]:
     problems = []
     leaf = load_certificate(certs / PUBLIC / CURRENT / f"{service}.pem")
@@ -322,6 +328,9 @@ def check_leaf(
         leaf.verify_directly_issued_by(ca)
     except (ValueError, TypeError, InvalidSignature) as error:
         problems.append(f"{service}.pem is not signed by the install CA: {error}")
+    named = sorted(subject_names(leaf))
+    if named != sorted(names):
+        problems.append(f"{service}.pem names {', '.join(named) or 'no host'}, not {', '.join(sorted(names))}")
     if leaf.not_valid_after_utc <= deadline:
         problems.append(f"{service}.pem expires at {leaf.not_valid_after_utc.isoformat()}")
     if keys:
@@ -335,6 +344,14 @@ def check_leaf(
         if public_bytes(key.public_key()) != public_bytes(leaf.public_key()):
             problems.append(f"{service}.key does not match {service}.pem")
     return problems
+
+
+def subject_names(leaf: x509.Certificate) -> list[str]:
+    try:
+        names = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return []
+    return [*names.get_values_for_type(x509.DNSName), *map(str, names.get_values_for_type(x509.IPAddress))]
 
 
 def probe(certs: Path, service: str, address: str) -> list[str]:

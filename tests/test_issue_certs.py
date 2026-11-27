@@ -227,6 +227,19 @@ def test_a_partial_or_mixed_set_is_refused_with_the_runbook(certs, capsys, damag
     assert "docker compose run --rm certs issue --reissue" in capsys.readouterr().err
 
 
+def test_a_chain_valid_set_naming_other_hosts_is_refused_on_rerun(certs, capsys):
+    renamed = {**SERVICES, "gateway": certs_module.Service(("gateway.example", "10.0.0.5"), GID)}
+    assert run(certs, "issue", services=renamed) == 0
+    before = snapshot(certs)
+    capsys.readouterr()
+    assert run(certs, "issue") == 1
+    error = capsys.readouterr().err
+    assert "gateway.pem names 10.0.0.5, gateway.example, not 127.0.0.1, gateway, localhost" in error
+    assert "docker compose run --rm certs issue --reissue" in error
+    assert snapshot(certs) == before
+    assert run(certs, "check") == 1
+
+
 def test_a_first_issue_killed_before_its_switch_is_replaced_on_rerun(certs):
     (certs / "gateway" / "gen-0001").mkdir()
     assert run(certs, "issue") == 0
