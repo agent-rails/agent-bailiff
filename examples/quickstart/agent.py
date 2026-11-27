@@ -8,6 +8,7 @@ import argparse
 import http.client
 import json
 import os
+import ssl
 import statistics
 import sys
 import threading
@@ -31,7 +32,8 @@ AGENT_KEY = STATE / "agent" / "agent.key"
 AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
-GATEWAY_URL = os.environ.get("BAILIFF_GATEWAY_URL", "http://gateway:8080/mcp")
+GATEWAY_URL = os.environ.get("BAILIFF_GATEWAY_URL", "https://gateway:8080/mcp")
+GATEWAY_CA = STATE / "certs" / "public" / "current" / "ca.pem"
 ROUTES = json.loads((Path(__file__).resolve().parent / "upstreams" / "gitea-routes.json").read_text())["routes"]
 SERVICE = "gitea"
 ORG = "quickstart"
@@ -109,7 +111,8 @@ def load_key() -> Ed25519PrivateKey:
 
 def client_for(task: dict[str, str], key: Ed25519PrivateKey, extra: Sequence[dict[str, Any]] = ()) -> BailiffClient:
     holder = Holder(task["task_root"], (), key, task["decider_id"])
-    return BailiffClient(GATEWAY_URL, holder, ToolRoutes.from_document({"routes": [*ROUTES, *extra]}))
+    routes = ToolRoutes.from_document({"routes": [*ROUTES, *extra]})
+    return BailiffClient(GATEWAY_URL, holder, routes, cafile=GATEWAY_CA)
 
 
 def open_client(extra: Sequence[dict[str, Any]] = ()) -> tuple[BailiffClient, str]:
@@ -226,7 +229,7 @@ def run_load(clients: int, calls: int) -> dict[str, Any]:
     }
 
 
-def raw_exchange(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
+def raw_exchange(client: BailiffClient, context: ssl.SSLContext, call: PreparedCall) -> dict[str, Any]:
     call.consume()
     parts = urlsplit(GATEWAY_URL)
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream", **call.headers}
@@ -234,7 +237,9 @@ def raw_exchange(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
         headers["mcp-protocol-version"] = client.protocol_version
     if client.session_id is not None:
         headers["mcp-session-id"] = client.session_id
-    connection = http.client.HTTPConnection(parts.hostname or "", parts.port, timeout=RAW_TIMEOUT_SECONDS)
+    connection = http.client.HTTPSConnection(
+        parts.hostname or "", parts.port, timeout=RAW_TIMEOUT_SECONDS, context=context
+    )
     try:
         connection.request("POST", parts.path, call.body, headers)
         response = connection.getresponse()
@@ -248,10 +253,11 @@ def raw_exchange(client: BailiffClient, call: PreparedCall) -> dict[str, Any]:
 
 def run_raw() -> dict[str, Any]:
     client, task_id = open_client([UNROUTED])
+    context = ssl.create_default_context(cafile=GATEWAY_CA)
     try:
         client.list_tools()
         exchanges = [
-            {"case": case, **raw_exchange(client, client.prepare(SERVICE, name, arguments))}
+            {"case": case, **raw_exchange(client, context, client.prepare(SERVICE, name, arguments))}
             for case, name, arguments in RAW_CASES
         ]
     finally:

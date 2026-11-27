@@ -75,7 +75,7 @@ services:
       - certs-public:/var/lib/bailiff/certs/public:ro
     healthcheck:
       test: ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30",
-             "--probe", "stub-upstream=stub-upstream:8443"]
+             "--probe", "stub-upstream=stub-upstream:8443", "--probe", "gateway=gateway:8080"]
       interval: 6h
       timeout: 10s
       retries: 1
@@ -85,6 +85,8 @@ services:
       certs:
         condition: service_completed_successfully
       stub-upstream:
+        condition: service_started
+      gateway:
         condition: service_started
 
   stub-upstream:
@@ -424,7 +426,7 @@ services:
   gateway:
     image: ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b
     user: "10004:10004"
-    group_add: ["20002"]
+    group_add: ["20002", "20005"]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -438,8 +440,11 @@ services:
       - gateway-config:/var/lib/bailiff/gateway:ro
       - decide-run:/run/bailiff/decide
       - custodian-run:/run/bailiff/custodian
+      - certs-gateway:/var/lib/bailiff/certs/gateway:ro
     networks: [edge, upstream, egress]
     depends_on:
+      certs:
+        condition: service_completed_successfully
       gateway-check:
         condition: service_completed_successfully
       decide:
@@ -465,6 +470,10 @@ services:
       - agent-data:/var/lib/bailiff/agent:ro
       - agent-public:/var/lib/bailiff/agent-public:ro
       - tasks:/var/lib/bailiff/tasks:ro
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   reader:
     <<: [*bailiff, *offline]

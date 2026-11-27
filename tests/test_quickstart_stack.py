@@ -190,7 +190,11 @@ EXPECTED_IDENTITIES = {
         b.CUSTODIAN_UID,
         {b.CUSTODIAN_UID, b.DOCKET_WRITERS_GID, b.LEDGER_GID, b.GATEWAY_SOCKETS_GID},
     ),
-    "gateway": (b.GATEWAY_UID, b.GATEWAY_UID, {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID}),
+    "gateway": (
+        b.GATEWAY_UID,
+        b.GATEWAY_UID,
+        {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID, certs_module.SERVICES["gateway"].gid},
+    ),
     "cert-watch": (CERT_WATCH_UID, CERT_WATCH_UID, {CERT_WATCH_UID}),
     "stub-upstream": (STUB_UID, STUB_UID, {STUB_UID, certs_module.SERVICES["stub-upstream"].gid}),
 }
@@ -277,6 +281,8 @@ class Stack:
         self.profiles = tuple(profiles)
         self.files = (COMPOSE_FILE, *files)
         self.jaeger_port, gitea_mcp_port, self.gateway_port = free_ports(3)
+        self.gateway_url = f"https://127.0.0.1:{self.gateway_port}/mcp"
+        self.gateway_ca = None
         self.env = {
             **os.environ,
             "COMPOSE_PROJECT_NAME": project,
@@ -320,8 +326,12 @@ class Stack:
 
 @contextlib.contextmanager
 def started(stack):
+    host = Path(tempfile.mkdtemp(prefix="bailiff-ca-"))
     try:
+        os.chmod(host, 0o755)
         stack.compose("up", "--build", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
+        stack.gateway_ca = host / "ca.pem"
+        stack.compose("cp", f"cert-watch:{b.INSTALL_CA}", str(stack.gateway_ca))
         yield stack
     finally:
         subprocess.run(
@@ -331,6 +341,7 @@ def started(stack):
             timeout=RUN_TIMEOUT_SECONDS,
             check=False,
         )
+        shutil.rmtree(host)
 
 
 @pytest.fixture(scope="module")
@@ -384,6 +395,7 @@ def test_the_agent_mounts_no_bailiff_state(stack):
     assert sorted((volume["source"], volume.get("read_only", False)) for volume in agent["volumes"]) == [
         ("agent-data", True),
         ("agent-public", True),
+        ("certs-public", True),
         ("tasks", True),
     ]
     assert list(agent["networks"]) == ["edge"]
@@ -452,7 +464,7 @@ def test_the_install_ca_is_copied_out_with_compose_cp(stack):
         target = Path(directory) / "ca.pem"
         stack.compose("cp", "cert-watch:/var/lib/bailiff/certs/public/current/ca.pem", str(target))
         copied = target.read_text()
-    assert copied == stack.probe(CA_SCRIPT)
+    assert copied == stack.probe(CA_SCRIPT) == stack.gateway_ca.read_text()
     assert copied.startswith("-----BEGIN CERTIFICATE-----")
 
 

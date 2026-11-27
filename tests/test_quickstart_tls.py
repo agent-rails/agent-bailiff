@@ -1,8 +1,10 @@
 import hashlib
+import http.client
 import json
 import os
 import shutil
 import socket
+import ssl
 import tempfile
 import time
 import uuid
@@ -99,6 +101,46 @@ def test_the_gateway_trusts_only_the_configured_ca(stack):
             "policies": {"backendTLS": {"root": "/var/lib/bailiff/gateway/ca.pem"}},
         }
     ]
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+def test_the_gateway_serves_its_install_leaf_on_loopback(stack, host):
+    context = ssl.create_default_context(cafile=stack.gateway_ca)
+    with (
+        socket.create_connection((host, stack.gateway_port), timeout=5) as raw,
+        context.wrap_socket(raw, server_hostname=host) as tls,
+    ):
+        assert tls.version() in ("TLSv1.2", "TLSv1.3")
+
+
+def test_plain_http_to_the_gateway_gets_no_mcp_answer(stack):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    connection = http.client.HTTPConnection("127.0.0.1", stack.gateway_port, timeout=5)
+    try:
+        with pytest.raises((ConnectionError, http.client.HTTPException)):
+            connection.request("POST", "/mcp", body, headers)
+            connection.getresponse().read()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("pinned", ["another", "system roots"])
+def test_a_client_without_the_install_ca_is_refused_before_sending_a_proof(stack, adopter, proxy, pinned):
+    pin = []
+    if pinned == "another":
+        other = adopter.root / "another-ca.pem"
+        other.write_bytes(pem(issue_certificate("another quickstart ca")[0]))
+        os.chmod(other, 0o644)
+        pin = ["--gateway-ca", other]
+    before = len(calls(stack, "tls-upstream"))
+    result = test_adopt_stack.cli(
+        "proxy", "tools", "--task-file", adopter.task_file, "--key-dir", adopter.key_dir,
+        "--gateway-url", adopter.gateway_url, *pin, check=False,
+    )  # fmt: skip
+    assert result.returncode == 1, result.stderr
+    assert "CERTIFICATE_VERIFY_FAILED" in result.stderr, result.stderr
+    assert len(calls(stack, "tls-upstream")) == before
 
 
 def test_a_call_reaches_the_https_upstream_with_the_stored_credential(stack, proxy, secret):

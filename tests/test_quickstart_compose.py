@@ -24,6 +24,8 @@ CERT_MOUNTS = {
     "certs": {(volume, False) for volume in CERT_VOLUMES},
     "cert-watch": {("certs-public", True)},
     "gateway-init": {("certs-public", True)},
+    "gateway": {("certs-gateway", True)},
+    "agent": {("certs-public", True)},
     "stub-upstream": {("certs-stub-upstream", True)},
 }
 OWN_UIDS = ("certs", "cert-watch")
@@ -262,9 +264,22 @@ def test_cert_watch_checks_the_public_certificates_every_six_hours(config):
     assert service["depends_on"]["certs"]["condition"] == "service_completed_successfully"
 
 
-def test_cert_watch_probes_the_stub_upstream_with_the_install_ca(config):
+def test_the_gateway_serves_its_install_leaf_on_the_published_port(config):
+    listener = json.loads(b.GATEWAY_TEMPLATE.read_text())["gateways"]["default"]
+    leaf = f"{CERTS}/gateway/current/gateway"
+    assert listener["tls"] == {"cert": f"{leaf}.pem", "key": f"{leaf}.key"}
+    assert {port["target"] for port in config["services"]["gateway"]["ports"]} == {listener["port"]}
+
+
+def test_cert_watch_probes_the_stub_upstream_and_the_gateway_with_the_install_ca(config):
     service = config["services"]["cert-watch"]
     port = flag_values(arguments_of(config["services"]["stub-upstream"]), "--port").pop()
-    assert flag_values(service["healthcheck"]["test"], "--probe") == {f"stub-upstream=stub-upstream:{port}"}
+    gateway_port = json.loads(b.GATEWAY_TEMPLATE.read_text())["gateways"]["default"]["port"]
+    assert flag_values(service["healthcheck"]["test"], "--probe") == {
+        f"stub-upstream=stub-upstream:{port}",
+        f"gateway=gateway:{gateway_port}",
+    }
     assert service["networks"].keys() == {"upstream"}
+    assert set(service["networks"]) <= set(config["services"]["gateway"]["networks"])
     assert service["depends_on"]["stub-upstream"]["condition"] == "service_started"
+    assert service["depends_on"]["gateway"]["condition"] == "service_started"
