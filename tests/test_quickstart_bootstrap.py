@@ -181,7 +181,10 @@ GITEA_UPSTREAM = b.QUICKSTART_UPSTREAMS / "gitea.json"
 
 
 def write_upstream(tmp_path, routes=None, **changes):
-    document = {**json.loads(GITEA_UPSTREAM.read_text()), **changes}
+    document = json.loads(GITEA_UPSTREAM.read_text())
+    if "url" in changes:
+        del document["ca_file"]
+    document.update(changes)
     routes_document = (
         routes if routes is not None else json.loads((b.QUICKSTART_UPSTREAMS / "gitea-routes.json").read_text())
     )
@@ -199,14 +202,12 @@ def test_the_gitea_upstream_loads_with_one_unit_of_cost_per_routed_tool():
     assert upstream.costs == {"version": 1, "tools": {route["tool"]: 1 for route in routes}}
 
 
-@pytest.mark.parametrize(
-    "name, policies",
-    [("gitea.json", {}), ("stub.json", {"policies": {"backendTLS": {"root": str(b.GATEWAY_CA)}}})],
-)
-def test_the_gateway_config_targets_only_the_upstream_url(name, policies):
+@pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
+def test_the_gateway_config_targets_only_the_upstream_url(name):
     upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / name)
     template = json.loads(b.GATEWAY_TEMPLATE.read_text())
     document = b.gateway_document(upstream)
+    policies = {"policies": {"backendTLS": {"root": str(b.GATEWAY_CA)}}}
     assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}, **policies}]
     assert {**document, "mcp": {**document["mcp"], "targets": []}} == template
 
@@ -215,6 +216,12 @@ def test_the_stub_upstream_is_served_over_https_with_the_install_ca():
     upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
     assert upstream.url.startswith("https://stub-upstream:")
     assert upstream.ca_file == b.INSTALL_CA == b.STATE / "certs" / "public" / "current" / "ca.pem"
+
+
+def test_gitea_mcp_is_reached_through_its_tls_sidecar_with_the_install_ca():
+    upstream = b.load_upstream(GITEA_UPSTREAM)
+    assert upstream.url == "https://gitea-mcp-tls:8443/mcp"
+    assert upstream.ca_file == b.INSTALL_CA
 
 
 @pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
@@ -252,11 +259,11 @@ def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch
     monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
     assert b.init_gateway() == "updated"
     written = json.loads((tmp_path / "gateway.json").read_text())
-    assert written["mcp"]["targets"][0]["mcp"]["host"] == "http://gitea-mcp:8080/mcp"
+    assert written["mcp"]["targets"][0]["mcp"]["host"] == "https://gitea-mcp-tls:8443/mcp"
 
 
 @pytest.mark.parametrize(
-    "url", ["http://gitea-mcp:8080/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
+    "url", ["http://mcp-server:8080/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
 )
 def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url):
     assert b.load_upstream(write_upstream(tmp_path, url=url)).url == url
@@ -273,10 +280,10 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"target": 7}, "target must be a non-empty ASCII printable string"),
         ({"service": "k8s"}, r"k8s\.\* tools are routed only from their catalog"),
         ({"url": "http://mcp.example.com:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://gitea-mcp/mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "http://mcp-server/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "http://167772165:8080/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "http://0xa000005:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "ftp://gitea-mcp:21/mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "ftp://mcp-server:21/mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "https:///mcp"}, "http://<compose-service>:<port> or https://"),
         ({"url": "https://user:secret@mcp.example.com/mcp"}, "no credentials, query or fragment"),
         ({"url": "https://mcp.example.com/mcp?key=1"}, "no credentials, query or fragment"),
@@ -284,6 +291,9 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"url": "http://localhost:15000/"}, "must not name the stack's own localhost"),
         ({"url": "http://gateway:8080/mcp"}, "must not name the stack's own gateway"),
         ({"url": "http://custodian:8080/mcp"}, "must not name the stack's own custodian"),
+        ({"url": "http://gitea-mcp:8080/mcp"}, "must not name the stack's own gitea-mcp"),
+        ({"url": "https://gitea:3000/mcp"}, "must not name the stack's own gitea"),
+        ({"url": "http://gitea-mcp-spike:8080/mcp"}, "must not name the stack's own gitea-mcp-spike"),
         ({"url": "https://LocalHost./mcp"}, "must not name the stack's own localhost"),
         ({"url": "https://127.0.0.1/mcp"}, "loopback, link-local, unspecified or multicast"),
         ({"url": "https://[::1]:8443/mcp"}, "loopback, link-local, unspecified or multicast"),
@@ -471,7 +481,9 @@ def test_init_gateway_writes_keeps_and_removes_the_ca(tmp_path, monkeypatch):
     (upstreams / "ca.pem").write_bytes(pem(other))
     assert b.init_gateway() == "updated"
     assert (tmp_path / "ca.pem").read_bytes() == pem(other)
-    monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
+    public = tmp_path / "public"
+    public.mkdir()
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(public, url="https://mcp.example.com/mcp"))
     assert b.init_gateway() == "updated"
     assert not (tmp_path / "ca.pem").exists()
     assert "policies" not in json.loads((tmp_path / "gateway.json").read_text())["mcp"]["targets"][0]
@@ -498,7 +510,7 @@ def test_ca_file_install_is_read_only_when_the_gateway_config_is_written(tmp_pat
     assert (tmp_path / "ca.pem").read_bytes() == pem(reissued)
 
 
-@pytest.mark.parametrize("host", sorted(b.UPSTREAM_HOSTS) + ["STUB-UPSTREAM.", "gitea-mcp."])
+@pytest.mark.parametrize("host", sorted(b.UPSTREAM_HOSTS) + ["STUB-UPSTREAM.", "GITEA-MCP-TLS."])
 @pytest.mark.parametrize("ca_file", [None, "ca.pem"])
 def test_an_https_url_to_an_in_stack_upstream_without_ca_file_install_fails_bootstrap(tmp_path, host, ca_file):
     (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
@@ -510,7 +522,7 @@ def test_an_https_url_to_an_in_stack_upstream_without_ca_file_install_fails_boot
 @pytest.mark.parametrize(
     "url, message",
     [
-        (HTTPS_URL, "ca_file install is the install CA, which signs only gitea, gitea-mcp, gitea-mcp-spike"),
+        (HTTPS_URL, "ca_file install is the install CA, which signs only gitea-mcp-tls, stub-upstream"),
         ("https://203.0.113.7/mcp", "ca_file install is the install CA"),
         ("http://stub-upstream:8443/mcp", "ca_file needs an https:// url"),
     ],

@@ -43,7 +43,9 @@ def measure(stack, clients):
     stack.compose("run", "--rm", "--no-deps", "gitea-task", "/app/quickstart/bootstrap.py", "issue-load")
     arguments = ["--clients", str(clients), "--calls", str(CALLS_PER_CLIENT)]
     direct = json.loads(
-        stack.compose("run", "--rm", "--no-deps", "bootstrap", "/app/quickstart/baseline.py", *arguments)
+        stack.compose(
+            "--profile", "load", "run", "--rm", "--no-deps", "baseline", "/app/quickstart/baseline.py", *arguments
+        )
     )
     level = json.loads(stack.compose("--profile", "agent", "run", "--rm", "--no-deps", "agent", "load", *arguments))
     export = wait_for_export(stack)

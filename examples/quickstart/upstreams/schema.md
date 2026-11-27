@@ -6,12 +6,13 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-
 {
   "version": 1,
   "service": "gitea",
-  "url": "http://gitea-mcp:8080/mcp",
+  "url": "https://gitea-mcp-tls:8443/mcp",
   "credential_id": "gitea-token",
   "credential_header": "Authorization",
   "target": "gitea",
   "binding_resource": "gitea/repos/quickstart/*",
-  "routes_file": "gitea-routes.json"
+  "routes_file": "gitea-routes.json",
+  "ca_file": "install"
 }
 ```
 
@@ -19,7 +20,7 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-
 | --- | --- |
 | `version` | `1` |
 | `service` | Route service name: ASCII printable, no whitespace or `*`. `k8s` is reserved for catalogs. |
-| `url` | `http://<compose-service>:<port>[/path]` for a server in the stack, or `https://<host>[:port][/path]`. No credentials, query or fragment. Not `localhost`, a stack service other than the upstream servers, or a loopback, link-local, unspecified or multicast address; a hostname that resolves to one is not checked. An `https://` url to an upstream server in the stack (`stub-upstream`, `gitea`, `gitea-mcp`, `gitea-mcp-spike`) needs `"ca_file": "install"`. |
+| `url` | `http://<compose-service>:<port>[/path]` for a server in the stack, or `https://<host>[:port][/path]`. No credentials, query or fragment. Not `localhost`, a stack service other than the upstream servers, or a loopback, link-local, unspecified or multicast address; a hostname that resolves to one is not checked. An `https://` url to an upstream server in the stack (`stub-upstream`, `gitea-mcp-tls`) needs `"ca_file": "install"`; `gitea` and `gitea-mcp` are reached only through `gitea-mcp-tls`. |
 | `credential_id`, `target` | The custodian credential the gateway injects for every route. Store it with `agent-bailiff custodian put-credential --tenant quickstart --credential-id <id> --target <target>`. |
 | `credential_header` | HTTP field name the custodian sets, for example `Authorization`. |
 | `binding_resource` | Resource the credential binding covers; a wildcard only as a final `/*` segment. |

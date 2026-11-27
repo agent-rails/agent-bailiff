@@ -1,10 +1,11 @@
 {
   "version": 1,
   "service": "gitea",
-  "url": "http://gitea-mcp:8080/mcp",
+  "url": "https://gitea-mcp-tls:8443/mcp",
   "credential_id": "gitea-token",
   "credential_header": "Authorization",
   "target": "gitea",
   "binding_resource": "gitea/repos/quickstart/*",
-  "routes_file": "gitea-routes.json"
+  "routes_file": "gitea-routes.json",
+  "ca_file": "install"
 }

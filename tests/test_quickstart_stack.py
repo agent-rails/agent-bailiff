@@ -84,6 +84,8 @@ CUSTODIAN = (b.CUSTODIAN_UID, b.CUSTODIAN_UID)
 CERTS_UID = 10012
 CERT_WATCH_UID = 10015
 STUB_UID = 10011
+SIDECAR_UID = 10013
+GITEA_MCP_UID = 10014
 CERTS = (CERTS_UID, CERTS_UID)
 FIRST = "gen-0001"
 DIRECTORY, FILE, SOCKET = "directory", "file", "socket"
@@ -197,6 +199,8 @@ EXPECTED_IDENTITIES = {
     ),
     "cert-watch": (CERT_WATCH_UID, CERT_WATCH_UID, {CERT_WATCH_UID}),
     "stub-upstream": (STUB_UID, STUB_UID, {STUB_UID, certs_module.SERVICES["stub-upstream"].gid}),
+    "gitea-mcp-tls": (SIDECAR_UID, SIDECAR_UID, {SIDECAR_UID, certs_module.SERVICES["gitea-mcp-tls"].gid}),
+    "gitea-mcp": (GITEA_MCP_UID, GITEA_MCP_UID, {GITEA_MCP_UID}),
 }
 ONE_SHOTS = (
     "issuer-init",
@@ -258,6 +262,36 @@ try:
     print(json.dumps("connected"))
 except OSError as error:
     print(json.dumps(type(error).__name__))
+"""
+MCP_SCRIPT = """
+import http.client, json, ssl, sys, time
+context = ssl.create_default_context(cafile="/v/certs-public/current/ca.pem")
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}}})
+headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+for attempt in range(int(sys.argv[3])):
+    try:
+        connection = http.client.HTTPSConnection(sys.argv[1], int(sys.argv[2]), timeout=10, context=context)
+        connection.request("POST", "/mcp", body, headers)
+        response = connection.getresponse()
+        print(json.dumps([response.status, "serverInfo" in response.read().decode()]))
+        break
+    except OSError as error:
+        outcome = type(error).__name__
+        time.sleep(0.5)
+else:
+    print(json.dumps(outcome))
+"""
+KEY_SCRIPT = """
+import json, sys
+read = {}
+for name in sys.argv[1:]:
+    try:
+        open(f"/v/certs-{name}/current/{name}.key", "rb").close()
+        read[name] = True
+    except PermissionError:
+        read[name] = False
+json.dump(read, sys.stdout)
 """
 READ_PROBE = """
 import json, os, sys
@@ -456,7 +490,7 @@ def reach(stack, network, host, port):
 
 
 def test_gitea_is_unreachable_on_the_upstream_network(stack):
-    assert reach(stack, "upstream", "gitea-mcp", 8080) == "connected"
+    assert reach(stack, "upstream", "gitea-mcp-tls", 8443) == "connected"
     assert reach(stack, "upstream", "gitea", 3000) == "gaierror"
 
 
@@ -471,6 +505,32 @@ def test_gitea_links_to_its_root_url_host_over_the_socket(stack):
         "http://gitea/.well-known/openid-configuration",
     )  # fmt: skip
     assert json.loads(document)["issuer"] == "http://gitea"
+
+
+def initialize(stack, host, port, attempts=1):
+    arguments = (host, str(port), str(attempts))
+    return stack.probe(MCP_SCRIPT, user="65534:65534", arguments=arguments, network=f"{stack.project}_upstream")
+
+
+def test_gitea_mcp_answers_only_through_its_tls_sidecar(stack):
+    assert initialize(stack, "gitea-mcp-tls", 8443) == [200, True]
+    assert reach(stack, "upstream", "gitea-mcp", 8080) == "gaierror"
+    for port in (8080, 15000, 15020, 15021):
+        assert reach(stack, "upstream", "gitea-mcp-tls", port) == "ConnectionRefusedError", port
+
+
+@pytest.mark.parametrize("owner", [None, *certs_module.SERVICES])
+def test_each_key_is_readable_only_in_its_owners_group(stack, owner):
+    gid = certs_module.SERVICES[owner].gid if owner else 65534
+    read = stack.probe(KEY_SCRIPT, user=f"65534:{gid}", arguments=tuple(certs_module.SERVICES))
+    assert read == {name: name == owner for name in certs_module.SERVICES}
+
+
+def test_the_sidecar_recovers_with_a_compose_restart(stack):
+    stack.compose("kill", "gitea-mcp-tls")
+    assert initialize(stack, "gitea-mcp-tls", 8443) == "gaierror"
+    stack.compose("restart", "gitea-mcp-tls")
+    assert initialize(stack, "gitea-mcp-tls", 8443, attempts=60) == [200, True]
 
 
 def health(stack, service):

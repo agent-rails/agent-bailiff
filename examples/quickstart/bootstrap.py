@@ -120,10 +120,10 @@ STACK_HOSTS = frozenset(
         "docket-init",
         "gateway-init", "bootstrap", "agent-key", "task-issuer", "gitea-task", "gitea-secret", "gitea-admin",
         "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
-        "jaeger", "exporter", "rule", "certs", "cert-watch",
+        "jaeger", "exporter", "rule", "certs", "cert-watch", "gitea", "gitea-mcp", "gitea-mcp-spike", "baseline",
     }
 )  # fmt: skip
-UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea", "gitea-mcp", "gitea-mcp-spike"})
+UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea-mcp-tls"})
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 INSTALL = "install"
 TASK_SCOPE = {

@@ -1,6 +1,7 @@
 import datetime
 import errno
 import importlib.util
+import json
 import os
 import shutil
 import socket
@@ -375,3 +376,50 @@ def test_a_probe_of_a_certificate_the_ca_signed_for_another_service_names_it(cer
 def test_a_probe_needs_a_known_service():
     with pytest.raises(SystemExit):
         certs_module.main(["check", "--probe", "jaeger=jaeger:4318"])
+
+
+def write_upstream(tmp_path, url):
+    path = tmp_path / "upstream.json"
+    path.write_text(json.dumps({"url": url}))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("url", "probes"),
+    [
+        ("https://gitea-mcp-tls:8443/mcp", [("gitea-mcp-tls", "gitea-mcp-tls:8443")]),
+        ("https://stub-upstream:8443/mcp", [("stub-upstream", "stub-upstream:8443")]),
+        ("https://gitea-mcp-tls/mcp", [("gitea-mcp-tls", "gitea-mcp-tls:443")]),
+        ("https://mcp.example.com/mcp", []),
+        ("http://gitea-mcp-tls:8443/mcp", []),
+    ],
+)
+def test_the_upstream_probe_covers_only_an_https_server_in_the_stack(tmp_path, url, probes):
+    assert certs_module.upstream_probe(write_upstream(tmp_path, url)) == probes
+
+
+@pytest.mark.parametrize("content", ["{", "{}", '{"url": 1}', '{"url": "https://gitea-mcp-tls:port/mcp"}'])
+def test_an_upstream_config_without_a_url_fails_the_check(tmp_path, certs, capsys, content):
+    assert run(certs, "issue") == 0
+    path = tmp_path / "upstream.json"
+    path.write_text(content)
+    assert run(certs, "check", "--probe-upstream", str(path)) == 1
+    assert "names no upstream url" in capsys.readouterr().err
+
+
+def test_the_check_probes_the_configured_upstream_with_the_explicit_probes_once(tmp_path, certs, monkeypatch):
+    assert run(certs, "issue") == 0
+    probed = []
+    monkeypatch.setattr(certs_module, "probe", lambda _certs, service, address: probed.append((service, address)) or [])
+    path = write_upstream(tmp_path, "https://gitea-mcp-tls:8443/mcp")
+    arguments = ("--probe", "stub-upstream=stub-upstream:8443", "--probe", "gateway=gateway:8080")
+    assert run(certs, "check", *arguments, "--probe-upstream", str(path)) == 0
+    assert probed == [
+        ("gateway", "gateway:8080"),
+        ("gitea-mcp-tls", "gitea-mcp-tls:8443"),
+        ("stub-upstream", "stub-upstream:8443"),
+    ]
+    probed.clear()
+    path = write_upstream(tmp_path, "https://stub-upstream:8443/mcp")
+    assert run(certs, "check", *arguments, "--probe-upstream", str(path)) == 0
+    assert probed == [("gateway", "gateway:8080"), ("stub-upstream", "stub-upstream:8443")]

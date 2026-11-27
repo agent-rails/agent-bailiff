@@ -3,7 +3,8 @@ that serves TLS, and discards the CA key, so revoking is rerunning with --reissu
 directory (one volume each), readable only by that service's group; the CA and the leaf certificates land in public.
 A complete, valid set is kept on rerun; a partial or mixed set is refused. --reissue writes a new generation in every
 directory and switches each one's current symlink only after every file is on disk. check fails when the set is
-incomplete, does not chain, or expires within the margin, and can probe each served certificate over TLS."""
+incomplete, does not chain, or expires within the margin, and can probe each served certificate over TLS, including
+the configured upstream's when it is a server in the stack."""
 
 from __future__ import annotations
 
@@ -11,12 +12,14 @@ import argparse
 import contextlib
 import datetime
 import ipaddress
+import json
 import os
 import re
 import shutil
 import socket
 import ssl
 import sys
+import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -352,6 +355,18 @@ def probe(certs: Path, service: str, address: str) -> list[str]:
     return []
 
 
+def upstream_probe(path: Path) -> list[tuple[str, str]]:
+    try:
+        url = urllib.parse.urlsplit(json.loads(path.read_text())["url"])
+        port = url.port or 443
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise CertError(f"{path} names no upstream url: {error}") from None
+    host = url.hostname
+    if url.scheme != "https" or host is None or host not in SERVICES:
+        return []
+    return [(host, f"{host}:{port}")]
+
+
 def parse_probe(value: str) -> tuple[str, str]:
     service, separator, address = value.partition("=")
     if not separator or service not in SERVICES:
@@ -370,6 +385,9 @@ def main(argv: Sequence[str] | None = None, services: Mapping[str, Service] = SE
     checking.add_argument("--margin-days", type=int, default=MARGIN_DAYS)
     checking.add_argument("--keys", action="store_true", help="also check each key against its certificate")
     checking.add_argument("--probe", type=parse_probe, action="append", default=[], help="SERVICE=HOST:PORT")
+    checking.add_argument(
+        "--probe-upstream", type=Path, help="upstream config; probe its url when a stack server serves it"
+    )
     args = parser.parse_args(argv)
     try:
         print(run(args, services))
@@ -385,7 +403,10 @@ def run(args: argparse.Namespace, services: Mapping[str, Service]) -> str:
             raise CertError("--days must be at least 1")
         return issue(args.certs, services, args.days, reissue=args.reissue)
     problems = check(args.certs, services, datetime.datetime.now(datetime.UTC), args.margin_days, keys=args.keys)
-    for service, address in args.probe:
+    probes = set(args.probe)
+    if args.probe_upstream is not None:
+        probes.update(upstream_probe(args.probe_upstream))
+    for service, address in sorted(probes):
         problems.extend(probe(args.certs, service, address))
     if problems:
         raise CertError("; ".join(problems))

@@ -9,10 +9,13 @@ from test_quickstart_rule import rule_module
 from test_quickstart_stack import b
 
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "examples" / "quickstart" / "compose.yaml"
+SIDECAR_CONFIG = COMPOSE_FILE.parent / "gitea-mcp-tls.json"
 EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}, "gateway": {"egress"}}
 PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
-GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
+GITEA_ONLY = (
+    "gitea", "gitea-mcp-tls", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task",
+)  # fmt: skip
 DOCKET_READERS = ("reader", "archiver", "exporter")
 ISSUERS = ("task-issuer", "gitea-task")
 CERTS = "/var/lib/bailiff/certs"
@@ -27,10 +30,13 @@ CERT_MOUNTS = {
     "gateway": {("certs-gateway", True)},
     "agent": {("certs-public", True)},
     "stub-upstream": {("certs-stub-upstream", True)},
+    "gitea-mcp-tls": {("certs-gitea-mcp-tls", True)},
+    "baseline": {("certs-public", True)},
 }
-OWN_UIDS = ("certs", "cert-watch")
+OWN_UIDS = ("certs", "cert-watch", "gitea-mcp-tls", "gitea-mcp")
 KEY_GIDS = {f"certs-{leaf}": str(settings.gid) for leaf, settings in certs_module.SERVICES.items()}
 STUB_LEAF = f"{CERTS}/stub-upstream/current/stub-upstream"
+SIDECAR_LEAF = f"{CERTS}/gitea-mcp-tls/current/gitea-mcp-tls"
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -89,6 +95,7 @@ def test_the_stub_upstream_is_the_default(config):
 def test_the_gateway_depends_on_gitea_only_when_its_profile_runs(config):
     depends = config["services"]["gateway"]["depends_on"]
     assert {name for name, condition in depends.items() if not condition.get("required", True)} == {
+        "gitea-mcp-tls",
         "gitea-mcp",
         "gitea-task",
     }
@@ -285,6 +292,18 @@ def test_cert_watch_probes_the_stub_upstream_and_the_gateway_with_the_install_ca
     assert service["depends_on"]["gateway"]["condition"] == "service_started"
 
 
+def test_cert_watch_also_probes_the_configured_upstream_when_its_profile_runs(config):
+    service = config["services"]["cert-watch"]
+    assert flag_values(service["healthcheck"]["test"], "--probe-upstream") == {
+        config["services"]["decide-init"]["environment"]["BAILIFF_UPSTREAM"]
+    }
+    assert {volume["target"] for volume in service["volumes"]} == {"/etc/bailiff/upstreams", f"{CERTS}/public"}
+    assert service["depends_on"]["gitea-mcp-tls"] == {
+        "condition": "service_started",
+        "required": False,
+    }
+
+
 def test_gitea_serves_http_only_on_a_unix_socket_with_no_network(config):
     gitea = config["services"]["gitea"]
     settings = gitea["environment"]
@@ -318,6 +337,79 @@ def test_gitea_mcp_reaches_gitea_over_the_socket_at_the_root_url_host(config, na
     root_url = config["services"]["gitea"]["environment"]["GITEA__server__ROOT_URL"]
     assert flag_values(arguments, "-gitea-unix-socket") == {str(b.GITEA_SOCKET)}
     assert flag_values(arguments, "-host") == {root_url.rstrip("/")} == {f"http://{b.GITEA_HOST}"}
+
+
+def test_the_sidecar_proxies_plain_https_to_gitea_mcp_on_loopback_with_its_own_leaf():
+    assert json.loads(SIDECAR_CONFIG.read_text()) == {
+        "config": {
+            "adminAddr": "127.0.0.1:15000",
+            "statsAddr": "127.0.0.1:15020",
+            "readinessAddr": "127.0.0.1:15021",
+        },
+        "binds": [
+            {
+                "port": 8443,
+                "listeners": [
+                    {
+                        "protocol": "HTTPS",
+                        "tls": {"cert": f"{SIDECAR_LEAF}.pem", "key": f"{SIDECAR_LEAF}.key"},
+                        "routes": [
+                            {
+                                "policies": {"urlRewrite": {"authority": {"full": "127.0.0.1:8080"}}},
+                                "backends": [{"host": "127.0.0.1:8080"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    assert certs_module.SERVICES["gitea-mcp-tls"].names == ("gitea-mcp-tls",)
+
+
+def test_the_sidecar_runs_the_pinned_gateway_image_with_its_config_and_key_read_only(config):
+    sidecar = config["services"]["gitea-mcp-tls"]
+    assert sidecar["image"] == config["services"]["gateway"]["image"]
+    assert "@sha256:" in sidecar["image"]
+    assert sidecar["command"] == ["-f", "/etc/agentgateway/gitea-mcp-tls.json"]
+    mounts = {volume["target"]: volume for volume in sidecar["volumes"]}
+    assert mounts.keys() == {"/etc/agentgateway/gitea-mcp-tls.json", f"{CERTS}/gitea-mcp-tls"}
+    assert mounts["/etc/agentgateway/gitea-mcp-tls.json"]["source"] == str(SIDECAR_CONFIG)
+    assert all(volume["read_only"] for volume in mounts.values())
+    assert sidecar["group_add"] == [str(certs_module.SERVICES["gitea-mcp-tls"].gid)]
+    assert sidecar["read_only"] is True
+    assert sidecar["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in sidecar["security_opt"]
+    assert sidecar["networks"].keys() == {"upstream"}
+    assert "ports" not in sidecar
+
+
+def test_gitea_mcp_listens_on_loopback_inside_the_sidecars_network_namespace(config):
+    gitea_mcp = config["services"]["gitea-mcp"]
+    arguments = arguments_of(gitea_mcp)
+    route = json.loads(SIDECAR_CONFIG.read_text())["binds"][0]["listeners"][0]["routes"][0]
+    backend = route["backends"][0]
+    assert gitea_mcp["network_mode"] == "service:gitea-mcp-tls"
+    assert "networks" not in gitea_mcp
+    assert f"{flag_values(arguments, '-bind').pop()}:{flag_values(arguments, '-port').pop()}" == backend["host"]
+    assert route["policies"]["urlRewrite"]["authority"]["full"] == backend["host"]
+    assert gitea_mcp["depends_on"]["gitea-mcp-tls"]["restart"] is True
+
+
+def test_the_gitea_upstream_names_the_sidecar_on_its_bound_port():
+    url = b.load_upstream(b.QUICKSTART_UPSTREAMS / "gitea.json").url
+    assert url == f"https://gitea-mcp-tls:{json.loads(SIDECAR_CONFIG.read_text())['binds'][0]['port']}/mcp"
+
+
+def test_the_spike_stays_off_the_upstream_network(config):
+    assert config["services"]["gitea-mcp-spike"]["networks"].keys() == {"spike"}
+
+
+def test_the_baseline_reaches_the_upstream_network_with_the_install_ca_under_its_own_profile(config):
+    service = config["services"]["baseline"]
+    assert service["profiles"] == ["load"]
+    assert service["networks"].keys() == {"upstream"}
+    assert service["user"] == config["services"]["bootstrap"]["user"]
 
 
 def test_bootstrap_reaches_gitea_only_over_the_socket(config):

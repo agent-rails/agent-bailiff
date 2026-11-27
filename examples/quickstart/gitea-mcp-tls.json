@@ -1,0 +1,37 @@
+{
+  "config": {
+    "adminAddr": "127.0.0.1:15000",
+    "statsAddr": "127.0.0.1:15020",
+    "readinessAddr": "127.0.0.1:15021"
+  },
+  "binds": [
+    {
+      "port": 8443,
+      "listeners": [
+        {
+          "protocol": "HTTPS",
+          "tls": {
+            "cert": "/var/lib/bailiff/certs/gitea-mcp-tls/current/gitea-mcp-tls.pem",
+            "key": "/var/lib/bailiff/certs/gitea-mcp-tls/current/gitea-mcp-tls.key"
+          },
+          "routes": [
+            {
+              "policies": {
+                "urlRewrite": {
+                  "authority": {
+                    "full": "127.0.0.1:8080"
+                  }
+                }
+              },
+              "backends": [
+                {
+                  "host": "127.0.0.1:8080"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
