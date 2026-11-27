@@ -569,21 +569,22 @@ def test_a_duplicate_target_name_is_refused():
         {"host": "http://127.0.0.1:8080/mcp"},
         {"host": "http://localhost:8080/mcp"},
         {"host": "http://[::1]:8080/mcp"},
-        {"host": "http://gitea-mcp:8080/mcp"},
         {"host": "127.0.0.1"},
-        {"host": "gitea-mcp:8080"},
-        {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
         {"host": "[::1]", "port": 8080, "path": "/mcp"},
         {"host": "[::1]:8080"},
     ],
 )
-def test_a_gateway_bound_target_over_https_loopback_or_a_service_name_is_accepted(target):
+def test_a_gateway_bound_target_over_https_or_loopback_is_accepted(target):
     assert problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target)) == ()
 
 
 @pytest.mark.parametrize(
     "target",
     [
+        {"host": "http://gitea-mcp:8080/mcp"},
+        {"host": "gitea-mcp:8080"},
+        {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
+        {"host": "http://gitea-mcp.local:8080/mcp"},
         {"host": "http://mcp.example.com/mcp"},
         {"host": "http://mcp.example.com:8080/mcp"},
         {"host": "http://10.0.0.5:8080/mcp"},

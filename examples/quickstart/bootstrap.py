@@ -34,7 +34,6 @@ from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.docket.client import DocketClient, DocketError
 from agent_bailiff.docket.grant import Grant
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
-from agent_bailiff.plain_http import allows_plain_http
 from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.scope_pattern import is_bounded_resource
@@ -206,7 +205,7 @@ def load_upstream(path: Path) -> Upstream:
     if not is_bounded_resource(text["binding_resource"]):
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
-    ca_file = upstream_ca_file(path, text["ca_file"], text["url"]) if "ca_file" in text else None
+    ca_file = upstream_ca_file(path, text["ca_file"]) if "ca_file" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
         text["binding_resource"], routes, ca_file,
@@ -230,9 +229,7 @@ def check_install_ca(path: Path, url: str, ca_file: str | None) -> None:
         )
 
 
-def upstream_ca_file(path: Path, ca_file: str, url: str) -> Path:
-    if urlsplit(url).scheme != "https":
-        raise BootstrapError(f"{path}: ca_file needs an https:// url")
+def upstream_ca_file(path: Path, ca_file: str) -> Path:
     if ca_file == INSTALL:
         return INSTALL_CA
     ca_path = beside(path, "ca_file", ca_file)
@@ -274,7 +271,7 @@ def read_bounded(path: Path, limit: int) -> bytes:
 def check_upstream_url(path: Path, url: str) -> None:
     try:
         parts = urlsplit(url)
-        port = parts.port
+        _ = parts.port
     except ValueError as error:
         raise BootstrapError(f"{path}: url {error}") from None
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
@@ -282,9 +279,7 @@ def check_upstream_url(path: Path, url: str) -> None:
     check_upstream_host(path, (parts.hostname or "").rstrip("."))
     if parts.scheme == "https" and parts.hostname:
         return
-    if parts.scheme == "http" and allows_plain_http(parts.hostname or "") and port:
-        return
-    raise BootstrapError(f"{path}: url must be http://<compose-service>:<port> or https://")
+    raise BootstrapError(f"{path}: url must be https://<host>[:<port>]; plain http is allowed only on loopback")
 
 
 def check_upstream_host(path: Path, host: str) -> None:

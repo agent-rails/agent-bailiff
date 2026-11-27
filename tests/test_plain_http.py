@@ -3,12 +3,28 @@ import pytest
 from agent_bailiff.plain_http import allows_plain_http, parse_transport_url
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "gateway", "gitea-mcp", "svc_1"])
-def test_plain_http_is_allowed_for_loopback_and_single_label_names(host):
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+def test_plain_http_is_allowed_for_loopback(host):
     assert allows_plain_http(host)
 
 
-@pytest.mark.parametrize("host", ["gateway.example.com", "10.0.0.5", "167772165", "0xa000005", "", "Gateway", "a b"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "gateway",
+        "gitea-mcp",
+        "svc_1",
+        "gateway.local",
+        "10.0.0.1",
+        "gateway.example.com",
+        "10.0.0.5",
+        "167772165",
+        "0xa000005",
+        "",
+        "Gateway",
+        "a b",
+    ],
+)
 def test_plain_http_is_refused_for_every_other_host(host):
     assert not allows_plain_http(host)
 

@@ -263,9 +263,9 @@ def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    "url", ["http://mcp-server:8080/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
+    "url", ["https://mcp-server/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
 )
-def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url):
+def test_an_upstream_url_is_https(tmp_path, url):
     assert b.load_upstream(write_upstream(tmp_path, url=url)).url == url
 
 
@@ -279,12 +279,13 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"credential_id": "gitea token"}, "credential_id must be a non-empty ASCII printable string"),
         ({"target": 7}, "target must be a non-empty ASCII printable string"),
         ({"service": "k8s"}, r"k8s\.\* tools are routed only from their catalog"),
-        ({"url": "http://mcp.example.com:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://mcp-server/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://167772165:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://0xa000005:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "ftp://mcp-server:21/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "https:///mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "http://mcp-server:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://mcp.example.com:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://mcp-server/mcp"}, "url must be https://<host>"),
+        ({"url": "http://167772165:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://0xa000005:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "ftp://mcp-server:21/mcp"}, "url must be https://<host>"),
+        ({"url": "https:///mcp"}, "url must be https://<host>"),
         ({"url": "https://user:secret@mcp.example.com/mcp"}, "no credentials, query or fragment"),
         ({"url": "https://mcp.example.com/mcp?key=1"}, "no credentials, query or fragment"),
         ({"url": "https://mcp.example.com:99999/mcp"}, "url Port out of range"),
@@ -448,7 +449,7 @@ def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
         (b"", HTTPS_URL, "must hold PEM certificates"),
         (b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", HTTPS_URL, "must hold PEM certificates"),
         (b"x" * (64 * 1024 + 1), HTTPS_URL, "larger than 65536 bytes"),
-        (None, "http://stub-upstream:8080/mcp", "ca_file needs an https:// url"),
+        (None, "http://stub-upstream:8080/mcp", "url must be https://<host>"),
     ],
 )
 def test_an_invalid_ca_file_fails_bootstrap(tmp_path, data, url, message):
@@ -524,7 +525,7 @@ def test_an_https_url_to_an_in_stack_upstream_without_ca_file_install_fails_boot
     [
         (HTTPS_URL, "ca_file install is the install CA, which signs only gitea-mcp-tls, stub-upstream"),
         ("https://203.0.113.7/mcp", "ca_file install is the install CA"),
-        ("http://stub-upstream:8443/mcp", "ca_file needs an https:// url"),
+        ("http://stub-upstream:8443/mcp", "url must be https://<host>"),
     ],
 )
 def test_ca_file_install_outside_the_stack_or_over_http_fails_bootstrap(tmp_path, url, message):

@@ -358,6 +358,7 @@ def test_a_name_routed_on_two_services_is_refused():
 @pytest.mark.parametrize(
     "url",
     [
+        "http://gateway:8080/mcp",
         "http://gateway.example.com/mcp",
         "http://10.0.0.5:8080/mcp",
     ],
