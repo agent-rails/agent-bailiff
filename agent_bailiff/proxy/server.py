@@ -6,12 +6,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from agent_bailiff.client import BailiffClient, GatewayError, Holder, OutcomeUnknown
+from agent_bailiff.client import BailiffClient, GatewayError, OutcomeUnknown
 from agent_bailiff.client.client import (
     PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -40,7 +41,7 @@ SERVER_ERROR = -32000
 
 logger = logging.getLogger(__name__)
 
-ClientFactory = Callable[[str, Holder, ToolRoutes], BailiffClient]
+ClientFactory = Callable[..., BailiffClient]
 
 
 class Stop(Exception):
@@ -64,8 +65,14 @@ class StdioProxy:
         *,
         clock: Clock = system_clock,
         client_factory: ClientFactory = BailiffClient,
+        gateway_ca: Path | None = None,
     ) -> None:
-        check_gateway_url(gateway_url)
+        parts = check_gateway_url(gateway_url)
+        if gateway_ca is not None:
+            if parts.scheme != "https":
+                raise ValueError("--gateway-ca pins the gateway's TLS certificate; it needs an https gateway url")
+            ssl.create_default_context(cafile=gateway_ca)
+        self._gateway_ca = gateway_ca
         self._task_file = task_file
         self._key_dir = key_dir
         self._gateway_url = gateway_url
@@ -200,7 +207,7 @@ class StdioProxy:
             return self._state, self._client
         state = TaskState.from_bytes(raw, self._key_dir)
         self.close()
-        client = self._client_factory(self._gateway_url, state.holder, self._routes)
+        client = self._client_factory(self._gateway_url, state.holder, self._routes, cafile=self._gateway_ca)
         self._state, self._client = state, client
         logger.info("loaded task %s", state.task.root.task_id)
         self._prune(state.subject)
