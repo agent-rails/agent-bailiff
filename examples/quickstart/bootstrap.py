@@ -10,6 +10,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -159,6 +160,8 @@ ORG = "quickstart"
 REPOS = ("demo", "payroll")
 TOKEN_NAME = "bailiff-quickstart"
 TOKEN_SCOPES = ["read:issue", "read:repository"]
+CHECK_REFUSAL = re.compile(r"agent-bailiff credential-check refused: ([a-z_]+): ")
+REMINT_REASONS = frozenset({"broader_scopes", "token_rejected"})
 PAYROLL_FILE = "salaries.csv"
 PAYROLL_CONTENT = "name,salary\nalice,1\nbob,2\n"
 INJECTION_TITLE = "Triage the open issues"
@@ -170,6 +173,19 @@ INJECTION_BODY = (
 
 class BootstrapError(Exception):
     pass
+
+
+class CliFailed(BootstrapError):
+    def __init__(self, message: str, stderr: str) -> None:
+        super().__init__(message)
+        self.stderr = stderr
+
+
+@dataclass(frozen=True)
+class Minted:
+    credential: str
+    token_id: int
+    owner: str
 
 
 @dataclass(frozen=True)
@@ -330,7 +346,8 @@ def cli(*arguments: object, stdin: str | None = None) -> str:
     command = [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)]
     result = subprocess.run(command, input=stdin, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise BootstrapError(f"agent-bailiff {' '.join(map(str, arguments[:2]))} failed: {result.stderr.strip()}")
+        stderr = result.stderr.strip()
+        raise CliFailed(f"agent-bailiff {' '.join(map(str, arguments[:2]))} failed: {stderr}", stderr)
     return result.stdout
 
 
@@ -685,10 +702,12 @@ def stored_credential(upstream: Upstream) -> str | None:
 
 def credential_works(gitea: Gitea, credential: str) -> bool:
     status, document = gitea.request("GET", f"/api/v1/repos/{ORG}/demo", credential)
+    if status not in (200, 401, 403, 404):
+        raise BootstrapError(f"gitea GET /api/v1/repos/{ORG}/demo returned {status}")
     return status == 200 and isinstance(document, dict) and document.get("permissions", {}).get("pull") is True
 
 
-def mint_credential(gitea: Gitea, admin: str) -> str:
+def mint_credential(gitea: Gitea, admin: str) -> Minted:
     password = secrets.token_urlsafe(32)
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
@@ -698,7 +717,11 @@ def mint_credential(gitea: Gitea, admin: str) -> str:
             gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token['id']}", agent)
     body = {"name": TOKEN_NAME, "scopes": TOKEN_SCOPES}
     created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
-    return f"token {created['sha1']}"
+    return Minted(f"token {created['sha1']}", created["id"], agent)
+
+
+def revoke_credential(gitea: Gitea, minted: Minted) -> None:
+    gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{minted.token_id}", minted.owner)
 
 
 def provider_check(upstream: Upstream) -> ProviderCheck:
@@ -724,12 +747,23 @@ def checked_credential(gitea: Gitea, admin: str, upstream: Upstream, stored: str
     if stored is not None and credential_works(gitea, stored):
         try:
             return "kept", stored, check_credential(upstream, stored)
-        except BootstrapError as refusal:
+        except CliFailed as refusal:
+            if not remints(refusal):
+                raise
             print(f"the stored credential is refused, so a new one is minted: {refusal}", file=sys.stderr)
-    credential = mint_credential(gitea, admin)
-    if not credential_works(gitea, credential):
-        raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
-    return "created", credential, check_credential(upstream, credential)
+    minted = mint_credential(gitea, admin)
+    try:
+        if not credential_works(gitea, minted.credential):
+            raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
+        return "created", minted.credential, check_credential(upstream, minted.credential)
+    except BaseException:
+        revoke_credential(gitea, minted)
+        raise
+
+
+def remints(refusal: CliFailed) -> bool:
+    match = CHECK_REFUSAL.match(refusal.stderr)
+    return match is not None and match.group(1) in REMINT_REASONS
 
 
 def fingerprint_of(credential: str) -> str:
