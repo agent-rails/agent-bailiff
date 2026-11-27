@@ -519,6 +519,7 @@ class TokenGitea(b.Gitea):
         self.tokens = {7: b.TOKEN_NAME, 8: "laptop"}
         self.deleted = []
         self.demo = {STORED: 200, MINTED: 200}
+        self.page_cap = 50
 
     def wait_healthy(self, seconds):
         pass
@@ -538,7 +539,7 @@ class TokenGitea(b.Gitea):
             return 204, None
         if method == "GET" and urlsplit(path).path == tokens:
             query = parse_qs(urlsplit(path).query)
-            limit, page = int(query.get("limit", ["50"])[0]), int(query.get("page", ["1"])[0])
+            limit, page = min(int(query.get("limit", ["50"])[0]), self.page_cap), int(query.get("page", ["1"])[0])
             listed = [{"id": token_id, "name": name} for token_id, name in self.tokens.items()]
             return 200, listed[(page - 1) * limit : page * limit]
         assert method in ("GET", "PATCH")
@@ -708,9 +709,15 @@ def test_mint_deletes_the_old_quickstart_token_from_every_page_of_the_token_list
 def test_mint_refuses_a_token_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
     monkeypatch.setattr(b, "MAX_TOKEN_PAGES", 2, raising=False)
     gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 101)}
-    with pytest.raises(b.BootstrapError, match="holds more than 100 gitea tokens"):
+    with pytest.raises(b.BootstrapError, match=f"the gitea token list of {b.AGENT} runs past 2 pages"):
         b.mint_credential(gitea, "admin")
     assert gitea.deleted == [] and len(gitea.tokens) == 100
+
+
+def test_the_token_list_is_read_past_a_short_page_until_an_empty_one(gitea):
+    gitea.page_cap = 3
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 8)}
+    assert [token["id"] for token in b.agent_tokens(gitea, "agent")] == list(range(1, 8))
 
 
 @pytest.fixture

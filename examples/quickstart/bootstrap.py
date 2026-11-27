@@ -748,10 +748,10 @@ def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
         batch = gitea.expect({200}, "GET", path, agent)
         if not isinstance(batch, list):
             raise BootstrapError(f"gitea GET {path} returned no token list")
-        tokens.extend(batch)
-        if len(batch) < TOKEN_PAGE_LIMIT:
+        if not batch:
             return tokens
-    raise BootstrapError(f"{AGENT} holds more than {MAX_TOKEN_PAGES * TOKEN_PAGE_LIMIT} gitea tokens")
+        tokens.extend(batch)
+    raise BootstrapError(f"the gitea token list of {AGENT} runs past {MAX_TOKEN_PAGES} pages")
 
 
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:
