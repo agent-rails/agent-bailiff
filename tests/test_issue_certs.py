@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import errno
 import importlib.util
@@ -10,6 +11,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -460,6 +462,25 @@ def test_a_probe_of_a_certificate_the_ca_signed_for_another_service_names_it(cer
     assert "serves a certificate other than the current one" in capsys.readouterr().err
 
 
+def test_probes_of_silent_servers_finish_within_one_check_deadline(certs, monkeypatch, capsys):
+    assert run(certs, "issue") == 0
+    monkeypatch.setattr(certs_module, "CHECK_DEADLINE_SECONDS", 1, raising=False)
+    with contextlib.ExitStack() as stack:
+        listeners = [stack.enter_context(socket.create_server(("127.0.0.1", 0))) for _ in SERVICES]
+        probes = [
+            argument
+            for service, listener in zip(SERVICES, listeners, strict=True)
+            for argument in ("--probe", f"{service}=127.0.0.1:{listener.getsockname()[1]}")
+        ]
+        started = time.monotonic()
+        assert run(certs, "check", *probes) == 1
+        elapsed = time.monotonic() - started
+    assert elapsed < 2
+    error = capsys.readouterr().err
+    assert all(f"{service} at 127.0.0.1:" in error for service in SERVICES)
+    assert "the check ran past its 1s deadline" in error
+
+
 def test_a_probe_needs_a_known_service():
     with pytest.raises(SystemExit):
         certs_module.main(["check", "--probe", "jaeger=jaeger:4318"])
@@ -497,7 +518,9 @@ def test_an_upstream_config_without_a_url_fails_the_check(tmp_path, certs, capsy
 def test_the_check_probes_the_configured_upstream_with_the_explicit_probes_once(tmp_path, certs, monkeypatch):
     assert run(certs, "issue") == 0
     probed = []
-    monkeypatch.setattr(certs_module, "probe", lambda _certs, service, address: probed.append((service, address)) or [])
+    monkeypatch.setattr(
+        certs_module, "probe", lambda _certs, service, address, _deadline: probed.append((service, address)) or []
+    )
     path = write_upstream(tmp_path, "https://gitea-mcp-tls:8443/mcp")
     arguments = ("--probe", "stub-upstream=stub-upstream:8443", "--probe", "gateway=gateway:8080")
     assert run(certs, "check", *arguments, "--probe-upstream", str(path)) == 0

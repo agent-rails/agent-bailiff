@@ -6,7 +6,7 @@ interrupted run, is refused. --reissue writes a new generation in every
 directory, switches each one's current symlink only after every file is on disk, then deletes every other
 generation, so no earlier key stays on disk. check fails when the set is incomplete, does not chain, names other
 hosts, or expires within the margin, and can probe each served certificate over TLS, including the configured
-upstream's when it is a server in the stack."""
+upstream's when it is a server in the stack, all within one deadline below the healthcheck timeout."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import shutil
 import socket
 import ssl
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ GENERATION = re.compile(r"gen-(\d{4,})")
 DEFAULT_DAYS = 365
 MARGIN_DAYS = 30
 SKEW = datetime.timedelta(minutes=5)
-PROBE_TIMEOUT_SECONDS = 5
+CHECK_DEADLINE_SECONDS = 8
 RUNBOOK = (
     "the certificate set is partial or mixed; reissue it with the stack stopped: "
     "docker compose stop && docker compose run --rm certs issue --reissue && docker compose up -d"
@@ -359,18 +360,24 @@ def subject_names(leaf: x509.Certificate) -> list[str]:
     return [*names.get_values_for_type(x509.DNSName), *map(str, names.get_values_for_type(x509.IPAddress))]
 
 
-def probe(certs: Path, service: str, address: str) -> list[str]:
+def seconds_left(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError(f"the check ran past its {CHECK_DEADLINE_SECONDS}s deadline")
+    return left
+
+
+def probe(certs: Path, service: str, address: str, deadline: float) -> list[str]:
     host, _, port = address.rpartition(":")
     if not host or not port.isdigit():
         return [f"probe {address!r} is not host:port"]
     context = ssl.create_default_context(cafile=certs / PUBLIC / CURRENT / "ca.pem")
     expected = load_certificate(certs / PUBLIC / CURRENT / f"{service}.pem").public_bytes(Encoding.DER)
     try:
-        with (
-            socket.create_connection((host, int(port)), timeout=PROBE_TIMEOUT_SECONDS) as raw,
-            context.wrap_socket(raw, server_hostname=host) as tls,
-        ):
-            served = tls.getpeercert(binary_form=True)
+        with socket.create_connection((host, int(port)), timeout=seconds_left(deadline)) as raw:
+            raw.settimeout(seconds_left(deadline))
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                served = tls.getpeercert(binary_form=True)
     except OSError as error:
         return [f"{service} at {address} failed TLS with the install CA: {error}"]
     if served != expected:
@@ -425,12 +432,13 @@ def run(args: argparse.Namespace, services: Mapping[str, Service]) -> str:
         if args.days < 1:
             raise CertError("--days must be at least 1")
         return issue(args.certs, services, args.days, reissue=args.reissue)
+    deadline = time.monotonic() + CHECK_DEADLINE_SECONDS
     problems = check(args.certs, services, datetime.datetime.now(datetime.UTC), args.margin_days, keys=args.keys)
     probes = set(args.probe)
     if args.probe_upstream is not None:
         probes.update(upstream_probe(args.probe_upstream))
     for service, address in sorted(probes):
-        problems.extend(probe(args.certs, service, address))
+        problems.extend(probe(args.certs, service, address, deadline))
     if problems:
         raise CertError("; ".join(problems))
     return "certificates ok"

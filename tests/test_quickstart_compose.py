@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -269,6 +270,12 @@ def test_cert_watch_checks_the_public_certificates_every_six_hours(config):
     assert health["interval"] == "6h0m0s"
     assert health["start_period"] and health["start_interval"]
     assert service["depends_on"]["certs"]["condition"] == "service_completed_successfully"
+
+
+def test_cert_watch_finishes_its_check_before_the_healthcheck_times_out(config):
+    timeout = config["services"]["cert-watch"]["healthcheck"]["timeout"]
+    assert re.fullmatch(r"\d+s", timeout), timeout
+    assert certs_module.CHECK_DEADLINE_SECONDS < int(timeout[:-1])
 
 
 def test_the_gateway_serves_its_install_leaf_on_the_published_port(config):
