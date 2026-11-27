@@ -209,6 +209,23 @@ except b.BootstrapError as refusal:
 finally:
     gitea.expect({204}, "DELETE", f"/api/v1/users/{b.ADMIN}/tokens/{created['id']}", admin)
 """
+OUTSIDE_REPOSITORY_SCRIPT = """
+import sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap as b
+gitea = b.Gitea(b.GITEA)
+admin = b.basic(b.ADMIN, b.ADMIN_PASSWORD.read_text().strip())
+if sys.argv[1] == "create":
+    gitea.expect({201}, "POST", f"/api/v1/admin/users/{b.AGENT}/repos", admin, {"name": "outside", "private": True})
+else:
+    gitea.expect({204}, "DELETE", f"/api/v1/repos/{b.AGENT}/outside", admin)
+"""
+STORED_WORKS_SCRIPT = """
+import sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap as b
+print(b.credential_works(b.Gitea(b.GITEA), sys.stdin.read().strip()))
+"""
 STAT_SCRIPT = """
 import json, os, stat, sys
 kinds = {stat.S_IFDIR: "directory", stat.S_IFREG: "file", stat.S_IFSOCK: "socket"}
@@ -412,6 +429,10 @@ def stored_state(stack):
 
 def run_credential_pair(stack):
     stack.compose("up", "--no-deps", "--force-recreate", *CREDENTIAL_PAIR, timeout=UP_TIMEOUT_SECONDS)
+    return credential_pair_outcome(stack)
+
+
+def credential_pair_outcome(stack):
     states = stack.compose("ps", "--all", "--format", "json", *CREDENTIAL_PAIR).splitlines()
     codes = {state["Service"]: state["ExitCode"] for state in map(json.loads, states)}
     logs = {service: stack.compose("logs", "--no-color", "--no-log-prefix", service) for service in CREDENTIAL_PAIR}
@@ -480,3 +501,34 @@ def test_a_refused_token_is_never_stored_and_fails_the_pair(stack, tmp_path, cha
         "bootstrap credential refused: bootstrap refused the credential, so nothing is stored"
     ], logs
     assert stored_state(stack) == before
+
+
+def outside_repository(stack, action):
+    stack.compose(
+        "run", "--rm", "--no-deps", "--entrypoint", "python", "bootstrap", "-c", OUTSIDE_REPOSITORY_SCRIPT, action
+    )
+
+
+def stored_token_works(stack):
+    arguments = ["run", "--rm", "--no-deps", "-T", "--entrypoint", "python", "bootstrap", "-c", STORED_WORKS_SCRIPT]
+    return stack.compose(*arguments, stdin=stored_header(stack)).strip() == "True"
+
+
+def test_a_refused_check_fails_compose_up_and_leaves_the_last_passing_token_stored(stack):
+    codes, logs = run_credential_pair(stack)
+    assert codes == {"credential-put": 0, "bootstrap": 0}, logs
+    assert stored_token_works(stack)
+    before = stored_state(stack)
+    outside_repository(stack, "create")
+    try:
+        stack.compose("up", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS, expect=1)
+        codes, logs = credential_pair_outcome(stack)
+    finally:
+        outside_repository(stack, "delete")
+    assert codes == {"credential-put": 1, "bootstrap": 1}, logs
+    assert "credential-check refused: outside_binding: " in logs["bootstrap"], logs
+    assert stored_state(stack) == before
+    assert stored_token_works(stack)
+    assert stack.compose("ps", "--format", "{{.State}}", "custodian").strip() == "running"
+    codes, logs = run_credential_pair(stack)
+    assert codes == {"credential-put": 0, "bootstrap": 0}, logs
