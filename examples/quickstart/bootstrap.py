@@ -801,11 +801,15 @@ def credential_works(gitea: Gitea, credential: str) -> bool:
     return status == 200 and isinstance(document, dict) and document.get("permissions", {}).get("pull") is True
 
 
-def mint_credential(gitea: Gitea, admin: str) -> Minted:
+def agent_login(gitea: Gitea, admin: str) -> str:
     password = secrets.token_urlsafe(32)
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
-    agent = basic(AGENT, password)
+    return basic(AGENT, password)
+
+
+def mint_credential(gitea: Gitea, admin: str) -> Minted:
+    agent = agent_login(gitea, admin)
     name = f"{TOKEN_NAME}-{secrets.token_hex(8)}"
     try:
         created = gitea.expect(
@@ -840,12 +844,18 @@ def revoke_credential(gitea: Gitea, minted: Minted) -> None:
     delete_token(gitea, minted.owner, minted.token_id)
 
 
-def retire_credentials(gitea: Gitea, minted: Minted) -> None:
-    delete_tokens(
-        gitea,
-        minted.owner,
-        lambda token: bool(TOKEN_NAMES.fullmatch(token["name"])) and token.get("id") != minted.token_id,
-    )
+def retire_credentials(gitea: Gitea, owner: str, keeps: Callable[[dict[str, Any]], bool]) -> None:
+    try:
+        delete_tokens(gitea, owner, lambda token: bool(TOKEN_NAMES.fullmatch(token["name"])) and not keeps(token))
+    except (BootstrapError, OSError) as error:
+        raise BootstrapError(f"older {TOKEN_NAME} tokens may still be live in gitea: {error}") from None
+
+
+def holds(token: dict[str, Any], credential: str) -> bool:
+    last_eight = token.get("token_last_eight")
+    if not isinstance(last_eight, str):
+        raise BootstrapError(f"gitea listed token {token.get('id')} with no token_last_eight")
+    return last_eight == credential[-8:]
 
 
 def delete_tokens(gitea: Gitea, owner: str, doomed: Callable[[dict[str, Any]], bool]) -> None:
@@ -1053,18 +1063,29 @@ def bootstrap_gitea() -> str:
     )
     wait_for_handoff(("ready",), READY_SECONDS, missing)
     try:
-        gitea, minted, created = check_and_hand_off(upstream, take_handoff("stored"))
+        checked = check_and_hand_off(upstream, take_handoff("stored"))
     except BaseException:
         write_handoff("refused", "")
         raise
+    gitea, minted = checked.gitea, checked.minted
     if minted is None:
-        return "created" if created else "kept"
+        retire_credentials(gitea, agent_login(gitea, checked.admin), lambda token: holds(token, checked.credential))
+        return "created" if checked.seeded else "kept"
     await_store(gitea, minted)
-    retire_credentials(gitea, minted)
+    retire_credentials(gitea, minted.owner, lambda token: token.get("id") == minted.token_id)
     return "created"
 
 
-def check_and_hand_off(upstream: Upstream, stored: str | None) -> tuple[Gitea, Minted | None, bool]:
+@dataclass(frozen=True)
+class Checked:
+    gitea: Gitea
+    admin: str
+    credential: str
+    minted: Minted | None
+    seeded: bool
+
+
+def check_and_hand_off(upstream: Upstream, stored: str | None) -> Checked:
     gitea = Gitea(GITEA)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
@@ -1081,7 +1102,7 @@ def check_and_hand_off(upstream: Upstream, stored: str | None) -> tuple[Gitea, M
         if minted is not None:
             revoke_credential(gitea, minted)
         raise
-    return gitea, minted, bool(created)
+    return Checked(gitea, admin, credential, minted, bool(created))
 
 
 def await_store(gitea: Gitea, minted: Minted) -> None:

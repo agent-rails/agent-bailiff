@@ -523,6 +523,7 @@ class TokenGitea(b.Gitea):
         self.demo = {STORED: 200, MINTED: 200}
         self.page_cap = 50
         self.lost = None
+        self.last_eight = {7: "s" * 8}
 
     def wait_healthy(self, seconds):
         pass
@@ -534,6 +535,7 @@ class TokenGitea(b.Gitea):
         if (method, path) == ("POST", tokens):
             token_id = max(self.tokens) + 1
             self.tokens[token_id] = body["name"]
+            self.last_eight[token_id] = "m" * 8
             self.events.append(("minted", token_id))
             if self.lost is not None:
                 return self.lost()
@@ -547,10 +549,14 @@ class TokenGitea(b.Gitea):
         if method == "GET" and urlsplit(path).path == tokens:
             query = parse_qs(urlsplit(path).query)
             limit, page = min(int(query.get("limit", ["50"])[0]), self.page_cap), int(query.get("page", ["1"])[0])
-            listed = [{"id": token_id, "name": name} for token_id, name in self.tokens.items()]
+            listed = [self.listed(token_id, name) for token_id, name in self.tokens.items()]
             return 200, listed[(page - 1) * limit : page * limit]
         assert method in ("GET", "PATCH")
         return 200, {}
+
+    def listed(self, token_id, name):
+        last_eight = self.last_eight.get(token_id, f"{token_id:08x}")
+        return {"id": token_id, "name": name} | ({} if last_eight is None else {"token_last_eight": last_eight})
 
 
 class FakeCli:
@@ -683,6 +689,47 @@ def test_a_kept_credential_is_checked_and_not_put_again(pair, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert "credential: kept" in lines and "gitea: kept" in lines
     assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_kept_credential_retires_every_other_quickstart_token(pair, gitea):
+    gitea.tokens.update({20: f"{b.TOKEN_NAME}-0123456789abcdef", 21: f"{b.TOKEN_NAME}-laptop"})
+    pair.stored = STORED
+    assert run_pair() == (0, 0)
+    assert pair.events == [("deleted", 20)]
+    assert gitea.tokens.keys() == {7, 8, 21} and pair.cli.of("custodian") == []
+
+
+def test_a_kept_credential_whose_old_tokens_cannot_be_retired_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+
+    def unlisted(gitea, agent):
+        raise b.BootstrapError("token list failed")
+
+    monkeypatch.setattr(b, "agent_tokens", unlisted)
+    assert run_pair() == (0, 1)
+    assert f"older {b.TOKEN_NAME} tokens may still be live in gitea: token list failed" in capsys.readouterr().err
+
+
+def test_a_kept_credential_beside_a_token_with_no_last_eight_fails_and_deletes_nothing(pair, gitea, capsys):
+    gitea.tokens[20] = f"{b.TOKEN_NAME}-0123456789abcdef"
+    gitea.last_eight[7] = None
+    pair.stored = STORED
+    assert run_pair() == (0, 1)
+    assert gitea.deleted == []
+    assert "gitea listed token 7 with no token_last_eight" in capsys.readouterr().err
+
+
+def test_a_stored_remint_whose_old_tokens_cannot_be_retired_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def unlisted(gitea, agent):
+        raise b.BootstrapError("token list failed")
+
+    monkeypatch.setattr(b, "agent_tokens", unlisted)
+    assert run_pair() == (0, 1)
+    assert pair.events == [("minted", 9), ("stored", MINTED)]
+    assert f"older {b.TOKEN_NAME} tokens may still be live in gitea: token list failed" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("reason", ["broader_scopes", "token_rejected"])
