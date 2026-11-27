@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -514,10 +515,11 @@ def fingerprint(credential):
 
 
 class TokenGitea(b.Gitea):
-    def __init__(self):
+    def __init__(self, events):
         super().__init__("http://gitea:3000")
         self.tokens = {7: b.TOKEN_NAME, 8: "laptop"}
         self.deleted = []
+        self.events = events
         self.demo = {STORED: 200, MINTED: 200}
         self.page_cap = 50
 
@@ -531,11 +533,13 @@ class TokenGitea(b.Gitea):
         if (method, path) == ("POST", tokens):
             token_id = max(self.tokens) + 1
             self.tokens[token_id] = body["name"]
+            self.events.append(("minted", token_id))
             return 201, {"id": token_id, "sha1": "m" * 40}
         if method == "DELETE" and path.startswith(f"{tokens}/"):
             token_id = int(path.rsplit("/", 1)[1])
             del self.tokens[token_id]
             self.deleted.append(token_id)
+            self.events.append(("deleted", token_id))
             return 204, None
         if method == "GET" and urlsplit(path).path == tokens:
             query = parse_qs(urlsplit(path).query)
@@ -547,9 +551,11 @@ class TokenGitea(b.Gitea):
 
 
 class FakeCli:
-    def __init__(self):
+    def __init__(self, events=None):
         self.calls = []
         self.refused = {}
+        self.put_fails = False
+        self.events = [] if events is None else events
 
     def __call__(self, command, **options):
         arguments, stdin = tuple(command[3:]), options["input"]
@@ -560,6 +566,9 @@ class FakeCli:
                 return subprocess.CompletedProcess(command, 1, "", stderr)
             document = {"fingerprint": fingerprint(stdin), "login": "agent", "private_repositories": 2}
             return subprocess.CompletedProcess(command, 0, json.dumps(document), "")
+        if self.put_fails:
+            return subprocess.CompletedProcess(command, 1, "", "agent-bailiff put-credential refused: a detail\n")
+        self.events.append(("stored", stdin))
         return subprocess.CompletedProcess(command, 0, "stored\n", "")
 
     def of(self, command):
@@ -571,7 +580,10 @@ def pair(tmp_path, monkeypatch):
     handoff = tmp_path / "handoff"
     handoff.mkdir(mode=0o700)
     (tmp_path / "password").write_text("admin password")
-    fake = SimpleNamespace(cli=FakeCli(), stored=None, handoff=handoff, gitea=TokenGitea(), built=[])
+    events = []
+    fake = SimpleNamespace(
+        cli=FakeCli(events), stored=None, handoff=handoff, gitea=TokenGitea(events), built=[], events=events
+    )
     monkeypatch.setattr(b, "HANDOFF", handoff)
     monkeypatch.setattr(b, "HANDOFF_POLL_SECONDS", 0.01)
     monkeypatch.setattr(b, "READY_SECONDS", 10)
@@ -618,8 +630,8 @@ def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(p
 def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_put(pair, gitea, capsys):
     pair.cli.refused[MINTED] = "broader_scopes"
     assert run_pair() == (1, 1)
-    assert gitea.deleted == [7, 9]
-    assert gitea.tokens == {8: "laptop"}
+    assert gitea.deleted == [9]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
     assert pair.cli.of("custodian") == []
     err = capsys.readouterr().err
     assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: agent-bailiff" in err
@@ -630,7 +642,7 @@ def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
     gitea.demo[MINTED] = 404
     assert run_pair() == (1, 1)
-    assert gitea.deleted == [7, 9]
+    assert gitea.deleted == [9]
     assert pair.cli.calls == []
     assert f"the minted credential cannot read {b.ORG}/demo" in capsys.readouterr().err
 
@@ -674,12 +686,47 @@ def test_a_kept_credential_the_check_refuses_is_replaced_by_a_checked_one(pair, 
     pair.cli.refused[STORED] = reason
     assert run_pair() == (0, 0)
     assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED, MINTED]
-    assert gitea.deleted == [7] and gitea.tokens == {8: "laptop", 9: b.TOKEN_NAME}
+    assert pair.events == [("minted", 9), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 9} and gitea.tokens[9].startswith(f"{b.TOKEN_NAME}-")
     [(arguments, stdin)] = pair.cli.of("custodian")
     assert (arguments[-1], stdin) == (fingerprint(MINTED), MINTED)
     captured = capsys.readouterr()
     assert "the stored credential is refused, so a new one is minted" in captured.err
     assert "credential: created" in captured.out.splitlines()
+
+
+def test_a_refused_remint_deletes_only_the_new_token_and_leaves_the_stored_one_live(pair, gitea, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    pair.cli.refused[MINTED] = "broader_scopes"
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+    assert "bootstrap refused the credential, so nothing is stored" in capsys.readouterr().err
+
+
+def test_a_remint_credential_put_fails_to_store_deletes_only_the_new_token(pair, gitea, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "token_rejected"
+    pair.cli.put_fails = True
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+    assert "credential-put did not store the minted credential, so it is deleted from gitea" in capsys.readouterr().err
+
+
+def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def unreachable(gitea, credential):
+        raise b.BootstrapError("token reach probe failed")
+
+    monkeypatch.setattr(b, "token_reach", unreachable)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and pair.cli.of("custodian") == []
+    assert "token reach probe failed" in capsys.readouterr().err
 
 
 def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
@@ -697,21 +744,29 @@ def test_every_handoff_file_is_owner_read_only(pair):
     assert modes == dict.fromkeys(("stored", "ready", "token", "fingerprint", "checked"), 0o400)
 
 
-def test_mint_deletes_the_old_quickstart_token_from_every_page_of_the_token_list(pair, gitea):
+def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
+    first, second = b.mint_credential(gitea, "admin"), b.mint_credential(gitea, "admin")
+    assert (first.token_id, second.token_id) == (9, 10) and gitea.deleted == []
+    assert gitea.tokens[9] != gitea.tokens[10]
+    assert all(re.fullmatch(f"{b.TOKEN_NAME}-[0-9a-f]{{16}}", gitea.tokens[token_id]) for token_id in (9, 10))
+
+
+def test_a_stored_remint_retires_every_other_quickstart_token_from_every_page(pair, gitea):
     gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 121)}
+    gitea.tokens[60] = f"{b.TOKEN_NAME}-0123456789abcdef"
     gitea.tokens[110] = b.TOKEN_NAME
-    minted = b.mint_credential(gitea, "admin")
-    assert gitea.deleted == [110]
-    assert gitea.tokens[121] == b.TOKEN_NAME and len(gitea.tokens) == 120
-    assert minted.credential == MINTED
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    assert run_pair() == (0, 0)
+    assert pair.events == [("minted", 121), ("stored", MINTED), ("deleted", 60), ("deleted", 110)]
+    assert gitea.tokens[121].startswith(f"{b.TOKEN_NAME}-") and len(gitea.tokens) == 119
 
 
-def test_mint_refuses_a_token_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
+def test_the_token_list_refuses_a_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
     monkeypatch.setattr(b, "MAX_TOKEN_PAGES", 2, raising=False)
     gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 101)}
     with pytest.raises(b.BootstrapError, match=f"the gitea token list of {b.AGENT} runs past 2 pages"):
-        b.mint_credential(gitea, "admin")
-    assert gitea.deleted == [] and len(gitea.tokens) == 100
+        b.agent_tokens(gitea, "agent")
 
 
 def test_the_token_list_is_read_past_a_short_page_until_an_empty_one(gitea):

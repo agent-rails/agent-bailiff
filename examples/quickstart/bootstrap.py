@@ -91,6 +91,7 @@ TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
 HANDOFF = RUN / "credential-handoff"
 HANDOFF_FILES = ("stored", "ready", "token", "fingerprint", "checked", "refused")
+STORE_RESULTS = ("saved", "unsaved")
 MAX_HANDOFF_BYTES = 4096
 READY_SECONDS = 60
 HANDOFF_SECONDS = 300
@@ -733,10 +734,7 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
     agent = basic(AGENT, password)
-    for token in agent_tokens(gitea, agent):
-        if token["name"] == TOKEN_NAME:
-            gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token['id']}", agent)
-    body = {"name": TOKEN_NAME, "scopes": TOKEN_SCOPES}
+    body = {"name": f"{TOKEN_NAME}-{secrets.token_hex(8)}", "scopes": TOKEN_SCOPES}
     created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
     return Minted(f"token {created['sha1']}", created["id"], agent)
 
@@ -755,7 +753,19 @@ def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
 
 
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:
-    gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{minted.token_id}", minted.owner)
+    delete_token(gitea, minted.owner, minted.token_id)
+
+
+def retire_credentials(gitea: Gitea, minted: Minted) -> None:
+    for token in agent_tokens(gitea, minted.owner):
+        if not isinstance(token, dict) or not isinstance(token.get("name"), str):
+            raise BootstrapError("gitea listed a token with no name")
+        if token["name"].startswith(TOKEN_NAME) and token.get("id") != minted.token_id:
+            delete_token(gitea, minted.owner, token["id"])
+
+
+def delete_token(gitea: Gitea, owner: str, token_id: Any) -> None:
+    gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token_id}", owner)
 
 
 def provider_check(upstream: Upstream) -> ProviderCheck:
@@ -778,10 +788,12 @@ def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
     return document
 
 
-def checked_credential(gitea: Gitea, admin: str, upstream: Upstream, stored: str | None) -> tuple[str, str, Any]:
+def checked_credential(
+    gitea: Gitea, admin: str, upstream: Upstream, stored: str | None
+) -> tuple[str, Any, Minted | None]:
     if stored is not None and credential_works(gitea, stored):
         try:
-            return "kept", stored, check_credential(upstream, stored)
+            return stored, check_credential(upstream, stored), None
         except CliFailed as refusal:
             if not remints(refusal):
                 raise
@@ -790,7 +802,7 @@ def checked_credential(gitea: Gitea, admin: str, upstream: Upstream, stored: str
     try:
         if not credential_works(gitea, minted.credential):
             raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
-        return "created", minted.credential, check_credential(upstream, minted.credential)
+        return minted.credential, check_credential(upstream, minted.credential), minted
     except BaseException:
         revoke_credential(gitea, minted)
         raise
@@ -831,8 +843,8 @@ def take_handoff(name: str) -> str | None:
     return text
 
 
-def clear_handoff() -> None:
-    for name in HANDOFF_FILES:
+def clear_handoff(names: Sequence[str] = (*HANDOFF_FILES, *STORE_RESULTS)) -> None:
+    for name in names:
         (HANDOFF / name).unlink(missing_ok=True)
         partial_handoff(name).unlink(missing_ok=True)
 
@@ -882,11 +894,16 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
         return "kept"
     if outcome != "created":
         raise BootstrapError(f"bootstrap handed off an unknown outcome {outcome!r}")
-    cli(
-        "custodian", "put-credential", "--config", DIRS["custodian"] / "config.json", "--tenant", TENANT,
-        "--credential-id", upstream.credential_id, "--target", upstream.target,
-        "--expect-fingerprint", fingerprint, stdin=read_handoff("token"),
-    )  # fmt: skip
+    try:
+        cli(
+            "custodian", "put-credential", "--config", DIRS["custodian"] / "config.json", "--tenant", TENANT,
+            "--credential-id", upstream.credential_id, "--target", upstream.target,
+            "--expect-fingerprint", fingerprint, stdin=read_handoff("token"),
+        )  # fmt: skip
+    except BaseException:
+        write_handoff("unsaved", "")
+        raise
+    write_handoff("saved", "")
     return "created"
 
 
@@ -899,7 +916,7 @@ def put_credential() -> str:
         export_credential(stored)
         return store_handed_off(upstream, stored)
     finally:
-        clear_handoff()
+        clear_handoff(HANDOFF_FILES)
 
 
 def probe_outcome(label: str, status: int) -> str:
@@ -940,13 +957,22 @@ def bootstrap_gitea() -> str:
     )
     wait_for_handoff(("ready",), READY_SECONDS, missing)
     try:
-        return check_and_hand_off(upstream, take_handoff("stored"))
+        gitea, minted, created = check_and_hand_off(upstream, take_handoff("stored"))
     except BaseException:
         write_handoff("refused", "")
         raise
+    if minted is None:
+        return "created" if created else "kept"
+    try:
+        await_store()
+    except BaseException:
+        revoke_credential(gitea, minted)
+        raise
+    retire_credentials(gitea, minted)
+    return "created"
 
 
-def check_and_hand_off(upstream: Upstream, stored: str | None) -> str:
+def check_and_hand_off(upstream: Upstream, stored: str | None) -> tuple[Gitea, Minted | None, bool]:
     gitea = Gitea(GITEA)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
@@ -954,11 +980,24 @@ def check_and_hand_off(upstream: Upstream, stored: str | None) -> str:
     created = seed(gitea, admin)
     for item in created:
         print(f"gitea: created {item}")
-    outcome, credential, check = checked_credential(gitea, admin, upstream, stored)
-    print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
-    print(f"credential check: passed with {check['private_repositories']} private repositories")
-    hand_off(outcome, credential, check["fingerprint"])
-    return "created" if created or outcome == "created" else "kept"
+    credential, check, minted = checked_credential(gitea, admin, upstream, stored)
+    try:
+        print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
+        print(f"credential check: passed with {check['private_repositories']} private repositories")
+        hand_off("kept" if minted is None else "created", credential, check["fingerprint"])
+    except BaseException:
+        if minted is not None:
+            revoke_credential(gitea, minted)
+        raise
+    return gitea, minted, bool(created)
+
+
+def await_store() -> None:
+    missing = f"credential-put reported no store of the minted credential within {HANDOFF_SECONDS}s"
+    result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
+    take_handoff(result)
+    if result == "unsaved":
+        raise BootstrapError("credential-put did not store the minted credential, so it is deleted from gitea")
 
 
 def agent_subject() -> str:

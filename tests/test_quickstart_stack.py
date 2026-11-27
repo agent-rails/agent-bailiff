@@ -501,6 +501,7 @@ def test_a_refused_token_is_never_stored_and_fails_the_pair(stack, tmp_path, cha
         "bootstrap credential refused: bootstrap refused the credential, so nothing is stored"
     ], logs
     assert stored_state(stack) == before
+    assert stored_token_works(stack)
 
 
 def outside_repository(stack, action):
