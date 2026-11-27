@@ -22,7 +22,7 @@ from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, Infl
 from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
-from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable, header_value
+from agent_bailiff.custodian.store import UNREDACTABLE, CredentialStore, CredentialUnavailable, header_value
 from agent_bailiff.decide.clearance import Clearance, decode_clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
@@ -527,7 +527,7 @@ class Custodian:
         if value is None:
             raise _Refusal("credential_unavailable")
         problem = redaction_problem(value)
-        if problem is not None and stored.exception is None:
+        if problem is not None and UNREDACTABLE not in stored.exceptions:
             logger.warning(
                 "stored credential %r for target %r cannot be redacted from results and has no accepted exception: %s",
                 binding.credential_id,
@@ -535,7 +535,7 @@ class Custodian:
                 problem,
             )
             raise _Refusal("credential_unredactable")
-        return value, () if stored.exception is None else (stored.exception,)
+        return value, tuple(sorted(stored.exceptions))
 
     def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str, started: int) -> None:
         key = (clearance.tenant, clearance.task, clearance.op_id, reason)

@@ -409,6 +409,17 @@ def test_a_release_dockets_the_accepted_unredactable_exception(make_custodian, i
     ]
 
 
+@pytest.mark.parametrize("value", ["unredactable,unredactable", "unknown", ""])
+def test_a_stored_exception_that_is_not_canonical_is_unavailable(make_custodian, issue, state, value):
+    custodian = make_custodian()
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = ?", (value,))
+    connection.commit()
+    connection.close()
+    request, token = issue()
+    assert custodian.release(token, request, NOW + 1) == Refused("credential_unavailable")
+
+
 @pytest.mark.parametrize("token", [None, ""])
 def test_missing_clearance_is_refused(make_custodian, issue, token):
     request, _ = issue()

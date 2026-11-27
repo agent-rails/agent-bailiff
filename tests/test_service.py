@@ -836,7 +836,7 @@ def test_put_credential_records_an_accepted_exception(deployment, capsys, caplog
         assert put_credential(deployment, b"Bearer short-key\n", "--accept-unredactable") == 0
     assert capsys.readouterr().out == "stored\n"
     assert "accepted unredactable exception" in caplog.text
-    assert stored(deployment) == StoredCredential(b"Bearer short-key", "unredactable")
+    assert stored(deployment) == StoredCredential(b"Bearer short-key", frozenset({"unredactable"}))
 
 
 def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployment, capsys):
