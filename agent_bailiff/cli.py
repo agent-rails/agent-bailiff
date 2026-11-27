@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -442,6 +443,9 @@ def _add_credential_check(commands: argparse._SubParsersAction[argparse.Argument
     )
     check.add_argument(
         "--max-repos", type=int, default=DEFAULT_MAX_REPOS, help="refuse when a repository search reports more"
+    )
+    check.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="seconds the whole check may take"
     )
     check.set_defaults(handler=_credential_check)
 
@@ -1116,6 +1120,8 @@ def _put_credential(args: argparse.Namespace) -> int:
 
 
 def _credential_check(args: argparse.Namespace) -> int:
+    if not 0 < args.timeout < math.inf:
+        return _refused("credential-check", "--timeout must be a positive finite number of seconds")
     try:
         secret = _read_line()
     except ValueError as exc:
@@ -1127,7 +1133,7 @@ def _credential_check(args: argparse.Namespace) -> int:
         return _refused("credential-check", "the credential on stdin is not ASCII")
     previous = signal.signal(signal.SIGALRM, _expire_credential_check)
     try:
-        signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS + CREDENTIAL_CHECK_GRACE_SECONDS)
+        signal.setitimer(signal.ITIMER_REAL, args.timeout + CREDENTIAL_CHECK_GRACE_SECONDS)
         result = check_token(
             secret.decode("ascii"),
             api_url=args.api_url,
@@ -1135,7 +1141,7 @@ def _credential_check(args: argparse.Namespace) -> int:
             required=args.required,
             cafile=args.ca_file,
             unix_socket=args.unix_socket,
-            timeout=DEFAULT_TIMEOUT_SECONDS,
+            timeout=args.timeout,
             max_repos=args.max_repos,
         )
     except (TokenCheckRefused, OSError, ValueError) as exc:

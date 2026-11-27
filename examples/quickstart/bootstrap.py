@@ -32,7 +32,7 @@ from agent_warrant.task_root import issue_task_root
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from agent_bailiff.adapters.gitea.token_check import parse_required
+from agent_bailiff.adapters.gitea.token_check import DEFAULT_MAX_REPOS, DEFAULT_TIMEOUT_SECONDS, parse_required
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
@@ -141,6 +141,9 @@ UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea-mcp-tls"})
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 INSTALL = "install"
 PROVIDER_FIELDS = frozenset({"provider", "provider_api_url", "required_permissions"})
+MAX_CHECK_REPOS = 10_000
+MAX_CHECK_TIMEOUT_SECONDS = 60
+CHECK_BOUNDS = {"max_repos": MAX_CHECK_REPOS, "check_timeout_seconds": MAX_CHECK_TIMEOUT_SECONDS}
 PROVIDERS = frozenset({"gitea"})
 TASK_SCOPE = {
     "permissions": [
@@ -210,6 +213,8 @@ class ProviderCheck:
     provider: str
     api_url: str
     required: tuple[str, ...]
+    max_repos: int
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -235,17 +240,18 @@ def load_upstream(path: Path) -> Upstream:
     if (
         not isinstance(document, dict)
         or not UPSTREAM_FIELDS <= set(document)
-        or not optional <= UPSTREAM_OPTIONAL_FIELDS | PROVIDER_FIELDS
-        or (optional & PROVIDER_FIELDS and not PROVIDER_FIELDS <= optional)
+        or not optional <= UPSTREAM_OPTIONAL_FIELDS | PROVIDER_FIELDS | set(CHECK_BOUNDS)
+        or (optional & (PROVIDER_FIELDS | set(CHECK_BOUNDS)) and not PROVIDER_FIELDS <= optional)
     ):
         raise BootstrapError(
             f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}, optionally ca_file, "
-            f"and optionally all of {', '.join(sorted(PROVIDER_FIELDS))}"
+            f"and optionally all of {', '.join(sorted(PROVIDER_FIELDS))} "
+            f"with any of {', '.join(sorted(CHECK_BOUNDS))}"
         )
     version = document["version"]
     if isinstance(version, bool) or version != UPSTREAM_VERSION:
         raise BootstrapError(f"{path}: version must be {UPSTREAM_VERSION}")
-    text = {name: document[name] for name in set(document) - {"version", "required_permissions"}}
+    text = {name: document[name] for name in set(document) - {"version", "required_permissions", *CHECK_BOUNDS}}
     for name, value in text.items():
         if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
             raise BootstrapError(f"{path}: {name} must be a non-empty ASCII printable string without whitespace")
@@ -260,24 +266,40 @@ def load_upstream(path: Path) -> Upstream:
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
     ca_file = upstream_ca_file(path, text["ca_file"]) if "ca_file" in text else None
-    provider_check = load_provider_check(path, text, document["required_permissions"]) if "provider" in text else None
+    provider_check = load_provider_check(path, text, document) if "provider" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
         text["binding_resource"], routes, ca_file, provider_check,
     )  # fmt: skip
 
 
-def load_provider_check(path: Path, text: dict[str, str], required: Any) -> ProviderCheck:
+def load_provider_check(path: Path, text: dict[str, str], document: dict[str, Any]) -> ProviderCheck:
     if text["provider"] not in PROVIDERS:
         raise BootstrapError(f"{path}: provider must be one of {', '.join(sorted(PROVIDERS))}")
     check_provider_api_url(path, text["provider_api_url"])
+    required = document["required_permissions"]
     if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
         raise BootstrapError(f"{path}: required_permissions must be a list of scope names")
     try:
         permissions = parse_required(required)
     except ValueError as error:
         raise BootstrapError(f"{path}: {error}") from None
-    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)))
+    max_repos = check_bound(path, document, "max_repos")
+    timeout = check_bound(path, document, "check_timeout_seconds")
+    return ProviderCheck(
+        text["provider"], text["provider_api_url"], tuple(sorted(permissions)),
+        DEFAULT_MAX_REPOS if max_repos is None else max_repos,
+        DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout,
+    )  # fmt: skip
+
+
+def check_bound(path: Path, document: dict[str, Any], field: str) -> int | None:
+    if field not in document:
+        return None
+    value, cap = document[field], CHECK_BOUNDS[field]
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= cap:
+        raise BootstrapError(f"{path}: {field} must be an integer from 1 to {cap}")
+    return value
 
 
 def check_provider_api_url(path: Path, url: str) -> None:
@@ -395,15 +417,13 @@ def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]
     return tuple(document["routes"])
 
 
-def cli(*arguments: object, stdin: str | None = None) -> str:
+def cli(*arguments: object, stdin: str | None = None, timeout: float = CLI_TIMEOUT_SECONDS) -> str:
     command = [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)]
     label = " ".join(map(str, arguments[:2]))
     try:
-        result = subprocess.run(
-            command, input=stdin, capture_output=True, text=True, check=False, timeout=CLI_TIMEOUT_SECONDS
-        )
+        result = subprocess.run(command, input=stdin, capture_output=True, text=True, check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise BootstrapError(f"agent-bailiff {label} did not finish within {CLI_TIMEOUT_SECONDS}s") from None
+        raise BootstrapError(f"agent-bailiff {label} did not finish within {timeout:g}s") from None
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise CliFailed(f"agent-bailiff {label} failed: {stderr}", stderr)
@@ -919,7 +939,8 @@ def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
     required = [argument for name in check.required for argument in ("--required", name)]
     output = cli(
         "credential-check", "--provider", check.provider, "--api-url", check.api_url, "--unix-socket", GITEA_SOCKET,
-        "--binding-resource", upstream.binding_resource, *required, stdin=credential,
+        "--binding-resource", upstream.binding_resource, *required, "--max-repos", check.max_repos,
+        "--timeout", check.timeout_seconds, stdin=credential, timeout=CLI_TIMEOUT_SECONDS + check.timeout_seconds,
     )  # fmt: skip
     document = json.loads(output)
     if not isinstance(document, dict) or not isinstance(document.get("fingerprint"), str):

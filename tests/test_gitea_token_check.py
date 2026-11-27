@@ -17,7 +17,14 @@ import pytest
 
 from agent_bailiff import cli
 from agent_bailiff.adapters.gitea import token_check
-from agent_bailiff.adapters.gitea.token_check import TokenCheck, TokenCheckRefused, broader_scopes, check_token
+from agent_bailiff.adapters.gitea.token_check import (
+    DEFAULT_MAX_REPOS,
+    DEFAULT_TIMEOUT_SECONDS,
+    TokenCheck,
+    TokenCheckRefused,
+    broader_scopes,
+    check_token,
+)
 
 NEEDLE = "token needle-0123456789abcdef0123456789abcdef"
 REQUIRED = ("read:issue", "read:repository")
@@ -694,12 +701,12 @@ def test_credential_check_passes_and_prints_the_fingerprint(gitea, capsys):
     ],
     ids=["headers", "body"],
 )
-def test_credential_check_refuses_a_slow_drip_at_its_wall_clock_deadline(capsys, monkeypatch, head, drip):
-    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.5, raising=False)
+def test_credential_check_refuses_a_slow_drip_at_its_wall_clock_deadline(capsys, head, drip):
     server = Drip(head, drip)
     try:
         started = time.monotonic()
-        assert credential_check(None, NEEDLE.encode() + b"\n", api_url=server.url) == cli.EXIT_REFUSED
+        code = credential_check(None, NEEDLE.encode() + b"\n", "--timeout", "0.5", api_url=server.url)
+        assert code == cli.EXIT_REFUSED
         elapsed = time.monotonic() - started
     finally:
         server.close()
@@ -725,12 +732,44 @@ def test_credential_check_lets_the_check_report_its_own_refusal_just_past_its_de
         time.sleep(options["timeout"] * 2)
         raise TokenCheckRefused("provider_unreachable", "the check gave up on its own")
 
-    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.2, raising=False)
     monkeypatch.setattr(cli, "check_token", slow_refusal)
-    assert credential_check(None, NEEDLE.encode() + b"\n", api_url="http://127.0.0.1:9/api/v1") == cli.EXIT_REFUSED
+    code = credential_check(None, NEEDLE.encode() + b"\n", "--timeout", "0.2", api_url="http://127.0.0.1:9/api/v1")
+    assert code == cli.EXIT_REFUSED
     err = capsys.readouterr().err
     assert "credential-check refused: provider_unreachable: the check gave up on its own" in err
     assert "deadline_exceeded" not in err
+
+
+@pytest.mark.parametrize(
+    ("extra", "timeout", "max_repos"),
+    [((), DEFAULT_TIMEOUT_SECONDS, DEFAULT_MAX_REPOS), (("--timeout", "45", "--max-repos", "5000"), 45.0, 5000)],
+)
+def test_credential_check_runs_the_check_under_its_timeout_and_item_cap(monkeypatch, extra, timeout, max_repos):
+    seen = []
+    armed = []
+    setitimer = cli.signal.setitimer
+
+    def recorded(header, **options):
+        seen.append((options["timeout"], options["max_repos"]))
+        raise TokenCheckRefused("provider_unreachable", "recorded")
+
+    def arm(which, seconds):
+        armed.append(seconds)
+        setitimer(which, 0)
+
+    monkeypatch.setattr(cli, "check_token", recorded)
+    monkeypatch.setattr(cli.signal, "setitimer", arm)
+    assert credential_check(None, NEEDLE.encode() + b"\n", *extra, api_url="http://127.0.0.1:9/api/v1") == 1
+    assert seen == [(timeout, max_repos)]
+    assert armed == [timeout + cli.CREDENTIAL_CHECK_GRACE_SECONDS, 0]
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "-inf"])
+def test_credential_check_refuses_a_timeout_that_is_not_a_positive_finite_number(gitea, capsys, timeout):
+    assert credential_check(gitea, NEEDLE.encode() + b"\n", f"--timeout={timeout}") == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == "" and "--timeout must be a positive finite number of seconds" in captured.err
+    assert gitea.requests == []
 
 
 def test_credential_check_fingerprint_matches_put_credential(gitea, capsys):
@@ -880,14 +919,12 @@ def test_credential_check_over_a_unix_socket_passes(unix_gitea, unix_socket, cap
     assert {headers["Host"] for _, headers in unix_gitea.requests} == {"gitea"}
 
 
-def test_credential_check_refuses_a_slow_drip_over_a_unix_socket_at_its_wall_clock_deadline(
-    capsys, monkeypatch, unix_socket
-):
-    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.5, raising=False)
+def test_credential_check_refuses_a_slow_drip_over_a_unix_socket_at_its_wall_clock_deadline(capsys, unix_socket):
     server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a", unix_socket)
     try:
         started = time.monotonic()
-        code = credential_check(None, NEEDLE.encode() + b"\n", "--unix-socket", str(unix_socket), api_url=server.url)
+        extra = ("--unix-socket", str(unix_socket), "--timeout", "0.5")
+        code = credential_check(None, NEEDLE.encode() + b"\n", *extra, api_url=server.url)
         elapsed = time.monotonic() - started
     finally:
         server.close()

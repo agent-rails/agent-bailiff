@@ -27,7 +27,9 @@ from cryptography.x509.oid import NameOID
 from test_gitea_token_check import NEEDLE, Drip
 from test_quickstart_stack import b
 
+from agent_bailiff import cli
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
+from agent_bailiff.adapters.gitea.token_check import DEFAULT_MAX_REPOS, DEFAULT_TIMEOUT_SECONDS
 from agent_bailiff.custodian.backend import LocalBackend
 from agent_bailiff.custodian.store import CredentialStore
 from agent_bailiff.docket.client import DocketError
@@ -348,8 +350,48 @@ def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path, field):
 
 def test_the_gitea_upstream_names_the_provider_check_and_the_stub_names_none():
     check = b.load_upstream(GITEA_UPSTREAM).provider_check
-    assert check == b.ProviderCheck("gitea", "http://gitea/api/v1", ("read:issue", "read:repository"))
+    assert check == b.ProviderCheck(
+        "gitea", "http://gitea/api/v1", ("read:issue", "read:repository"), DEFAULT_MAX_REPOS, DEFAULT_TIMEOUT_SECONDS
+    )
+    assert (DEFAULT_MAX_REPOS, DEFAULT_TIMEOUT_SECONDS) == (1000, 10.0)
     assert b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json").provider_check is None
+
+
+@pytest.mark.parametrize(
+    "changes", [{"max_repos": 1}, {"max_repos": 10_000, "check_timeout_seconds": 1}, {"check_timeout_seconds": 60}]
+)
+def test_an_upstream_sets_the_credential_check_bounds(tmp_path, changes):
+    check = b.load_upstream(write_upstream(tmp_path, **changes)).provider_check
+    expected = {"max_repos": DEFAULT_MAX_REPOS, "check_timeout_seconds": DEFAULT_TIMEOUT_SECONDS} | changes
+    assert (check.max_repos, check.timeout_seconds) == (expected["max_repos"], expected["check_timeout_seconds"])
+
+
+@pytest.mark.parametrize(
+    "field, cap", [("max_repos", b.MAX_CHECK_REPOS), ("check_timeout_seconds", b.MAX_CHECK_TIMEOUT_SECONDS)]
+)
+@pytest.mark.parametrize("value", [0, -1, True, False, "5", 1.5, 10.0, None, [5], "above"])
+def test_a_credential_check_bound_that_is_not_a_bounded_positive_int_fails_bootstrap(tmp_path, field, cap, value):
+    path = write_upstream(tmp_path, **{field: cap + 1 if value == "above" else value})
+    with pytest.raises(b.BootstrapError, match=f"{field} must be an integer from 1 to {cap}$"):
+        b.load_upstream(path)
+
+
+def test_the_credential_check_bounds_are_capped_at_ten_thousand_repositories_and_a_minute():
+    assert (b.MAX_CHECK_REPOS, b.MAX_CHECK_TIMEOUT_SECONDS) == (10_000, 60)
+    assert b.GITEA_HEALTH_SECONDS + 2 * (b.MAX_CHECK_TIMEOUT_SECONDS + cli.CREDENTIAL_CHECK_GRACE_SECONDS) < (
+        b.HANDOFF_SECONDS
+    )
+
+
+@pytest.mark.parametrize("field", ["max_repos", "check_timeout_seconds"])
+def test_a_credential_check_bound_without_a_provider_fails_bootstrap(tmp_path, field):
+    path = write_upstream(tmp_path, **{field: 5})
+    document = json.loads(path.read_text())
+    for name in ("provider", "provider_api_url", "required_permissions"):
+        del document[name]
+    path.write_text(json.dumps(document))
+    with pytest.raises(b.BootstrapError, match="exactly the fields .*optionally all of provider"):
+        b.load_upstream(path)
 
 
 @pytest.mark.parametrize(
@@ -689,6 +731,7 @@ class TokenGitea(b.Gitea):
 class FakeCli:
     def __init__(self, events=None):
         self.calls = []
+        self.timeouts = []
         self.refused = {}
         self.put_fails = False
         self.store = None
@@ -697,6 +740,7 @@ class FakeCli:
     def __call__(self, command, **options):
         arguments, stdin = tuple(command[3:]), options["input"]
         self.calls.append((arguments, stdin))
+        self.timeouts.append((arguments[0], options["timeout"]))
         if arguments[0] == "credential-check":
             if stdin in self.refused:
                 stderr = f"agent-bailiff credential-check refused: {self.refused[stdin]}: a detail\n"
@@ -755,6 +799,7 @@ def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(p
     assert arguments[1:] == (
         "--provider", "gitea", "--api-url", "http://gitea/api/v1", "--unix-socket", "/run/gitea/gitea.sock",
         "--binding-resource", "gitea/repos/quickstart/*", "--required", "read:issue", "--required", "read:repository",
+        "--max-repos", "1000", "--timeout", "10.0",
     )  # fmt: skip
     [(arguments, stdin)] = pair.cli.of("custodian")
     assert arguments[:2] == ("custodian", "put-credential")
@@ -763,6 +808,23 @@ def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(p
     lines = capsys.readouterr().out.splitlines()
     assert "credential: created" in lines and "gitea: created" in lines
     assert list(pair.handoff.iterdir()) == []
+
+
+def test_the_upstream_credential_check_bounds_reach_the_check_under_a_longer_subprocess_timeout(
+    pair, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, max_repos=10_000, check_timeout_seconds=60))
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    assert run_pair() == (0, 0)
+    checks = pair.cli.of("credential-check")
+    assert [arguments[-4:] for arguments, _ in checks] == [("--max-repos", "10000", "--timeout", "60")] * 2
+    assert pair.cli.timeouts == [
+        ("credential-check", 60 + b.CLI_TIMEOUT_SECONDS),
+        ("credential-check", 60 + b.CLI_TIMEOUT_SECONDS),
+        ("custodian", b.CLI_TIMEOUT_SECONDS),
+    ]
+    assert 60 + b.CLI_TIMEOUT_SECONDS > 60 + cli.CREDENTIAL_CHECK_GRACE_SECONDS
 
 
 def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_put(pair, gitea, capsys):
@@ -1090,15 +1152,14 @@ def test_a_gitea_answer_that_drips_fails_bootstrap_at_its_wall_clock_deadline(mo
     assert elapsed < 2
 
 
-def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap(monkeypatch):
-    monkeypatch.setattr(b, "CLI_TIMEOUT_SECONDS", 1, raising=False)
+def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap():
     server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a")
     try:
         started = time.monotonic()
         with pytest.raises(b.BootstrapError, match="credential-check --provider did not finish within 1s"):
             b.cli(
                 "credential-check", "--provider", "gitea", "--api-url", server.url, "--binding-resource",
-                "gitea/repos/quickstart/*", "--required", "read:repository", stdin=NEEDLE,
+                "gitea/repos/quickstart/*", "--required", "read:repository", stdin=NEEDLE, timeout=1,
             )  # fmt: skip
         elapsed = time.monotonic() - started
     finally:
