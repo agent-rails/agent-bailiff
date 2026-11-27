@@ -243,7 +243,7 @@ admin = b.basic(b.ADMIN, b.ADMIN_PASSWORD.read_text().strip())
 body = {"name": "privilege-check-probe", "scopes": ["write:admin"]}
 created = gitea.expect({201}, "POST", f"/api/v1/users/{b.ADMIN}/tokens", admin, body)
 try:
-    b.check_credential(b.load_upstream(b.UPSTREAM_FILE), f"token {created['sha1']}")
+    b.check_credential(b.load_upstream(b.UPSTREAM_FILE), f"token {created['sha1']}", b.Budget(b.HANDOFF_SECONDS))
     print("passed")
 except b.BootstrapError as refusal:
     print(refusal)
