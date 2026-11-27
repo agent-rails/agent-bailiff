@@ -799,3 +799,12 @@ def test_a_second_credential_put_refuses_while_one_holds_the_handoff(stack):
         stack.compose(
             "run", "--rm", "--no-deps", "--entrypoint", "python", "credential-put", "-c", HANDOFF_CLEAR_SCRIPT
         )
+
+
+def test_the_credential_handoff_tmpfs_caps_its_bytes_and_files(stack):
+    script = (
+        "import json, os; s = os.statvfs('/run/bailiff/credential-handoff'); "
+        "print(json.dumps([s.f_blocks * s.f_frsize, s.f_files]))"
+    )
+    capped = stack.compose("run", "--rm", "--no-deps", "--entrypoint", "python", "credential-put", "-c", script)
+    assert json.loads(capped) == [1024 * 1024, 64]

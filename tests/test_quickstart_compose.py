@@ -143,7 +143,7 @@ def test_the_credential_handoff_lives_in_memory_owned_by_the_pair(config):
     assert config["volumes"]["credential-handoff"]["driver_opts"] == {
         "type": "tmpfs",
         "device": "tmpfs",
-        "o": "uid=10003,gid=10003,mode=0700",
+        "o": "uid=10003,gid=10003,mode=0700,size=1m,nr_inodes=64",
     }
     users = {
         name: service.get("user") for name, service in config["services"].items() if HANDOFF in volume_sources(service)
