@@ -95,6 +95,7 @@ MAX_HANDOFF_BYTES = 4096
 READY_SECONDS = 60
 HANDOFF_SECONDS = 300
 HANDOFF_POLL_SECONDS = 0.5
+CLI_TIMEOUT_SECONDS = 60
 
 TENANT = "quickstart"
 PRINCIPAL = "user:operator"
@@ -347,10 +348,16 @@ def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]
 
 def cli(*arguments: object, stdin: str | None = None) -> str:
     command = [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)]
-    result = subprocess.run(command, input=stdin, capture_output=True, text=True, check=False)
+    label = " ".join(map(str, arguments[:2]))
+    try:
+        result = subprocess.run(
+            command, input=stdin, capture_output=True, text=True, check=False, timeout=CLI_TIMEOUT_SECONDS
+        )
+    except subprocess.TimeoutExpired:
+        raise BootstrapError(f"agent-bailiff {label} did not finish within {CLI_TIMEOUT_SECONDS}s") from None
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        raise CliFailed(f"agent-bailiff {' '.join(map(str, arguments[:2]))} failed: {stderr}", stderr)
+        raise CliFailed(f"agent-bailiff {label} failed: {stderr}", stderr)
     return result.stdout
 
 

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.x509.oid import NameOID
+from test_gitea_token_check import NEEDLE, Drip
 from test_quickstart_stack import b
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
@@ -726,6 +728,22 @@ def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch
     answering.status, answering.body = status, json.dumps({"pad": "x" * 64}).encode()
     with pytest.raises(b.BootstrapError, match="gitea GET /api/v1/user answered more than 64 bytes"):
         b.Gitea(answering.url).request("GET", "/api/v1/user", None)
+
+
+def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap(monkeypatch):
+    monkeypatch.setattr(b, "CLI_TIMEOUT_SECONDS", 1, raising=False)
+    server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a")
+    try:
+        started = time.monotonic()
+        with pytest.raises(b.BootstrapError, match="credential-check --provider did not finish within 1s"):
+            b.cli(
+                "credential-check", "--provider", "gitea", "--api-url", server.url, "--binding-resource",
+                "gitea/repos/quickstart/*", "--required", "read:repository", stdin=NEEDLE,
+            )  # fmt: skip
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert elapsed < 3
 
 
 def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
