@@ -14,7 +14,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_bailiff.custodian.backend import BackendError, KeyBackend
 from agent_bailiff.custodian.echo import redaction_problem
-from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned, raise_database_error
+from agent_bailiff.custodian.files import (
+    OwnedFileError,
+    PinnedFile,
+    connect_owned,
+    database_error_name,
+    raise_database_error,
+)
 
 DEK_BYTES = 32
 NONCE_BYTES = 12
@@ -309,7 +315,7 @@ def _add_exception_column(connection: sqlite3.Connection) -> None:
             try:
                 connection.execute("ROLLBACK")
             except sqlite3.Error as rollback:
-                exc.add_note(f"the rollback also failed: {rollback}")
+                exc.add_note(f"the rollback also failed ({database_error_name(rollback)})")
         raise
 
 

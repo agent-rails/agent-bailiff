@@ -1,11 +1,20 @@
 import errno
 import os
+import sqlite3
 import stat
 
 import pytest
 
 from agent_bailiff.custodian import files
-from agent_bailiff.custodian.files import OwnedFileError, commit_at, create_owned, replace_at, stage_at
+from agent_bailiff.custodian.files import (
+    OwnedFileError,
+    commit_at,
+    connect_owned,
+    create_owned,
+    raise_database_error,
+    replace_at,
+    stage_at,
+)
 
 TARGET = "target.json"
 LABEL = "target file"
@@ -241,3 +250,43 @@ def test_create_owned_keeps_an_interrupt_when_the_file_cannot_be_removed(directo
         f"cannot remove the partly written target file at {directory / 'new.json'}: Permission denied"
     ]
     assert_closed(opened[-1])
+
+
+def sqlite_error(code, name):
+    error = sqlite3.OperationalError("raw sqlite text")
+    error.sqlite_errorcode = code
+    error.sqlite_errorname = name
+    return error
+
+
+@pytest.mark.parametrize(
+    ("code", "name", "problem"),
+    [
+        (sqlite3.SQLITE_FULL, "SQLITE_FULL", "its storage failed"),
+        (sqlite3.SQLITE_IOERR_WRITE, "SQLITE_IOERR_WRITE", "its storage failed"),
+        (sqlite3.SQLITE_CANTOPEN, "SQLITE_CANTOPEN", "its storage could not be opened"),
+        (sqlite3.SQLITE_BUSY, "SQLITE_BUSY", "it is busy"),
+        (sqlite3.SQLITE_READONLY, "SQLITE_READONLY", "it is not writable"),
+        (sqlite3.SQLITE_NOTADB, "SQLITE_NOTADB", "it is not a usable database"),
+        (sqlite3.SQLITE_CONSTRAINT_TRIGGER, "SQLITE_CONSTRAINT_TRIGGER", "the database refused it"),
+    ],
+)
+def test_a_database_error_is_refused_by_its_primary_code(code, name, problem):
+    with pytest.raises(OwnedFileError) as raised:
+        raise_database_error("cannot write the store", sqlite_error(code, name))
+    assert str(raised.value) == f"cannot write the store: {problem} ({name})"
+
+
+def test_a_connection_that_cannot_open_names_the_path_without_the_sqlite_message(directory, monkeypatch):
+    path = directory / "store.db"
+    real_connect = files.sqlite3.connect
+
+    def removed_first(*args, **kwargs):
+        path.unlink()
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(files.sqlite3, "connect", removed_first)
+    with pytest.raises(OwnedFileError) as raised:
+        connect_owned(path, LABEL, "")
+    assert str(raised.value) == f"cannot open the {LABEL} at {path}: its storage could not be opened (SQLITE_CANTOPEN)"
+    assert "unable to open database file" not in str(raised.value)

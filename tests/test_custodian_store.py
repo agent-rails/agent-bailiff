@@ -363,14 +363,17 @@ class RollbackFails:
         if sql == ADD_EXCEPTION:
             raise sqlite3.OperationalError("disk I/O error")
         if sql == "ROLLBACK":
-            raise sqlite3.OperationalError("cannot rollback")
+            error = sqlite3.OperationalError("cannot rollback")
+            error.sqlite_errorname = "SQLITE_ERROR"
+            raise error
         return iter(())
 
 
 def test_a_failed_rollback_keeps_the_migration_error():
     with pytest.raises(sqlite3.OperationalError, match="disk I/O error") as raised:
         _add_exception_column(RollbackFails())
-    assert any("rollback also failed" in note for note in raised.value.__notes__)
+    assert raised.value.__notes__ == ["the rollback also failed (SQLITE_ERROR)"]
+    assert "cannot rollback" not in raised.value.__notes__[0]
 
 
 def test_opening_a_file_that_is_not_a_database_names_the_store(state, backend):

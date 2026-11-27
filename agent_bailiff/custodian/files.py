@@ -22,6 +22,7 @@ DATABASE_REFUSED = "the database refused it"
 DATABASE_PROBLEMS = {
     sqlite3.SQLITE_FULL: STORAGE_FAILED,
     sqlite3.SQLITE_IOERR: STORAGE_FAILED,
+    sqlite3.SQLITE_CANTOPEN: "its storage could not be opened",
     sqlite3.SQLITE_BUSY: BUSY,
     sqlite3.SQLITE_LOCKED: BUSY,
     sqlite3.SQLITE_READONLY: "it is not writable",
@@ -40,8 +41,11 @@ def raise_database_error(context: str, exc: sqlite3.Error) -> NoReturn:
         raise exc
     code = getattr(exc, "sqlite_errorcode", None)
     problem = DATABASE_REFUSED if code is None else DATABASE_PROBLEMS.get(code & PRIMARY_CODE_MASK, DATABASE_REFUSED)
-    name = getattr(exc, "sqlite_errorname", None) or type(exc).__name__
-    raise OwnedFileError(f"{context}: {problem} ({name})") from None
+    raise OwnedFileError(f"{context}: {problem} ({database_error_name(exc)})") from None
+
+
+def database_error_name(exc: sqlite3.Error) -> str:
+    return getattr(exc, "sqlite_errorname", None) or type(exc).__name__
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.C
             check_same_thread=False,
         )
     except sqlite3.Error as exc:
-        raise OwnedFileError(f"cannot open the {label}: {exc}") from None
+        raise_database_error(f"cannot open the {label} at {path}", exc)
     try:
         connection.execute("PRAGMA synchronous = FULL")
         if schema is not None:
