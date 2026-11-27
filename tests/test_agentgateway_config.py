@@ -674,6 +674,52 @@ def test_backend_tls_beyond_a_non_empty_root_is_refused(backend_tls):
     assert any("backendTLS" in problem for problem in problems_after(change))
 
 
+STACK_HOST_PROBLEM = (
+    "gateway-bound service 'deploy' targets a host in the stack over https and must set "
+    "policies.backendTLS.root; with the system roots any public CA can vouch for that name"
+)
+STACK = GatewayExpectations(**{**EXPECTED.__dict__, "stack_hosts": frozenset({"stub-upstream"})})
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"host": "https://stub-upstream:8443/mcp"},
+        {"host": "https://STUB-UPSTREAM.:8443/mcp"},
+    ],
+)
+def test_an_https_target_in_the_stack_without_a_backend_root_is_refused(target):
+    config = gateway_config()
+    config["mcp"]["targets"][0].update(mcp=target)
+    assert validate_gateway_config(config, STACK) == (STACK_HOST_PROBLEM,)
+
+
+def test_an_https_target_in_the_stack_with_a_backend_root_is_accepted():
+    config = gateway_config()
+    config["mcp"]["targets"][0].update(
+        mcp={"host": "https://stub-upstream:8443/mcp"}, policies={"backendTLS": {"root": "/etc/gateway/ca.pem"}}
+    )
+    assert validate_gateway_config(config, STACK) == ()
+    del config["mcp"]["targets"][0]["policies"]
+    assert validate_gateway_config(config, STACK) == (STACK_HOST_PROBLEM,)
+
+
+def test_an_https_target_outside_the_stack_keeps_the_system_roots():
+    config = gateway_config()
+    config["mcp"]["targets"][0].update(mcp={"host": "https://mcp.example.com/mcp"})
+    assert validate_gateway_config(config, STACK) == ()
+
+
+def test_check_config_refuses_a_stack_host_target_without_a_backend_root(owned_files):
+    config = gateway_config(upstream="https://stub-upstream:8443/mcp")
+    result = run_check(owned_files, config, arguments=("--stack-host", "stub-upstream"))
+    assert result.returncode == 1
+    assert f"check-config refused: {STACK_HOST_PROBLEM}" in result.stderr
+    config["mcp"]["targets"][0]["policies"] = {"backendTLS": {"root": "/etc/gateway/ca.pem"}}
+    result = run_check(owned_files, config, arguments=("--stack-host", "stub-upstream"))
+    assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
+
+
 GATEWAY_TLS = {"cert": "/var/lib/bailiff/certs/gateway.pem", "key": "/var/lib/bailiff/gateway-key/gateway.key"}
 
 
@@ -768,6 +814,7 @@ def test_malformed_documents_are_refused(document):
         {"redactor_socket": CUSTODIAN_SOCKET},
         {"services": frozenset()},
         {"credential_headers": frozenset({"bad header"})},
+        {"stack_hosts": frozenset({""})},
     ],
 )
 def test_expectations_are_validated(options):
@@ -800,7 +847,7 @@ def owned_files():
 ROUTE = {"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/a"}
 
 
-def run_check(owned_files, config_document, routes=(ROUTE,)):
+def run_check(owned_files, config_document, routes=(ROUTE,), arguments=()):
     routes = owned_files("routes.json", {"routes": list(routes)})
     bindings = owned_files(
         "bindings.json",
@@ -836,6 +883,7 @@ def run_check(owned_files, config_document, routes=(ROUTE,)):
         str(CUSTODIAN_SOCKET),
         "--redactor-socket",
         str(REDACTOR_SOCKET),
+        *arguments,
     ]
     return subprocess.run(command, capture_output=True, text=True, timeout=60)
 

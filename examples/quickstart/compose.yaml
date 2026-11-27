@@ -469,6 +469,10 @@ services:
       - /run/bailiff/custodian/custodian.sock
       - --redactor-socket
       - /run/bailiff/custodian/redactor.sock
+      - --stack-host
+      - stub-upstream
+      - --stack-host
+      - gitea-mcp-tls
     volumes:
       - custodian-data:/var/lib/bailiff/custodian:ro
       - gateway-config:/var/lib/bailiff/gateway:ro

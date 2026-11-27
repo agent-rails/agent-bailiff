@@ -208,6 +208,10 @@ def test_the_gateway_check_names_every_processor_socket(config):
     }
 
 
+def test_the_gateway_check_requires_a_backend_root_for_every_upstream_in_the_stack(config):
+    assert flag_values(config["services"]["gateway-check"]["command"], "--stack-host") == b.UPSTREAM_HOSTS
+
+
 def cert_mounts(config):
     mounts = {}
     for name, service in config["services"].items():

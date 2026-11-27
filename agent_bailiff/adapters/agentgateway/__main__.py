@@ -25,6 +25,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--decide-socket", type=Path, required=True)
     check.add_argument("--custodian-socket", type=Path, required=True)
     check.add_argument("--redactor-socket", type=Path, required=True)
+    check.add_argument(
+        "--stack-host",
+        action="append",
+        default=[],
+        help="a host served by a private CA; an https target to it must set backendTLS.root (repeatable)",
+    )
     args = parser.parse_args(argv)
     try:
         document = _load_json(args.gateway_config, "gateway config")
@@ -37,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             services=routes.services,
             credential_headers=frozenset(binding.header_name for binding in bindings.credential_bindings),
             effector_services=routes.catalog_services,
+            stack_hosts=frozenset(args.stack_host),
         )
     except (OSError, ValueError, OwnedFileError) as exc:
         print(f"check-config refused: {exc}", file=sys.stderr)

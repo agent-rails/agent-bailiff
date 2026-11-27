@@ -76,6 +76,7 @@ class GatewayExpectations:
     services: frozenset[str]
     credential_headers: frozenset[str]
     effector_services: frozenset[str] = frozenset()
+    stack_hosts: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         sockets = (self.decide_socket, self.custodian_socket, self.redactor_socket)
@@ -88,6 +89,8 @@ class GatewayExpectations:
             raise ValueError("services must be a non-empty set of non-empty str")
         if not all(isinstance(item, str) and HEADER_NAME.fullmatch(item) for item in self.credential_headers):
             raise ValueError("credential_headers must be HTTP field names")
+        if not all(isinstance(item, str) and item for item in self.stack_hosts):
+            raise ValueError("stack_hosts must be a set of non-empty str")
 
 
 def validate_gateway_config(document: object, expected: GatewayExpectations) -> tuple[str, ...]:
@@ -111,7 +114,7 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         _check_gateways(problems, document["gateways"], mcp)
     if mcp.get("statefulMode") != "stateless":
         problems.append('mcp.statefulMode must be "stateless"; the stateful event stream reaches upstreams unchecked')
-    _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
+    _check_targets(problems, mcp.get("targets"), expected)
     _check_policies(problems, mcp.get("policies"), expected)
     _check_access_log(problems, document.get("frontendPolicies"))
     _check_credential_headers(problems, document, expected.credential_headers)
@@ -182,9 +185,7 @@ def _check_access_log(problems: list[str], frontend: object) -> None:
         )
 
 
-def _check_targets(
-    problems: list[str], targets: object, services: frozenset[str], effector_services: frozenset[str]
-) -> None:
+def _check_targets(problems: list[str], targets: object, expected: GatewayExpectations) -> None:
     if not isinstance(targets, list):
         problems.append("mcp.targets must be a list")
         return
@@ -205,7 +206,7 @@ def _check_targets(
             _only_keys(problems, f"mcp target {name!r} policies", policies, TARGET_POLICY_KEYS)
             if "backendTLS" in policies:
                 _check_backend_tls(problems, name, policies["backendTLS"])
-    for service in sorted(services):
+    for service in sorted(expected.services):
         target = seen.get(service)
         if target is None:
             problems.append(f"gateway-bound service {service!r} has no mcp target")
@@ -218,7 +219,7 @@ def _check_targets(
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
-        if service in effector_services:
+        if service in expected.effector_services:
             if not _is_loopback_http(target["mcp"]):
                 problems.append(
                     f"catalog service {service!r} must target the effector over http on {PLAIN_HTTP_HOSTS}; "
@@ -228,6 +229,11 @@ def _check_targets(
             problems.append(
                 f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
                 "a host without a scheme is http, and the released credential must not cross the network in cleartext"
+            )
+        elif _names_stack_host(target["mcp"], expected.stack_hosts) and not _has_backend_root(target):
+            problems.append(
+                f"gateway-bound service {service!r} targets a host in the stack over https and must set "
+                "policies.backendTLS.root; with the system roots any public CA can vouch for that name"
             )
 
 
@@ -271,6 +277,20 @@ def _is_protected_transport(target: Mapping[str, Any]) -> bool:
     if url is None or url.hostname is None:
         return False
     return url.scheme == "https" or allows_plain_http(url.hostname)
+
+
+def _names_stack_host(target: Mapping[str, Any], stack_hosts: frozenset[str]) -> bool:
+    url = _parse_target_host(target)
+    if url is None or url.hostname is None:
+        return False
+    return url.hostname.rstrip(".") in {host.lower().rstrip(".") for host in stack_hosts}
+
+
+def _has_backend_root(target: Mapping[str, Any]) -> bool:
+    policies = target.get("policies")
+    backend_tls = policies.get("backendTLS") if isinstance(policies, dict) else None
+    root = backend_tls.get("root") if isinstance(backend_tls, dict) else None
+    return isinstance(root, str) and bool(root)
 
 
 def _is_loopback_http(target: Mapping[str, Any]) -> bool:
