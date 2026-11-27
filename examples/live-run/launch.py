@@ -313,12 +313,6 @@ def main() -> None:
         signal.signal(signal.SIGTERM, previous)
 
 
-def keep_tag(run_tags: list[str], tag: str, reason: str) -> None:
-    if tag in run_tags:
-        run_tags.remove(tag)
-        print(f"keeping image tag {tag}: {reason}", file=sys.stderr)
-
-
 def launch() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--script", choices=("run", "kubernetes"), required=True)
@@ -345,6 +339,7 @@ def launch() -> None:
     )
     run_id = secrets.token_hex(8)
     run_tags: list[str] = []
+    held_tag = None
     try:
         webhook = None
         if kubernetes and args.catalog != READ_CATALOG:
@@ -353,6 +348,7 @@ def launch() -> None:
                 args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG, run_tag=webhook_tag
             )
             run_tags.append(webhook_tag)
+            held_tag = webhook_tag
             webhook = resolve_digest(args.docker_context, webhook_id, WEBHOOK_REPO)
         image_tag = f"{IMAGE_REPO}:{run_id}"
         image = build_image(
@@ -371,6 +367,8 @@ def launch() -> None:
             catalog=args.catalog,
             platform=platform_of(args.context),
         )
+        if held_tag is not None:
+            run_tags.remove(held_tag)
         process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
             stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
@@ -381,24 +379,31 @@ def launch() -> None:
                 check=False,
             )
             process.wait(30)
-            if kubernetes:
-                keep_tag(
-                    run_tags, f"{WEBHOOK_REPO}:{run_id}", "the run was stopped and its cluster may be left deployed"
-                )
             raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
         if process.returncode != 0:
             if kubernetes:
                 print(report_lock(args.context, args.docker_context), file=sys.stderr)
-                keep_tag(run_tags, f"{WEBHOOK_REPO}:{run_id}", "the run failed and its cluster may be left deployed")
             raise SystemExit(process.returncode)
         result = read_result(stdout.decode(), spec.run_id)
+        if held_tag is not None:
+            run_tags.insert(0, held_tag)
+            held_tag = None
         write_result(spec.out, result)
         print(f"run {spec.run_id}: wrote {spec.out}")
         if result["status"] != "ok":
             raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
 
     finally:
-        remove_tags(args.docker_context, run_tags)
+        handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            if held_tag is not None and held_tag not in run_tags:
+                print(
+                    f"keeping image tag {held_tag}: the run did not complete with exit 0, so its cluster may use it",
+                    file=sys.stderr,
+                )
+            remove_tags(args.docker_context, run_tags)
+        finally:
+            signal.signal(signal.SIGTERM, handler)
 
 
 if __name__ == "__main__":

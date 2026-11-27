@@ -506,6 +506,12 @@ class FakeLaunch:
         self.rmi_raises = rmi_raises
         self.token_sizes = []
         self.returncode = returncode
+        self.communicate = None
+        self.wait = lambda timeout: 0
+        self.stop_raises = None
+        self.lock_raises = None
+        self.fail = None
+        self.on_rmi = None
         self.out = tmp_path / "result.json"
         monkeypatch.setattr(launch.subprocess, "run", self.run)
         monkeypatch.setattr(launch.subprocess, "Popen", self.popen)
@@ -525,7 +531,15 @@ class FakeLaunch:
 
     def run(self, command, **options):
         self.commands.append(command)
+        if self.fail and self.fail in command:
+            return self.finish(command, 1, "", options)
+        if "stop" in command:
+            if self.stop_raises:
+                raise self.stop_raises
+            return self.finish(command, 0, "", options)
         if command[:3] == ["kubectl", "--context", "orbstack"]:
+            if self.lock_raises:
+                raise self.lock_raises
             return self.finish(command, 0, "", options)
         if command[0] == "kubectl":
             return self.finish(command, 0, json.dumps(view()), options)
@@ -538,6 +552,8 @@ class FakeLaunch:
         if "inspect" in command:
             return self.finish(command, 0, json.dumps([WEBHOOK]), options)
         if "rmi" in command:
+            if self.on_rmi:
+                self.on_rmi()
             if self.rmi_raises:
                 raise self.rmi_raises
             return self.finish(command, 1 if self.rmi_fails else 0, "", options)
@@ -549,7 +565,8 @@ class FakeLaunch:
         result = {"run_id": "r1", "status": "ok", "failures": []}
         process = type("Process", (), {})()
         process.returncode = self.returncode
-        process.communicate = lambda data, timeout: (json.dumps(result).encode(), b"")
+        process.communicate = self.communicate or (lambda data, timeout: (json.dumps(result).encode(), b""))
+        process.wait = self.wait
         return process
 
     def where(self, word):
@@ -630,26 +647,99 @@ def test_a_run_tag_id_is_eight_random_bytes(monkeypatch, tmp_path):
     assert fake.token_sizes == [8]
 
 
+def sigterm_self(data, timeout):
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def stderr_keeps_webhook_tag(capsys):
+    return "keeping image tag agent-bailiff-webhook:r1" in capsys.readouterr().err
+
+
 def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_handler(monkeypatch, tmp_path):
     fake = FakeLaunch(monkeypatch, tmp_path, "run")
-    original = fake.popen
+    fake.communicate = sigterm_self
+    sentinel = lambda signum, frame: None  # noqa: E731
+    original = signal.signal(signal.SIGTERM, sentinel)
+    try:
+        with pytest.raises(SystemExit) as stop:
+            launch.main()
+        assert signal.getsignal(signal.SIGTERM) == sentinel
+    finally:
+        signal.signal(signal.SIGTERM, original)
+    assert stop.value.code == 143
+    assert len(fake.where("rmi")) == 1
 
-    def popen(command, **options):
-        process = original(command, **options)
 
-        def communicate(data, timeout):
-            os.kill(os.getpid(), signal.SIGTERM)
+def raise_timeout(data, timeout):
+    raise subprocess.TimeoutExpired("docker", timeout)
 
-        process.communicate = communicate
-        return process
 
-    monkeypatch.setattr(launch.subprocess, "Popen", popen)
-    before = signal.getsignal(signal.SIGTERM)
+def test_sigterm_during_a_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    fake.communicate = sigterm_self
     with pytest.raises(SystemExit) as stop:
         launch.main()
     assert stop.value.code == 143
+    assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-live-run:r1"]]
+    assert stderr_keeps_webhook_tag(capsys)
+
+
+def test_a_timed_out_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    fake.communicate = raise_timeout
+    with pytest.raises(SystemExit, match="was stopped"):
+        launch.main()
+    assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-live-run:r1"]]
+    assert stderr_keeps_webhook_tag(capsys)
+
+
+def test_a_failing_docker_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    fake.communicate = raise_timeout
+    fake.stop_raises = subprocess.TimeoutExpired("docker", 330)
+    with pytest.raises(subprocess.TimeoutExpired):
+        launch.main()
     assert len(fake.where("rmi")) == 1
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert stderr_keeps_webhook_tag(capsys)
+
+
+def test_a_failing_wait_after_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    fake.communicate = raise_timeout
+
+    def wait(timeout):
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+    fake.wait = wait
+    with pytest.raises(subprocess.TimeoutExpired):
+        launch.main()
+    assert len(fake.where("rmi")) == 1
+    assert stderr_keeps_webhook_tag(capsys)
+
+
+def test_a_failing_lock_report_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes", returncode=3)
+    fake.lock_raises = subprocess.CalledProcessError(1, "kubectl")
+    with pytest.raises(subprocess.CalledProcessError):
+        launch.main()
+    assert len(fake.where("rmi")) == 1
+    assert stderr_keeps_webhook_tag(capsys)
+
+
+def test_a_second_sigterm_during_cleanup_does_not_abort_the_removals(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    fake.on_rmi = lambda: os.kill(os.getpid(), signal.SIGTERM)
+    launch.main()
+    assert len(fake.where("rmi")) == 2
+
+
+@pytest.mark.parametrize(("script", "word"), [("run", "build"), ("kubernetes", "inspect")])
+def test_a_docker_command_that_exits_non_zero_stops_the_launch(monkeypatch, tmp_path, script, word):
+    fake = FakeLaunch(monkeypatch, tmp_path, script)
+    fake.fail = word
+    with pytest.raises(subprocess.CalledProcessError):
+        launch.main()
+    assert fake.popen_calls == []
 
 
 @pytest.mark.parametrize(
