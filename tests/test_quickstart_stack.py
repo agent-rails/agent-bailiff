@@ -282,6 +282,26 @@ for attempt in range(int(sys.argv[3])):
 else:
     print(json.dumps(outcome))
 """
+HOST_SCRIPT = """
+import http.client, json, ssl, sys
+context = ssl.create_default_context(cafile="/v/certs-public/current/ca.pem")
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}}})
+answers = {}
+for host in sys.argv[1:]:
+    headers = {"host": host, "content-type": "application/json", "accept": "application/json, text/event-stream"}
+    connection = http.client.HTTPSConnection("gitea-mcp-tls", 8443, timeout=10, context=context)
+    connection.request("POST", "/mcp", body, headers)
+    response = connection.getresponse()
+    text = response.read().decode()
+    data = [line[5:] for line in text.splitlines() if line.startswith("data:")] or [text]
+    try:
+        answer = json.loads(data[0])["result"]["serverInfo"]
+    except (ValueError, KeyError, TypeError):
+        answer = text
+    answers[host] = [response.status, answer]
+json.dump(answers, sys.stdout)
+"""
 KEY_SCRIPT = """
 import json, sys
 read = {}
@@ -517,6 +537,14 @@ def test_gitea_mcp_answers_only_through_its_tls_sidecar(stack):
     assert reach(stack, "upstream", "gitea-mcp", 8080) == "gaierror"
     for port in (8080, 15000, 15020, 15021):
         assert reach(stack, "upstream", "gitea-mcp-tls", port) == "ConnectionRefusedError", port
+
+
+def test_any_host_header_through_the_sidecar_reaches_only_gitea_mcp(stack):
+    hosts = ("gitea-mcp-tls:8443", "evil.example", "stub-upstream:8443", "gitea:3000", "127.0.0.1:15000")
+    answers = stack.probe(HOST_SCRIPT, user="65534:65534", arguments=hosts, network=f"{stack.project}_upstream")
+    status, server = answers[hosts[0]]
+    assert status == 200 and "gitea" in server["name"].lower(), answers
+    assert all(answer == [status, server] for answer in answers.values()), answers
 
 
 @pytest.mark.parametrize("owner", [None, *certs_module.SERVICES])
