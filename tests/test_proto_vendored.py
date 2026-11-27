@@ -298,20 +298,13 @@ def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():
 def test_the_image_scan_downloads_the_database_once_per_day():
     text = IMAGE_SCAN.read_text()
     assert "key=trivy-db-${TRIVY_VERSION}-$(date -u +%F)" in text
-    for only in ("--download-db-only", "--download-java-db-only"):
-        assert (
-            f'          "$RUNNER_TEMP/trivy" image {only} --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress\n'
-            in text
-        )
-    cached = (
-        "          path: |\n"
-        "            ${{ runner.temp }}/trivy-cache/db\n"
-        "            ${{ runner.temp }}/trivy-cache/java-db\n"
-    )
+    assert "--download-db-only --cache-dir" in text
+    assert "--download-java-db-only" not in text
+    assert "trivy-cache/java-db" not in text
+    cached = "          path: ${{ runner.temp }}/trivy-cache/db\n"
     assert text.count(cached) == 2
     assert f"{cached}          key: ${{{{ steps.key.outputs.key }}}}\n" in text
     assert f"{cached}          key: ${{{{ needs.db.outputs.key }}}}\n          fail-on-cache-miss: true\n" in text
-    assert '          jq . "$RUNNER_TEMP/trivy-cache/java-db/metadata.json"\n' in text
     assert "--skip-db-update --skip-java-db-update\n" in text
 
 
