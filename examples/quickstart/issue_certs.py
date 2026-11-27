@@ -4,10 +4,10 @@ directory (one volume each), readable only by that service's group; the CA and t
 A complete, valid set is kept on rerun; a partial or mixed set, or a directory left with a second generation by an
 interrupted run, is refused. --reissue writes a new generation in every
 directory, switches each one's current symlink only after every file is on disk, then deletes every other
-generation, so no earlier key stays on disk. check fails when the set is incomplete, does not chain, names other
-hosts, or expires within the margin, and can probe each served certificate over TLS, including the configured
-upstream's when it is a server in the stack, all within one deadline below the healthcheck timeout; name resolution
-runs under that deadline too, and each address is tried with the time left."""
+generation and syncs each directory, so no earlier key stays on disk. check fails when the set is incomplete, does
+not chain, names other hosts, or expires within the margin, and can probe each served certificate over TLS, including
+the configured upstream's when it is a server in the stack, all within one deadline below the healthcheck timeout;
+name resolution runs under that deadline too, and each address is tried with the time left."""
 
 from __future__ import annotations
 
@@ -256,6 +256,7 @@ def prune(directory: Path, keep: set[str]) -> None:
     for entry in os.listdir(directory):
         if entry.startswith(f".{CURRENT}."):
             os.unlink(directory / entry)
+    fsync_directory(directory)
 
 
 def issue(

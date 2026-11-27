@@ -279,6 +279,19 @@ def test_reissue_leaves_no_earlier_private_key_on_disk(certs):
         assert spki(key.public_key()) == spki(leaf(certs, service).public_key())
 
 
+def test_reissue_syncs_each_directory_after_deleting_the_earlier_generation(certs, monkeypatch):
+    assert run(certs, "issue") == 0
+    fsync_directory, synced = certs_module.fsync_directory, []
+
+    def recording(path):
+        synced.append((path, sorted(os.listdir(path))))
+        fsync_directory(path)
+
+    monkeypatch.setattr(certs_module, "fsync_directory", recording)
+    assert run(certs, "issue", "--reissue") == 0
+    assert all((certs / name, ["current", "gen-0002"]) in synced for name in NAMES)
+
+
 KILL_BEFORE_SWITCH = """
 import importlib.util, os, signal, sys
 spec = importlib.util.spec_from_file_location("issue_certs", sys.argv[1])
