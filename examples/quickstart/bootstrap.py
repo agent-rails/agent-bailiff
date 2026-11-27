@@ -12,6 +12,7 @@ import hmac
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -99,6 +100,7 @@ MAX_HANDOFF_BYTES = 4096
 READY_SECONDS = 60
 HANDOFF_SECONDS = 300
 HANDOFF_RESERVE_SECONDS = 5
+CLEANUP_SECONDS = 30
 HANDOFF_POLL_SECONDS = 0.5
 CLI_TIMEOUT_SECONDS = 60
 
@@ -205,19 +207,33 @@ class CliFailed(BootstrapError):
 
 
 class Budget:
-    def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        name: str = "hand-off",
+        stops: str = "bootstrap stops before credential-put stops waiting",
+    ) -> None:
         self.seconds = seconds
+        self.name = name
+        self.stops = stops
         self._clock = clock
         self._at = clock() + seconds
 
     def remaining(self) -> float:
         return self._at - self._clock()
 
-    def cap(self, seconds: float, what: str) -> float:
+    def check(self, what: str) -> float:
         remaining = self.remaining()
         if remaining <= 0:
             raise BootstrapError(self._spent(0, f"none for {what}"))
-        return min(seconds, remaining)
+        return remaining
+
+    def cap(self, seconds: float, what: str) -> float:
+        if not (math.isfinite(seconds) and seconds > 0):
+            raise ValueError(f"a budget caps a positive finite number of seconds, not {seconds!r}")
+        return min(seconds, self.check(what))
 
     def require(self, seconds: float, what: str) -> float:
         remaining = self.remaining()
@@ -226,10 +242,7 @@ class Budget:
         return remaining
 
     def _spent(self, remaining: float, shortfall: str) -> str:
-        return (
-            f"{max(remaining, 0):g}s of the {self.seconds:g}s hand-off budget is left, {shortfall}; "
-            "bootstrap stops before credential-put stops waiting"
-        )
+        return f"{max(remaining, 0):g}s of the {self.seconds:g}s {self.name} budget is left, {shortfall}; {self.stops}"
 
 
 @dataclass(frozen=True)
@@ -740,6 +753,11 @@ class Gitea:
         unbudgeted.budget = None
         return unbudgeted
 
+    def for_cleanup(self) -> Gitea:
+        cleanup = copy.copy(self)
+        cleanup.budget = Budget(CLEANUP_SECONDS, name="cleanup", stops="the cleanup stops")
+        return cleanup
+
     def request(self, method: str, path: str, authorization: str | None, body: Any = None) -> tuple[int, Any]:
         headers = {"accept": "application/json"}
         if authorization is not None:
@@ -924,8 +942,8 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
             or not isinstance(created.get("id"), int)
         ):
             raise BootstrapError(f"gitea minted token {name} with no id or sha1")
-    except BaseException:
-        delete_tokens(gitea.without_budget(), agent, lambda token: token["name"] == name)
+    except BaseException as error:
+        clean_up(gitea, error, f"token {name}", lambda cleanup: delete_tokens(cleanup, agent, named(name)))
         raise
     return Minted(f"token {created['sha1']}", created["id"], agent)
 
@@ -943,8 +961,23 @@ def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
     raise BootstrapError(f"the gitea token list of {AGENT} runs past {MAX_TOKEN_PAGES} pages")
 
 
+def named(name: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda token: token["name"] == name
+
+
+def clean_up(gitea: Gitea, error: BaseException, token: str, remove: Callable[[Gitea], None]) -> None:
+    try:
+        remove(gitea.for_cleanup())
+    except Exception as failure:
+        error.add_note(f"{token} may still be live in gitea: {failure}")
+
+
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:
     delete_token(gitea, minted.owner, minted.token_id)
+
+
+def revoke_after(gitea: Gitea, error: BaseException, minted: Minted) -> None:
+    clean_up(gitea, error, f"token {minted.token_id}", lambda cleanup: revoke_credential(cleanup, minted))
 
 
 def retire_credentials(gitea: Gitea, owner: str, keeps: Callable[[dict[str, Any]], bool]) -> None:
@@ -1012,8 +1045,8 @@ def checked_credential(
         if not credential_works(gitea, minted.credential):
             raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
         return minted.credential, check_credential(upstream, minted.credential, budget), minted
-    except BaseException:
-        revoke_credential(gitea.without_budget(), minted)
+    except BaseException as error:
+        revoke_after(gitea, error, minted)
         raise
 
 
@@ -1207,10 +1240,11 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -
     try:
         print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
         print(f"credential check: passed with {check['private_repositories']} private repositories")
+        budget.check("the hand-off")
         hand_off("kept" if minted is None else "created", credential, check["fingerprint"])
-    except BaseException:
+    except BaseException as error:
         if minted is not None:
-            revoke_credential(gitea.without_budget(), minted)
+            revoke_after(gitea, error, minted)
         raise
     return Checked(gitea.without_budget(), admin, credential, minted, bool(created))
 
@@ -1322,6 +1356,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcome = COMMANDS[args.step]()
     except (BootstrapError, InitError, OwnedFileError, BackendError, DocketError, OSError, ValueError) as error:
         print(f"bootstrap {args.step} refused: {error}", file=sys.stderr)
+        for note in getattr(error, "__notes__", ()):
+            print(f"bootstrap {args.step}: {note}", file=sys.stderr)
         return 1
     print(f"{args.step}: {outcome}")
     return 0

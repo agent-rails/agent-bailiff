@@ -3,6 +3,7 @@ import hashlib
 import http.server
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -1289,13 +1290,17 @@ class ChargedGitea(b.Gitea):
         self.clock = clock
         self.calls = []
 
+    @property
+    def budget_name(self):
+        return None if self.budget is None else self.budget.name
+
     def wait_healthy(self, seconds):
         self.clock.now += seconds
-        self.calls.append(("health", "", self.clock.now, self.budget is not None))
+        self.calls.append(("health", "", self.clock.now, self.budget_name))
 
     def send(self, method, path, headers, data, seconds):
         self.clock.now += seconds
-        self.calls.append((method, path, self.clock.now, self.budget is not None))
+        self.calls.append((method, path, self.clock.now, self.budget_name))
         if path.startswith(f"/api/v1/repos/{b.ORG}/demo/issues?"):
             return 200, [{"title": b.INJECTION_TITLE}]
         if "/collaborators/" in path:
@@ -1314,7 +1319,7 @@ def test_bootstrap_refuses_rather_than_run_past_the_handoff_budget_when_every_ca
     monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, check_timeout_seconds=check_timeout))
     clock = SimpleNamespace(now=0.0)
     budget = b.Budget
-    monkeypatch.setattr(b, "Budget", lambda seconds: budget(seconds, clock=lambda: clock.now))
+    monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
     charged = ChargedGitea(pair.events, clock)
     monkeypatch.setattr(b, "Gitea", lambda base, budget=None: setattr(charged, "budget", budget) or charged)
     pair.cli.refused[STORED] = "broader_scopes"
@@ -1332,14 +1337,76 @@ def test_bootstrap_refuses_rather_than_run_past_the_handoff_budget_when_every_ca
     assert b.main(["gitea"]) == 1
     err = capsys.readouterr().err
     assert "of the 295s hand-off budget is left" in err
-    budgeted = [call for call in charged.calls if call[3]]
-    assert budgeted and max(at for _, _, at, _ in budgeted) <= 295
+    budgeted = [at for _, _, at, name in charged.calls if name == "hand-off"]
+    assert budgeted and max(budgeted) <= 295
+    cleanup = [at for _, _, at, name in charged.calls if name == "cleanup"]
+    assert all(at <= 295 + b.CLEANUP_SECONDS for at in cleanup) and len(cleanup) == int(minted)
+    assert all(name is not None for *_, name in charged.calls)
     assert sorted(entry.name for entry in pair.handoff.iterdir()) == ["ready", "refused", "started"]
     mints = [at for method, path, at, _ in charged.calls if method == "POST" and path.endswith("/tokens")]
     assert len(mints) == int(minted) and all(at <= 295 for at in mints)
     assert [event for event in pair.events if event[0] in ("minted", "deleted")] == (
         [("minted", 9), ("deleted", 9)] if minted else []
     )
+
+
+def test_a_lost_mint_cleanup_stops_at_its_own_deadline_and_keeps_the_mint_error(pair, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget
+    monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
+    charged = ChargedGitea(pair.events, clock)
+    charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
+    charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    with pytest.raises(b.GiteaUnavailable) as raised:
+        b.mint_credential(charged, "admin")
+    assert raised.value.args == ("the mint was lost",)
+    [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
+    cleanup = [at for _, _, at, _ in charged.calls if at > lost_at]
+    assert cleanup and max(cleanup) - lost_at <= b.CLEANUP_SECONDS
+    [note] = raised.value.__notes__
+    assert note.startswith(f"token {b.TOKEN_NAME}-") and "may still be live in gitea: " in note
+    assert f"of the {b.CLEANUP_SECONDS}s cleanup budget is left" in note
+
+
+def test_a_failed_revoke_keeps_the_refusal_and_notes_the_live_token(pair, gitea, monkeypatch):
+    pair.cli.refused[MINTED] = "token_rejected"
+    monkeypatch.setattr(b, "delete_token", lambda *_: lose(b.GiteaUnavailable("the delete was lost")))
+    with pytest.raises(b.CliFailed, match="credential-check") as raised:
+        b.checked_credential(gitea, "admin", b.load_upstream(GITEA_UPSTREAM), None, b.Budget(295))
+    assert raised.value.__notes__ == ["token 9 may still be live in gitea: the delete was lost"]
+
+
+def test_bootstrap_prints_the_notes_of_a_refusal(pair, monkeypatch, capsys):
+    def refuse():
+        error = b.BootstrapError("refused")
+        error.add_note("token 9 may still be live in gitea: lost")
+        raise error
+
+    monkeypatch.setitem(b.COMMANDS, "gitea", refuse)
+    assert b.main(["gitea"]) == 1
+    assert capsys.readouterr().err.splitlines() == [
+        "bootstrap gitea refused: refused",
+        "bootstrap gitea: token 9 may still be live in gitea: lost",
+    ]
+
+
+def test_bootstrap_hands_off_nothing_once_the_budget_is_spent(pair, monkeypatch, capsys):
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget
+    monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
+    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: setattr(clock, "now", 1000.0) or {})
+    pair.stored = STORED
+    (pair.handoff / "stored").write_text(STORED)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert "none for the hand-off" in capsys.readouterr().err
+    assert sorted(entry.name for entry in pair.handoff.iterdir()) == ["ready", "refused", "started"]
+
+
+@pytest.mark.parametrize("seconds", [0, -1, math.nan, math.inf])
+def test_a_budget_refuses_to_cap_a_wait_that_is_not_a_positive_finite_number(seconds):
+    with pytest.raises(ValueError, match="positive finite number of seconds"):
+        b.Budget(295).cap(seconds, "a wait")
 
 
 def test_bootstrap_alone_fails_at_the_deadline_naming_credential_put(pair, monkeypatch, capsys):
