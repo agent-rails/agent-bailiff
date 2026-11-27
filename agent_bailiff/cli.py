@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import dataclasses
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -108,6 +109,7 @@ EXIT_FORGED_GRANT = 4
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
 GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
+FINGERPRINT_DIGITS = frozenset("0123456789abcdef")
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
 STARTUP_ERRORS = (
@@ -343,6 +345,11 @@ def _parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="store a credential whose provider privilege may exceed the binding; "
                 "the exception is recorded with it and docketed at every release",
+            )
+            put.add_argument(
+                "--expect-fingerprint",
+                help="refuse unless the credential's sha256, as credential-check prints it, matches; "
+                "this catches a pasted wrong token and proves nothing about the check",
             )
             put.set_defaults(handler=_put_credential)
             check = component.add_parser(
@@ -1053,6 +1060,10 @@ def _task_issue(args: argparse.Namespace) -> int:
 def _put_credential(args: argparse.Namespace) -> int:
     try:
         secret = _read_secret()
+        if args.expect_fingerprint is not None and not hmac.compare_digest(
+            _credential_fingerprint(secret), _expected_fingerprint(args.expect_fingerprint)
+        ):
+            return _refused("put-credential", "the credential on stdin does not match --expect-fingerprint")
         run.put_credential(
             load_custodian(args.config),
             args.tenant,
@@ -1110,6 +1121,16 @@ def _control(args: argparse.Namespace) -> int:
         session.close()
     _print_outcome(outcome)
     return 0
+
+
+def _credential_fingerprint(secret: bytes) -> str:
+    return hashlib.sha256(secret).hexdigest()
+
+
+def _expected_fingerprint(value: str) -> str:
+    if len(value) != 64 or not set(value) <= FINGERPRINT_DIGITS:
+        raise ValueError("--expect-fingerprint must be 64 lowercase hex digits")
+    return value
 
 
 def _read_secret() -> bytes:

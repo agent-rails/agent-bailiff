@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import logging
@@ -845,6 +846,30 @@ def test_put_credential_records_an_accepted_broader_exception(deployment, capsys
     assert capsys.readouterr().out == "stored\n"
     assert "accepted broader exception" in caplog.text and SECRET.decode() not in caplog.text
     assert stored(deployment) == StoredCredential(SECRET, frozenset({"broader"}))
+
+
+def test_put_credential_stores_when_the_fingerprint_matches(deployment, capsys):
+    fingerprint = hashlib.sha256(SECRET).hexdigest()
+    assert put_credential(deployment, SECRET + b"\n", "--expect-fingerprint", fingerprint) == 0
+    assert capsys.readouterr().out == "stored\n"
+    assert stored(deployment) == StoredCredential(SECRET, frozenset())
+
+
+@pytest.mark.parametrize(
+    ("fingerprint", "message"),
+    [
+        (hashlib.sha256(b"Bearer another-secret-value").hexdigest(), "does not match --expect-fingerprint"),
+        (hashlib.sha256(SECRET + b"\n").hexdigest(), "does not match --expect-fingerprint"),
+        (hashlib.sha256(SECRET).hexdigest().upper(), "64 lowercase hex digits"),
+        (hashlib.sha256(SECRET).hexdigest()[:-1], "64 lowercase hex digits"),
+    ],
+)
+def test_put_credential_refuses_a_fingerprint_mismatch_and_stores_nothing(deployment, capsys, fingerprint, message):
+    assert put_credential(deployment, SECRET + b"\n", "--expect-fingerprint", fingerprint) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == "" and message in captured.err and SECRET.decode() not in captured.err
+    with pytest.raises(CredentialUnavailable):
+        stored(deployment)
 
 
 def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployment, capsys):
