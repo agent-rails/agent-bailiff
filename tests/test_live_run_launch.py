@@ -1,4 +1,6 @@
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +13,6 @@ import launch  # noqa: E402
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
 IMAGE_ID = "sha256:" + "c" * 64
-OTHER_ID = "sha256:" + "d" * 64
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
 CERT_USER = {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}
 
@@ -471,16 +472,13 @@ def test_the_result_file_is_private_and_never_overwritten(tmp_path):
         launch.write_result(path, {"run_id": "r2"})
 
 
-def fake_docker(monkeypatch, tags, built, after_build=None):
+def fake_docker(monkeypatch, built):
     calls = []
 
     def run(command, **options):
         calls.append(command)
         if "build" in command:
             Path(command[command.index("--iidfile") + 1]).write_text(built)
-            tags[command[command.index("-t") + 1]] = built
-            if after_build:
-                after_build()
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(launch.subprocess, "run", run)
@@ -489,7 +487,7 @@ def fake_docker(monkeypatch, tags, built, after_build=None):
 
 @pytest.mark.parametrize(("platform", "expected"), [(None, []), ("linux/amd64", ["--platform", "linux/amd64"])])
 def test_an_image_is_built_for_the_platform_asked_or_natively(monkeypatch, platform, expected):
-    calls = fake_docker(monkeypatch, {}, IMAGE_ID)
+    calls = fake_docker(monkeypatch, IMAGE_ID)
     assert launch.build_image("orbstack", "Dockerfile", "t:1", platform) == IMAGE_ID
     [command] = calls
     iidfile = command[command.index("--iidfile") + 1]
@@ -501,31 +499,48 @@ WEBHOOK_ID = "sha256:" + "e" * 64
 
 
 class FakeLaunch:
-    def __init__(self, monkeypatch, tmp_path, script, rmi_fails=False, returncode=0):
+    def __init__(self, monkeypatch, tmp_path, script, rmi_fails=False, rmi_raises=None, returncode=0):
         self.commands = []
         self.popen_calls = []
         self.rmi_fails = rmi_fails
+        self.rmi_raises = rmi_raises
+        self.token_sizes = []
         self.returncode = returncode
         self.out = tmp_path / "result.json"
         monkeypatch.setattr(launch.subprocess, "run", self.run)
         monkeypatch.setattr(launch.subprocess, "Popen", self.popen)
-        monkeypatch.setattr(launch.secrets, "token_hex", lambda size: "r1")
+        monkeypatch.setattr(launch.secrets, "token_hex", self.token_hex)
         monkeypatch.setenv(launch.TOKEN_VARIABLE, "token")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.setattr(sys, "argv", ["launch.py", "--script", script, "--out", str(self.out)])
 
+    def token_hex(self, size):
+        self.token_sizes.append(size)
+        return "r1"
+
+    def finish(self, command, returncode, stdout="", options=None):
+        if (options or {}).get("check") and returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
+
     def run(self, command, **options):
         self.commands.append(command)
+        if command[:3] == ["kubectl", "--context", "orbstack"]:
+            return self.finish(command, 0, "", options)
         if command[0] == "kubectl":
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(view()), stderr="")
+            return self.finish(command, 0, json.dumps(view()), options)
+        if "ps" in command:
+            return self.finish(command, 0, "", options)
         if "build" in command:
             built = WEBHOOK_ID if "deploy/kubernetes/Dockerfile.webhook" in command else IMAGE_ID
             Path(command[command.index("--iidfile") + 1]).write_text(built + "\n")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return self.finish(command, 0, "", options)
         if "inspect" in command:
-            return subprocess.CompletedProcess(command, 0, stdout=json.dumps([WEBHOOK]), stderr="")
+            return self.finish(command, 0, json.dumps([WEBHOOK]), options)
         if "rmi" in command:
-            return subprocess.CompletedProcess(command, 1 if self.rmi_fails else 0, stdout="", stderr="")
+            if self.rmi_raises:
+                raise self.rmi_raises
+            return self.finish(command, 1 if self.rmi_fails else 0, "", options)
         raise AssertionError(command)
 
     def popen(self, command, **options):
@@ -576,6 +591,68 @@ def test_the_run_tags_are_removed_when_the_run_fails(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
+    "failure", [subprocess.TimeoutExpired("docker", 60), FileNotFoundError("docker")], ids=["timeout", "missing"]
+)
+def test_a_raising_tag_removal_changes_neither_the_exit_nor_the_other_removals(monkeypatch, tmp_path, capsys, failure):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run", rmi_raises=failure, returncode=3)
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    assert stop.value.code == 3
+    assert "agent-bailiff-live-run:r1" in capsys.readouterr().err
+    assert len(fake.where("rmi")) == 1
+
+
+def test_every_tag_is_attempted_when_a_removal_raises(monkeypatch, capsys):
+    attempts = []
+
+    def run(command, **options):
+        attempts.append(command[-1])
+        raise subprocess.TimeoutExpired(command, 60)
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    launch.remove_tags("orbstack", ["a:1", "b:1"])
+    assert attempts == ["a:1", "b:1"]
+    assert "a:1" in capsys.readouterr().err
+
+
+def test_a_failed_kubernetes_run_keeps_the_webhook_tag_and_says_why(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes", returncode=3)
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    assert stop.value.code == 3
+    assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-live-run:r1"]]
+    assert "agent-bailiff-webhook:r1" in capsys.readouterr().err
+
+
+def test_a_run_tag_id_is_eight_random_bytes(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    launch.main()
+    assert fake.token_sizes == [8]
+
+
+def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_handler(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    original = fake.popen
+
+    def popen(command, **options):
+        process = original(command, **options)
+
+        def communicate(data, timeout):
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        process.communicate = communicate
+        return process
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    assert stop.value.code == 143
+    assert len(fake.where("rmi")) == 1
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+@pytest.mark.parametrize(
     "failure",
     [subprocess.CalledProcessError(1, "docker"), subprocess.TimeoutExpired("docker", 1800)],
     ids=["fail", "timeout"],
@@ -595,7 +672,23 @@ def test_a_failed_build_starts_no_container_and_hands_over_no_credentials(monkey
         launch.main()
     assert fake.popen_calls == []
     assert not fake.out.exists()
-    assert len(fake.where("rmi")) == 1
+    assert fake.where("rmi") == []
+
+
+def test_only_a_tag_whose_build_returned_is_removed(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
+    original = fake.run
+
+    def run(command, **options):
+        if "build" in command and "examples/live-run/Dockerfile" in command:
+            fake.commands.append(command)
+            raise subprocess.CalledProcessError(1, command)
+        return original(command, **options)
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        launch.main()
+    assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-webhook:r1"]]
 
 
 def test_the_build_scratch_dir_is_removed_after_success_and_after_failure(monkeypatch):
@@ -626,7 +719,7 @@ def test_a_failed_tag_removal_is_reported_without_masking_the_run(monkeypatch, t
 
 @pytest.mark.parametrize("written", ["", "\n", "latest", "sha256:abc"])
 def test_a_build_without_an_image_id_is_refused(monkeypatch, written):
-    fake_docker(monkeypatch, {}, written)
+    fake_docker(monkeypatch, written)
     with pytest.raises(RuntimeError, match="image ID"):
         launch.build_image("orbstack", "Dockerfile", "t:1")
 

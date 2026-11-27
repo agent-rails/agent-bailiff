@@ -10,6 +10,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -99,9 +100,17 @@ def resolve_digest(docker_context: str, image_id: str, repository: str) -> str:
 
 def remove_tags(docker_context: str, tags: list[str]) -> None:
     for tag in tags:
-        removal = subprocess.run(
-            ["docker", "--context", docker_context, "rmi", tag], capture_output=True, text=True, check=False, timeout=60
-        )
+        try:
+            removal = subprocess.run(
+                ["docker", "--context", docker_context, "rmi", tag],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+        except (subprocess.TimeoutExpired, OSError) as error:
+            print(f"could not remove image tag {tag}: {error}", file=sys.stderr)
+            continue
         if removal.returncode != 0:
             print(f"could not remove image tag {tag}: {removal.stderr.strip()}", file=sys.stderr)
 
@@ -292,7 +301,25 @@ def write_result(path: Path, result: dict[str, Any]) -> None:
         json.dump(result, file, indent=2)
 
 
+def end_on_sigterm(signum: int, frame: Any) -> None:
+    raise SystemExit(128 + signum)
+
+
 def main() -> None:
+    previous = signal.signal(signal.SIGTERM, end_on_sigterm)
+    try:
+        launch()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def keep_tag(run_tags: list[str], tag: str, reason: str) -> None:
+    if tag in run_tags:
+        run_tags.remove(tag)
+        print(f"keeping image tag {tag}: {reason}", file=sys.stderr)
+
+
+def launch() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--script", choices=("run", "kubernetes"), required=True)
     parser.add_argument("--context", default="orbstack", help="disposable cluster context for the kubernetes run")
@@ -316,23 +343,22 @@ def main() -> None:
         if kubernetes
         else None
     )
-    run_id = secrets.token_hex(4)
+    run_id = secrets.token_hex(8)
     run_tags: list[str] = []
     try:
         webhook = None
         if kubernetes and args.catalog != READ_CATALOG:
-            run_tags.append(f"{WEBHOOK_REPO}:{run_id}")
-            webhook = resolve_digest(
-                args.docker_context,
-                build_image(
-                    args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG, run_tag=run_tags[-1]
-                ),
-                WEBHOOK_REPO,
+            webhook_tag = f"{WEBHOOK_REPO}:{run_id}"
+            webhook_id = build_image(
+                args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG, run_tag=webhook_tag
             )
-        run_tags.append(f"{IMAGE_REPO}:{run_id}")
+            run_tags.append(webhook_tag)
+            webhook = resolve_digest(args.docker_context, webhook_id, WEBHOOK_REPO)
+        image_tag = f"{IMAGE_REPO}:{run_id}"
         image = build_image(
-            args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64", run_tag=run_tags[-1]
+            args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64", run_tag=image_tag
         )
+        run_tags.append(image_tag)
         spec = RunSpec(
             script=args.script,
             context=args.context if kubernetes else None,
@@ -355,10 +381,15 @@ def main() -> None:
                 check=False,
             )
             process.wait(30)
+            if kubernetes:
+                keep_tag(
+                    run_tags, f"{WEBHOOK_REPO}:{run_id}", "the run was stopped and its cluster may be left deployed"
+                )
             raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
         if process.returncode != 0:
             if kubernetes:
                 print(report_lock(args.context, args.docker_context), file=sys.stderr)
+                keep_tag(run_tags, f"{WEBHOOK_REPO}:{run_id}", "the run failed and its cluster may be left deployed")
             raise SystemExit(process.returncode)
         result = read_result(stdout.decode(), spec.run_id)
         write_result(spec.out, result)
