@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -27,6 +29,7 @@ from agent_warrant.task_root import issue_task_root
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 
+from agent_bailiff.adapters.gitea.token_check import parse_required
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
@@ -85,6 +88,12 @@ AGENT_PUBLIC_KEY = STATE / "agent-public" / "agent.pub"
 READER_ISSUERS = DIRS["reader"] / "issuers.json"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
+HANDOFF = RUN / "credential-handoff"
+HANDOFF_FILES = ("stored", "ready", "token", "fingerprint", "checked", "refused")
+MAX_HANDOFF_BYTES = 4096
+READY_SECONDS = 60
+HANDOFF_SECONDS = 300
+HANDOFF_POLL_SECONDS = 0.5
 
 TENANT = "quickstart"
 PRINCIPAL = "user:operator"
@@ -117,12 +126,15 @@ STACK_HOSTS = frozenset(
     {
         "localhost", "issuer-init", "decide-init", "custodian-init", "control-init", "rule-init", "reader-init",
         "docket-init",
-        "gateway-init", "bootstrap", "agent-key", "task-issuer", "gitea-task", "gitea-secret", "gitea-admin",
+        "gateway-init", "bootstrap", "credential-put", "agent-key", "task-issuer", "gitea-task", "gitea-secret",
+        "gitea-admin",
         "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
         "jaeger", "exporter", "rule",
     }
 )  # fmt: skip
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
+PROVIDER_FIELDS = frozenset({"provider", "provider_api_url", "required_permissions"})
+PROVIDERS = frozenset({"gitea"})
 TASK_SCOPE = {
     "permissions": [
         {
@@ -161,6 +173,13 @@ class BootstrapError(Exception):
 
 
 @dataclass(frozen=True)
+class ProviderCheck:
+    provider: str
+    api_url: str
+    required: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Upstream:
     service: str
     url: str
@@ -170,6 +189,7 @@ class Upstream:
     binding_resource: str
     routes: tuple[dict[str, Any], ...]
     ca_pem: bytes | None = None
+    provider_check: ProviderCheck | None = None
 
     @property
     def costs(self) -> dict[str, Any]:
@@ -178,17 +198,21 @@ class Upstream:
 
 def load_upstream(path: Path) -> Upstream:
     document = read_strict(path, MAX_UPSTREAM_BYTES)
+    optional = set(document) - UPSTREAM_FIELDS if isinstance(document, dict) else set()
     if (
         not isinstance(document, dict)
-        or not UPSTREAM_FIELDS <= set(document) <= UPSTREAM_FIELDS | UPSTREAM_OPTIONAL_FIELDS
+        or not UPSTREAM_FIELDS <= set(document)
+        or not optional <= UPSTREAM_OPTIONAL_FIELDS | PROVIDER_FIELDS
+        or (optional & PROVIDER_FIELDS and not PROVIDER_FIELDS <= optional)
     ):
         raise BootstrapError(
-            f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}, and optionally ca_file"
+            f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}, optionally ca_file, "
+            f"and optionally all of {', '.join(sorted(PROVIDER_FIELDS))}"
         )
     version = document["version"]
     if isinstance(version, bool) or version != UPSTREAM_VERSION:
         raise BootstrapError(f"{path}: version must be {UPSTREAM_VERSION}")
-    text = {name: document[name] for name in set(document) - {"version"}}
+    text = {name: document[name] for name in set(document) - {"version", "required_permissions"}}
     for name, value in text.items():
         if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
             raise BootstrapError(f"{path}: {name} must be a non-empty ASCII printable string without whitespace")
@@ -202,10 +226,24 @@ def load_upstream(path: Path) -> Upstream:
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
     ca_pem = load_upstream_ca(path, text["ca_file"], text["url"]) if "ca_file" in text else None
+    provider_check = load_provider_check(path, text, document["required_permissions"]) if "provider" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
-        text["binding_resource"], routes, ca_pem,
+        text["binding_resource"], routes, ca_pem, provider_check,
     )  # fmt: skip
+
+
+def load_provider_check(path: Path, text: dict[str, str], required: Any) -> ProviderCheck:
+    if text["provider"] not in PROVIDERS:
+        raise BootstrapError(f"{path}: provider must be one of {', '.join(sorted(PROVIDERS))}")
+    check_upstream_url(path, text["provider_api_url"], "provider_api_url")
+    if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+        raise BootstrapError(f"{path}: required_permissions must be a list of scope names")
+    try:
+        permissions = parse_required(required)
+    except ValueError as error:
+        raise BootstrapError(f"{path}: {error}") from None
+    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)))
 
 
 def beside(path: Path, field: str, name: str) -> Path:
@@ -248,31 +286,31 @@ def read_bounded(path: Path, limit: int) -> bytes:
     return raw
 
 
-def check_upstream_url(path: Path, url: str) -> None:
+def check_upstream_url(path: Path, url: str, field: str = "url") -> None:
     try:
         parts = urlsplit(url)
         port = parts.port
     except ValueError as error:
-        raise BootstrapError(f"{path}: url {error}") from None
+        raise BootstrapError(f"{path}: {field} {error}") from None
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
-        raise BootstrapError(f"{path}: url must carry no credentials, query or fragment")
-    check_upstream_host(path, (parts.hostname or "").rstrip("."))
+        raise BootstrapError(f"{path}: {field} must carry no credentials, query or fragment")
+    check_upstream_host(path, (parts.hostname or "").rstrip("."), field)
     if parts.scheme == "https" and parts.hostname:
         return
     if parts.scheme == "http" and allows_plain_http(parts.hostname or "") and port:
         return
-    raise BootstrapError(f"{path}: url must be http://<compose-service>:<port> or https://")
+    raise BootstrapError(f"{path}: {field} must be http://<compose-service>:<port> or https://")
 
 
-def check_upstream_host(path: Path, host: str) -> None:
+def check_upstream_host(path: Path, host: str, field: str) -> None:
     if host in STACK_HOSTS:
-        raise BootstrapError(f"{path}: url must not name the stack's own {host}")
+        raise BootstrapError(f"{path}: {field} must not name the stack's own {host}")
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
         return
     if address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast:
-        raise BootstrapError(f"{path}: url must not name a loopback, link-local, unspecified or multicast address")
+        raise BootstrapError(f"{path}: {field} must not name a loopback, link-local, unspecified or multicast address")
 
 
 def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]:
@@ -650,7 +688,7 @@ def credential_works(gitea: Gitea, credential: str) -> bool:
     return status == 200 and isinstance(document, dict) and document.get("permissions", {}).get("pull") is True
 
 
-def issue_credential(gitea: Gitea, admin: str, upstream: Upstream) -> None:
+def mint_credential(gitea: Gitea, admin: str) -> str:
     password = secrets.token_urlsafe(32)
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
@@ -660,10 +698,129 @@ def issue_credential(gitea: Gitea, admin: str, upstream: Upstream) -> None:
             gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token['id']}", agent)
     body = {"name": TOKEN_NAME, "scopes": TOKEN_SCOPES}
     created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
+    return f"token {created['sha1']}"
+
+
+def provider_check(upstream: Upstream) -> ProviderCheck:
+    if upstream.provider_check is None:
+        raise BootstrapError(f"{UPSTREAM_FILE} names no provider to check the token against")
+    return upstream.provider_check
+
+
+def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
+    check = provider_check(upstream)
+    required = [argument for name in check.required for argument in ("--required", name)]
+    output = cli(
+        "credential-check", "--provider", check.provider, "--api-url", check.api_url,
+        "--binding-resource", upstream.binding_resource, *required, stdin=credential,
+    )  # fmt: skip
+    document = json.loads(output)
+    if not isinstance(document, dict) or not isinstance(document.get("fingerprint"), str):
+        raise BootstrapError("agent-bailiff credential-check printed no fingerprint")
+    return document
+
+
+def checked_credential(gitea: Gitea, admin: str, upstream: Upstream, stored: str | None) -> tuple[str, str, Any]:
+    if stored is not None and credential_works(gitea, stored):
+        try:
+            return "kept", stored, check_credential(upstream, stored)
+        except BootstrapError as refusal:
+            print(f"the stored credential is refused, so a new one is minted: {refusal}", file=sys.stderr)
+    credential = mint_credential(gitea, admin)
+    if not credential_works(gitea, credential):
+        raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
+    return "created", credential, check_credential(upstream, credential)
+
+
+def fingerprint_of(credential: str) -> str:
+    return hashlib.sha256(credential.encode("ascii")).hexdigest()
+
+
+def write_handoff(name: str, text: str) -> None:
+    fd = os.open(HANDOFF / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+    with os.fdopen(fd, "w") as handoff:
+        handoff.write(text)
+
+
+def read_handoff(name: str) -> str:
+    return read_bounded(HANDOFF / name, MAX_HANDOFF_BYTES).decode("ascii")
+
+
+def take_handoff(name: str) -> str | None:
+    if not os.path.lexists(HANDOFF / name):
+        return None
+    text = read_handoff(name)
+    (HANDOFF / name).unlink()
+    return text
+
+
+def clear_handoff() -> None:
+    for name in HANDOFF_FILES:
+        (HANDOFF / name).unlink(missing_ok=True)
+
+
+def wait_for_handoff(
+    names: Sequence[str],
+    seconds: float,
+    missing: str,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> str:
+    deadline = clock() + seconds
+    while True:
+        for name in names:
+            if os.path.lexists(HANDOFF / name):
+                return name
+        if clock() >= deadline:
+            raise BootstrapError(missing)
+        sleep(HANDOFF_POLL_SECONDS)
+
+
+def hand_off(outcome: str, credential: str, fingerprint: str) -> None:
+    if outcome == "created":
+        write_handoff("token", credential)
+    write_handoff("fingerprint", fingerprint)
+    write_handoff("checked", outcome)
+
+
+def export_credential(stored: str | None) -> None:
+    if stored is not None:
+        write_handoff("stored", stored)
+    write_handoff("ready", "")
+
+
+def store_handed_off(upstream: Upstream, stored: str | None) -> str:
+    missing = (
+        f"bootstrap handed off no checked credential within {HANDOFF_SECONDS}s; "
+        "run credential-put and bootstrap together: docker compose --profile gitea up bootstrap"
+    )
+    if wait_for_handoff(("checked", "refused"), HANDOFF_SECONDS, missing) == "refused":
+        raise BootstrapError("bootstrap refused the credential, so nothing is stored")
+    outcome, fingerprint = read_handoff("checked"), read_handoff("fingerprint")
+    if outcome == "kept":
+        if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):
+            raise BootstrapError("bootstrap kept a credential other than the stored one, so nothing is stored")
+        return "kept"
+    if outcome != "created":
+        raise BootstrapError(f"bootstrap handed off an unknown outcome {outcome!r}")
     cli(
         "custodian", "put-credential", "--config", DIRS["custodian"] / "config.json", "--tenant", TENANT,
-        "--credential-id", upstream.credential_id, "--target", upstream.target, stdin=f"token {created['sha1']}",
+        "--credential-id", upstream.credential_id, "--target", upstream.target,
+        "--expect-fingerprint", fingerprint, stdin=read_handoff("token"),
     )  # fmt: skip
+    return "created"
+
+
+def put_credential() -> str:
+    upstream = load_upstream(UPSTREAM_FILE)
+    provider_check(upstream)
+    stored = stored_credential(upstream)
+    try:
+        export_credential(stored)
+        return store_handed_off(upstream, stored)
+    finally:
+        clear_handoff()
 
 
 def probe_outcome(label: str, status: int) -> str:
@@ -697,6 +854,21 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
 
 def bootstrap_gitea() -> str:
     upstream = load_upstream(UPSTREAM_FILE)
+    provider_check(upstream)
+    missing = (
+        f"credential-put exported no stored credential within {READY_SECONDS}s; "
+        "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
+    )
+    wait_for_handoff(("ready",), READY_SECONDS, missing)
+    stored = take_handoff("stored")
+    try:
+        return check_and_hand_off(upstream, stored)
+    except BaseException:
+        write_handoff("refused", "")
+        raise
+
+
+def check_and_hand_off(upstream: Upstream, stored: str | None) -> str:
     gitea = Gitea(GITEA)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
@@ -704,16 +876,10 @@ def bootstrap_gitea() -> str:
     created = seed(gitea, admin)
     for item in created:
         print(f"gitea: created {item}")
-    outcome = "kept"
-    credential = stored_credential(upstream)
-    if credential is None or not credential_works(gitea, credential):
-        issue_credential(gitea, admin, upstream)
-        outcome = "created"
-        credential = stored_credential(upstream)
-    if credential is None or not credential_works(gitea, credential):
-        raise BootstrapError(f"the stored credential cannot read {ORG}/demo")
+    outcome, credential, check = checked_credential(gitea, admin, upstream, stored)
     print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
-    print(f"credential: {outcome}")
+    print(f"credential check: passed with {check['private_repositories']} private repositories")
+    hand_off(outcome, credential, check["fingerprint"])
     return "created" if created or outcome == "created" else "kept"
 
 
@@ -798,6 +964,7 @@ COMMANDS: dict[str, Callable[[], str]] = {
     "gateway": init_gateway,
     "admin-secret": admin_secret,
     "gitea": bootstrap_gitea,
+    "credential": put_credential,
     "issue": issue_task,
     "issue-load": issue_load_tasks,
 }

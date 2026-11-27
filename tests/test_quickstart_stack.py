@@ -174,9 +174,41 @@ ONE_SHOTS = (
     "gateway-init",
     "gitea-secret",
     "gitea-admin",
-    "bootstrap",
     "agent-key",
 )
+CREDENTIAL_PAIR = ("credential-put", "bootstrap")
+CREDENTIAL_SCRIPT = """
+import sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap
+print(bootstrap.stored_credential(bootstrap.load_upstream(bootstrap.UPSTREAM_FILE)))
+"""
+CREDENTIAL_STATE_SCRIPT = """
+import hashlib, json, sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap as b
+upstream = b.load_upstream(b.UPSTREAM_FILE)
+settings = b.load_custodian(b.DIRS["custodian"] / "config.json")
+store = b.CredentialStore.open(settings.credentials, b.LocalBackend.load(settings.kek))
+stored = store.get(b.TENANT, upstream.credential_id, upstream.target)
+print(json.dumps({"fingerprint": hashlib.sha256(stored.secret).hexdigest(), "exceptions": sorted(stored.exceptions)}))
+"""
+ADMIN_TOKEN_CHECK_SCRIPT = """
+import sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap as b
+gitea = b.Gitea(b.GITEA)
+admin = b.basic(b.ADMIN, b.ADMIN_PASSWORD.read_text().strip())
+body = {"name": "privilege-check-probe", "scopes": ["write:admin"]}
+created = gitea.expect({201}, "POST", f"/api/v1/users/{b.ADMIN}/tokens", admin, body)
+try:
+    b.check_credential(b.load_upstream(b.UPSTREAM_FILE), f"token {created['sha1']}")
+    print("passed")
+except b.BootstrapError as refusal:
+    print(refusal)
+finally:
+    gitea.expect({204}, "DELETE", f"/api/v1/users/{b.ADMIN}/tokens/{created['id']}", admin)
+"""
 STAT_SCRIPT = """
 import json, os, stat, sys
 kinds = {stat.S_IFDIR: "directory", stat.S_IFREG: "file", stat.S_IFSOCK: "socket"}
@@ -367,9 +399,29 @@ def test_the_image_ships_without_pip(stack):
     assert pip_absent(stack, "agent", "--profile", "agent")
 
 
+def stored_header(stack):
+    return stack.compose(
+        "run", "--rm", "--no-deps", "--entrypoint", "python", "credential-put", "-c", CREDENTIAL_SCRIPT
+    )
+
+
+def stored_state(stack):
+    arguments = ["run", "--rm", "--no-deps", "--entrypoint", "python", "credential-put", "-c", CREDENTIAL_STATE_SCRIPT]
+    return json.loads(stack.compose(*arguments))
+
+
+def run_credential_pair(stack):
+    stack.compose("up", "--no-deps", "--force-recreate", *CREDENTIAL_PAIR, timeout=UP_TIMEOUT_SECONDS)
+    states = stack.compose("ps", "--all", "--format", "json", *CREDENTIAL_PAIR).splitlines()
+    codes = {state["Service"]: state["ExitCode"] for state in map(json.loads, states)}
+    logs = {service: stack.compose("logs", "--no-color", "--no-log-prefix", service) for service in CREDENTIAL_PAIR}
+    return codes, logs
+
+
 def test_bootstrap_rerun_idempotent(stack):
     before = stack.probe(SNAPSHOT_SCRIPT)
     outputs = {service: stack.compose("run", "--rm", "--no-deps", service) for service in ONE_SHOTS}
+    codes, logs = run_credential_pair(stack)
     after = stack.probe(SNAPSHOT_SCRIPT)
     assert after == before
     for service, step in [
@@ -385,8 +437,46 @@ def test_bootstrap_rerun_idempotent(stack):
         ("agent-key", "key"),
     ]:
         assert outputs[service].strip().splitlines()[-1] == f"{step}: kept", outputs[service]
-    lines = outputs["bootstrap"].strip().splitlines()
-    assert lines[-2:] == ["credential: kept", "gitea: kept"], outputs["bootstrap"]
+    assert codes == {"credential-put": 0, "bootstrap": 0}, logs
+    assert logs["credential-put"].strip().splitlines() == ["credential: kept"], logs
+    lines = logs["bootstrap"].strip().splitlines()
+    assert lines[-2:] == ["credential check: passed with 2 private repositories", "gitea: kept"], logs
     assert not any(line.startswith("gitea: created") for line in lines)
-    reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential:", "gitea:"))))
+    reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential check:", "gitea:"))))
     assert reach["what this token can reach"]["probes"][f"read issues in {b.ORG}/demo"] == "allowed"
+
+
+def test_the_stored_gitea_token_passed_the_check_with_no_exception(stack):
+    assert stored_state(stack)["exceptions"] == []
+
+
+def test_a_write_admin_token_is_refused_by_the_check(stack):
+    output = stack.compose(
+        "run", "--rm", "--no-deps", "--entrypoint", "python", "bootstrap", "-c", ADMIN_TOKEN_CHECK_SCRIPT
+    )
+    assert "refused: broader_scopes: the token holds scopes beyond the required ones: write:admin" in output, output
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"required_permissions": ["read:repository"]}, "broader_scopes"),
+        ({"binding_resource": f"gitea/repos/{b.ORG}/demo"}, "outside_binding"),
+    ],
+)
+def test_a_refused_token_is_never_stored_and_fails_the_pair(stack, tmp_path, change, reason):
+    before = stored_state(stack)
+    upstreams = tmp_path / "upstreams"
+    upstreams.mkdir()
+    for name in ("gitea.json", "gitea-routes.json"):
+        (upstreams / name).write_bytes((b.QUICKSTART_UPSTREAMS / name).read_bytes())
+    document = json.loads((upstreams / "gitea.json").read_text())
+    (upstreams / "gitea.json").write_text(json.dumps({**document, **change}))
+    codes, logs = run_credential_pair(Stack(stack.project, stack.profiles, env={"BAILIFF_UPSTREAMS": str(upstreams)}))
+    assert codes == {"credential-put": 1, "bootstrap": 1}, logs
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: " in logs["bootstrap"], logs
+    assert f"credential-check refused: {reason}: " in logs["bootstrap"], logs
+    assert logs["credential-put"].strip().splitlines() == [
+        "bootstrap credential refused: bootstrap refused the credential, so nothing is stored"
+    ], logs
+    assert stored_state(stack) == before

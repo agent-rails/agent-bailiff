@@ -6,5 +6,8 @@
   "credential_header": "Authorization",
   "target": "gitea",
   "binding_resource": "gitea/repos/quickstart/*",
-  "routes_file": "gitea-routes.json"
+  "routes_file": "gitea-routes.json",
+  "provider": "gitea",
+  "provider_api_url": "http://gitea:3000/api/v1",
+  "required_permissions": ["read:issue", "read:repository"]
 }

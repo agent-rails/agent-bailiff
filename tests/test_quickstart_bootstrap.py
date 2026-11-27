@@ -1,6 +1,8 @@
 import datetime
+import hashlib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -276,6 +278,15 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"binding_resource": "gitea/*/issues"}, "final /\\* segment"),
         ({"routes_file": "../routes.json"}, "a file beside the upstream config"),
         ({"routes_file": ".."}, "a file beside the upstream config"),
+        ({"provider": "github"}, "provider must be one of gitea"),
+        ({"provider": ""}, "provider must be a non-empty ASCII printable string"),
+        ({"provider_api_url": "http://gitea.example.com:3000/api/v1"}, "provider_api_url must be http://<compose"),
+        ({"provider_api_url": "http://custodian:3000/api/v1"}, "provider_api_url must not name the stack's own"),
+        ({"provider_api_url": "https://127.0.0.1/api/v1"}, "provider_api_url must not name a loopback"),
+        ({"required_permissions": "read:repository"}, "required_permissions must be a list of scope names"),
+        ({"required_permissions": ["read:repository", 7]}, "required_permissions must be a list of scope names"),
+        ({"required_permissions": ["read:issue"]}, "must include read:repository or write:repository"),
+        ({"required_permissions": ["admin"]}, "is not read:<category>, write:<category> or public-only"),
     ],
 )
 def test_an_invalid_upstream_fails_bootstrap(tmp_path, changes, message):
@@ -286,13 +297,20 @@ def test_an_invalid_upstream_fails_bootstrap(tmp_path, changes, message):
         b.load_upstream(path)
 
 
-def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path):
+@pytest.mark.parametrize("field", ["target", "provider", "provider_api_url", "required_permissions"])
+def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path, field):
     path = write_upstream(tmp_path)
     document = json.loads(path.read_text())
-    del document["target"]
+    del document[field]
     path.write_text(json.dumps(document))
-    with pytest.raises(b.BootstrapError, match="exactly the fields"):
+    with pytest.raises(b.BootstrapError, match="exactly the fields .*optionally all of provider"):
         b.load_upstream(path)
+
+
+def test_the_gitea_upstream_names_the_provider_check_and_the_stub_names_none():
+    check = b.load_upstream(GITEA_UPSTREAM).provider_check
+    assert check == b.ProviderCheck("gitea", "http://gitea:3000/api/v1", ("read:issue", "read:repository"))
+    assert b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json").provider_check is None
 
 
 @pytest.mark.parametrize(
@@ -466,3 +484,177 @@ def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypat
     monkeypatch.setattr(b, "load_custodian", lambda path: settings)
     upstream = SimpleNamespace(credential_id="gitea", target="https://gitea.example")
     assert b.stored_credential(upstream) == "token " + "a" * 40
+
+
+STORED = "token " + "s" * 40
+MINTED = "token " + "m" * 40
+
+
+def fingerprint(credential):
+    return hashlib.sha256(credential.encode()).hexdigest()
+
+
+class FakeGitea:
+    built = []
+
+    def __init__(self, base):
+        FakeGitea.built.append(base)
+
+    def wait_healthy(self, seconds):
+        pass
+
+    def expect(self, statuses, method, path, authorization, body=None):
+        return {}
+
+
+class FakeCli:
+    def __init__(self):
+        self.calls = []
+        self.refused = set()
+
+    def __call__(self, *arguments, stdin=None):
+        self.calls.append((arguments, stdin))
+        if arguments[0] == "credential-check":
+            if stdin in self.refused:
+                raise b.BootstrapError("agent-bailiff credential-check --provider failed: broader_scopes")
+            return json.dumps({"fingerprint": fingerprint(stdin), "login": "agent", "private_repositories": 2})
+        return "stored"
+
+    def of(self, command):
+        return [(arguments, stdin) for arguments, stdin in self.calls if arguments[0] == command]
+
+
+@pytest.fixture
+def pair(tmp_path, monkeypatch):
+    handoff = tmp_path / "handoff"
+    handoff.mkdir(mode=0o700)
+    (tmp_path / "password").write_text("admin password")
+    fake = SimpleNamespace(cli=FakeCli(), stored=None, minted=[], handoff=handoff)
+    monkeypatch.setattr(b, "HANDOFF", handoff)
+    monkeypatch.setattr(b, "HANDOFF_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(b, "READY_SECONDS", 10)
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 10)
+    monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
+    monkeypatch.setattr(b, "ADMIN_PASSWORD", tmp_path / "password")
+    monkeypatch.setattr(b, "Gitea", FakeGitea)
+    monkeypatch.setattr(b, "seed", lambda gitea, admin: [])
+    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: {})
+    monkeypatch.setattr(b, "credential_works", lambda gitea, credential: True)
+    monkeypatch.setattr(b, "stored_credential", lambda upstream: fake.stored)
+    monkeypatch.setattr(b, "mint_credential", lambda gitea, admin: fake.minted.append(MINTED) or MINTED)
+    monkeypatch.setattr(b, "cli", fake.cli)
+    FakeGitea.built = []
+    return fake
+
+
+def run_pair():
+    with ThreadPoolExecutor(1) as pool:
+        put = pool.submit(b.main, ["credential"])
+        checked = b.main(["gitea"])
+        return put.result(timeout=30), checked
+
+
+def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(pair, capsys):
+    assert run_pair() == (0, 0)
+    [(arguments, stdin)] = pair.cli.of("credential-check")
+    assert stdin == MINTED
+    assert arguments[1:] == (
+        "--provider", "gitea", "--api-url", "http://gitea:3000/api/v1", "--binding-resource",
+        "gitea/repos/quickstart/*", "--required", "read:issue", "--required", "read:repository",
+    )  # fmt: skip
+    [(arguments, stdin)] = pair.cli.of("custodian")
+    assert arguments[:2] == ("custodian", "put-credential")
+    assert arguments[-2:] == ("--expect-fingerprint", fingerprint(MINTED))
+    assert stdin == MINTED
+    lines = capsys.readouterr().out.splitlines()
+    assert "credential: created" in lines and "gitea: created" in lines
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_refused_credential_aborts_before_any_put(pair, capsys):
+    pair.cli.refused.add(MINTED)
+    assert run_pair() == (1, 1)
+    assert pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: broader_scopes" in err
+    assert "bootstrap credential refused: bootstrap refused the credential, so nothing is stored" in err
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_kept_credential_is_checked_and_not_put_again(pair, capsys):
+    pair.stored = STORED
+    assert run_pair() == (0, 0)
+    assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED]
+    assert pair.cli.of("custodian") == [] and pair.minted == []
+    lines = capsys.readouterr().out.splitlines()
+    assert "credential: kept" in lines and "gitea: kept" in lines
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_kept_credential_the_check_refuses_is_replaced_by_a_checked_one(pair, capsys):
+    pair.stored = STORED
+    pair.cli.refused.add(STORED)
+    assert run_pair() == (0, 0)
+    assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED, MINTED]
+    [(arguments, stdin)] = pair.cli.of("custodian")
+    assert (arguments[-1], stdin) == (fingerprint(MINTED), MINTED)
+    captured = capsys.readouterr()
+    assert "the stored credential is refused, so a new one is minted" in captured.err
+    assert "credential: created" in captured.out.splitlines()
+
+
+def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
+    b.export_credential(STORED)
+    b.hand_off("kept", STORED, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == []
+
+
+def test_every_handoff_file_is_owner_read_only(pair):
+    b.export_credential(STORED)
+    b.hand_off("created", MINTED, fingerprint(MINTED))
+    modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
+    assert modes == dict.fromkeys(("stored", "ready", "token", "fingerprint", "checked"), 0o400)
+
+
+def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
+    pair.stored = STORED
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    assert b.main(["credential"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap handed off no checked credential within 0s" in err
+    assert "run credential-put and bootstrap together" in err
+    assert pair.cli.calls == [] and list(pair.handoff.iterdir()) == []
+
+
+def test_bootstrap_alone_fails_at_the_deadline_naming_credential_put(pair, monkeypatch, capsys):
+    monkeypatch.setattr(b, "READY_SECONDS", 0)
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "credential-put exported no stored credential within 0s" in err
+    assert "run bootstrap together with credential-put" in err
+    assert FakeGitea.built == [] and pair.cli.calls == []
+
+
+def test_the_handoff_wait_polls_until_its_deadline_then_fails(pair):
+    ticks = iter([0.0, 0.0, 1.0, 2.0])
+    sleeps = []
+    with pytest.raises(b.BootstrapError, match="^nobody came$"):
+        b.wait_for_handoff(("checked",), 2, "nobody came", clock=lambda: next(ticks), sleep=sleeps.append)
+    assert sleeps == [b.HANDOFF_POLL_SECONDS] * 2
+
+
+def test_the_handoff_wait_returns_the_first_file_that_appears(pair):
+    def sleep(seconds):
+        (pair.handoff / "refused").write_text("")
+
+    assert b.wait_for_handoff(("checked", "refused"), 60, "unused", clock=lambda: 0.0, sleep=sleep) == "refused"
+
+
+@pytest.mark.parametrize("step", ["credential", "gitea"])
+def test_an_upstream_without_a_provider_fails_the_pair(pair, monkeypatch, capsys, step):
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert b.main([step]) == 1
+    assert "stub.json names no provider to check the token against" in capsys.readouterr().err
+    assert list(pair.handoff.iterdir()) == []
