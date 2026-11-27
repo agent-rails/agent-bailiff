@@ -192,13 +192,22 @@ def test_the_gitea_upstream_loads_with_one_unit_of_cost_per_routed_tool():
     assert upstream.costs == {"version": 1, "tools": {route["tool"]: 1 for route in routes}}
 
 
-@pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
-def test_the_gateway_config_targets_only_the_upstream_url(name):
+@pytest.mark.parametrize(
+    "name, policies",
+    [("gitea.json", {}), ("stub.json", {"policies": {"backendTLS": {"root": str(b.GATEWAY_CA)}}})],
+)
+def test_the_gateway_config_targets_only_the_upstream_url(name, policies):
     upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / name)
     template = json.loads(b.GATEWAY_TEMPLATE.read_text())
     document = b.gateway_document(upstream)
-    assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}}]
+    assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}, **policies}]
     assert {**document, "mcp": {**document["mcp"], "targets": []}} == template
+
+
+def test_the_stub_upstream_is_served_over_https_with_the_install_ca():
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert upstream.url.startswith("https://stub-upstream:")
+    assert upstream.ca_file == b.INSTALL_CA == b.STATE / "certs" / "public" / "current" / "ca.pem"
 
 
 @pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
@@ -225,6 +234,9 @@ def test_a_gateway_template_with_a_target_is_refused(tmp_path, monkeypatch):
 
 
 def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch):
+    (tmp_path / "install.pem").write_bytes(pem(issue_certificate("quickstart install ca")[0]))
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "install.pem")
+    monkeypatch.setattr(b, "GATEWAY_CA", tmp_path / "ca.pem")
     monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
     monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
     assert b.init_gateway() == "created"
@@ -400,8 +412,8 @@ def write_ca(tmp_path, data, url=HTTPS_URL):
 def test_a_ca_file_is_kept_as_its_certificates_only(tmp_path):
     ca, key = issue_certificate("quickstart test ca")
     upstream = b.load_upstream(write_ca(tmp_path, private_pem(key) + pem(ca)))
-    assert upstream.ca_pem == pem(ca)
-    assert b"PRIVATE KEY" not in upstream.ca_pem
+    assert upstream.ca_file == tmp_path / "ca.pem"
+    assert b.load_upstream_ca(upstream.ca_file) == pem(ca)
 
 
 def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
@@ -452,10 +464,53 @@ def test_init_gateway_writes_keeps_and_removes_the_ca(tmp_path, monkeypatch):
     (upstreams / "ca.pem").write_bytes(pem(other))
     assert b.init_gateway() == "updated"
     assert (tmp_path / "ca.pem").read_bytes() == pem(other)
-    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
     assert b.init_gateway() == "updated"
     assert not (tmp_path / "ca.pem").exists()
     assert "policies" not in json.loads((tmp_path / "gateway.json").read_text())["mcp"]["targets"][0]
+
+
+def test_ca_file_install_is_read_only_when_the_gateway_config_is_written(tmp_path, monkeypatch):
+    install, _ = issue_certificate("quickstart install ca")
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "absent.pem")
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert upstream.ca_file == tmp_path / "absent.pem"
+    monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
+    monkeypatch.setattr(b, "GATEWAY_CA", tmp_path / "ca.pem")
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    with pytest.raises(b.BootstrapError, match="cannot open .*absent.pem"):
+        b.init_gateway()
+    assert not (tmp_path / "gateway.json").exists()
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "install.pem")
+    (tmp_path / "install.pem").write_bytes(pem(install))
+    assert b.init_gateway() == "created"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(install)
+    reissued, _ = issue_certificate("quickstart reissued ca")
+    (tmp_path / "install.pem").write_bytes(pem(reissued))
+    assert b.init_gateway() == "updated"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(reissued)
+
+
+@pytest.mark.parametrize("host", sorted(b.UPSTREAM_HOSTS) + ["STUB-UPSTREAM.", "gitea-mcp."])
+@pytest.mark.parametrize("ca_file", [None, "ca.pem"])
+def test_an_https_url_to_an_in_stack_upstream_without_ca_file_install_fails_bootstrap(tmp_path, host, ca_file):
+    (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
+    changes = {"url": f"https://{host}:8443/mcp"} | ({"ca_file": ca_file} if ca_file else {})
+    with pytest.raises(b.BootstrapError, match=r"an https url to the stack's .* needs ca_file install"):
+        b.load_upstream(write_upstream(tmp_path, **changes))
+
+
+@pytest.mark.parametrize(
+    "url, message",
+    [
+        (HTTPS_URL, "ca_file install is the install CA, which signs only gitea, gitea-mcp, gitea-mcp-spike"),
+        ("https://203.0.113.7/mcp", "ca_file install is the install CA"),
+        ("http://stub-upstream:8443/mcp", "ca_file needs an https:// url"),
+    ],
+)
+def test_ca_file_install_outside_the_stack_or_over_http_fails_bootstrap(tmp_path, url, message):
+    with pytest.raises(b.BootstrapError, match=message):
+        b.load_upstream(write_upstream(tmp_path, url=url, ca_file="install"))
 
 
 def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypatch):

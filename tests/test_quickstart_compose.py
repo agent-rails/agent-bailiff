@@ -10,7 +10,6 @@ from test_quickstart_stack import b
 
 COMPOSE_FILE = Path(__file__).resolve().parents[1] / "examples" / "quickstart" / "compose.yaml"
 EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}, "gateway": {"egress"}}
-UPSTREAM_SERVERS = {"stub-upstream", "gitea", "gitea-mcp", "gitea-mcp-spike"}
 PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
 GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
@@ -24,8 +23,12 @@ CERT_VOLUMES = {
 CERT_MOUNTS = {
     "certs": {(volume, False) for volume in CERT_VOLUMES},
     "cert-watch": {("certs-public", True)},
+    "gateway-init": {("certs-public", True)},
+    "stub-upstream": {("certs-stub-upstream", True)},
 }
 OWN_UIDS = ("certs", "cert-watch")
+KEY_GIDS = {f"certs-{leaf}": str(settings.gid) for leaf, settings in certs_module.SERVICES.items()}
+STUB_LEAF = f"{CERTS}/stub-upstream/current/stub-upstream"
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -54,7 +57,8 @@ def test_only_jaeger_the_spike_and_the_gateway_reach_a_routable_network(config):
 
 
 def test_an_upstream_url_may_name_no_stack_service_but_the_upstream_servers(config):
-    assert b.STACK_HOSTS == set(config["services"]) - UPSTREAM_SERVERS | {"localhost"}
+    assert b.STACK_HOSTS | b.UPSTREAM_HOSTS == set(config["services"]) | {"localhost"}
+    assert not b.STACK_HOSTS & b.UPSTREAM_HOSTS
 
 
 def test_only_jaeger_the_spike_and_the_gateway_publish_a_loopback_port(config):
@@ -194,14 +198,36 @@ def test_the_gateway_check_names_every_processor_socket(config):
     }
 
 
-def test_only_the_certs_init_writes_the_certificates_and_cert_watch_reads_only_the_public_ones(config):
+def cert_mounts(config):
     mounts = {}
     for name, service in config["services"].items():
         for volume in service.get("volumes", []):
             if volume.get("source") in CERT_VOLUMES:
                 assert volume["target"] == CERT_VOLUMES[volume["source"]], name
                 mounts.setdefault(name, set()).add((volume["source"], volume.get("read_only", False)))
-    assert mounts == CERT_MOUNTS
+    return mounts
+
+
+def test_only_the_certs_init_writes_the_certificates_and_each_reader_mounts_read_only(config):
+    assert cert_mounts(config) == CERT_MOUNTS
+
+
+def test_a_key_volume_reader_is_in_that_keys_group_and_starts_after_the_certs_init(config):
+    for name, mounts in cert_mounts(config).items():
+        if name == "certs":
+            continue
+        service = config["services"][name]
+        assert service["depends_on"]["certs"]["condition"] == "service_completed_successfully", name
+        groups = {KEY_GIDS[volume] for volume, _ in mounts if volume in KEY_GIDS}
+        assert set(service.get("group_add", [])) & set(KEY_GIDS.values()) == groups, name
+
+
+def test_the_stub_upstream_serves_its_leaf_on_the_port_the_stub_config_names(config):
+    arguments = arguments_of(config["services"]["stub-upstream"])
+    url = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json").url
+    assert url == f"https://stub-upstream:{flag_values(arguments, '--port').pop()}/mcp"
+    assert flag_values(arguments, "--certificate") == {f"{STUB_LEAF}.pem"}
+    assert flag_values(arguments, "--private-key") == {f"{STUB_LEAF}.key"}
 
 
 def test_the_certs_init_runs_offline_without_capabilities_in_every_key_group(config):
@@ -230,7 +256,15 @@ def test_a_certificate_service_runs_as_a_uid_no_other_service_uses(config, name)
 def test_cert_watch_checks_the_public_certificates_every_six_hours(config):
     service = config["services"]["cert-watch"]
     health = service["healthcheck"]
-    assert health["test"] == ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30"]
+    assert health["test"][:6] == ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30"]
     assert health["interval"] == "6h0m0s"
     assert health["start_period"] and health["start_interval"]
     assert service["depends_on"]["certs"]["condition"] == "service_completed_successfully"
+
+
+def test_cert_watch_probes_the_stub_upstream_with_the_install_ca(config):
+    service = config["services"]["cert-watch"]
+    port = flag_values(arguments_of(config["services"]["stub-upstream"]), "--port").pop()
+    assert flag_values(service["healthcheck"]["test"], "--probe") == {f"stub-upstream=stub-upstream:{port}"}
+    assert service["networks"].keys() == {"upstream"}
+    assert service["depends_on"]["stub-upstream"]["condition"] == "service_started"

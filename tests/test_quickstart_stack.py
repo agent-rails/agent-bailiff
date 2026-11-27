@@ -83,6 +83,7 @@ DECIDE = (b.DECIDE_UID, b.LEDGER_GID)
 CUSTODIAN = (b.CUSTODIAN_UID, b.CUSTODIAN_UID)
 CERTS_UID = 10012
 CERT_WATCH_UID = 10015
+STUB_UID = 10011
 CERTS = (CERTS_UID, CERTS_UID)
 FIRST = "gen-0001"
 DIRECTORY, FILE, SOCKET = "directory", "file", "socket"
@@ -191,6 +192,7 @@ EXPECTED_IDENTITIES = {
     ),
     "gateway": (b.GATEWAY_UID, b.GATEWAY_UID, {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID}),
     "cert-watch": (CERT_WATCH_UID, CERT_WATCH_UID, {CERT_WATCH_UID}),
+    "stub-upstream": (STUB_UID, STUB_UID, {STUB_UID, certs_module.SERVICES["stub-upstream"].gid}),
 }
 ONE_SHOTS = (
     "issuer-init",

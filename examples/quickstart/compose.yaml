@@ -67,13 +67,15 @@ services:
       - certs-gitea-mcp-tls:/var/lib/bailiff/certs/gitea-mcp-tls
 
   cert-watch:
-    <<: [*bailiff, *offline]
+    <<: *bailiff
     user: "10015:10015"
     command: ["-c", "import signal, sys; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.pause()"]
+    networks: [upstream]
     volumes:
       - certs-public:/var/lib/bailiff/certs/public:ro
     healthcheck:
-      test: ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30"]
+      test: ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30",
+             "--probe", "stub-upstream=stub-upstream:8443"]
       interval: 6h
       timeout: 10s
       retries: 1
@@ -82,12 +84,22 @@ services:
     depends_on:
       certs:
         condition: service_completed_successfully
+      stub-upstream:
+        condition: service_started
 
   stub-upstream:
     <<: *bailiff
     user: "10011:10011"
-    command: ["/app/quickstart/stub-upstream/server.py", "--port", "8080"]
+    group_add: ["20006"]
+    command: ["/app/quickstart/stub-upstream/server.py", "--port", "8443",
+              "--certificate", "/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.pem",
+              "--private-key", "/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.key"]
     networks: [upstream]
+    volumes:
+      - certs-stub-upstream:/var/lib/bailiff/certs/stub-upstream:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   gitea:
     <<: *gitea-limits
@@ -246,6 +258,10 @@ services:
     volumes:
       - *upstreams
       - gateway-config:/var/lib/bailiff/gateway
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   bootstrap:
     <<: [*bailiff, *once]

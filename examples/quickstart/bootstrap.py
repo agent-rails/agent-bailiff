@@ -102,6 +102,7 @@ UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "
 GATEWAY_TEMPLATE = Path(__file__).resolve().parent / "gateway.json"
 GATEWAY_CONFIG = STATE / "gateway" / "gateway.json"
 GATEWAY_CA = STATE / "gateway" / "ca.pem"
+INSTALL_CA = STATE / "certs" / "public" / "current" / "ca.pem"
 MAX_GATEWAY_BYTES = 64 * 1024
 UPSTREAM_VERSION = 1
 MAX_UPSTREAM_BYTES = 64 * 1024
@@ -122,7 +123,9 @@ STACK_HOSTS = frozenset(
         "jaeger", "exporter", "rule", "certs", "cert-watch",
     }
 )  # fmt: skip
+UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea", "gitea-mcp", "gitea-mcp-spike"})
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
+INSTALL = "install"
 TASK_SCOPE = {
     "permissions": [
         {
@@ -169,7 +172,7 @@ class Upstream:
     target: str
     binding_resource: str
     routes: tuple[dict[str, Any], ...]
-    ca_pem: bytes | None = None
+    ca_file: Path | None = None
 
     @property
     def costs(self) -> dict[str, Any]:
@@ -196,15 +199,16 @@ def load_upstream(path: Path) -> Upstream:
     if problem:
         raise BootstrapError(f"{path}: {problem}")
     check_upstream_url(path, text["url"])
+    check_install_ca(path, text["url"], text.get("ca_file"))
     if not HEADER_NAME.fullmatch(text["credential_header"]):
         raise BootstrapError(f"{path}: credential_header must be an HTTP field name token")
     if not is_bounded_resource(text["binding_resource"]):
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
-    ca_pem = load_upstream_ca(path, text["ca_file"], text["url"]) if "ca_file" in text else None
+    ca_file = upstream_ca_file(path, text["ca_file"], text["url"]) if "ca_file" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
-        text["binding_resource"], routes, ca_pem,
+        text["binding_resource"], routes, ca_file,
     )  # fmt: skip
 
 
@@ -214,10 +218,28 @@ def beside(path: Path, field: str, name: str) -> Path:
     return path.parent / name
 
 
-def load_upstream_ca(path: Path, ca_file: str, url: str) -> bytes:
+def check_install_ca(path: Path, url: str, ca_file: str | None) -> None:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").rstrip(".")
+    if parts.scheme == "https" and host in UPSTREAM_HOSTS and ca_file != INSTALL:
+        raise BootstrapError(f"{path}: an https url to the stack's {host} needs ca_file {INSTALL}")
+    if ca_file == INSTALL and host not in UPSTREAM_HOSTS:
+        raise BootstrapError(
+            f"{path}: ca_file {INSTALL} is the install CA, which signs only {', '.join(sorted(UPSTREAM_HOSTS))}"
+        )
+
+
+def upstream_ca_file(path: Path, ca_file: str, url: str) -> Path:
     if urlsplit(url).scheme != "https":
         raise BootstrapError(f"{path}: ca_file needs an https:// url")
+    if ca_file == INSTALL:
+        return INSTALL_CA
     ca_path = beside(path, "ca_file", ca_file)
+    load_upstream_ca(ca_path)
+    return ca_path
+
+
+def load_upstream_ca(ca_path: Path) -> bytes:
     try:
         certificates = x509.load_pem_x509_certificates(read_bounded(ca_path, MAX_CA_BYTES))
     except ValueError as error:
@@ -444,7 +466,7 @@ def gateway_document(upstream: Upstream) -> dict[str, Any]:
     if document["mcp"]["targets"] != []:
         raise BootstrapError(f"{GATEWAY_TEMPLATE} must leave mcp.targets empty for the upstream config to fill")
     target: dict[str, Any] = {"name": upstream.target, "mcp": {"host": upstream.url}}
-    if upstream.ca_pem is not None:
+    if upstream.ca_file is not None:
         target["policies"] = {"backendTLS": {"root": str(GATEWAY_CA)}}
     document["mcp"]["targets"] = [target]
     return document
@@ -453,16 +475,17 @@ def gateway_document(upstream: Upstream) -> dict[str, Any]:
 def init_gateway() -> str:
     upstream = load_upstream(UPSTREAM_FILE)
     document = gateway_document(upstream)
+    ca_pem = load_upstream_ca(upstream.ca_file) if upstream.ca_file is not None else None
     current_ca = read_bounded(GATEWAY_CA, MAX_CA_BYTES) if GATEWAY_CA.exists() else None
     outcome = "created"
     if GATEWAY_CONFIG.exists():
-        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document and current_ca == upstream.ca_pem:
+        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document and current_ca == ca_pem:
             return "kept"
         outcome = "updated"
-    if upstream.ca_pem is not None:
-        write_public_bytes(GATEWAY_CA, upstream.ca_pem)
+    if ca_pem is not None:
+        write_public_bytes(GATEWAY_CA, ca_pem)
     write_public(GATEWAY_CONFIG, document)
-    if upstream.ca_pem is None and current_ca is not None:
+    if ca_pem is None and current_ca is not None:
         GATEWAY_CA.unlink()
     return outcome
 

@@ -23,8 +23,8 @@ $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
 | Service | uid | Role |
 | --- | --- | --- |
 | `certs` | 10012 | One-shot, offline: issues the install CA and one leaf each for `gateway`, `stub-upstream` and `gitea-mcp-tls`, or keeps a complete set; see [Certificates](#certificates) |
-| `cert-watch` | 10015 | Mounts the public certificates only; its healthcheck fails when the set is incomplete or a certificate expires within 30 days |
-| `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server, refuses a `tools/call` without an `Authorization` header; its `echo_auth` tool returns the credential it received, raw and in base64, so the custodian's redaction can be seen |
+| `cert-watch` | 10015 | Mounts the public certificates only; its healthcheck fails when the set is incomplete, a certificate expires within 30 days, or a TLS service serves a certificate other than the current one |
+| `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server over TLS on port 8443 with its install leaf, refuses a `tools/call` without an `Authorization` header; its `echo_auth` tool returns the credential it received, raw and in base64, so the custodian's redaction can be seen |
 | `gitea`, `gitea-mcp` | image default | `gitea` profile: upstream Git service and its MCP server (`gitea-mcp-server:1.13.0`) |
 | `gateway` | 10004 | agentgateway v1.7.0 with the decide, custodian and redactor processors and the refusal guard, `failClosed` |
 | `decide` | 10002 | Verifies the chain, checks scope and budget, writes the ledger |
@@ -42,7 +42,7 @@ $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
 | `gitea-secret`, `gitea-admin`, `bootstrap`, `agent-key`, `gitea-task` | per component | `gitea` profile: seed Gitea, store its token, issue the walkthrough task |
 | `task-issuer` | 10007 | `operator` profile: `agent-bailiff task issue` into the bind-mounted `BAILIFF_TASK_DIR` (default `./tasks`), which must exist, owned by uid 10007 and not group or other writable |
 
-Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. The upstream servers, `bootstrap` and `gateway` have a network beyond `edge`: `upstream`, which is internal too. Only the gateway also joins `egress`, a routable network with no destination filter: Docker publishes a port only for a container on a routable network, and an `https://` upstream needs it. Bootstrap refuses an upstream URL that names a stack service, `localhost`, or a loopback, link-local, unspecified or multicast address. The gateway publishes its MCP port on `127.0.0.1` only (`GATEWAY_PORT`, default 18090). Any local user can connect to that port; the task chain and the agent's key gate calls, not the port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
+Every bailiff container and gitea-mcp is read-only, drops all capabilities and sets `no-new-privileges`. Processes talk over Unix sockets on named volumes; each server checks the peer uid. The upstream servers, `bootstrap`, `cert-watch` and `gateway` have a network beyond `edge`: `upstream`, which is internal too. Only the gateway also joins `egress`, a routable network with no destination filter: Docker publishes a port only for a container on a routable network, and an `https://` upstream needs it. Bootstrap refuses an upstream URL that names a stack service, `localhost`, or a loopback, link-local, unspecified or multicast address. The gateway publishes its MCP port on `127.0.0.1` only (`GATEWAY_PORT`, default 18090). Any local user can connect to that port; the task chain and the agent's key gate calls, not the port. The `spike` profile adds `gitea-mcp-spike`, which publishes port 18080 on `127.0.0.1` (`GITEA_MCP_PORT`) for `tests/test_quickstart_spike.py`; a call there bypasses the gateway and carries no token.
 
 Every service has a memory and process limit (`mem_limit`, `pids_limit`), with swap capped at the memory limit (`memswap_limit`), set at about three times the peak measured during the 32-client load run (`gitea` and `gitea-admin` 768 MiB and 256 processes, gitea-mcp 128 MiB and 64, every other service 256 MiB and 128). A runaway or forking process stops at its own container's limit instead of starving the host. There are no CPU limits, so one busy service can still slow the others.
 
@@ -154,7 +154,9 @@ Copy the CA out for a client on the host:
 $ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem ./ca.pem
 ```
 
-`cert-watch` checks the set every 6 hours. `docker compose ps cert-watch` shows `unhealthy` once the set is incomplete, a leaf does not chain to the CA, or a certificate expires within 30 days. The rest of the stack keeps running.
+`cert-watch` checks the set every 6 hours, and connects to `stub-upstream` on the internal `upstream` network to check that it serves the current leaf, verified with the install CA. `docker compose ps cert-watch` shows `unhealthy` once the set is incomplete, a leaf does not chain to the CA, a certificate expires within 30 days, or a service serves an older certificate. The rest of the stack keeps running.
+
+The stub upstream config names `"ca_file": "install"`, so `gateway-init` copies the install CA into the gateway config, and the gateway trusts only that CA for `https://stub-upstream:8443`. Bootstrap refuses an `https://` url to an upstream server in the stack without it.
 
 Reissue with the stack stopped. It makes a new CA, so every client needs the new `ca.pem`:
 
