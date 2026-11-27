@@ -167,6 +167,7 @@ AGENT = "agent"
 ORG = "quickstart"
 REPOS = ("demo", "payroll")
 TOKEN_NAME = "bailiff-quickstart"
+TOKEN_NAMES = re.compile(rf"{TOKEN_NAME}(-[0-9a-f]{{16}})?")
 TOKEN_SCOPES = ["read:issue", "read:repository"]
 CHECK_REFUSAL = re.compile(r"agent-bailiff credential-check refused: ([a-z_]+): ")
 REMINT_REASONS = frozenset({"broader_scopes", "token_rejected"})
@@ -831,7 +832,7 @@ def retire_credentials(gitea: Gitea, minted: Minted) -> None:
     for token in agent_tokens(gitea, minted.owner):
         if not isinstance(token, dict) or not isinstance(token.get("name"), str):
             raise BootstrapError("gitea listed a token with no name")
-        if token["name"].startswith(TOKEN_NAME) and token.get("id") != minted.token_id:
+        if TOKEN_NAMES.fullmatch(token["name"]) and token.get("id") != minted.token_id:
             delete_token(gitea, minted.owner, token["id"])
 
 

@@ -762,6 +762,17 @@ def test_a_stored_remint_retires_every_other_quickstart_token_from_every_page(pa
     assert gitea.tokens[121].startswith(f"{b.TOKEN_NAME}-") and len(gitea.tokens) == 119
 
 
+def test_a_stored_remint_spares_tokens_that_only_share_the_quickstart_prefix(pair, gitea):
+    gitea.tokens.update(
+        {20: f"{b.TOKEN_NAME}-laptop", 21: f"{b.TOKEN_NAME}ish", 22: f"{b.TOKEN_NAME}-0123456789ABCDEF"}
+    )
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    assert run_pair() == (0, 0)
+    assert pair.events == [("minted", 23), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 20, 21, 22, 23}
+
+
 def test_the_token_list_refuses_a_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
     monkeypatch.setattr(b, "MAX_TOKEN_PAGES", 2, raising=False)
     gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 101)}
