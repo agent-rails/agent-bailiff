@@ -28,6 +28,7 @@ TTL_NS = DEFAULT_INFLIGHT_TTL * 1_000_000_000
 THREADS = (1, 4, 16, 64)
 OCCUPANCY = (0, DEFAULT_INFLIGHT_MAX // 2)
 RUN_SECONDS = 1.0
+JOIN_SECONDS = 10
 SWEEP_SIZES = (64, 512, DEFAULT_INFLIGHT_MAX)
 SWEEP_REPEATS = 5
 ENTRY = Entry(
@@ -68,7 +69,7 @@ def fill(releases, prefix, count, tenants=1):
 def contend(threads, occupancy):
     releases = default_map(Clock(), DEFAULT_INFLIGHT_MAX + threads)
     fill(releases, "held", occupancy, tenants=8)
-    reserve_us, take_us = [], []
+    reserve_us, take_us, errors = [], [], []
     lock = threading.Lock()
     start = threading.Barrier(threads + 1)
     stop = threading.Event()
@@ -77,17 +78,22 @@ def contend(threads, occupancy):
         local_reserve, local_take = [], []
         start.wait()
         number = 0
-        while not stop.is_set():
-            key = f"w{index}-{number}"
-            began = time.perf_counter_ns()
-            reservation = releases.reserve(key, f"tenant-{index % 8}", HEADER_VALUE)
-            reserved = time.perf_counter_ns()
-            releases.commit(reservation, "release", ENTRY)
-            committed = time.perf_counter_ns()
-            assert releases.take(key) is not None
-            local_reserve.append((reserved - began) / 1e3)
-            local_take.append((time.perf_counter_ns() - committed) / 1e3)
-            number += 1
+        try:
+            while not stop.is_set():
+                key = f"w{index}-{number}"
+                began = time.perf_counter_ns()
+                reservation = releases.reserve(key, f"tenant-{index % 8}", HEADER_VALUE)
+                reserved = time.perf_counter_ns()
+                releases.commit(reservation, "release", ENTRY)
+                committed = time.perf_counter_ns()
+                assert releases.take(key) is not None
+                local_reserve.append((reserved - began) / 1e3)
+                local_take.append((time.perf_counter_ns() - committed) / 1e3)
+                number += 1
+        except BaseException as error:
+            stop.set()
+            with lock:
+                errors.append(error)
         with lock:
             reserve_us.extend(local_reserve)
             take_us.extend(local_take)
@@ -100,7 +106,10 @@ def contend(threads, occupancy):
     time.sleep(RUN_SECONDS)
     stop.set()
     for item in workers:
-        item.join()
+        item.join(JOIN_SECONDS)
+    assert not [item for item in workers if item.is_alive()], f"workers did not stop within {JOIN_SECONDS}s"
+    if errors:
+        raise errors[0]
     wall = time.perf_counter() - began
     return {
         "threads": threads,

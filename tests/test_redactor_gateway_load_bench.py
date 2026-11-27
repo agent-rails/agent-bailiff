@@ -187,7 +187,9 @@ def _drive(upstream, setting):
                 ready.abort()
                 raise
             ready.wait()
-            outcomes[index] = [_call(instance, setting, f"{index}-{number}") for number in range(per_client)]
+            outcomes[index] = [
+                _call(instance, setting, f"{setting['tag']}-{index}-{number}") for number in range(per_client)
+            ]
         finally:
             instance.close()
 
@@ -387,7 +389,11 @@ def test_redactor_load_through_agentgateway(binary, workdir, private, make_decid
         "gateway_rss": "agentgateway resident set size after the setting drained (ps rss), not its peak",
         "settings": settings,
     }
-    assert not [item for item in settings if item["duplicate_executions"] or item["refused_after_acting"]]
+    assert not [
+        item
+        for item in settings
+        if item["duplicate_executions"] or item["refused_after_acting"] or item["unknown_without_acting"]
+    ]
     assert not [item for item in settings if "result_wrong" in item["outcomes"]]
     BENCHMARKS.mkdir(exist_ok=True)
     path = BENCHMARKS / f"redactor-gateway-load-{workers}-worker-{now:%Y-%m-%d}.local.json"
