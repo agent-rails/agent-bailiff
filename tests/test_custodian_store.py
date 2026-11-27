@@ -245,6 +245,75 @@ def test_a_short_write_under_a_file_size_limit_leaves_no_kek(state):
     assert not (state / "kek").exists()
 
 
+FILE_SIZE_LIMIT = (
+    "import os, resource, signal, sys\n"
+    "from pathlib import Path\n"
+    "from agent_bailiff.custodian import CredentialStore, LocalBackend, OwnedFileError\n"
+    "path = Path(sys.argv[1])\n"
+    "backend = LocalBackend.load(path.parent / 'kek')\n"
+    "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+    "limit = int(sys.argv[2]) if len(sys.argv) > 2 else os.path.getsize(path)\n"
+    "resource.setrlimit(resource.RLIMIT_FSIZE, (limit, resource.RLIM_INFINITY))\n"
+)
+
+
+def test_a_put_the_disk_cannot_hold_names_the_store_and_keeps_what_was_stored(state, store):
+    store.put(*BINDING, SECRET)
+    script = FILE_SIZE_LIMIT + (
+        "store = CredentialStore.open(path, backend)\n"
+        "refused = 0\n"
+        "for credential_id in ('deploy-api', 'other-api'):\n"
+        "    try:\n"
+        "        store.put('tenant-a', credential_id, 'deploy.example', b'Bearer grown-' + b'g' * 20000)\n"
+        "    except OwnedFileError as exc:\n"
+        "        print(exc)\n"
+        "        refused += 1\n"
+        "sys.exit(3 if refused == 2 else 4)\n"
+    )
+    path = state / "credentials.db"
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(path)], capture_output=True, text=True, timeout=30, check=False
+    )
+    output = done.stdout + done.stderr
+    assert done.returncode == 3, output
+    assert output.count(f"cannot write the credential store at {path}: ") == 2
+    assert "Traceback" not in output and "grown-" not in output
+    reopened = CredentialStore.open(path, LocalBackend.load(state / "kek"))
+    try:
+        assert reopened.get(*BINDING) == StoredCredential(SECRET, frozenset())
+        with pytest.raises(CredentialUnavailable, match="no credential"):
+            reopened.get("tenant-a", "other-api", "deploy.example")
+    finally:
+        reopened.close()
+
+
+def test_a_migration_the_disk_cannot_hold_names_the_store_and_leaves_it_unmigrated(state, backend):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SECRET)
+    script = FILE_SIZE_LIMIT + (
+        "try:\n"
+        "    CredentialStore.open(path, backend)\n"
+        "except OwnedFileError as exc:\n"
+        "    print(exc)\n"
+        "    sys.exit(3)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(path), "1024"], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert f"the credential store at {path} is not a usable database: " in done.stdout
+    connection = sqlite3.connect(path)
+    try:
+        assert "exception" not in {row[1] for row in connection.execute("PRAGMA table_info(credentials)")}
+    finally:
+        connection.close()
+    store = CredentialStore.open(path, backend)
+    try:
+        assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
+    finally:
+        store.close()
+
+
 def basic(pair):
     return b"Basic " + base64.b64encode(pair)
 

@@ -130,7 +130,7 @@ class CredentialStore:
             _add_exception_column(connection)
         except sqlite3.Error as exc:
             connection.close()
-            raise OwnedFileError(f"the {STORE_LABEL} is not a usable database: {exc}") from None
+            raise OwnedFileError(f"the {STORE_LABEL} at {path} is not a usable database: {exc}") from None
         return cls(connection, pinned, backend)
 
     def put(
@@ -163,13 +163,16 @@ class CredentialStore:
         wrapped = self._backend.wrap(dek, context)
         with self._lock:
             self._pinned.check()
-            self._connection.execute(
-                "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext, exception) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
-                "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
-                "exception = excluded.exception",
-                (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
-            )
+            try:
+                self._connection.execute(
+                    "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext, "
+                    "exception) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
+                    "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
+                    "exception = excluded.exception",
+                    (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
+                )
+            except sqlite3.Error as exc:
+                raise OwnedFileError(f"cannot write the {STORE_LABEL} at {self._pinned.path}: {exc}") from None
         if problem is not None:
             logger.warning(
                 "stored credential %r for target %r with an accepted %s exception: %s",
@@ -302,7 +305,8 @@ def _add_exception_column(connection: sqlite3.Connection) -> None:
             connection.execute(ADD_EXCEPTION)
         connection.execute("COMMIT")
     except BaseException:
-        connection.execute("ROLLBACK")
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         raise
 
 
