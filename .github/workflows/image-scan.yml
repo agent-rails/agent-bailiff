@@ -1,20 +1,135 @@
 name: image-scan
 
 on:
+  pull_request:
   schedule:
-    - cron: "23 5 * * 1"
+    - cron: "23 5 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: image-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: 0.76.2
+  TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.diff.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
+            .dockerignore \
+            .github/workflows/image-scan.yml \
+            .trivyignore.yaml \
+            LICENSE \
+            README.md \
+            agent_bailiff \
+            deploy/gke/Dockerfile.minter \
+            deploy/gke/mint_tokens.py \
+            deploy/kubernetes/Dockerfile.webhook \
+            deploy/kubernetes/webhook-requirements.txt \
+            examples/live-run/Dockerfile \
+            examples/live-run/entrypoint.sh \
+            examples/live-run/kubernetes.py \
+            examples/live-run/package-lock.json \
+            examples/live-run/package.json \
+            examples/live-run/run.py \
+            examples/live-run/shim.py \
+            examples/live-run/upstream.py \
+            examples/quickstart/Dockerfile \
+            examples/quickstart/agent.py \
+            examples/quickstart/baseline.py \
+            examples/quickstart/bootstrap.py \
+            examples/quickstart/gateway.json \
+            examples/quickstart/proxy_bench.py \
+            examples/quickstart/rule.py \
+            examples/quickstart/stub-upstream/server.py \
+            examples/quickstart/trace-requirements.txt \
+            examples/quickstart/upstreams \
+            pyproject.toml \
+            requirements-ci.txt)"
+          echo "$changed"
+          if [ -n "$changed" ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  db:
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - id: key
+        run: echo "key=trivy-db-${TRIVY_VERSION}-$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy-cache/db
+          key: ${{ steps.key.outputs.key }}
+      - name: Install trivy
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          printf '%s  %s\n' "$TRIVY_SHA256" "$archive" > "$RUNNER_TEMP/trivy.sha256"
+          sha256sum --check --strict "$RUNNER_TEMP/trivy.sha256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+      - name: Download the vulnerability database
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: '"$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
+      - name: Check the vulnerability database is fresh
+        run: |
+          metadata="$RUNNER_TEMP/trivy-cache/db/metadata.json"
+          jq . "$metadata"
+          updated="$(jq -er .UpdatedAt "$metadata")"
+          test "$(date -u -d "$updated" +%s)" -ge "$(( $(date -u +%s) - DB_MAX_AGE_SECONDS ))"
+        env:
+          DB_MAX_AGE_SECONDS: 172800
+
   scan:
+    needs: db
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: quickstart
+            build: --file examples/quickstart/Dockerfile --target quickstart
+          - image: quickstart-trace
+            build: --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt
+          - image: webhook
+            build: --file deploy/kubernetes/Dockerfile.webhook
+          - image: minter
+            build: --file deploy/gke/Dockerfile.minter
+          - image: live-run
+            build: --file examples/live-run/Dockerfile
     env:
-      TRIVY_VERSION: 0.76.2
-      TRIVY_SHA256: bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf
+      IMAGE: agent-bailiff-${{ matrix.image }}:scan
+      LIBZSTD_FLOOR: 1.5.7+dfsg-1+deb13u1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,17 +141,36 @@ jobs:
           printf '%s  %s\n' "$TRIVY_SHA256" "$archive" > "$RUNNER_TEMP/trivy.sha256"
           sha256sum --check --strict "$RUNNER_TEMP/trivy.sha256"
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
-      - name: Build images
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/trivy-cache/db
+          key: ${{ needs.db.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Build image
+        env:
+          BUILD: ${{ matrix.build }}
         run: |
-          docker build --file examples/quickstart/Dockerfile --target quickstart --tag agent-bailiff-quickstart:scan .
-          docker build --file examples/quickstart/Dockerfile --target quickstart --build-arg REQUIREMENTS=examples/quickstart/trace-requirements.txt --tag agent-bailiff-quickstart-trace:scan .
-          docker build --file deploy/kubernetes/Dockerfile.webhook --tag agent-bailiff-webhook:scan .
-          docker build --file deploy/gke/Dockerfile.minter --tag agent-bailiff-minter:scan .
-          docker build --file examples/live-run/Dockerfile --tag agent-bailiff-live-run:scan .
-      - name: Scan images
+          read -ra build <<< "$BUILD"
+          docker build "${build[@]}" --tag "$IMAGE" .
+      - name: Check libzstd1
         run: |
-          status=0
-          for image in agent-bailiff-quickstart:scan agent-bailiff-quickstart-trace:scan agent-bailiff-webhook:scan agent-bailiff-minter:scan agent-bailiff-live-run:scan; do
-            "$RUNNER_TEMP/trivy" image --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --exit-code 1 --no-progress "$image" || status=1
-          done
-          exit "$status"
+          status="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${db:Status-Abbrev} ${Version}\n' libzstd1)"
+          echo "libzstd1 $status"
+          test "$(wc -l <<< "$status")" -eq 1
+          test "${status:0:4}" = "ii  "
+          dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
+      - name: Scan image
+        run: >-
+          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
+          --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
+          --exit-code 1 --no-progress "$IMAGE"
+
+  image-scan:
+    if: always()
+    needs: [changes, db, scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: test "$RESULTS" = "success true success success" || test "$RESULTS" = "success false skipped skipped"
+        env:
+          RESULTS: ${{ needs.changes.result }} ${{ needs.changes.outputs.images }} ${{ needs.db.result }} ${{ needs.scan.result }}
