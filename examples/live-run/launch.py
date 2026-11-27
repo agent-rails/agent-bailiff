@@ -12,6 +12,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent.parent
 IMAGE_TAG = "agent-bailiff-live-run:local"
 WEBHOOK_TAG = "agent-bailiff-webhook:live"
+IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 DIGEST_REF = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 ALLOWED_CONTEXTS = frozenset({"orbstack"})
 GKE_PROBE = re.compile(r"gke_(?P<project>[a-z0-9-]+)_(?P<location>[a-z0-9-]+)_bailiff-probe")
@@ -56,18 +58,24 @@ class RunSpec:
 
 def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | None = None) -> str:
     target = ["--platform", platform] if platform else []
-    subprocess.run(
-        ["docker", "--context", docker_context, "build", *target, "-f", dockerfile, "-t", tag, "."],
-        cwd=REPO,
-        check=True,
-        timeout=1800,
-    )
-    return tag
+    with tempfile.TemporaryDirectory() as scratch:
+        iidfile = Path(scratch) / "iid"
+        subprocess.run(
+            ["docker", "--context", docker_context, "build", *target, "--iidfile", str(iidfile), "-f", dockerfile,
+             "-t", tag, "."],
+            cwd=REPO,
+            check=True,
+            timeout=1800,
+        )  # fmt: skip
+        image_id = iidfile.read_text().strip() if iidfile.is_file() else ""
+    if IMAGE_ID.fullmatch(image_id) is None:
+        raise RuntimeError(f"the build of {tag} reported no image ID ({image_id!r})")
+    return image_id
 
 
-def resolve_digest(docker_context: str, tag: str) -> str:
+def resolve_digest(docker_context: str, image_id: str) -> str:
     output = subprocess.run(
-        ["docker", "--context", docker_context, "image", "inspect", tag, "--format", "{{json .RepoDigests}}"],
+        ["docker", "--context", docker_context, "image", "inspect", image_id, "--format", "{{json .RepoDigests}}"],
         capture_output=True,
         text=True,
         check=True,
@@ -75,7 +83,9 @@ def resolve_digest(docker_context: str, tag: str) -> str:
     ).stdout
     digests = json.loads(output) or []
     if not digests or DIGEST_REF.fullmatch(digests[0]) is None:
-        raise RuntimeError(f"{tag} has no sha256 repo digest ({digests}); the live run needs OrbStack's image store")
+        raise RuntimeError(
+            f"{image_id} has no sha256 repo digest ({digests}); the live run needs OrbStack's image store"
+        )
     return str(digests[0])
 
 
@@ -291,11 +301,10 @@ def main() -> None:
     )
     webhook = None
     if kubernetes and args.catalog != READ_CATALOG:
-        build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
-        webhook = resolve_digest(args.docker_context, WEBHOOK_TAG)
-    image = resolve_digest(
-        args.docker_context, build_image(args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64")
-    )
+        webhook = resolve_digest(
+            args.docker_context, build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
+        )
+    image = build_image(args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64")
     spec = RunSpec(
         script=args.script,
         context=args.context if kubernetes else None,

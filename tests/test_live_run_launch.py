@@ -10,6 +10,8 @@ import launch  # noqa: E402
 
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
+IMAGE_ID = "sha256:" + "c" * 64
+OTHER_ID = "sha256:" + "d" * 64
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
 CERT_USER = {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}
 
@@ -305,16 +307,24 @@ def inspect_returns(monkeypatch, digests):
     monkeypatch.setattr(launch.subprocess, "run", run)
 
 
-def test_the_image_is_run_by_its_repo_digest(monkeypatch):
-    inspect_returns(monkeypatch, [DIGEST])
-    assert launch.resolve_digest("orbstack", "agent-bailiff-live-run:local") == DIGEST
+def test_the_webhook_image_is_resolved_to_its_repo_digest_by_image_id(monkeypatch):
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps([WEBHOOK]), stderr="")
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    assert launch.resolve_digest("orbstack", IMAGE_ID) == WEBHOOK
+    assert calls[0][:5] == ["docker", "--context", "orbstack", "image", "inspect"]
+    assert calls[0][5] == IMAGE_ID
 
 
 @pytest.mark.parametrize("digests", [[], None, ["agent-bailiff-live-run:local"], ["agent-bailiff-live-run@sha256:abc"]])
 def test_an_image_without_a_repo_digest_is_refused(monkeypatch, digests):
     inspect_returns(monkeypatch, digests)
     with pytest.raises(RuntimeError, match="no sha256 repo digest"):
-        launch.resolve_digest("orbstack", "agent-bailiff-live-run:local")
+        launch.resolve_digest("orbstack", IMAGE_ID)
 
 
 def parse_bundle(data):
@@ -450,9 +460,47 @@ def test_the_result_file_is_private_and_never_overwritten(tmp_path):
         launch.write_result(path, {"run_id": "r2"})
 
 
+def fake_docker(monkeypatch, tags, built, after_build=None):
+    calls = []
+
+    def run(command, **options):
+        calls.append(command)
+        if "build" in command:
+            Path(command[command.index("--iidfile") + 1]).write_text(built)
+            tags[command[command.index("-t") + 1]] = built
+            if after_build:
+                after_build()
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(launch.subprocess, "run", run)
+    return calls
+
+
 @pytest.mark.parametrize(("platform", "expected"), [(None, []), ("linux/amd64", ["--platform", "linux/amd64"])])
 def test_an_image_is_built_for_the_platform_asked_or_natively(monkeypatch, platform, expected):
-    calls = []
-    monkeypatch.setattr(launch.subprocess, "run", lambda command, **options: calls.append(command))
-    assert launch.build_image("orbstack", "Dockerfile", "t:1", platform) == "t:1"
-    assert calls == [["docker", "--context", "orbstack", "build", *expected, "-f", "Dockerfile", "-t", "t:1", "."]]
+    calls = fake_docker(monkeypatch, {}, IMAGE_ID)
+    assert launch.build_image("orbstack", "Dockerfile", "t:1", platform) == IMAGE_ID
+    [command] = calls
+    iidfile = command[command.index("--iidfile") + 1]
+    head = ["docker", "--context", "orbstack", "build", *expected]
+    assert command == [*head, "--iidfile", iidfile, "-f", "Dockerfile", "-t", "t:1", "."]
+
+
+def test_a_launch_runs_the_image_it_built_when_another_launch_retags_the_tag(monkeypatch):
+    tags = {}
+    fake_docker(monkeypatch, tags, IMAGE_ID, after_build=lambda: tags.update({"t:1": OTHER_ID}))
+    assert launch.build_image("orbstack", "Dockerfile", "t:1") == IMAGE_ID
+    assert tags["t:1"] == OTHER_ID
+
+
+@pytest.mark.parametrize("written", ["", "\n", "latest", "sha256:abc"])
+def test_a_build_without_an_image_id_is_refused(monkeypatch, written):
+    fake_docker(monkeypatch, {}, written)
+    with pytest.raises(RuntimeError, match="image ID"):
+        launch.build_image("orbstack", "Dockerfile", "t:1")
+
+
+def test_a_build_that_writes_no_iidfile_is_refused(monkeypatch):
+    monkeypatch.setattr(launch.subprocess, "run", lambda command, **options: None)
+    with pytest.raises(RuntimeError, match="image ID"):
+        launch.build_image("orbstack", "Dockerfile", "t:1")
