@@ -321,6 +321,21 @@ def test_check_fails_on_a_missing_leaf_or_a_mismatched_key(certs, damage):
     assert run(certs, "check", "--keys") == 1
 
 
+def test_check_names_a_leaf_another_ca_signed_under_the_same_ca_name(certs, capsys):
+    assert run(certs, "issue") == 0
+    other = certs.parent / "other"
+    for name in NAMES:
+        (other / name).mkdir(parents=True)
+    assert run(other, "issue") == 0
+    public = certs / "public" / "current" / "gateway.pem"
+    make_writable(public)
+    public.write_bytes((other / "public" / "current" / "gateway.pem").read_bytes())
+    assert leaf(certs, "gateway").issuer == ca(certs).subject
+    capsys.readouterr()
+    assert run(certs, "check") == 1
+    assert "gateway.pem is not signed by the install CA" in capsys.readouterr().err
+
+
 def test_check_fails_on_an_expired_ca(certs):
     past = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=10)
     certs_module.issue(certs, SERVICES, 1, now=lambda: past)

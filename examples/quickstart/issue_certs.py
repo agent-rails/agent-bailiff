@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import (
@@ -319,7 +320,7 @@ def check_leaf(
     leaf = load_certificate(certs / PUBLIC / CURRENT / f"{service}.pem")
     try:
         leaf.verify_directly_issued_by(ca)
-    except (ValueError, TypeError, x509.InvalidSignature) as error:
+    except (ValueError, TypeError, InvalidSignature) as error:
         problems.append(f"{service}.pem is not signed by the install CA: {error}")
     if leaf.not_valid_after_utc <= deadline:
         problems.append(f"{service}.pem expires at {leaf.not_valid_after_utc.isoformat()}")
