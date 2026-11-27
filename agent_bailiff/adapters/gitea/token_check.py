@@ -177,6 +177,7 @@ def fetch_token_info(provider: Provider) -> tuple[tuple[str, ...], str]:
 def _search_repos(provider: Provider, query: str, max_repos: int) -> tuple[Repo, ...]:
     seen: dict[int, Repo] = {}
     total: int | None = None
+    served = 0
     page = 1
     while True:
         headers, document = provider.get_with_headers(f"/repos/search?{query}limit={PAGE_LIMIT}&page={page}")
@@ -192,6 +193,11 @@ def _search_repos(provider: Provider, query: str, max_repos: int) -> tuple[Repo,
         items = _search_items(document)
         if not items:
             break
+        served += len(items)
+        if served > max_repos:
+            raise TokenCheckRefused(
+                "too_many_repos", f"a repository search served more than {max_repos} items across its pages"
+            )
         before = len(seen)
         for item in items:
             repo = _repo(item)

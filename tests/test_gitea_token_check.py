@@ -528,6 +528,17 @@ def test_a_repository_seen_twice_counts_once(gitea):
     assert check(gitea).private_total == 3
 
 
+def test_repeated_items_count_against_the_item_cap_before_they_are_deduplicated(gitea):
+    gitea.token(["read:repository"])
+    first = [repo(1, "quickstart/a")] * 3
+    second = [repo(2, "quickstart/b")] * 3
+    gitea.routes[SEARCH] = pages((first, 2), (second, 2))
+    refused = refusal(gitea, max_repos=5)
+    assert refused.reason == "too_many_repos"
+    assert "more than 5 items" in str(refused)
+    assert len(gitea.searches()) == 2
+
+
 def test_a_repository_that_changes_between_pages_is_refused(gitea):
     gitea.token(["read:repository"])
     first = [repo(1, "quickstart/a"), repo(2, "quickstart/b")]
