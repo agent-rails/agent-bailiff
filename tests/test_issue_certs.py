@@ -481,6 +481,45 @@ def test_probes_of_silent_servers_finish_within_one_check_deadline(certs, monkey
     assert "the check ran past its 1s deadline" in error
 
 
+def test_a_probe_whose_name_resolves_slowly_ends_within_the_check_deadline(certs, monkeypatch, capsys):
+    assert run(certs, "issue") == 0
+    monkeypatch.setattr(certs_module, "CHECK_DEADLINE_SECONDS", 1, raising=False)
+    resolve = socket.getaddrinfo
+    release = threading.Event()
+
+    def slow(*arguments, **options):
+        release.wait(10)
+        return resolve(*arguments, **options)
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    try:
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            started = time.monotonic()
+            assert run(certs, "check", "--probe", f"gateway=localhost:{listener.getsockname()[1]}") == 1
+            elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert elapsed < 2
+    assert "gateway at localhost:" in (error := capsys.readouterr().err)
+    assert "resolving localhost ran past the 1s deadline" in error
+
+
+def test_a_probe_tries_the_next_address_when_one_refuses(certs, monkeypatch):
+    assert run(certs, "issue") == 0
+    server = serve_leaf(certs, "gateway")
+    with socket.create_server(("127.0.0.1", 0)) as closed:
+        refused = closed.getsockname()[1]
+    addresses = [
+        (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port))
+        for port in (refused, server.port)
+    ]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_arguments, **_options: addresses)
+    try:
+        assert run(certs, "check", "--probe", f"gateway=localhost:{server.port}") == 0
+    finally:
+        server.close()
+
+
 def test_a_probe_needs_a_known_service():
     with pytest.raises(SystemExit):
         certs_module.main(["check", "--probe", "jaeger=jaeger:4318"])

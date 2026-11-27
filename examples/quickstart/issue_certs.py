@@ -6,7 +6,8 @@ interrupted run, is refused. --reissue writes a new generation in every
 directory, switches each one's current symlink only after every file is on disk, then deletes every other
 generation, so no earlier key stays on disk. check fails when the set is incomplete, does not chain, names other
 hosts, or expires within the margin, and can probe each served certificate over TLS, including the configured
-upstream's when it is a server in the stack, all within one deadline below the healthcheck timeout."""
+upstream's when it is a server in the stack, all within one deadline below the healthcheck timeout; name resolution
+runs under that deadline too, and each address is tried with the time left."""
 
 from __future__ import annotations
 
@@ -21,11 +22,13 @@ import shutil
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -367,6 +370,41 @@ def seconds_left(deadline: float) -> float:
     return left
 
 
+def resolve(host: str, port: int, deadline: float) -> list[tuple[Any, ...]]:
+    found: list[tuple[Any, ...]] = []
+    failed: list[OSError] = []
+
+    def lookup() -> None:
+        try:
+            found.extend(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except OSError as error:
+            failed.append(error)
+
+    thread = threading.Thread(target=lookup, daemon=True)
+    thread.start()
+    thread.join(seconds_left(deadline))
+    if thread.is_alive():
+        raise TimeoutError(f"resolving {host} ran past the {CHECK_DEADLINE_SECONDS}s deadline")
+    if failed:
+        raise failed[0]
+    return found
+
+
+def connect(host: str, port: int, deadline: float) -> socket.socket:
+    failure = OSError(f"{host} resolved to no address")
+    for family, kind, protocol, _, address in resolve(host, port, deadline):
+        connection = socket.socket(family, kind, protocol)
+        try:
+            connection.settimeout(seconds_left(deadline))
+            connection.connect(address)
+        except OSError as error:
+            connection.close()
+            failure = error
+            continue
+        return connection
+    raise failure
+
+
 def probe(certs: Path, service: str, address: str, deadline: float) -> list[str]:
     host, _, port = address.rpartition(":")
     if not host or not port.isdigit():
@@ -374,7 +412,7 @@ def probe(certs: Path, service: str, address: str, deadline: float) -> list[str]
     context = ssl.create_default_context(cafile=certs / PUBLIC / CURRENT / "ca.pem")
     expected = load_certificate(certs / PUBLIC / CURRENT / f"{service}.pem").public_bytes(Encoding.DER)
     try:
-        with socket.create_connection((host, int(port)), timeout=seconds_left(deadline)) as raw:
+        with connect(host, int(port), deadline) as raw:
             raw.settimeout(seconds_left(deadline))
             with context.wrap_socket(raw, server_hostname=host) as tls:
                 served = tls.getpeercert(binary_form=True)
