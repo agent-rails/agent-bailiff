@@ -806,9 +806,17 @@ def fingerprint_of(credential: str) -> str:
 
 
 def write_handoff(name: str, text: str) -> None:
-    fd = os.open(HANDOFF / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+    partial = partial_handoff(name)
+    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
     with os.fdopen(fd, "w") as handoff:
         handoff.write(text)
+        handoff.flush()
+        os.fsync(handoff.fileno())
+    os.rename(partial, HANDOFF / name)
+
+
+def partial_handoff(name: str) -> Path:
+    return HANDOFF / f".{name}.partial"
 
 
 def read_handoff(name: str) -> str:
@@ -826,6 +834,7 @@ def take_handoff(name: str) -> str | None:
 def clear_handoff() -> None:
     for name in HANDOFF_FILES:
         (HANDOFF / name).unlink(missing_ok=True)
+        partial_handoff(name).unlink(missing_ok=True)
 
 
 def wait_for_handoff(
@@ -929,9 +938,8 @@ def bootstrap_gitea() -> str:
         "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
     )
     wait_for_handoff(("ready",), READY_SECONDS, missing)
-    stored = take_handoff("stored")
     try:
-        return check_and_hand_off(upstream, stored)
+        return check_and_hand_off(upstream, take_handoff("stored"))
     except BaseException:
         write_handoff("refused", "")
         raise

@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -756,6 +757,36 @@ def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap(monkeypatch):
     finally:
         server.close()
     assert elapsed < 3
+
+
+def test_a_handoff_file_appears_under_its_name_only_once_it_is_whole_and_synced(pair, monkeypatch):
+    events = []
+    fsync, rename = os.fsync, os.rename
+
+    def synced(fd):
+        events.append(("fsync", os.fstat(fd).st_size))
+        fsync(fd)
+
+    def renamed(source, target):
+        events.append(("rename", Path(target).name, Path(source).read_text(), os.path.lexists(target)))
+        rename(source, target)
+
+    monkeypatch.setattr(b.os, "fsync", synced)
+    monkeypatch.setattr(b.os, "rename", renamed)
+    b.write_handoff("fingerprint", fingerprint(MINTED))
+    assert events == [("fsync", 64), ("rename", "fingerprint", fingerprint(MINTED), False)]
+    assert [entry.name for entry in pair.handoff.iterdir()] == ["fingerprint"]
+    assert (pair.handoff / "fingerprint").stat().st_mode & 0o777 == 0o400
+
+
+def test_a_stored_handoff_bootstrap_cannot_read_writes_the_refused_marker(pair, capsys):
+    pair.stored = "token " + "x" * b.MAX_HANDOFF_BYTES
+    assert run_pair() == (1, 1)
+    err = capsys.readouterr().err
+    assert f"stored is larger than {b.MAX_HANDOFF_BYTES} bytes" in err
+    assert "bootstrap refused the credential, so nothing is stored" in err
+    assert pair.built == [] and pair.cli.calls == []
+    assert list(pair.handoff.iterdir()) == []
 
 
 def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
