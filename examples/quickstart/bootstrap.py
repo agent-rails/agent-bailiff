@@ -992,9 +992,13 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
             "--credential-id", upstream.credential_id, "--target", upstream.target,
             "--expect-fingerprint", fingerprint, stdin=read_handoff("token"),
         )  # fmt: skip
-    except BaseException:
-        write_handoff("unsaved", "")
-        raise
+    except BaseException as error:
+        held = stored_credential(upstream)
+        if held is None or not hmac.compare_digest(fingerprint_of(held), fingerprint):
+            write_handoff("unsaved", "")
+            raise
+        write_handoff("saved", "")
+        raise BootstrapError(f"{error}; the store holds the checked credential anyway, so it is kept") from None
     write_handoff("saved", "")
     return "created"
 
@@ -1055,11 +1059,7 @@ def bootstrap_gitea() -> str:
         raise
     if minted is None:
         return "created" if created else "kept"
-    try:
-        await_store()
-    except BaseException:
-        revoke_credential(gitea, minted)
-        raise
+    await_store(gitea, minted)
     retire_credentials(gitea, minted)
     return "created"
 
@@ -1084,11 +1084,15 @@ def check_and_hand_off(upstream: Upstream, stored: str | None) -> tuple[Gitea, M
     return gitea, minted, bool(created)
 
 
-def await_store() -> None:
-    missing = f"credential-put reported no store of the minted credential within {HANDOFF_SECONDS}s"
+def await_store(gitea: Gitea, minted: Minted) -> None:
+    missing = (
+        f"credential-put reported no store of the minted credential within {HANDOFF_SECONDS}s, "
+        f"so token {minted.token_id} stays in gitea until a later run keeps or deletes it"
+    )
     result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
     take_handoff(result)
     if result == "unsaved":
+        revoke_credential(gitea, minted)
         raise BootstrapError("credential-put did not store the minted credential, so it is deleted from gitea")
 
 

@@ -558,6 +558,7 @@ class FakeCli:
         self.calls = []
         self.refused = {}
         self.put_fails = False
+        self.store = None
         self.events = [] if events is None else events
 
     def __call__(self, command, **options):
@@ -572,6 +573,7 @@ class FakeCli:
         if self.put_fails:
             return subprocess.CompletedProcess(command, 1, "", "agent-bailiff put-credential refused: a detail\n")
         self.events.append(("stored", stdin))
+        self.store = stdin
         return subprocess.CompletedProcess(command, 0, "stored\n", "")
 
     def of(self, command):
@@ -596,7 +598,7 @@ def pair(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "Gitea", lambda base: fake.built.append(base) or fake.gitea)
     monkeypatch.setattr(b, "seed", lambda gitea, admin: [])
     monkeypatch.setattr(b, "token_reach", lambda gitea, credential: {})
-    monkeypatch.setattr(b, "stored_credential", lambda upstream: fake.stored)
+    monkeypatch.setattr(b, "stored_credential", lambda upstream: fake.cli.store or fake.stored)
     monkeypatch.setattr(b.subprocess, "run", fake.cli)
     return fake
 
@@ -716,6 +718,58 @@ def test_a_remint_credential_put_fails_to_store_deletes_only_the_new_token(pair,
     assert pair.events == [("minted", 9), ("deleted", 9)]
     assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
     assert "credential-put did not store the minted credential, so it is deleted from gitea" in capsys.readouterr().err
+
+
+def test_a_put_that_stores_then_times_out_keeps_the_new_token_and_fails_credential_put(
+    pair, gitea, monkeypatch, capsys
+):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def stored_then_timed_out(command, **options):
+        result = pair.cli(command, **options)
+        if command[3] == "custodian":
+            raise subprocess.TimeoutExpired(command, b.CLI_TIMEOUT_SECONDS)
+        return result
+
+    monkeypatch.setattr(b.subprocess, "run", stored_then_timed_out)
+    assert run_pair() == (1, 0)
+    assert pair.events == [("minted", 9), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 9}
+    err = capsys.readouterr().err
+    assert "did not finish within 60s; the store holds the checked credential anyway, so it is kept" in err
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_both(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 2)
+    write = b.write_handoff
+
+    def disk_full_on_saved(name, text):
+        if name == "saved":
+            raise OSError(28, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", disk_full_on_saved)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("stored", MINTED)]
+    assert gitea.tokens.keys() == {7, 8, 9}
+    err = capsys.readouterr().err
+    assert "bootstrap credential refused: [Errno 28] No space left on device" in err
+    assert "reported no store of the minted credential within 2s, so token 9 stays in gitea" in err
+
+
+def test_a_store_result_that_never_comes_keeps_the_new_token_and_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0.2)
+    monkeypatch.setattr(b, "store_handed_off", lambda upstream, stored: b.wait_for_handoff(("checked",), 10, "unused"))
+    assert run_pair() == (0, 1)
+    assert pair.events == [("minted", 9)]
+    assert gitea.tokens.keys() == {7, 8, 9}
+    assert "within 0.2s, so token 9 stays in gitea until a later run keeps or deletes it" in capsys.readouterr().err
 
 
 def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, gitea, monkeypatch, capsys):
