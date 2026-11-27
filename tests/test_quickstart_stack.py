@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -234,6 +235,12 @@ store = b.CredentialStore.open(settings.credentials, b.LocalBackend.load(setting
 stored = store.get(b.TENANT, upstream.credential_id, upstream.target)
 print(json.dumps({"fingerprint": hashlib.sha256(stored.secret).hexdigest(), "exceptions": sorted(stored.exceptions)}))
 """
+HANDOFF_CLEAR_SCRIPT = """
+import sys
+sys.path.insert(0, "/app/quickstart")
+import bootstrap as b
+b.clear_handoff()
+"""
 ADMIN_TOKEN_CHECK_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
@@ -410,13 +417,16 @@ class Stack:
         }
 
     def compose(self, *arguments, timeout=RUN_TIMEOUT_SECONDS, stdin=None, expect=0):
-        selected = [arg for profile in self.profiles for arg in ("--profile", profile)]
-        command = ["docker", "compose", *self.file_arguments(), *selected, *arguments]
-        result = subprocess.run(
-            command, env=self.env, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        result = self.run_result(*arguments, timeout=timeout, stdin=stdin)
         assert result.returncode == expect, f"{' '.join(arguments)} failed:\n{result.stdout}\n{result.stderr}"
         return result.stdout
+
+    def run_result(self, *arguments, timeout=RUN_TIMEOUT_SECONDS, stdin=None):
+        selected = [arg for profile in self.profiles for arg in ("--profile", profile)]
+        command = ["docker", "compose", *self.file_arguments(), *selected, *arguments]
+        return subprocess.run(
+            command, env=self.env, input=stdin, capture_output=True, text=True, timeout=timeout, check=False
+        )
 
     def file_arguments(self):
         return [arg for path in self.files for arg in ("--file", str(path))]
@@ -758,3 +768,34 @@ def test_cert_watch_turns_unhealthy_on_a_leaf_within_the_margin(stack):
     assert state["Log"][-1]["ExitCode"] == 1, state
     output = state["Log"][-1]["Output"]
     assert all(f"{name}.pem expires at" in output for name in certs_module.SERVICES), output
+
+
+def wait_for_ready(name):
+    for _ in range(60):
+        probe = ["docker", "exec", name, "python", "-c", "import os; os.lstat('/run/bailiff/credential-handoff/ready')"]
+        if subprocess.run(probe, capture_output=True, timeout=RUN_TIMEOUT_SECONDS, check=False).returncode == 0:
+            return
+        time.sleep(1)
+    pytest.fail(f"{name} exported no ready within 60s")
+
+
+def is_running(name):
+    state = ["docker", "inspect", "--format", "{{.State.Running}}", name]
+    return subprocess.run(state, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=True).stdout
+
+
+def test_a_second_credential_put_refuses_while_one_holds_the_handoff(stack):
+    holder = f"bailiff-probe-{uuid.uuid4().hex[:8]}"
+    stack.compose("run", "-d", "--no-deps", "--name", holder, "credential-put")
+    try:
+        wait_for_ready(holder)
+        second = stack.run_result("run", "--rm", "--no-deps", "credential-put")
+        assert second.returncode == 1, second
+        assert "bootstrap credential refused: another credential-put is running on " in second.stderr, second
+        assert is_running(holder).strip() == "true"
+        wait_for_ready(holder)
+    finally:
+        subprocess.run(["docker", "rm", "-f", holder], capture_output=True, timeout=RUN_TIMEOUT_SECONDS, check=False)
+        stack.compose(
+            "run", "--rm", "--no-deps", "--entrypoint", "python", "credential-put", "-c", HANDOFF_CLEAR_SCRIPT
+        )
