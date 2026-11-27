@@ -76,6 +76,7 @@ BUDGET = 100
 DRIVER_REPLY_SECONDS = 300
 DRIVER_EXIT_SECONDS = 30
 UPSTREAM_BACKLOG = 256
+QUIESCE_SECONDS = 70
 TTL_NS = (DEFAULT_INFLIGHT_TTL + 1) * 1_000_000_000
 
 
@@ -87,6 +88,7 @@ class TicketUpstream(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), TicketHandler)
         self.lock = threading.Lock()
         self.executions = Counter()
+        self.active = 0
         self.result = b"{}"
         self.thread = threading.Thread(target=self.serve_forever, daemon=True)
         self.thread.start()
@@ -101,8 +103,13 @@ class TicketUpstream(ThreadingHTTPServer):
             self.result = result
 
     def take(self):
-        with self.lock:
-            return dict(self.executions)
+        deadline = time.monotonic() + QUIESCE_SECONDS
+        while time.monotonic() < deadline:
+            with self.lock:
+                if not self.active:
+                    return dict(self.executions)
+            time.sleep(0.05)
+        raise AssertionError(f"upstream still handling calls after {QUIESCE_SECONDS}s")
 
     def stop(self):
         self.shutdown()
@@ -114,6 +121,15 @@ class TicketHandler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
+        with self.server.lock:
+            self.server.active += 1
+        try:
+            self.answer()
+        finally:
+            with self.server.lock:
+                self.server.active -= 1
+
+    def answer(self):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         if "id" not in body:
             self.send_response(202)

@@ -66,19 +66,26 @@ def fill(releases, prefix, count, tenants=1):
         releases.commit(reservation, "release", ENTRY)
 
 
+def join_all(workers):
+    deadline = time.monotonic() + JOIN_SECONDS
+    for item in workers:
+        item.join(max(0, deadline - time.monotonic()))
+    assert not [item for item in workers if item.is_alive()], f"workers did not stop within {JOIN_SECONDS}s"
+
+
 def contend(threads, occupancy):
     releases = default_map(Clock(), DEFAULT_INFLIGHT_MAX + threads)
     fill(releases, "held", occupancy, tenants=8)
     reserve_us, take_us, errors = [], [], []
     lock = threading.Lock()
-    start = threading.Barrier(threads + 1)
+    start = threading.Barrier(threads + 1, timeout=JOIN_SECONDS)
     stop = threading.Event()
 
     def worker(index):
         local_reserve, local_take = [], []
-        start.wait()
         number = 0
         try:
+            start.wait()
             while not stop.is_set():
                 key = f"w{index}-{number}"
                 began = time.perf_counter_ns()
@@ -91,6 +98,7 @@ def contend(threads, occupancy):
                 local_take.append((time.perf_counter_ns() - committed) / 1e3)
                 number += 1
         except BaseException as error:
+            start.abort()
             stop.set()
             with lock:
                 errors.append(error)
@@ -98,16 +106,19 @@ def contend(threads, occupancy):
             reserve_us.extend(local_reserve)
             take_us.extend(local_take)
 
-    workers = [threading.Thread(target=worker, args=(index,)) for index in range(threads)]
+    workers = [threading.Thread(target=worker, args=(index,), daemon=True) for index in range(threads)]
     for item in workers:
         item.start()
-    start.wait()
+    try:
+        start.wait()
+    except threading.BrokenBarrierError:
+        stop.set()
+        join_all(workers)
+        raise errors[0] if errors else AssertionError(f"workers did not start within {JOIN_SECONDS}s") from None
     began = time.perf_counter()
     time.sleep(RUN_SECONDS)
     stop.set()
-    for item in workers:
-        item.join(JOIN_SECONDS)
-    assert not [item for item in workers if item.is_alive()], f"workers did not stop within {JOIN_SECONDS}s"
+    join_all(workers)
     if errors:
         raise errors[0]
     wall = time.perf_counter() - began
