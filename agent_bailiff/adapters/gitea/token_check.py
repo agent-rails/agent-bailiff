@@ -27,6 +27,7 @@ PAGE_LIMIT = 50
 DEFAULT_MAX_REPOS = 1000
 MAX_NAMED_REPOS = 10
 DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_TIMEOUT_SECONDS = 3600.0
 MAX_RESPONSE_BYTES = 1 << 20
 READ_CHUNK_BYTES = 65536
 MAX_SHOWN_CHARS = 64
@@ -83,6 +84,8 @@ def check_token(
     binding = parse_binding(binding_resource)
     if isinstance(max_repos, bool) or not isinstance(max_repos, int) or max_repos < 1:
         raise ValueError("max_repos must be a positive int")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= MAX_TIMEOUT_SECONDS:
+        raise ValueError(f"timeout must be a number of seconds above 0 and at most {MAX_TIMEOUT_SECONDS:g}")
     provider = Provider(
         api_url, header_value, cafile=cafile, unix_socket=unix_socket, deadline=clock() + timeout, clock=clock
     )

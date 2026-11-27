@@ -378,9 +378,6 @@ def test_a_credential_check_bound_that_is_not_a_bounded_positive_int_fails_boots
 
 def test_the_credential_check_bounds_are_capped_at_ten_thousand_repositories_and_a_minute():
     assert (b.MAX_CHECK_REPOS, b.MAX_CHECK_TIMEOUT_SECONDS) == (10_000, 60)
-    assert b.GITEA_HEALTH_SECONDS + 2 * (b.MAX_CHECK_TIMEOUT_SECONDS + cli.CREDENTIAL_CHECK_GRACE_SECONDS) < (
-        b.HANDOFF_SECONDS
-    )
 
 
 @pytest.mark.parametrize("field", ["max_repos", "check_timeout_seconds"])
@@ -757,6 +754,16 @@ class FakeCli:
         return [(arguments, stdin) for arguments, stdin in self.calls if arguments[0] == command]
 
 
+SEED, TOKEN_REACH = b.seed, b.token_reach
+
+
+def short_handoff(monkeypatch, tmp_path, seconds):
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", seconds)
+    monkeypatch.setattr(b, "HANDOFF_RESERVE_SECONDS", 0)
+    monkeypatch.setattr(b, "CREDENTIAL_CHECK_GRACE_SECONDS", 0)
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, check_timeout_seconds=1))
+
+
 @pytest.fixture
 def pair(tmp_path, monkeypatch):
     handoff = tmp_path / "handoff"
@@ -769,10 +776,10 @@ def pair(tmp_path, monkeypatch):
     monkeypatch.setattr(b, "HANDOFF", handoff)
     monkeypatch.setattr(b, "HANDOFF_POLL_SECONDS", 0.01)
     monkeypatch.setattr(b, "READY_SECONDS", 10)
-    monkeypatch.setattr(b, "HANDOFF_SECONDS", 10)
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 100)
     monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
     monkeypatch.setattr(b, "ADMIN_PASSWORD", tmp_path / "password")
-    monkeypatch.setattr(b, "Gitea", lambda base: fake.built.append(base) or fake.gitea)
+    monkeypatch.setattr(b, "Gitea", lambda base, budget=None: fake.built.append(base) or fake.gitea)
     monkeypatch.setattr(b, "seed", lambda gitea, admin: [])
     monkeypatch.setattr(b, "token_reach", lambda gitea, credential: {})
     monkeypatch.setattr(b, "stored_credential", lambda upstream: fake.cli.store or fake.stored)
@@ -819,12 +826,34 @@ def test_the_upstream_credential_check_bounds_reach_the_check_under_a_longer_sub
     assert run_pair() == (0, 0)
     checks = pair.cli.of("credential-check")
     assert [arguments[-4:] for arguments, _ in checks] == [("--max-repos", "10000", "--timeout", "60")] * 2
-    assert pair.cli.timeouts == [
-        ("credential-check", 60 + b.CLI_TIMEOUT_SECONDS),
-        ("credential-check", 60 + b.CLI_TIMEOUT_SECONDS),
-        ("custodian", b.CLI_TIMEOUT_SECONDS),
-    ]
-    assert 60 + b.CLI_TIMEOUT_SECONDS > 60 + cli.CREDENTIAL_CHECK_GRACE_SECONDS
+    [first, second, put] = pair.cli.timeouts
+    assert [name for name, _ in (first, second)] == ["credential-check"] * 2 and put == ("custodian", 60)
+    assert all(60 + cli.CREDENTIAL_CHECK_GRACE_SECONDS < seconds <= 60 + 60 for _, seconds in (first, second))
+
+
+@pytest.mark.parametrize(("left", "expected"), [(1000, 120), (70, 70)])
+def test_a_check_at_the_timeout_cap_runs_under_a_subprocess_timeout_past_its_deadline_and_within_the_budget(
+    tmp_path, monkeypatch, left, expected
+):
+    upstream = b.load_upstream(write_upstream(tmp_path, check_timeout_seconds=60))
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget(left, clock=lambda: clock.now)
+    timeouts = []
+
+    def run(command, **options):
+        timeouts.append(options["timeout"])
+        return subprocess.CompletedProcess(command, 0, json.dumps({"fingerprint": fingerprint(MINTED)}), "")
+
+    monkeypatch.setattr(b.subprocess, "run", run)
+    assert b.check_credential(upstream, MINTED, budget) == {"fingerprint": fingerprint(MINTED)}
+    assert timeouts == [expected] and expected > 60 + cli.CREDENTIAL_CHECK_GRACE_SECONDS
+
+
+def test_a_check_the_budget_cannot_cover_is_refused_without_running(tmp_path, monkeypatch):
+    upstream = b.load_upstream(write_upstream(tmp_path, check_timeout_seconds=60))
+    monkeypatch.setattr(b.subprocess, "run", lambda command, **options: pytest.fail("the check ran"))
+    with pytest.raises(b.BootstrapError, match=r"^60\.5s of the 295s hand-off budget is left, less than the 61s"):
+        b.check_credential(upstream, MINTED, b.Budget(295, clock=iter([0.0, 234.5]).__next__))
 
 
 def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_put(pair, gitea, capsys):
@@ -977,10 +1006,12 @@ def test_a_put_that_stores_then_times_out_keeps_the_new_token_and_fails_credenti
     assert list(pair.handoff.iterdir()) == []
 
 
-def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_both(pair, gitea, monkeypatch, capsys):
+def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_both(
+    pair, gitea, tmp_path, monkeypatch, capsys
+):
     pair.stored = STORED
     pair.cli.refused[STORED] = "broader_scopes"
-    monkeypatch.setattr(b, "HANDOFF_SECONDS", 2)
+    short_handoff(monkeypatch, tmp_path, 2)
     write = b.write_handoff
 
     def disk_full_on_saved(name, text):
@@ -997,15 +1028,17 @@ def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_bot
     assert "reported no store of the minted credential within 2s, so token 9 stays in gitea" in err
 
 
-def test_a_store_result_that_never_comes_keeps_the_new_token_and_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+def test_a_store_result_that_never_comes_keeps_the_new_token_and_fails_bootstrap(
+    pair, gitea, tmp_path, monkeypatch, capsys
+):
     pair.stored = STORED
     pair.cli.refused[STORED] = "broader_scopes"
-    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0.2)
+    short_handoff(monkeypatch, tmp_path, 1.2)
     monkeypatch.setattr(b, "store_handed_off", lambda upstream, stored: b.wait_for_handoff(("checked",), 10, "unused"))
     assert run_pair() == (0, 1)
     assert pair.events == [("minted", 9)]
     assert gitea.tokens.keys() == {7, 8, 9}
-    assert "within 0.2s, so token 9 stays in gitea until a later run keeps or deletes it" in capsys.readouterr().err
+    assert "within 1.2s, so token 9 stays in gitea until a later run keeps or deletes it" in capsys.readouterr().err
 
 
 def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, gitea, monkeypatch, capsys):
@@ -1024,6 +1057,7 @@ def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, 
 
 def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
     b.export_credential(STORED)
+    b.write_handoff("started", "")
     b.hand_off("kept", STORED, fingerprint(MINTED))
     with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
@@ -1032,9 +1066,10 @@ def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair
 
 def test_every_handoff_file_is_owner_read_only(pair):
     b.export_credential(STORED)
+    b.write_handoff("started", "")
     b.hand_off("created", MINTED, fingerprint(MINTED))
     modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
-    assert modes == dict.fromkeys(("stored", "ready", "token", "fingerprint", "checked"), 0o400)
+    assert modes == dict.fromkeys(("stored", "ready", "started", "token", "fingerprint", "checked"), 0o400)
 
 
 def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
@@ -1202,7 +1237,7 @@ def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monke
     monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
     assert b.main(["credential"]) == 1
     err = capsys.readouterr().err
-    assert "bootstrap handed off no checked credential within 0s" in err
+    assert "bootstrap did not start within 0s" in err
     assert "run credential-put and bootstrap together" in err
     assert pair.cli.calls == [] and list(pair.handoff.iterdir()) == []
 
@@ -1211,10 +1246,100 @@ def test_credential_put_ignores_a_stale_checked_handoff_from_an_earlier_run(pair
     pair.stored = STORED
     (pair.handoff / "fingerprint").write_text(fingerprint(STORED))
     (pair.handoff / "checked").write_text("kept")
+    (pair.handoff / "started").write_text("")
     monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
     assert b.main(["credential"]) == 1
-    assert "bootstrap handed off no checked credential within 0s" in capsys.readouterr().err
+    assert "bootstrap did not start within 0s" in capsys.readouterr().err
     assert list(pair.handoff.iterdir()) == []
+
+
+def test_credential_put_names_bootstrap_when_it_starts_but_hands_off_nothing(pair, monkeypatch, capsys):
+    pair.stored = STORED
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0.2)
+    with ThreadPoolExecutor(1) as pool:
+        put = pool.submit(b.main, ["credential"])
+        b.wait_for_handoff(("ready",), 10, "no ready")
+        b.write_handoff("started", "")
+        assert put.result(timeout=30) == 1
+    assert "bootstrap handed off no checked credential within 0.2s" in capsys.readouterr().err
+
+
+def test_credential_put_times_its_wait_for_the_check_from_when_bootstrap_starts(pair, tmp_path, monkeypatch):
+    short_handoff(monkeypatch, tmp_path, 2)
+    pair.stored = STORED
+
+    def slow_check(command, **options):
+        if "credential-check" in command:
+            time.sleep(1)
+        return pair.cli(command, **options)
+
+    monkeypatch.setattr(b.subprocess, "run", slow_check)
+    with ThreadPoolExecutor(1) as pool:
+        put = pool.submit(b.main, ["credential"])
+        b.wait_for_handoff(("ready",), 10, "no ready")
+        time.sleep(1.5)
+        assert (b.main(["gitea"]), put.result(timeout=30)) == (0, 0)
+
+
+class ChargedGitea(b.Gitea):
+    def __init__(self, events, clock, budget=None):
+        super().__init__(b.GITEA_SOCKET, budget)
+        self.answers = TokenGitea(events)
+        self.answers.demo[b.basic(b.ADMIN, "admin password")] = 200
+        self.clock = clock
+        self.calls = []
+
+    def wait_healthy(self, seconds):
+        self.clock.now += seconds
+        self.calls.append(("health", "", self.clock.now, self.budget is not None))
+
+    def send(self, method, path, headers, data, seconds):
+        self.clock.now += seconds
+        self.calls.append((method, path, self.clock.now, self.budget is not None))
+        if path.startswith(f"/api/v1/repos/{b.ORG}/demo/issues?"):
+            return 200, [{"title": b.INJECTION_TITLE}]
+        if "/collaborators/" in path:
+            return 204, None
+        if path.startswith("/api/v1/repos/search"):
+            return 200, {"data": []}
+        body = None if data is None else json.loads(data)
+        return self.answers.request(method, path, headers.get("authorization"), body)
+
+
+@pytest.mark.parametrize(("check_timeout", "minted"), [(60, False), (10, True)])
+def test_bootstrap_refuses_rather_than_run_past_the_handoff_budget_when_every_call_takes_its_deadline(
+    pair, tmp_path, monkeypatch, capsys, check_timeout, minted
+):
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 300)
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, check_timeout_seconds=check_timeout))
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget
+    monkeypatch.setattr(b, "Budget", lambda seconds: budget(seconds, clock=lambda: clock.now))
+    charged = ChargedGitea(pair.events, clock)
+    monkeypatch.setattr(b, "Gitea", lambda base, budget=None: setattr(charged, "budget", budget) or charged)
+    pair.cli.refused[STORED] = "broader_scopes"
+    cli_run = pair.cli
+
+    def charged_check(command, **options):
+        clock.now += check_timeout + cli.CREDENTIAL_CHECK_GRACE_SECONDS
+        return cli_run(command, **options)
+
+    monkeypatch.setattr(b.subprocess, "run", charged_check)
+    monkeypatch.setattr(b, "seed", SEED)
+    monkeypatch.setattr(b, "token_reach", TOKEN_REACH)
+    (pair.handoff / "stored").write_text(STORED)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "of the 295s hand-off budget is left" in err
+    budgeted = [call for call in charged.calls if call[3]]
+    assert budgeted and max(at for _, _, at, _ in budgeted) <= 295
+    assert sorted(entry.name for entry in pair.handoff.iterdir()) == ["ready", "refused", "started"]
+    mints = [at for method, path, at, _ in charged.calls if method == "POST" and path.endswith("/tokens")]
+    assert len(mints) == int(minted) and all(at <= 295 for at in mints)
+    assert [event for event in pair.events if event[0] in ("minted", "deleted")] == (
+        [("minted", 9), ("deleted", 9)] if minted else []
+    )
 
 
 def test_bootstrap_alone_fails_at_the_deadline_naming_credential_put(pair, monkeypatch, capsys):

@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import shutil
 import socket
 import socketserver
@@ -524,6 +525,13 @@ def test_an_item_cap_that_is_not_a_positive_int_is_refused(gitea, max_repos):
     assert gitea.requests == []
 
 
+@pytest.mark.parametrize("timeout", [0, -1, True, "5", None, math.nan, math.inf, 3600.5, 1e300])
+def test_a_timeout_that_is_not_a_bounded_positive_number_is_refused(gitea, timeout):
+    with pytest.raises(ValueError, match="^timeout must be a number of seconds above 0 and at most 3600$"):
+        check(gitea, timeout=timeout)
+    assert gitea.requests == []
+
+
 def test_a_search_past_the_item_cap_is_refused_after_one_page(gitea):
     gitea.token(["read:repository"])
     gitea.visible = [repo(index, f"someone/p{index}", private=False) for index in range(3)]
@@ -764,12 +772,43 @@ def test_credential_check_runs_the_check_under_its_timeout_and_item_cap(monkeypa
     assert armed == [timeout + cli.CREDENTIAL_CHECK_GRACE_SECONDS, 0]
 
 
-@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "-inf"])
-def test_credential_check_refuses_a_timeout_that_is_not_a_positive_finite_number(gitea, capsys, timeout):
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf", "-inf", "3600.5", "1e8", "1e300"])
+def test_credential_check_refuses_a_timeout_that_is_not_a_bounded_positive_number(gitea, capsys, timeout):
     assert credential_check(gitea, NEEDLE.encode() + b"\n", f"--timeout={timeout}") == cli.EXIT_REFUSED
     captured = capsys.readouterr()
-    assert captured.out == "" and "--timeout must be a positive finite number of seconds" in captured.err
+    assert captured.out == ""
+    assert (
+        captured.err
+        == "agent-bailiff credential-check refused: --timeout must be a number of seconds above 0 and at most 3600\n"
+    )
     assert gitea.requests == []
+
+
+def test_credential_check_refuses_a_bad_timeout_before_it_reads_stdin(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_read_line", lambda: pytest.fail("stdin was read"))
+    assert cli.main(["credential-check", "--provider", "gitea", "--api-url", "http://127.0.0.1:9/api/v1",
+                     "--binding-resource", "gitea/repos/quickstart/*", "--required", "read:repository",
+                     "--timeout", "1e300"]) == cli.EXIT_REFUSED  # fmt: skip
+    assert "--timeout must be a number of seconds above 0 and at most 3600" in capsys.readouterr().err
+
+
+def test_credential_check_accepts_its_largest_timeout(monkeypatch):
+    armed = []
+    setitimer = cli.signal.setitimer
+
+    def arm(which, seconds):
+        armed.append(seconds)
+        setitimer(which, 0)
+
+    def recorded(header, **options):
+        raise TokenCheckRefused("provider_unreachable", "recorded")
+
+    monkeypatch.setattr(cli, "check_token", recorded)
+    monkeypatch.setattr(cli.signal, "setitimer", arm)
+    code = credential_check(None, NEEDLE.encode() + b"\n", "--timeout", "3600", api_url="http://127.0.0.1:9/api/v1")
+    assert code == cli.EXIT_REFUSED
+    assert armed == [3600 + cli.CREDENTIAL_CHECK_GRACE_SECONDS, 0]
+    assert token_check.MAX_TIMEOUT_SECONDS == 3600
 
 
 def test_credential_check_fingerprint_matches_put_credential(gitea, capsys):

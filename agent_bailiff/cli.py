@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import os
 import signal
 import sys
@@ -26,6 +25,7 @@ from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
 from agent_bailiff.adapters.gitea.token_check import (
     DEFAULT_MAX_REPOS,
     DEFAULT_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_SECONDS,
     TokenCheckRefused,
     check_token,
 )
@@ -1120,8 +1120,10 @@ def _put_credential(args: argparse.Namespace) -> int:
 
 
 def _credential_check(args: argparse.Namespace) -> int:
-    if not 0 < args.timeout < math.inf:
-        return _refused("credential-check", "--timeout must be a positive finite number of seconds")
+    if not 0 < args.timeout <= MAX_TIMEOUT_SECONDS:
+        return _refused(
+            "credential-check", f"--timeout must be a number of seconds above 0 and at most {MAX_TIMEOUT_SECONDS:g}"
+        )
     try:
         secret = _read_line()
     except ValueError as exc:
