@@ -16,7 +16,9 @@ from agent_bailiff.custodian.config import MAX_UPSTREAM_TIMEOUT
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
-TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies"})
+TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies", "gateways"})
+GATEWAY_LISTENER_KEYS = frozenset({"port", "tls"})
+GATEWAY_TLS_KEYS = frozenset({"cert", "key"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
 LOGGING_KEYS = frozenset({"level", "format"})
 MCP_KEYS = frozenset(
@@ -105,6 +107,8 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         problems.append("the gateway config must have an mcp object")
         return tuple(problems)
     _only_keys(problems, "mcp", mcp, MCP_KEYS)
+    if "gateways" in document:
+        _check_gateways(problems, document["gateways"], mcp)
     if mcp.get("statefulMode") != "stateless":
         problems.append('mcp.statefulMode must be "stateless"; the stateful event stream reaches upstreams unchecked')
     _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
@@ -112,6 +116,27 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
     _check_access_log(problems, document.get("frontendPolicies"))
     _check_credential_headers(problems, document, expected.credential_headers)
     return tuple(problems)
+
+
+def _check_gateways(problems: list[str], gateways: object, mcp: Mapping[str, Any]) -> None:
+    if not isinstance(gateways, dict) or set(gateways) != {"default"}:
+        problems.append("gateways must be an object holding only default")
+        return
+    listener = gateways["default"]
+    if not isinstance(listener, dict) or set(listener) != GATEWAY_LISTENER_KEYS:
+        problems.append("gateways.default must hold only port and tls")
+        return
+    if not _is_valid_target_port(listener["port"]):
+        problems.append("gateways.default.port must be a number from 1 to 65535")
+    tls = listener["tls"]
+    if (
+        not isinstance(tls, dict)
+        or set(tls) != GATEWAY_TLS_KEYS
+        or not all(isinstance(tls[key], str) and tls[key] for key in GATEWAY_TLS_KEYS)
+    ):
+        problems.append("gateways.default.tls must hold only cert and key, each a non-empty path")
+    if "port" in mcp:
+        problems.append("mcp.port must be absent when gateways is set; it would keep a plaintext listener")
 
 
 def _check_logging(problems: list[str], logging: object) -> None:

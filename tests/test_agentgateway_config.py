@@ -671,6 +671,64 @@ def test_backend_tls_beyond_a_non_empty_root_is_refused(backend_tls):
     assert any("backendTLS" in problem for problem in problems_after(change))
 
 
+GATEWAY_TLS = {"cert": "/var/lib/bailiff/certs/gateway.pem", "key": "/var/lib/bailiff/gateway-key/gateway.key"}
+
+
+def tls_listener(config):
+    config["gateways"] = {"default": {"port": config["mcp"].pop("port"), "tls": dict(GATEWAY_TLS)}}
+    return config
+
+
+def test_a_tls_gateways_listener_is_accepted():
+    assert validate_gateway_config(tls_listener(gateway_config()), EXPECTED) == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda gateways: gateways.update(other=gateways["default"]),
+        lambda gateways: gateways.update(public=gateways.pop("default")),
+        lambda gateways: gateways["default"].update(bind="0.0.0.0"),
+        lambda gateways: gateways["default"].pop("tls"),
+        lambda gateways: gateways["default"].pop("port"),
+        lambda gateways: gateways["default"]["tls"].update(root="/ca.pem"),
+        lambda gateways: gateways["default"]["tls"].update(cert=""),
+        lambda gateways: gateways["default"]["tls"].update(key=7),
+        lambda gateways: gateways["default"]["tls"].pop("key"),
+        lambda gateways: gateways["default"].update(tls="/cert.pem"),
+        lambda gateways: gateways["default"].update(port=0),
+        lambda gateways: gateways["default"].update(port=65536),
+        lambda gateways: gateways["default"].update(port="8443"),
+        lambda gateways: gateways["default"].update(port=True),
+        lambda gateways: gateways.clear(),
+    ],
+)
+def test_a_gateways_listener_beyond_one_tls_default_is_refused(change):
+    config = tls_listener(gateway_config())
+    change(config["gateways"])
+    assert any(problem.startswith("gateways") for problem in validate_gateway_config(config, EXPECTED))
+
+
+@pytest.mark.parametrize("gateways", [None, [], "default", {"default": None}])
+def test_a_malformed_gateways_value_is_refused(gateways):
+    config = gateway_config()
+    del config["mcp"]["port"]
+    config["gateways"] = gateways
+    assert any(problem.startswith("gateways") for problem in validate_gateway_config(config, EXPECTED))
+
+
+def test_an_mcp_port_beside_a_gateways_listener_is_refused():
+    config = tls_listener(gateway_config())
+    config["mcp"]["port"] = 8080
+    problems = validate_gateway_config(config, EXPECTED)
+    assert any("mcp.port" in problem and "plaintext" in problem for problem in problems), problems
+
+
+def test_check_config_accepts_a_tls_gateways_listener(owned_files):
+    result = run_check(owned_files, tls_listener(gateway_config()))
+    assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
+
+
 @pytest.mark.parametrize(
     "change",
     [

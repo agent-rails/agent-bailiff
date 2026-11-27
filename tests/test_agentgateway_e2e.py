@@ -380,8 +380,8 @@ def stack(binary, workdir, private, make_decider, make_custodian, stack_options)
     expected = GatewayExpectations(
         sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset({"Authorization"})
     )
-    assert validate_gateway_config(config, expected) == ()
     context = serve_over_tls(config, workdir) if stack_options.get("tls") else None
+    assert validate_gateway_config(config, expected) == ()
     gateway = Gateway(binary, config, workdir)
     try:
         yield {
