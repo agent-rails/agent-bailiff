@@ -226,6 +226,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 
 - No stop of an in-flight call. Once the custodian releases a token, the call proceeds; a revoke stops only later calls.
 - No rollback or compensation of an upstream effect.
+- Bootstrap's 10 s deadline on each Gitea request does not cover resolving the Gitea host name: a DNS lookup that hangs is bounded only by the resolver's own timeout.
 - No approval service. Decide can refuse with `needs_approval`; nothing here grants approval.
 - Credential passthrough (H4): gitea-mcp receives the injected `Authorization` header and forwards it to Gitea. MCP guidance forbids a server accepting a token issued for another service; this stack trusts gitea-mcp as part of the upstream. A compromised gitea-mcp holds every released token for the length of a call.
 - Token reach is wider than the task. The token reads `quickstart/payroll`, including `salaries.csv`. Decide refuses `get_file_contents` on `payroll` because neither the tool nor the repository is in the task scope.
