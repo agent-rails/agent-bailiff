@@ -567,7 +567,6 @@ def test_a_duplicate_target_name_is_refused():
         {"host": "https://mcp.example.com/mcp"},
         {"host": "https://10.0.0.5:8443/mcp"},
         {"host": "http://127.0.0.1:8080/mcp"},
-        {"host": "http://localhost:8080/mcp"},
         {"host": "http://[::1]:8080/mcp"},
         {"host": "127.0.0.1"},
         {"host": "[::1]", "port": 8080, "path": "/mcp"},
@@ -582,6 +581,9 @@ def test_a_gateway_bound_target_over_https_or_loopback_is_accepted(target):
     "target",
     [
         {"host": "http://gitea-mcp:8080/mcp"},
+        {"host": "http://localhost:8080/mcp"},
+        {"host": "localhost:8080"},
+        {"host": "localhost", "port": 8080, "path": "/mcp"},
         {"host": "gitea-mcp:8080"},
         {"host": "gitea-mcp", "port": 8080, "path": "/mcp"},
         {"host": "http://gitea-mcp.local:8080/mcp"},

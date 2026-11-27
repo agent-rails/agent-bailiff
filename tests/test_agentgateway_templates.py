@@ -164,7 +164,7 @@ def test_the_cli_prints_the_shipped_catalog_digest(capsys):
     ("host", "accepted"),
     [
         ("http://127.0.0.1:18080/mcp", True),
-        ("http://localhost:18080/mcp", True),
+        ("http://localhost:18080/mcp", False),
         ("http://[::1]:18080/mcp", True),
         ("http://10.0.0.5:18080/mcp", False),
         ("https://127.0.0.1:18080/mcp", False),
@@ -172,7 +172,7 @@ def test_the_cli_prints_the_shipped_catalog_digest(capsys):
         ("127.0.0.1", True),
         ("[::1]", True),
         ("[::1]:18080", True),
-        ("localhost:18080", True),
+        ("localhost:18080", False),
         ("::1", False),
         ("10.0.0.5", False),
         ("127.0.0.1:abc", False),

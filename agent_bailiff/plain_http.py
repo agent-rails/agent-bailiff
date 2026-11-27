@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from urllib.parse import SplitResult, urlsplit
 
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-PLAIN_HTTP_HOSTS = "127.0.0.1, localhost or [::1]"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+PLAIN_HTTP_HOSTS = "127.0.0.1 or [::1]"
 
 
 def allows_plain_http(host: str) -> bool:

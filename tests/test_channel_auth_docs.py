@@ -48,7 +48,8 @@ def test_the_upgrade_guide_covers_channel_auth():
     assert "## Channel authentication" in text
     assert '"ca_file": "install"' in text
     assert "--gateway-ca ./ca.pem" in text
-    assert "http only on 127.0.0.1, localhost or [::1]" in text
+    assert "http only on 127.0.0.1 or [::1]" in text
+    assert "`http://localhost` the same way" in text
 
 
 def test_the_adopt_guide_passes_the_gateway_ca_to_every_proxy_command():

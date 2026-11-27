@@ -221,8 +221,8 @@ def _check_targets(
         if service in effector_services:
             if not _is_loopback_http(target["mcp"]):
                 problems.append(
-                    f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or "
-                    "[::1]; releases and clearances must not leave the host"
+                    f"catalog service {service!r} must target the effector over http on {PLAIN_HTTP_HOSTS}; "
+                    "releases and clearances must not leave the host"
                 )
         elif not _is_protected_transport(target["mcp"]):
             problems.append(

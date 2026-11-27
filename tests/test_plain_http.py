@@ -3,9 +3,14 @@ import pytest
 from agent_bailiff.plain_http import allows_plain_http, parse_transport_url
 
 
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
-def test_plain_http_is_allowed_for_loopback(host):
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_plain_http_is_allowed_for_a_literal_loopback_address(host):
     assert allows_plain_http(host)
+
+
+@pytest.mark.parametrize("host", ["localhost", "localhost.", "ip6-localhost"])
+def test_plain_http_is_refused_for_a_loopback_name(host):
+    assert not allows_plain_http(host)
 
 
 @pytest.mark.parametrize(

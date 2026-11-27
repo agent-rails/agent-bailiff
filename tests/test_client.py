@@ -871,13 +871,19 @@ def test_an_http_gateway_url_to_a_remote_host_is_rejected(url):
         BailiffClient(url, holder(), ROUTES)
 
 
+@pytest.mark.parametrize("url", ["http://localhost:8080/mcp", "http://LocalHost:8080/mcp", "http://localhost/mcp"])
+def test_an_http_gateway_url_to_localhost_is_rejected(url):
+    message = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
+    with pytest.raises(ValueError, match=re.escape(message)):
+        BailiffClient(url, holder(), ROUTES)
+
+
 @pytest.mark.parametrize(
     "url",
     [
         "https://gateway.example.com/mcp",
         "https://10.0.0.5:8443/mcp",
         "http://127.0.0.1:8080/mcp",
-        "http://localhost:8080/mcp",
         "http://[::1]:8080/mcp",
     ],
 )
@@ -918,7 +924,7 @@ def tls_client(url, cafile, sleeps):
     )
 
 
-@pytest.mark.parametrize("url", ["http://127.0.0.1:8080/mcp", "http://localhost:8080/mcp"])
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8080/mcp", "http://[::1]:8080/mcp"])
 def test_a_cafile_with_an_http_gateway_url_is_rejected(url, tmp_path):
     cafile, _ = write_gateway_ca(tmp_path)
     with pytest.raises(ValueError, match="https"):
