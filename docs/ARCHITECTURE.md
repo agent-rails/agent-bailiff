@@ -12,7 +12,7 @@ agent-bailiff lets an agent use a credential for one approved tool call without 
 | docket archive | `archiver_uid`; in the docket reader group | its checkpoint, the archive directory, the receipt directory, pinned writer keys; the manifest and sealed segments read-only | none |
 | control | decide's uid, run on demand | its signing key; decide's config | none (CLI) |
 | docket export (optional) | its own uid; in the docket reader group | its checkpoint, pinned writer keys | none; sends OTLP/HTTP to a collector |
-| agentgateway | its own uid | gateway config | the agent's MCP connection |
+| agentgateway | its own uid | gateway config; its TLS key in the quickstart | the agent's MCP connection (TLS in the quickstart) |
 | effector | its own uid | its signing key, the operation catalog, the cluster token and audit token, pinned custodian and decide keys | 127.0.0.1 HTTP, the gateway's MCP upstream for catalog tools |
 
 Components keep separate private keys. Signed clearances and docket records are verified against public keys each verifier pins by key id in config it owns; Unix socket peers are checked by uid.
@@ -99,7 +99,7 @@ Decide and the custodian fail closed:
 
 Control applies its action first and reports it as unrecorded if its entry is not acknowledged.
 
-- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts, a non-Unix processor target, a gateway-bound upstream over `http` to a host that is neither loopback nor a single-label service name, or a `backendTLS` with any key but `root`.
+- check-config refuses a gateway config with `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts, a non-Unix processor target, a gateway-bound upstream over `http` to a host other than `127.0.0.1`, `localhost` or `[::1]`, a `backendTLS` with any key but `root`, a `gateways` entry other than one `default` TLS listener, or `mcp.port` beside it.
 
 ## Credential tiers
 

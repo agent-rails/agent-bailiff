@@ -160,9 +160,9 @@ $ agent-bailiff proxy run --gateway-url https://127.0.0.1:18090/mcp --gateway-ca
 
 Without `--gateway-ca` the client verifies the gateway against the system roots, and the handshake fails.
 
-`cert-watch` checks the set every 6 hours, and connects to `stub-upstream` and `gateway` on the internal `upstream` network to check that each serves its current leaf, verified with the install CA. `docker compose ps cert-watch` shows `unhealthy` once the set is incomplete, a leaf does not chain to the CA, a certificate expires within 30 days, or a service serves an older certificate. The rest of the stack keeps running.
+`cert-watch` checks the set every 6 hours, and connects to `stub-upstream`, `gateway` and, when it is the configured upstream, `gitea-mcp-tls` on the internal `upstream` network to check that each serves its current leaf, verified with the install CA. `docker compose ps cert-watch` shows `unhealthy` once the set is incomplete, a leaf does not chain to the CA, a certificate expires within 30 days, or a service serves an older certificate. The rest of the stack keeps running.
 
-The stub upstream config names `"ca_file": "install"`, so `gateway-init` copies the install CA into the gateway config, and the gateway trusts only that CA for `https://stub-upstream:8443`. Bootstrap refuses an `https://` url to an upstream server in the stack without it.
+The stub and Gitea upstream configs name `"ca_file": "install"`, so `gateway-init` copies the install CA into the gateway config, and the gateway trusts only that CA for `https://stub-upstream:8443` and `https://gitea-mcp-tls:8443`. Bootstrap refuses an `https://` url to an upstream server in the stack without it.
 
 Reissue with the stack stopped. It makes a new CA, so every client needs the new `ca.pem`:
 

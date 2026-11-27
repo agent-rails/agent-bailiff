@@ -1,9 +1,34 @@
 # Upgrading
 
+- [Channel authentication](#channel-authentication)
 - [Access log](#access-log)
 - [Credential checks](#credential-checks)
 - [Permission scopes](#permission-scopes)
 - [Docket grants](#docket-grants)
+
+## Channel authentication
+
+The channel authentication release allows plain http only to loopback and moves the quickstart to TLS (D24 in [DECISIONS.md](DECISIONS.md)).
+
+- check-config refuses a gateway-bound target over `http` to a service name, such as `http://gitea-mcp:8080/mcp`, with `gateway-bound service '<name>' must target https, or http only on 127.0.0.1, localhost or [::1]`. Serve the upstream over TLS and name it with `https://`, with `backendTLS.root` for a private CA.
+- The client and `proxy run` refuse an `http` gateway url to a service name, such as `http://gateway:8080/mcp`, with `an http gateway url must name 127.0.0.1, localhost or [::1]; use https for any other host`. Use `https://` and, for a private CA, `cafile` or `--gateway-ca`.
+- check-config now accepts a top-level `gateways` holding only `default`, with only `port` and `tls` (`cert` and `key`), and no `mcp.port` beside it.
+
+### Quickstart
+
+`docker compose up --build` adds `certs` and `cert-watch`, and the gateway on `127.0.0.1:18090` answers only TLS. Copy the CA out for host clients:
+
+```console
+$ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem ./ca.pem
+```
+
+Change `--gateway-url http://127.0.0.1:18090/mcp` to `https://127.0.0.1:18090/mcp` and add `--gateway-ca ./ca.pem` to `proxy tools`, `proxy run` and the agent host config. Without `--gateway-ca` the handshake fails against the system roots.
+
+An upstream config must name an `https://` url; bootstrap refuses `http://` with `url must be https://<host>[:<port>]; plain http is allowed only on loopback`. The bundled `stub.json` and `gitea.json` now name `https://stub-upstream:8443/mcp` and `https://gitea-mcp-tls:8443/mcp` with `"ca_file": "install"`, and a copy of either needs the same change. A server you added to the stack must serve TLS itself, with its CA as `ca_file`.
+
+### Rollback
+
+An earlier release refuses a top-level `gateways` key, so its check-config fails the TLS gateway config, and its proxy refuses `--gateway-ca` as an unrecognized argument. Restore the earlier `gateway.json` and upstream configs and drop `--gateway-ca`. The certificate volumes are unused by it; `down --volumes` removes them.
 
 ## Access log
 
