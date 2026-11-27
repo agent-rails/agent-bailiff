@@ -1143,6 +1143,11 @@ def export_credential(stored: str | None) -> None:
     write_handoff("ready", "")
 
 
+def report_unsaved(fingerprint: str) -> None:
+    if re.fullmatch("[0-9a-f]{64}", fingerprint):
+        write_handoff("unsaved", fingerprint)
+
+
 def store_handed_off(upstream: Upstream, stored: str | None) -> str:
     together = "run credential-put and bootstrap together: docker compose --profile gitea up bootstrap"
     for awaited, missing in (
@@ -1157,12 +1162,13 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
     except (BootstrapError, ValueError):
         policy = ""
     if not hmac.compare_digest(policy_of(upstream), policy):
-        if outcome == "created" and re.fullmatch("[0-9a-f]{64}", fingerprint):
-            write_handoff("unsaved", fingerprint)
+        report_unsaved(fingerprint)
         raise BootstrapError("bootstrap checked the credential under another upstream policy, so nothing is stored")
     if outcome == "kept":
         if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):
+            report_unsaved(fingerprint)
             raise BootstrapError("bootstrap kept a credential other than the stored one, so nothing is stored")
+        write_handoff("saved", fingerprint)
         return "kept"
     if outcome != "created":
         raise BootstrapError(f"bootstrap handed off an unknown outcome {outcome!r}")
@@ -1243,6 +1249,7 @@ def bootstrap_gitea() -> str:
             raise
         gitea, minted = checked.gitea, checked.minted
         if minted is None:
+            await_kept(checked.credential)
             retire_credentials(gitea, agent_login(gitea, checked.admin), lambda token: holds(token, checked.credential))
             return "created" if checked.seeded else "kept"
         await_store(gitea, minted)
@@ -1295,6 +1302,19 @@ def await_store(gitea: Gitea, minted: Minted) -> None:
     if result == "unsaved":
         revoke_credential(gitea, minted)
         raise BootstrapError("credential-put did not store the minted credential, so it is deleted from gitea")
+
+
+def await_kept(credential: str) -> None:
+    missing = (
+        f"credential-put reported no store of the kept credential within {HANDOFF_SECONDS}s, "
+        "so no other token is retired"
+    )
+    result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
+    named = take_handoff(result)
+    if named is None or not hmac.compare_digest(fingerprint_of(credential), named):
+        raise BootstrapError("credential-put reported a store result for another token, so no other token is retired")
+    if result == "unsaved":
+        raise BootstrapError("credential-put did not keep the checked credential, so no other token is retired")
 
 
 def agent_subject() -> str:

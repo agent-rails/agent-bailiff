@@ -1068,6 +1068,7 @@ def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair
     with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
     assert pair.cli.calls == []
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(MINTED) and not (pair.handoff / "saved").exists()
 
 
 def test_every_handoff_file_is_owner_read_only(pair):
@@ -1526,13 +1527,14 @@ def test_credential_put_refuses_a_check_made_under_another_upstream(pair, tmp_pa
     assert (pair.handoff / "unsaved").read_text() == fingerprint(MINTED) and not (pair.handoff / "saved").exists()
 
 
-def test_credential_put_reports_nothing_for_a_kept_check_under_another_upstream(pair, tmp_path):
+def test_credential_put_reports_a_kept_check_under_another_upstream_unsaved(pair, tmp_path):
     b.export_credential(STORED)
     b.write_handoff("started", "")
     b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "kept", STORED, fingerprint(STORED))
     with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
-    assert pair.cli.calls == [] and not {"saved", "unsaved"} & set(handoff_files(pair))
+    assert pair.cli.calls == []
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(STORED) and not (pair.handoff / "saved").exists()
 
 
 def plant_symlink(path):
@@ -1570,6 +1572,19 @@ def test_a_minted_token_checked_under_another_policy_is_deleted_at_once(pair, gi
     assert "did not store the minted credential, so it is deleted from gitea" in err
 
 
+def test_a_kept_credential_checked_under_another_policy_retires_nothing(pair, gitea, monkeypatch, capsys):
+    gitea.tokens[20] = f"{b.TOKEN_NAME}-0123456789abcdef"
+    pair.stored = STORED
+    write = b.write_handoff
+    monkeypatch.setattr(b, "write_handoff", lambda name, text: write(name, "0" * 64 if name == "policy" else text))
+    assert run_pair() == (1, 1)
+    assert gitea.deleted == [] and gitea.tokens.keys() == {7, 8, 20}
+    assert pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "under another upstream policy, so nothing is stored" in err
+    assert "credential-put did not keep the checked credential, so no other token is retired" in err
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -1593,6 +1608,28 @@ def test_bootstrap_refuses_a_store_result_for_another_token(pair, monkeypatch, r
     with pytest.raises(b.BootstrapError, match="a store result for another token, so token 9 stays in gitea"):
         b.await_store(pair.gitea, b.Minted(MINTED, 9, "agent"))
     assert handoff_files(pair) == []
+
+
+@pytest.mark.parametrize("result", b.STORE_RESULTS)
+def test_bootstrap_retires_nothing_on_a_kept_store_result_for_another_token(pair, result):
+    b.write_handoff(result, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="a store result for another token, so no other token is retired"):
+        b.await_kept(STORED)
+    assert handoff_files(pair) == []
+
+
+def test_bootstrap_retires_nothing_when_credential_put_reports_no_kept_store(pair, monkeypatch):
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    with pytest.raises(b.BootstrapError, match="no store of the kept credential within 0s, so no other token"):
+        b.await_kept(STORED)
+
+
+def test_credential_put_reports_a_kept_credential_saved(pair):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "kept", STORED, fingerprint(STORED))
+    assert b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED) == "kept"
+    assert (pair.handoff / "saved").read_text() == fingerprint(STORED) and pair.cli.calls == []
 
 
 @pytest.mark.parametrize(("put_fails", "result"), [(False, "saved"), (True, "unsaved")])
