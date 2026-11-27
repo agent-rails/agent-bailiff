@@ -326,22 +326,19 @@ def test_a_migration_the_disk_cannot_hold_names_the_store_and_leaves_it_unmigrat
         store.close()
 
 
-def test_a_refused_write_does_not_echo_the_values_it_was_given(state, store):
+def test_a_refused_write_does_not_echo_the_database_message(state, store):
     path = state / "credentials.db"
     connection = sqlite3.connect(path)
-    connection.execute(
-        "CREATE TRIGGER echo BEFORE INSERT ON credentials BEGIN "
-        "SELECT RAISE(ABORT, NEW.tenant || ':' || hex(NEW.ciphertext) || ':' || hex(NEW.wrapped_dek)); END"
-    )
+    connection.execute("CREATE TRIGGER echo BEFORE INSERT ON credentials BEGIN SELECT RAISE(ABORT, 'leak-marker'); END")
     connection.commit()
     connection.close()
     with pytest.raises(OwnedFileError) as raised:
-        store.put("tenant-leak-marker", "deploy-api", "deploy.example", SECRET)
+        store.put(*BINDING, SECRET)
     message = str(raised.value)
     assert (
         message == f"cannot write the credential store at {path}: the database refused it (SQLITE_CONSTRAINT_TRIGGER)"
     )
-    assert "tenant-leak-marker" not in message
+    assert "leak-marker" not in message
 
 
 def test_a_busy_older_store_is_refused_as_busy(state, backend, monkeypatch):
