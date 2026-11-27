@@ -1,4 +1,5 @@
 import datetime
+import ipaddress
 import json
 import os
 from types import SimpleNamespace
@@ -350,7 +351,7 @@ KEY_USAGES = (
 )  # fmt: skip
 
 
-def issue_certificate(common_name, issuer=None, dns_name=None):
+def issue_certificate(common_name, issuer=None, dns_name=None, ip_address=None):
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     signer_name, signer_key = (issuer[0].subject, issuer[1]) if issuer else (subject, key)
@@ -372,8 +373,11 @@ def issue_certificate(common_name, issuer=None, dns_name=None):
         builder = builder.add_extension(
             x509.KeyUsage(**{**usage, "key_cert_sign": True, "crl_sign": True}), critical=True
         )
-    if dns_name:
-        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+    names = [x509.DNSName(dns_name)] if dns_name else []
+    if ip_address:
+        names.append(x509.IPAddress(ipaddress.ip_address(ip_address)))
+    if names:
+        builder = builder.add_extension(x509.SubjectAlternativeName(names), critical=False)
     return builder.sign(signer_key, hashes.SHA256()), key
 
 
