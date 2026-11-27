@@ -7,16 +7,45 @@ import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import quote
 
 OWNED_MODE = 0o600
 STAGED_SUFFIX = ".new"
 FORBIDDEN_PARENT_BITS = 0o022
 BUSY_TIMEOUT_SECONDS = 30
+PRIMARY_CODE_MASK = 0xFF
+STORAGE_FAILED = "its storage failed"
+BUSY = "it is busy"
+UNUSABLE = "it is not a usable database"
+DATABASE_REFUSED = "the database refused it"
+DATABASE_PROBLEMS = {
+    sqlite3.SQLITE_FULL: STORAGE_FAILED,
+    sqlite3.SQLITE_IOERR: STORAGE_FAILED,
+    sqlite3.SQLITE_CANTOPEN: "its storage could not be opened",
+    sqlite3.SQLITE_BUSY: BUSY,
+    sqlite3.SQLITE_LOCKED: BUSY,
+    sqlite3.SQLITE_READONLY: "it is not writable",
+    sqlite3.SQLITE_CORRUPT: UNUSABLE,
+    sqlite3.SQLITE_NOTADB: UNUSABLE,
+    sqlite3.SQLITE_ERROR: UNUSABLE,
+}
 
 
 class OwnedFileError(Exception):
     pass
+
+
+def raise_database_error(context: str, exc: sqlite3.Error) -> NoReturn:
+    if isinstance(exc, sqlite3.ProgrammingError):
+        raise exc
+    code = getattr(exc, "sqlite_errorcode", None)
+    problem = DATABASE_REFUSED if code is None else DATABASE_PROBLEMS.get(code & PRIMARY_CODE_MASK, DATABASE_REFUSED)
+    raise OwnedFileError(f"{context}: {problem} ({database_error_name(exc)})") from None
+
+
+def database_error_name(exc: sqlite3.Error) -> str:
+    return getattr(exc, "sqlite_errorname", None) or type(exc).__name__
 
 
 @dataclass(frozen=True)
@@ -152,7 +181,7 @@ def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.C
             check_same_thread=False,
         )
     except sqlite3.Error as exc:
-        raise OwnedFileError(f"cannot open the {label}: {exc}") from None
+        raise_database_error(f"cannot open the {label} at {path}", exc)
     try:
         connection.execute("PRAGMA synchronous = FULL")
         if schema is not None:
@@ -160,7 +189,7 @@ def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.C
         connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
     except sqlite3.Error as exc:
         connection.close()
-        raise OwnedFileError(f"the {label} is not a usable database: {exc}") from None
+        raise_database_error(f"cannot open the {label} at {path}", exc)
     try:
         pinned.check()
     except OwnedFileError:
