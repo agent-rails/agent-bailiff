@@ -165,6 +165,7 @@ def test_the_image_scan_runs_on_every_pull_request_and_scans_when_an_image_input
     text = IMAGE_SCAN.read_text()
     assert "on:\n  pull_request:\n  schedule:\n" in text
     assert '    - cron: "23 5 * * *"\n  workflow_dispatch:\n' in text
+    assert "\nconcurrency:\n  group: image-scan-${{ github.ref }}\n  cancel-in-progress: true\n\n" in text
     diff = re.search(
         r'^          changed="\$\(git diff --name-only HEAD\^1 HEAD -- \\\n'
         r'((?:            \S+(?: \\|\)")\n)+)',
