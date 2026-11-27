@@ -743,6 +743,22 @@ def test_check_config_refuses_a_stack_host_target_without_a_backend_root(owned_f
     assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
 
 
+STACK_HOSTS_REQUIRED = "one of the arguments --stack-host --no-stack-hosts is required"
+
+
+def test_check_config_refuses_without_stack_hosts_or_an_explicit_none(owned_files):
+    result = run_check(owned_files, gateway_config(upstream="https://stub-upstream:8443/mcp"), arguments=())
+    assert (result.returncode, result.stdout) == (2, "")
+    assert STACK_HOSTS_REQUIRED in result.stderr
+
+
+def test_check_config_refuses_stack_hosts_beside_no_stack_hosts(owned_files):
+    arguments = ("--stack-host", "stub-upstream", "--no-stack-hosts")
+    result = run_check(owned_files, gateway_config(), arguments=arguments)
+    assert (result.returncode, result.stdout) == (2, "")
+    assert "not allowed with argument" in result.stderr
+
+
 GATEWAY_TLS = {"cert": "/var/lib/bailiff/certs/gateway.pem", "key": "/var/lib/bailiff/gateway-key/gateway.key"}
 
 
@@ -870,7 +886,7 @@ def owned_files():
 ROUTE = {"service": "deploy", "name": "deploy_service", "tool": "deploy.service", "resource": "env/a"}
 
 
-def run_check(owned_files, config_document, routes=(ROUTE,), arguments=()):
+def run_check(owned_files, config_document, routes=(ROUTE,), arguments=("--no-stack-hosts",)):
     routes = owned_files("routes.json", {"routes": list(routes)})
     bindings = owned_files(
         "bindings.json",

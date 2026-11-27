@@ -88,10 +88,11 @@ python -m agent_bailiff.adapters.agentgateway check-config \
   --bindings bindings.json \
   --decide-socket /run/bailiff/decide/decide.sock \
   --custodian-socket /run/bailiff/custodian/custodian.sock \
-  --redactor-socket /run/bailiff/custodian/redactor.sock
+  --redactor-socket /run/bailiff/custodian/redactor.sock \
+  --stack-host upstream.internal
 ```
 
-It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts or a TCP processor target.
+It refuses any config the processors cannot enforce, such as `failOpen`, a missing decide header allowlist, a custodian header filter, stateful mode, the wrong processor order, a missing redactor, missing or unbounded upstream timeouts or a TCP processor target. Name each upstream host a private CA serves with `--stack-host`, so an `https` target to it must set `backendTLS.root`; pass `--no-stack-hosts` instead when there is none. With neither, check-config refuses to run.
 
 Each component has its own commands, run as that component's uid:
 

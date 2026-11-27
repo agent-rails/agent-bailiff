@@ -13,6 +13,7 @@ The channel authentication release allows plain http only to loopback and moves 
 - check-config refuses a gateway-bound target over `http` to a service name, such as `http://gitea-mcp:8080/mcp`, with `gateway-bound service '<name>' must target https, or http only on 127.0.0.1 or [::1]`. It refuses `http://localhost` the same way; write `http://127.0.0.1` or `http://[::1]`. Serve the upstream over TLS and name it with `https://`, with `backendTLS.root` for a private CA.
 - The client and `proxy run` refuse an `http` gateway url to a service name, such as `http://gateway:8080/mcp`, with `an http gateway url must name 127.0.0.1 or [::1]; use https for any other host`, and `http://localhost` the same way. Use `https://` and, for a private CA, `cafile` or `--gateway-ca`.
 - check-config now accepts a top-level `gateways` holding only `default`, with only `port` and `tls` (`cert` and `key`), and no `mcp.port` beside it.
+- check-config now requires `--stack-host HOST` for each upstream host a private CA serves, or `--no-stack-hosts` when there is none, and exits 2 with `one of the arguments --stack-host --no-stack-hosts is required` given neither. Add one to every check-config call; the quickstart's `gateway-check` and `examples/live-run` already pass it.
 
 ### Quickstart
 
@@ -28,7 +29,7 @@ An upstream config must name an `https://` url; bootstrap refuses `http://` with
 
 ### Rollback
 
-An earlier release refuses a top-level `gateways` key, so its check-config fails the TLS gateway config, and its proxy refuses `--gateway-ca` as an unrecognized argument. Restore the earlier `gateway.json` and upstream configs and drop `--gateway-ca`. The certificate volumes are unused by it; `down --volumes` removes them.
+An earlier release refuses a top-level `gateways` key, so its check-config fails the TLS gateway config, and its proxy refuses `--gateway-ca` and its check-config `--stack-host` and `--no-stack-hosts` as unrecognized arguments. Restore the earlier `gateway.json` and upstream configs and drop `--gateway-ca`, `--stack-host` and `--no-stack-hosts`. The certificate volumes are unused by it; `down --volumes` removes them.
 
 ## Access log
 

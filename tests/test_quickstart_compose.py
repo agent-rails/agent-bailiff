@@ -272,6 +272,10 @@ def test_the_gateway_check_requires_a_backend_root_for_every_upstream_in_the_sta
     assert flag_values(config["services"]["gateway-check"]["command"], "--stack-host") == b.UPSTREAM_HOSTS
 
 
+def test_every_tls_upstream_the_install_ca_signs_is_a_stack_host():
+    assert b.UPSTREAM_HOSTS == set(certs_module.SERVICES) - {"gateway"}
+
+
 def cert_mounts(config):
     mounts = {}
     for name, service in config["services"].items():

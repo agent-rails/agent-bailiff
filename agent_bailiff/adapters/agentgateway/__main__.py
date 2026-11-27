@@ -25,11 +25,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--decide-socket", type=Path, required=True)
     check.add_argument("--custodian-socket", type=Path, required=True)
     check.add_argument("--redactor-socket", type=Path, required=True)
-    check.add_argument(
+    stack = check.add_mutually_exclusive_group(required=True)
+    stack.add_argument(
         "--stack-host",
         action="append",
         default=[],
         help="a host served by a private CA; an https target to it must set backendTLS.root (repeatable)",
+    )
+    stack.add_argument(
+        "--no-stack-hosts",
+        action="store_true",
+        help="no target host is served by a private CA; required when no --stack-host is given",
     )
     args = parser.parse_args(argv)
     try:

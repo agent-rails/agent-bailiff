@@ -524,7 +524,7 @@ class KubernetesDeployment(Deployment):
                 "--gateway-config", str(self.gateway_config), "--routes", str(self.root / "custodian" / "routes.json"),
                 "--bindings", str(self.root / "custodian" / "bindings.json"),
                 "--decide-socket", str(self.sockets["decide"]), "--custodian-socket", str(self.sockets["custodian"]),
-                "--redactor-socket", str(self.sockets["redactor"]),
+                "--redactor-socket", str(self.sockets["redactor"]), "--no-stack-hosts",
             ],
             check=True,
         )  # fmt: skip
