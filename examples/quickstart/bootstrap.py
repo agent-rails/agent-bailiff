@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import copy
 import hashlib
 import hmac
 import http.client
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -32,7 +34,8 @@ from agent_warrant.task_root import issue_task_root
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding
 
-from agent_bailiff.adapters.gitea.token_check import parse_required
+from agent_bailiff.adapters.gitea.token_check import DEFAULT_MAX_REPOS, DEFAULT_TIMEOUT_SECONDS, parse_required
+from agent_bailiff.cli import CREDENTIAL_CHECK_GRACE_SECONDS
 from agent_bailiff.custodian.backend import BackendError, LocalBackend
 from agent_bailiff.custodian.bindings import HEADER_NAME
 from agent_bailiff.custodian.files import OwnedFileError
@@ -91,11 +94,13 @@ READER_ISSUERS = DIRS["reader"] / "issuers.json"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
 HANDOFF = RUN / "credential-handoff"
-HANDOFF_FILES = ("stored", "ready", "token", "fingerprint", "checked", "refused")
+HANDOFF_FILES = ("stored", "ready", "started", "token", "fingerprint", "checked", "refused")
 STORE_RESULTS = ("saved", "unsaved")
 MAX_HANDOFF_BYTES = 4096
 READY_SECONDS = 60
 HANDOFF_SECONDS = 300
+HANDOFF_RESERVE_SECONDS = 5
+CLEANUP_SECONDS = 30
 HANDOFF_POLL_SECONDS = 0.5
 CLI_TIMEOUT_SECONDS = 60
 
@@ -141,6 +146,9 @@ UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea-mcp-tls"})
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
 INSTALL = "install"
 PROVIDER_FIELDS = frozenset({"provider", "provider_api_url", "required_permissions"})
+MAX_CHECK_REPOS = 10_000
+MAX_CHECK_TIMEOUT_SECONDS = 60
+CHECK_BOUNDS = {"max_repos": MAX_CHECK_REPOS, "check_timeout_seconds": MAX_CHECK_TIMEOUT_SECONDS}
 PROVIDERS = frozenset({"gitea"})
 TASK_SCOPE = {
     "permissions": [
@@ -198,6 +206,45 @@ class CliFailed(BootstrapError):
         self.stderr = stderr
 
 
+class Budget:
+    def __init__(
+        self,
+        seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        name: str = "hand-off",
+        stops: str = "bootstrap stops before credential-put stops waiting",
+    ) -> None:
+        self.seconds = seconds
+        self.name = name
+        self.stops = stops
+        self._clock = clock
+        self._at = clock() + seconds
+
+    def remaining(self) -> float:
+        return self._at - self._clock()
+
+    def check(self, what: str) -> float:
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise BootstrapError(self._spent(0, f"none for {what}"))
+        return remaining
+
+    def cap(self, seconds: float, what: str) -> float:
+        if not (math.isfinite(seconds) and seconds > 0):
+            raise ValueError(f"a budget caps a positive finite number of seconds, not {seconds!r}")
+        return min(seconds, self.check(what))
+
+    def require(self, seconds: float, what: str) -> float:
+        remaining = self.remaining()
+        if remaining < seconds:
+            raise BootstrapError(self._spent(remaining, f"less than the {seconds:g}s {what} needs"))
+        return remaining
+
+    def _spent(self, remaining: float, shortfall: str) -> str:
+        return f"{max(remaining, 0):g}s of the {self.seconds:g}s {self.name} budget is left, {shortfall}; {self.stops}"
+
+
 @dataclass(frozen=True)
 class Minted:
     credential: str
@@ -210,6 +257,8 @@ class ProviderCheck:
     provider: str
     api_url: str
     required: tuple[str, ...]
+    max_repos: int
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -235,17 +284,18 @@ def load_upstream(path: Path) -> Upstream:
     if (
         not isinstance(document, dict)
         or not UPSTREAM_FIELDS <= set(document)
-        or not optional <= UPSTREAM_OPTIONAL_FIELDS | PROVIDER_FIELDS
-        or (optional & PROVIDER_FIELDS and not PROVIDER_FIELDS <= optional)
+        or not optional <= UPSTREAM_OPTIONAL_FIELDS | PROVIDER_FIELDS | set(CHECK_BOUNDS)
+        or (optional & (PROVIDER_FIELDS | set(CHECK_BOUNDS)) and not PROVIDER_FIELDS <= optional)
     ):
         raise BootstrapError(
             f"{path} must have exactly the fields {', '.join(sorted(UPSTREAM_FIELDS))}, optionally ca_file, "
-            f"and optionally all of {', '.join(sorted(PROVIDER_FIELDS))}"
+            f"and optionally all of {', '.join(sorted(PROVIDER_FIELDS))} "
+            f"with any of {', '.join(sorted(CHECK_BOUNDS))}"
         )
     version = document["version"]
     if isinstance(version, bool) or version != UPSTREAM_VERSION:
         raise BootstrapError(f"{path}: version must be {UPSTREAM_VERSION}")
-    text = {name: document[name] for name in set(document) - {"version", "required_permissions"}}
+    text = {name: document[name] for name in set(document) - {"version", "required_permissions", *CHECK_BOUNDS}}
     for name, value in text.items():
         if not isinstance(value, str) or not value or not all("!" <= character <= "~" for character in value):
             raise BootstrapError(f"{path}: {name} must be a non-empty ASCII printable string without whitespace")
@@ -260,24 +310,40 @@ def load_upstream(path: Path) -> Upstream:
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
     ca_file = upstream_ca_file(path, text["ca_file"]) if "ca_file" in text else None
-    provider_check = load_provider_check(path, text, document["required_permissions"]) if "provider" in text else None
+    provider_check = load_provider_check(path, text, document) if "provider" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
         text["binding_resource"], routes, ca_file, provider_check,
     )  # fmt: skip
 
 
-def load_provider_check(path: Path, text: dict[str, str], required: Any) -> ProviderCheck:
+def load_provider_check(path: Path, text: dict[str, str], document: dict[str, Any]) -> ProviderCheck:
     if text["provider"] not in PROVIDERS:
         raise BootstrapError(f"{path}: provider must be one of {', '.join(sorted(PROVIDERS))}")
     check_provider_api_url(path, text["provider_api_url"])
+    required = document["required_permissions"]
     if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
         raise BootstrapError(f"{path}: required_permissions must be a list of scope names")
     try:
         permissions = parse_required(required)
     except ValueError as error:
         raise BootstrapError(f"{path}: {error}") from None
-    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)))
+    max_repos = check_bound(path, document, "max_repos")
+    timeout = check_bound(path, document, "check_timeout_seconds")
+    return ProviderCheck(
+        text["provider"], text["provider_api_url"], tuple(sorted(permissions)),
+        DEFAULT_MAX_REPOS if max_repos is None else max_repos,
+        DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout,
+    )  # fmt: skip
+
+
+def check_bound(path: Path, document: dict[str, Any], field: str) -> int | None:
+    if field not in document:
+        return None
+    value, cap = document[field], CHECK_BOUNDS[field]
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= cap:
+        raise BootstrapError(f"{path}: {field} must be an integer from 1 to {cap}")
+    return value
 
 
 def check_provider_api_url(path: Path, url: str) -> None:
@@ -395,15 +461,13 @@ def load_upstream_routes(path: Path, service: str) -> tuple[dict[str, Any], ...]
     return tuple(document["routes"])
 
 
-def cli(*arguments: object, stdin: str | None = None) -> str:
+def cli(*arguments: object, stdin: str | None = None, timeout: float = CLI_TIMEOUT_SECONDS) -> str:
     command = [sys.executable, "-m", "agent_bailiff.cli", *map(str, arguments)]
     label = " ".join(map(str, arguments[:2]))
     try:
-        result = subprocess.run(
-            command, input=stdin, capture_output=True, text=True, check=False, timeout=CLI_TIMEOUT_SECONDS
-        )
+        result = subprocess.run(command, input=stdin, capture_output=True, text=True, check=False, timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise BootstrapError(f"agent-bailiff {label} did not finish within {CLI_TIMEOUT_SECONDS}s") from None
+        raise BootstrapError(f"agent-bailiff {label} did not finish within {timeout:g}s") from None
     if result.returncode != 0:
         stderr = result.stderr.strip()
         raise CliFailed(f"agent-bailiff {label} failed: {stderr}", stderr)
@@ -680,8 +744,19 @@ class GiteaConnection(http.client.HTTPConnection):
 
 
 class Gitea:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, budget: Budget | None = None) -> None:
         self._path = path
+        self.budget = budget
+
+    def without_budget(self) -> Gitea:
+        unbudgeted = copy.copy(self)
+        unbudgeted.budget = None
+        return unbudgeted
+
+    def for_cleanup(self) -> Gitea:
+        cleanup = copy.copy(self)
+        cleanup.budget = Budget(CLEANUP_SECONDS, name="cleanup", stops="the cleanup stops")
+        return cleanup
 
     def request(self, method: str, path: str, authorization: str | None, body: Any = None) -> tuple[int, Any]:
         headers = {"accept": "application/json"}
@@ -691,7 +766,14 @@ class Gitea:
         if body is not None:
             headers["content-type"] = "application/json"
             data = json.dumps(body).encode()
-        deadline = Deadline(time.monotonic() + HTTP_TIMEOUT_SECONDS, f"gitea {method} {path}")
+        what = f"gitea {method} {path}"
+        seconds = HTTP_TIMEOUT_SECONDS if self.budget is None else self.budget.cap(HTTP_TIMEOUT_SECONDS, what)
+        return self.send(method, path, headers, data, seconds)
+
+    def send(
+        self, method: str, path: str, headers: dict[str, str], data: bytes | None, seconds: float
+    ) -> tuple[int, Any]:
+        deadline = Deadline(time.monotonic() + seconds, f"gitea {method} {path}", seconds)
         connection = GiteaConnection(self._path, deadline.remaining())
         watchdog = None
         try:
@@ -722,7 +804,7 @@ class Gitea:
             raise BootstrapError(f"gitea {method} {path} returned {status}")
         return document
 
-    def wait_healthy(self, seconds: int) -> None:
+    def wait_healthy(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             try:
@@ -731,17 +813,18 @@ class Gitea:
             except (GiteaUnavailable, OSError):
                 pass
             time.sleep(1)
-        raise BootstrapError(f"gitea at {self._path} was not healthy within {seconds}s")
+        raise BootstrapError(f"gitea at {self._path} was not healthy within {seconds:g}s")
 
 
 @dataclass(frozen=True)
 class Deadline:
     at: float
     what: str
+    seconds: float
 
     @property
     def late(self) -> str:
-        return f"{self.what} did not answer within {HTTP_TIMEOUT_SECONDS}s"
+        return f"{self.what} did not answer within {self.seconds:g}s"
 
     def passed(self) -> bool:
         return time.monotonic() >= self.at
@@ -859,8 +942,8 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
             or not isinstance(created.get("id"), int)
         ):
             raise BootstrapError(f"gitea minted token {name} with no id or sha1")
-    except BaseException:
-        delete_tokens(gitea, agent, lambda token: token["name"] == name)
+    except BaseException as error:
+        clean_up(gitea, error, f"token {name}", lambda cleanup: delete_tokens(cleanup, agent, named(name)))
         raise
     return Minted(f"token {created['sha1']}", created["id"], agent)
 
@@ -878,8 +961,23 @@ def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
     raise BootstrapError(f"the gitea token list of {AGENT} runs past {MAX_TOKEN_PAGES} pages")
 
 
+def named(name: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda token: token["name"] == name
+
+
+def clean_up(gitea: Gitea, error: BaseException, token: str, remove: Callable[[Gitea], None]) -> None:
+    try:
+        remove(gitea.for_cleanup())
+    except Exception as failure:
+        error.add_note(f"{token} may still be live in gitea: {failure}")
+
+
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:
     delete_token(gitea, minted.owner, minted.token_id)
+
+
+def revoke_after(gitea: Gitea, error: BaseException, minted: Minted) -> None:
+    clean_up(gitea, error, f"token {minted.token_id}", lambda cleanup: revoke_credential(cleanup, minted))
 
 
 def retire_credentials(gitea: Gitea, owner: str, keeps: Callable[[dict[str, Any]], bool]) -> None:
@@ -914,12 +1012,15 @@ def provider_check(upstream: Upstream) -> ProviderCheck:
     return upstream.provider_check
 
 
-def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
+def check_credential(upstream: Upstream, credential: str, budget: Budget) -> dict[str, Any]:
     check = provider_check(upstream)
+    left = budget.require(check.timeout_seconds + CREDENTIAL_CHECK_GRACE_SECONDS, "the credential check")
     required = [argument for name in check.required for argument in ("--required", name)]
     output = cli(
         "credential-check", "--provider", check.provider, "--api-url", check.api_url, "--unix-socket", GITEA_SOCKET,
-        "--binding-resource", upstream.binding_resource, *required, stdin=credential,
+        "--binding-resource", upstream.binding_resource, *required, "--max-repos", check.max_repos,
+        "--timeout", check.timeout_seconds, stdin=credential,
+        timeout=min(CLI_TIMEOUT_SECONDS + check.timeout_seconds, left),
     )  # fmt: skip
     document = json.loads(output)
     if not isinstance(document, dict) or not isinstance(document.get("fingerprint"), str):
@@ -928,22 +1029,24 @@ def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
 
 
 def checked_credential(
-    gitea: Gitea, admin: str, upstream: Upstream, stored: str | None
+    gitea: Gitea, admin: str, upstream: Upstream, stored: str | None, budget: Budget
 ) -> tuple[str, Any, Minted | None]:
     if stored is not None and credential_works(gitea, stored):
         try:
-            return stored, check_credential(upstream, stored), None
+            return stored, check_credential(upstream, stored, budget), None
         except CliFailed as refusal:
             if not remints(refusal):
                 raise
             print(f"the stored credential is refused, so a new one is minted: {refusal}", file=sys.stderr)
+    check = provider_check(upstream)
+    budget.require(check.timeout_seconds + CREDENTIAL_CHECK_GRACE_SECONDS, "the check of a minted credential")
     minted = mint_credential(gitea, admin)
     try:
         if not credential_works(gitea, minted.credential):
             raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
-        return minted.credential, check_credential(upstream, minted.credential), minted
-    except BaseException:
-        revoke_credential(gitea, minted)
+        return minted.credential, check_credential(upstream, minted.credential, budget), minted
+    except BaseException as error:
+        revoke_after(gitea, error, minted)
         raise
 
 
@@ -1020,12 +1123,13 @@ def export_credential(stored: str | None) -> None:
 
 
 def store_handed_off(upstream: Upstream, stored: str | None) -> str:
-    missing = (
-        f"bootstrap handed off no checked credential within {HANDOFF_SECONDS}s; "
-        "run credential-put and bootstrap together: docker compose --profile gitea up bootstrap"
-    )
-    if wait_for_handoff(("checked", "refused"), HANDOFF_SECONDS, missing) == "refused":
-        raise BootstrapError("bootstrap refused the credential, so nothing is stored")
+    together = "run credential-put and bootstrap together: docker compose --profile gitea up bootstrap"
+    for awaited, missing in (
+        ("started", f"bootstrap did not start within {HANDOFF_SECONDS}s; {together}"),
+        ("checked", f"bootstrap handed off no checked credential within {HANDOFF_SECONDS}s; {together}"),
+    ):
+        if wait_for_handoff((awaited, "refused"), HANDOFF_SECONDS, missing) == "refused":
+            raise BootstrapError("bootstrap refused the credential, so nothing is stored")
     outcome, fingerprint = read_handoff("checked"), read_handoff("fingerprint")
     if outcome == "kept":
         if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):
@@ -1100,7 +1204,9 @@ def bootstrap_gitea() -> str:
     )
     wait_for_handoff(("ready",), READY_SECONDS, missing)
     try:
-        checked = check_and_hand_off(upstream, take_handoff("stored"))
+        budget = Budget(HANDOFF_SECONDS - HANDOFF_RESERVE_SECONDS)
+        write_handoff("started", "")
+        checked = check_and_hand_off(upstream, take_handoff("stored"), budget)
     except BaseException:
         write_handoff("refused", "")
         raise
@@ -1122,24 +1228,25 @@ class Checked:
     seeded: bool
 
 
-def check_and_hand_off(upstream: Upstream, stored: str | None) -> Checked:
-    gitea = Gitea(GITEA_SOCKET)
-    gitea.wait_healthy(GITEA_HEALTH_SECONDS)
+def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -> Checked:
+    gitea = Gitea(GITEA_SOCKET, budget)
+    gitea.wait_healthy(budget.cap(GITEA_HEALTH_SECONDS, "the gitea health wait"))
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
     gitea.expect({200}, "GET", "/api/v1/user", admin)
     created = seed(gitea, admin)
     for item in created:
         print(f"gitea: created {item}")
-    credential, check, minted = checked_credential(gitea, admin, upstream, stored)
+    credential, check, minted = checked_credential(gitea, admin, upstream, stored, budget)
     try:
         print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
         print(f"credential check: passed with {check['private_repositories']} private repositories")
+        budget.check("the hand-off")
         hand_off("kept" if minted is None else "created", credential, check["fingerprint"])
-    except BaseException:
+    except BaseException as error:
         if minted is not None:
-            revoke_credential(gitea, minted)
+            revoke_after(gitea, error, minted)
         raise
-    return Checked(gitea, admin, credential, minted, bool(created))
+    return Checked(gitea.without_budget(), admin, credential, minted, bool(created))
 
 
 def await_store(gitea: Gitea, minted: Minted) -> None:
@@ -1249,6 +1356,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcome = COMMANDS[args.step]()
     except (BootstrapError, InitError, OwnedFileError, BackendError, DocketError, OSError, ValueError) as error:
         print(f"bootstrap {args.step} refused: {error}", file=sys.stderr)
+        for note in getattr(error, "__notes__", ()):
+            print(f"bootstrap {args.step}: {note}", file=sys.stderr)
         return 1
     print(f"{args.step}: {outcome}")
     return 0
