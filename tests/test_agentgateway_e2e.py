@@ -216,6 +216,13 @@ class Gateway:
         self.log_path = directory / "gateway.log"
         with open(self.log_path, "wb") as log:
             self.process = subprocess.Popen([str(binary), "-f", str(self.config_path)], stdout=log, stderr=log)
+        try:
+            self.wait_listening()
+        except BaseException:
+            self.stop()
+            raise
+
+    def wait_listening(self):
         deadline = time.monotonic() + STARTUP_SECONDS
         while time.monotonic() < deadline:
             assert self.process.poll() is None, self.log()
@@ -401,6 +408,24 @@ def stack(binary, workdir, private, make_decider, make_custodian, stack_options)
 
 def refused(body, reason):
     return body.get("result") == {"content": [{"type": "text", "text": reason}], "isError": True}
+
+
+def test_a_gateway_that_never_listens_is_stopped(tmp_path, monkeypatch):
+    binary = tmp_path / "gateway"
+    binary.write_text("#!/bin/sh\nexec sleep 60\n")
+    binary.chmod(0o755)
+    started = []
+    popen = subprocess.Popen
+
+    def record(*args, **kwargs):
+        started.append(popen(*args, **kwargs))
+        return started[-1]
+
+    monkeypatch.setattr(subprocess, "Popen", record)
+    monkeypatch.setattr(sys.modules[__name__], "STARTUP_SECONDS", 0.5)
+    with pytest.raises(AssertionError, match="did not listen"):
+        Gateway(binary, {"mcp": {"port": free_ports(1)[0]}}, tmp_path)
+    assert started[0].poll() is not None
 
 
 @LISTENERS

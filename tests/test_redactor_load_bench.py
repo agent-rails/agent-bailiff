@@ -3,6 +3,7 @@ import math
 import multiprocessing
 import os
 import platform
+import resource
 import statistics
 import subprocess
 import threading
@@ -19,7 +20,11 @@ from test_custodian import DEPLOY_SECRET, NOW, Released
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.processors import CLEARANCE_KEY, RedactorProcessor
-from agent_bailiff.adapters.agentgateway.server import RESPONSE_MAX_CONCURRENT_RPCS, response_server
+from agent_bailiff.adapters.agentgateway.server import (
+    RESPONSE_GRPC_THREADS,
+    RESPONSE_MAX_CONCURRENT_RPCS,
+    response_server,
+)
 from agent_bailiff.custodian.echo import MARKER, MAX_RESULT_BYTES
 from agent_bailiff.signing import token_hash
 
@@ -47,7 +52,7 @@ GATEWAY_TIMEOUT_SECONDS = 10
 ENVELOPE_HEADROOM = 1024
 SIZES = {"64KiB": 64 * 1024, "1MiB": 1024 * 1024, "2MiB": 2 * 1024 * 1024, "4MiB": MAX_RESULT_BYTES - ENVELOPE_HEADROOM}
 SHAPES = ("text", "records")
-CONCURRENCY = (1, 4, 16, 32, 64)
+CONCURRENCY = (1, 4, 16, 32, 64, 128)
 CALLS_PER_SETTING = 32
 MIN_CALLS_PER_CLIENT = 2
 PROBE_INTERVAL_SECONDS = 0.01
@@ -175,6 +180,11 @@ def percentile(values, rank):
     return round(statistics.quantiles(values, n=100, method="inclusive")[rank - 1], 2)
 
 
+def peak_rss_mib():
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / (1024 * 1024 if platform.system() == "Darwin" else 1024), 1)
+
+
 def summarize(setting, measured, probe):
     latencies = [elapsed for verdict, elapsed in measured["outcomes"] if verdict == "OK"]
     counts = {}
@@ -196,6 +206,7 @@ def summarize(setting, measured, probe):
         "shed_rate": round(counts.get("RESOURCE_EXHAUSTED", 0) / calls, 3),
         "probe_lag_p50_ms": percentile(probe.samples, 50),
         "probe_lag_p99_ms": percentile(probe.samples, 99),
+        "peak_rss_mib": peak_rss_mib(),
     }
 
 
@@ -321,6 +332,7 @@ def test_redactor_load(make_custodian, issue, workdir, private, workers):
     try:
         server.start()
         recorded = host()
+        started_rss = peak_rss_mib()
         with Probe() as idle:
             time.sleep(1)
         connection, driver = start_driver(drive)
@@ -348,18 +360,21 @@ def test_redactor_load(make_custodian, issue, workdir, private, workers):
             "without agentgateway; RedactorProcessor over a real Custodian, in-flight map and docket sink thread"
         ),
         "workers": workers,
-        "max_concurrent_rpcs": RESPONSE_MAX_CONCURRENT_RPCS,
+        "admission_limit": RESPONSE_MAX_CONCURRENT_RPCS,
+        "grpc_threads": RESPONSE_GRPC_THREADS,
         "deadline_s": GATEWAY_TIMEOUT_SECONDS,
         "calls_per_client": {str(concurrency): calls_per_client(concurrency) for concurrency in CONCURRENCY},
         "probe": (
             f"wake lag past a {PROBE_INTERVAL_SECONDS * 1000:.0f} ms sleep by another thread in the redactor process, "
             "a proxy for how long the scan holds the GIL from the request processor that shares the process"
         ),
+        "peak_rss": "the redactor process's high-water resident set size after the setting (ru_maxrss)",
+        "peak_rss_before_grid_mib": started_rss,
         "idle_probe_lag_p50_ms": percentile(idle.samples, 50),
         "idle_probe_lag_p99_ms": percentile(idle.samples, 99),
         "settings": settings,
     }
     assert not [item for item in settings if any(key.startswith("WRONG") for key in item["outcomes"])]
     BENCHMARKS.mkdir(exist_ok=True)
-    path = BENCHMARKS / f"redactor-load-{workers}-worker-{now:%Y-%m-%d}.json"
+    path = BENCHMARKS / f"redactor-load-{workers}-worker-{now:%Y-%m-%d}.local.json"
     path.write_text(json.dumps(baseline, indent=2) + "\n")
