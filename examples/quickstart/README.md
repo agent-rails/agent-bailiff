@@ -259,6 +259,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 - No stop of an in-flight call. Once the custodian releases a token, the call proceeds; a revoke stops only later calls.
 - No rollback or compensation of an upstream effect.
 - No approval service. Decide can refuse with `needs_approval`; nothing here grants approval.
+- No automatic certificate rotation. A leaf lasts 365 days and `cert-watch` turns `unhealthy` 30 days before it expires; renew with `certs issue --reissue` with the stack stopped ([Certificates](#certificates)).
 - Credential passthrough (H4): gitea-mcp receives the injected `Authorization` header and forwards it to Gitea. MCP guidance forbids a server accepting a token issued for another service; this stack trusts gitea-mcp as part of the upstream. A compromised gitea-mcp holds every released token for the length of a call.
 - Token reach is wider than the task. The token reads `quickstart/payroll`, including `salaries.csv`. Decide refuses `get_file_contents` on `payroll` because neither the tool nor the repository is in the task scope.
 - Only `owner` and `repo` are checked. Every other argument reaches gitea-mcp unchecked (gitea-mcp-server 1.13.0 `tools/list`):
