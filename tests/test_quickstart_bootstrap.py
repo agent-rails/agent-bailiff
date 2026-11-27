@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import hashlib
 import http.server
@@ -1063,7 +1064,7 @@ def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, 
 def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
     b.export_credential(STORED)
     b.write_handoff("started", "")
-    b.hand_off("kept", STORED, fingerprint(MINTED))
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "kept", STORED, fingerprint(MINTED))
     with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
     assert pair.cli.calls == []
@@ -1072,9 +1073,9 @@ def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair
 def test_every_handoff_file_is_owner_read_only(pair):
     b.export_credential(STORED)
     b.write_handoff("started", "")
-    b.hand_off("created", MINTED, fingerprint(MINTED))
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "created", MINTED, fingerprint(MINTED))
     modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
-    assert modes == dict.fromkeys(("stored", "ready", "started", "token", "fingerprint", "checked"), 0o400)
+    assert modes == dict.fromkeys(("stored", "ready", "started", "token", "fingerprint", "policy", "checked"), 0o400)
 
 
 def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
@@ -1513,3 +1514,49 @@ def test_a_symlinked_handoff_lock_refuses_the_run(pair, tmp_path, capsys, step, 
     assert b.main([step]) == 1
     assert "symbolic links" in capsys.readouterr().err
     assert handoff_files(pair) == [] and pair.cli.calls == [] and pair.built == []
+
+
+def test_credential_put_refuses_a_check_made_under_another_upstream(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "created", MINTED, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == []
+    assert not (pair.handoff / "unsaved").exists() and not (pair.handoff / "saved").exists()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"credential_id": "another-token"},
+        {"target": "elsewhere"},
+        {"binding_resource": "gitea/repos/other/*"},
+        {"max_repos": 5},
+        {"check_timeout_seconds": 3},
+    ],
+)
+def test_the_upstream_policy_changes_with_each_bound_field(tmp_path, changes):
+    base = b.policy_of(b.load_upstream(GITEA_UPSTREAM))
+    assert b.policy_of(b.load_upstream(write_upstream(tmp_path))) == base
+    assert b.policy_of(b.load_upstream(write_upstream(tmp_path, **changes))) != base
+
+
+@pytest.mark.parametrize("result", b.STORE_RESULTS)
+def test_bootstrap_refuses_a_store_result_for_another_token(pair, monkeypatch, result):
+    monkeypatch.setattr(b, "revoke_credential", lambda gitea, minted: pytest.fail("the token was revoked"))
+    b.write_handoff(result, fingerprint(STORED))
+    with pytest.raises(b.BootstrapError, match="a store result for another token, so token 9 stays in gitea"):
+        b.await_store(pair.gitea, b.Minted(MINTED, 9, "agent"))
+    assert handoff_files(pair) == []
+
+
+@pytest.mark.parametrize(("put_fails", "result"), [(False, "saved"), (True, "unsaved")])
+def test_the_store_result_names_the_stored_fingerprint(pair, put_fails, result):
+    pair.cli.put_fails = put_fails
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "created", MINTED, fingerprint(MINTED))
+    with contextlib.suppress(b.BootstrapError, b.InitError):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert (pair.handoff / result).read_text() == fingerprint(MINTED)

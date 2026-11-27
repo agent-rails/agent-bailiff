@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -95,7 +95,7 @@ READER_ISSUERS = DIRS["reader"] / "issuers.json"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
 HANDOFF = RUN / "credential-handoff"
-HANDOFF_FILES = ("stored", "ready", "started", "token", "fingerprint", "checked", "refused")
+HANDOFF_FILES = ("stored", "ready", "started", "token", "fingerprint", "policy", "checked", "refused")
 STORE_RESULTS = ("saved", "unsaved")
 HANDOFF_LOCKS = {"credential-put": ".credential-put.lock", "bootstrap": ".bootstrap.lock"}
 MAX_HANDOFF_BYTES = 4096
@@ -1061,6 +1061,10 @@ def fingerprint_of(credential: str) -> str:
     return hashlib.sha256(credential.encode("ascii")).hexdigest()
 
 
+def policy_of(upstream: Upstream) -> str:
+    return hashlib.sha256(json.dumps(asdict(upstream), sort_keys=True, default=str).encode()).hexdigest()
+
+
 def write_handoff(name: str, text: str) -> None:
     partial = partial_handoff(name)
     fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
@@ -1125,10 +1129,11 @@ def wait_for_handoff(
         sleep(HANDOFF_POLL_SECONDS)
 
 
-def hand_off(outcome: str, credential: str, fingerprint: str) -> None:
+def hand_off(upstream: Upstream, outcome: str, credential: str, fingerprint: str) -> None:
     if outcome == "created":
         write_handoff("token", credential)
     write_handoff("fingerprint", fingerprint)
+    write_handoff("policy", policy_of(upstream))
     write_handoff("checked", outcome)
 
 
@@ -1147,6 +1152,8 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
         if wait_for_handoff((awaited, "refused"), HANDOFF_SECONDS, missing) == "refused":
             raise BootstrapError("bootstrap refused the credential, so nothing is stored")
     outcome, fingerprint = read_handoff("checked"), read_handoff("fingerprint")
+    if not hmac.compare_digest(policy_of(upstream), read_handoff("policy")):
+        raise BootstrapError("bootstrap checked the credential under another upstream policy, so nothing is stored")
     if outcome == "kept":
         if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):
             raise BootstrapError("bootstrap kept a credential other than the stored one, so nothing is stored")
@@ -1162,11 +1169,11 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
     except BaseException as error:
         held = stored_credential(upstream)
         if held is None or not hmac.compare_digest(fingerprint_of(held), fingerprint):
-            write_handoff("unsaved", "")
+            write_handoff("unsaved", fingerprint)
             raise
-        write_handoff("saved", "")
+        write_handoff("saved", fingerprint)
         raise BootstrapError(f"{error}; the store holds the checked credential anyway, so it is kept") from None
-    write_handoff("saved", "")
+    write_handoff("saved", fingerprint)
     return "created"
 
 
@@ -1259,7 +1266,7 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -
         print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
         print(f"credential check: passed with {check['private_repositories']} private repositories")
         budget.check("the hand-off")
-        hand_off("kept" if minted is None else "created", credential, check["fingerprint"])
+        hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
     except BaseException as error:
         if minted is not None:
             revoke_after(gitea, error, minted)
@@ -1273,7 +1280,12 @@ def await_store(gitea: Gitea, minted: Minted) -> None:
         f"so token {minted.token_id} stays in gitea until a later run keeps or deletes it"
     )
     result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
-    take_handoff(result)
+    named = take_handoff(result)
+    if named is None or not hmac.compare_digest(fingerprint_of(minted.credential), named):
+        raise BootstrapError(
+            f"credential-put reported a store result for another token, so token {minted.token_id} stays in gitea "
+            "until a later run keeps or deletes it"
+        )
     if result == "unsaved":
         revoke_credential(gitea, minted)
         raise BootstrapError("credential-put did not store the minted credential, so it is deleted from gitea")
