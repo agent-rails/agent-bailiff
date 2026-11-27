@@ -522,6 +522,7 @@ class TokenGitea(b.Gitea):
         self.events = events
         self.demo = {STORED: 200, MINTED: 200}
         self.page_cap = 50
+        self.lost = None
 
     def wait_healthy(self, seconds):
         pass
@@ -534,6 +535,8 @@ class TokenGitea(b.Gitea):
             token_id = max(self.tokens) + 1
             self.tokens[token_id] = body["name"]
             self.events.append(("minted", token_id))
+            if self.lost is not None:
+                return self.lost()
             return 201, {"id": token_id, "sha1": "m" * 40}
         if method == "DELETE" and path.startswith(f"{tokens}/"):
             token_id = int(path.rsplit("/", 1)[1])
@@ -749,6 +752,29 @@ def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
     assert (first.token_id, second.token_id) == (9, 10) and gitea.deleted == []
     assert gitea.tokens[9] != gitea.tokens[10]
     assert all(re.fullmatch(f"{b.TOKEN_NAME}-[0-9a-f]{{16}}", gitea.tokens[token_id]) for token_id in (9, 10))
+
+
+def lose(error):
+    raise error
+
+
+@pytest.mark.parametrize(
+    "lost",
+    [
+        lambda: lose(b.GiteaUnavailable("gitea POST /api/v1/users/agent/tokens did not answer within 10s")),
+        lambda: lose(ConnectionResetError(54, "Connection reset by peer")),
+        lambda: lose(json.JSONDecodeError("Expecting value", "", 0)),
+        lambda: (201, {"id": 9}),
+        lambda: (201, ["m" * 40]),
+    ],
+    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object"],
+)
+def test_a_mint_with_no_clear_answer_deletes_the_token_by_its_name_and_fails(gitea, lost):
+    gitea.lost = lost
+    with pytest.raises((b.BootstrapError, OSError, ValueError)):
+        b.mint_credential(gitea, "admin")
+    assert gitea.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
 
 
 def test_a_stored_remint_retires_every_other_quickstart_token_from_every_page(pair, gitea):

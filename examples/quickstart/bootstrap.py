@@ -806,8 +806,20 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
     agent = basic(AGENT, password)
-    body = {"name": f"{TOKEN_NAME}-{secrets.token_hex(8)}", "scopes": TOKEN_SCOPES}
-    created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
+    name = f"{TOKEN_NAME}-{secrets.token_hex(8)}"
+    try:
+        created = gitea.expect(
+            {201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, {"name": name, "scopes": TOKEN_SCOPES}
+        )
+        if (
+            not isinstance(created, dict)
+            or not isinstance(created.get("sha1"), str)
+            or not isinstance(created.get("id"), int)
+        ):
+            raise BootstrapError(f"gitea minted token {name} with no id or sha1")
+    except BaseException:
+        delete_tokens(gitea, agent, lambda token: token["name"] == name)
+        raise
     return Minted(f"token {created['sha1']}", created["id"], agent)
 
 
@@ -829,11 +841,19 @@ def revoke_credential(gitea: Gitea, minted: Minted) -> None:
 
 
 def retire_credentials(gitea: Gitea, minted: Minted) -> None:
-    for token in agent_tokens(gitea, minted.owner):
+    delete_tokens(
+        gitea,
+        minted.owner,
+        lambda token: bool(TOKEN_NAMES.fullmatch(token["name"])) and token.get("id") != minted.token_id,
+    )
+
+
+def delete_tokens(gitea: Gitea, owner: str, doomed: Callable[[dict[str, Any]], bool]) -> None:
+    for token in agent_tokens(gitea, owner):
         if not isinstance(token, dict) or not isinstance(token.get("name"), str):
             raise BootstrapError("gitea listed a token with no name")
-        if TOKEN_NAMES.fullmatch(token["name"]) and token.get("id") != minted.token_id:
-            delete_token(gitea, minted.owner, token["id"])
+        if doomed(token):
+            delete_token(gitea, owner, token["id"])
 
 
 def delete_token(gitea: Gitea, owner: str, token_id: Any) -> None:
