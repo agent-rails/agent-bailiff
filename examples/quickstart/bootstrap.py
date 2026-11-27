@@ -1152,7 +1152,10 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
         if wait_for_handoff((awaited, "refused"), HANDOFF_SECONDS, missing) == "refused":
             raise BootstrapError("bootstrap refused the credential, so nothing is stored")
     outcome, fingerprint = read_handoff("checked"), read_handoff("fingerprint")
-    if not hmac.compare_digest(policy_of(upstream), read_handoff("policy")):
+    policy = read_handoff("policy") if os.path.lexists(HANDOFF / "policy") else ""
+    if not hmac.compare_digest(policy_of(upstream), policy):
+        if outcome == "created":
+            write_handoff("unsaved", fingerprint)
         raise BootstrapError("bootstrap checked the credential under another upstream policy, so nothing is stored")
     if outcome == "kept":
         if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):

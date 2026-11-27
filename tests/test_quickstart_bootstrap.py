@@ -1523,7 +1523,37 @@ def test_credential_put_refuses_a_check_made_under_another_upstream(pair, tmp_pa
     with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
     assert pair.cli.calls == []
-    assert not (pair.handoff / "unsaved").exists() and not (pair.handoff / "saved").exists()
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(MINTED) and not (pair.handoff / "saved").exists()
+
+
+def test_credential_put_reports_nothing_for_a_kept_check_under_another_upstream(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "kept", STORED, fingerprint(STORED))
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == [] and not {"saved", "unsaved"} & set(handoff_files(pair))
+
+
+@pytest.mark.parametrize("policy", [None, "", "0" * 64])
+def test_a_minted_token_checked_under_another_policy_is_deleted_at_once(pair, gitea, monkeypatch, capsys, policy):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    write = b.write_handoff
+
+    def forged_policy(name, text):
+        if name != "policy":
+            write(name, text)
+        elif policy is not None:
+            write(name, policy)
+
+    monkeypatch.setattr(b, "write_handoff", forged_policy)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "under another upstream policy, so nothing is stored" in err
+    assert "did not store the minted credential, so it is deleted from gitea" in err
 
 
 @pytest.mark.parametrize(
