@@ -154,6 +154,9 @@ POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "
 GITEA = os.environ.get("GITEA_URL", "http://gitea:3000")
 GITEA_HEALTH_SECONDS = 120
 HTTP_TIMEOUT_SECONDS = 10
+MAX_GITEA_BYTES = 1 << 20
+TOKEN_PAGE_LIMIT = 50
+MAX_TOKEN_PAGES = 20
 ADMIN = "quickstart-admin"
 AGENT = "agent"
 ORG = "quickstart"
@@ -618,9 +621,11 @@ class Gitea:
         request = urllib.request.Request(f"{self._base}{path}", data, headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-                status, raw = response.status, response.read()
+                status, raw = response.status, response.read(MAX_GITEA_BYTES + 1)
         except urllib.error.HTTPError as error:
-            status, raw = error.code, error.read()
+            status, raw = error.code, error.read(MAX_GITEA_BYTES + 1)
+        if len(raw) > MAX_GITEA_BYTES:
+            raise BootstrapError(f"gitea {method} {path} answered more than {MAX_GITEA_BYTES} bytes")
         return status, json.loads(raw) if raw.strip() else None
 
     def expect(self, statuses: set[int], method: str, path: str, authorization: str | None, body: Any = None) -> Any:
@@ -712,12 +717,25 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
     reset = {"login_name": AGENT, "source_id": 0, "password": password, "must_change_password": False}
     gitea.expect({200}, "PATCH", f"/api/v1/admin/users/{AGENT}", admin, reset)
     agent = basic(AGENT, password)
-    for token in gitea.expect({200}, "GET", f"/api/v1/users/{AGENT}/tokens", agent):
+    for token in agent_tokens(gitea, agent):
         if token["name"] == TOKEN_NAME:
             gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token['id']}", agent)
     body = {"name": TOKEN_NAME, "scopes": TOKEN_SCOPES}
     created = gitea.expect({201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, body)
     return Minted(f"token {created['sha1']}", created["id"], agent)
+
+
+def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
+    tokens: list[Any] = []
+    for page in range(1, MAX_TOKEN_PAGES + 1):
+        path = f"/api/v1/users/{AGENT}/tokens?limit={TOKEN_PAGE_LIMIT}&page={page}"
+        batch = gitea.expect({200}, "GET", path, agent)
+        if not isinstance(batch, list):
+            raise BootstrapError(f"gitea GET {path} returned no token list")
+        tokens.extend(batch)
+        if len(batch) < TOKEN_PAGE_LIMIT:
+            return tokens
+    raise BootstrapError(f"{AGENT} holds more than {MAX_TOKEN_PAGES * TOKEN_PAGE_LIMIT} gitea tokens")
 
 
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:

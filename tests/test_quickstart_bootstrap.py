@@ -3,8 +3,11 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from agent_warrant.identity import encode_public_key
@@ -518,8 +521,11 @@ class TokenGitea(b.Gitea):
             del self.tokens[token_id]
             self.deleted.append(token_id)
             return 204, None
-        if (method, path) == ("GET", tokens):
-            return 200, [{"id": token_id, "name": name} for token_id, name in self.tokens.items()]
+        if method == "GET" and urlsplit(path).path == tokens:
+            query = parse_qs(urlsplit(path).query)
+            limit, page = int(query.get("limit", ["50"])[0]), int(query.get("page", ["1"])[0])
+            listed = [{"id": token_id, "name": name} for token_id, name in self.tokens.items()]
+            return 200, listed[(page - 1) * limit : page * limit]
         assert method in ("GET", "PATCH")
         return 200, {}
 
@@ -673,6 +679,53 @@ def test_every_handoff_file_is_owner_read_only(pair):
     b.hand_off("created", MINTED, fingerprint(MINTED))
     modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
     assert modes == dict.fromkeys(("stored", "ready", "token", "fingerprint", "checked"), 0o400)
+
+
+def test_mint_deletes_the_old_quickstart_token_from_every_page_of_the_token_list(pair, gitea):
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 121)}
+    gitea.tokens[110] = b.TOKEN_NAME
+    minted = b.mint_credential(gitea, "admin")
+    assert gitea.deleted == [110]
+    assert gitea.tokens[121] == b.TOKEN_NAME and len(gitea.tokens) == 120
+    assert minted.credential == MINTED
+
+
+def test_mint_refuses_a_token_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
+    monkeypatch.setattr(b, "MAX_TOKEN_PAGES", 2, raising=False)
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 101)}
+    with pytest.raises(b.BootstrapError, match="holds more than 100 gitea tokens"):
+        b.mint_credential(gitea, "admin")
+    assert gitea.deleted == [] and len(gitea.tokens) == 100
+
+
+@pytest.fixture
+def answering():
+    answer = SimpleNamespace(status=200, body=b"{}")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(answer.status)
+            self.send_header("Content-Length", str(len(answer.body)))
+            self.end_headers()
+            self.wfile.write(answer.body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+    answer.url = f"http://127.0.0.1:{server.server_port}"
+    yield answer
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize("status", [200, 500])
+def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch, status):
+    monkeypatch.setattr(b, "MAX_GITEA_BYTES", 64, raising=False)
+    answering.status, answering.body = status, json.dumps({"pad": "x" * 64}).encode()
+    with pytest.raises(b.BootstrapError, match="gitea GET /api/v1/user answered more than 64 bytes"):
+        b.Gitea(answering.url).request("GET", "/api/v1/user", None)
 
 
 def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
