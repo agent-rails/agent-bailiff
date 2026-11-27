@@ -189,6 +189,19 @@ def test_json_rows_carry_the_signed_record(docket, pin_files, capsys):
     assert decoded.entry.decision == rows[2]["entry"]["decision"] == "refuse"
 
 
+def test_json_rows_carry_credential_exceptions_only_when_present(docket, pin_files, capsys):
+    docket.append("custodian", make_entry(1, hop="custodian", component="custodian"))
+    docket.append(
+        "custodian",
+        make_entry(2, hop="custodian", component="custodian", credential_exceptions=("unredactable",)),
+    )
+    code, out, err = verify(docket, pin_files, "--json", capsys=capsys)
+    assert code == 0, err
+    rows = json_rows(out)
+    assert "credential_exceptions" not in rows[0]["entry"]
+    assert rows[1]["entry"]["credential_exceptions"] == ["unredactable"]
+
+
 @pytest.mark.parametrize(
     ("arguments", "lines"),
     [

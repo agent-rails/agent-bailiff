@@ -97,6 +97,8 @@ def to_span(verified: VerifiedLine) -> ReadableSpan:
             attributes[f"bailiff.{name}"] = number
     if entry.links:
         attributes["bailiff.links"] = list(entry.links)
+    if entry.credential_exceptions:
+        attributes["bailiff.credential_exceptions"] = list(entry.credential_exceptions)
     for level, handle in sorted(entry.handles.items()):
         attributes[f"bailiff.handle.{level}"] = handle
     if entry.performed:

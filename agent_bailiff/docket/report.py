@@ -340,6 +340,10 @@ def json_row(verified: VerifiedLine) -> str:
         entry = asdict(record.entry)
         entry["links"] = list(record.entry.links)
         entry["handles"] = dict(record.entry.handles)
+        if record.entry.credential_exceptions:
+            entry["credential_exceptions"] = list(record.entry.credential_exceptions)
+        else:
+            del entry["credential_exceptions"]
         document |= {"typ": ENTRY_TYP, "entry": entry}
     return json.dumps(document, sort_keys=True)
 

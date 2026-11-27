@@ -18,6 +18,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from agent_warrant.canonical import canonicalize
+from agent_warrant.encoding import b64u, b64u_decode
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from agent_bailiff.docket import (
@@ -307,6 +309,78 @@ def test_invalid_entries_cannot_be_encoded():
         encode_record(DECIDE_KEY, "decide-1", "decide", 0, None, make_entry(1))
     with pytest.raises(ValueError, match="entry_id"):
         encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, make_entry(1, entry_id=""))
+
+
+def _signed_body(entry, **changes):
+    body = {
+        **{name: getattr(entry, name) for name in entry.__dataclass_fields__ if name != "credential_exceptions"},
+        "links": list(entry.links),
+        "handles": dict(entry.handles),
+        "writer": "decide",
+        "seq": 1,
+        "prev": None,
+    }
+    return {**body, **changes}
+
+
+def test_an_entry_without_credential_exceptions_signs_the_earlier_body():
+    entry = make_entry(1)
+    record = encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, entry)
+    assert record.token == sign(DECIDE_KEY, "decide-1", ENTRY_TYP, _signed_body(entry))
+    assert "credential_exceptions" not in json.loads(b64u_decode(record.token.split(".")[0]))
+
+
+def test_a_record_written_before_credential_exceptions_decodes_with_none():
+    token = sign(DECIDE_KEY, "decide-1", ENTRY_TYP, _signed_body(make_entry(1)))
+    decoded = decode_record(token, INDEX)
+    assert not isinstance(decoded, Refused)
+    assert decoded.entry == make_entry(1)
+    assert decoded.entry.credential_exceptions == ()
+
+
+def test_credential_exceptions_round_trip_through_the_sink(paths, start_sink):
+    start_sink()
+    entry = make_entry(1, credential_exceptions=("unredactable",))
+    record = decide_client(paths).append(entry)
+    decoded = decode_record(lines(paths[0])[0], INDEX)
+    assert decoded == record
+    assert decoded.entry.credential_exceptions == ("unredactable",)
+    payload = json.loads(b64u_decode(record.token.split(".")[0]))
+    assert payload["credential_exceptions"] == ["unredactable"]
+    assert verify_docket(paths[0], WRITERS).ok
+
+
+@pytest.mark.parametrize("value", [[], "unredactable", ["unknown"], ["unredactable", "unredactable"], [""], None])
+def test_an_invalid_credential_exceptions_value_is_refused(paths, start_sink, value):
+    start_sink()
+    token = sign(DECIDE_KEY, "decide-1", ENTRY_TYP, _signed_body(make_entry(1), credential_exceptions=value))
+    assert decode_record(token, INDEX).reason == "invalid_field"
+    assert_refused(paths, token, "invalid_field")
+
+
+@pytest.mark.parametrize("value", [("unknown",), ("unredactable", "unredactable")])
+def test_invalid_credential_exceptions_cannot_be_encoded(value):
+    with pytest.raises(ValueError, match="credential_exceptions"):
+        encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, make_entry(1, credential_exceptions=value))
+
+
+def _with_payload(record, change):
+    encoded, signature = record.token.split(".")
+    payload = change(json.loads(b64u_decode(encoded)))
+    return f"{b64u(canonicalize(payload))}.{signature}"
+
+
+def test_tampering_with_credential_exceptions_fails_verification():
+    marked = encode_record(
+        DECIDE_KEY, "decide-1", "decide", 1, None, make_entry(1, credential_exceptions=("unredactable",))
+    )
+    plain = encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, make_entry(1))
+    tampered = [
+        _with_payload(marked, lambda body: {name: body[name] for name in body if name != "credential_exceptions"}),
+        _with_payload(marked, lambda body: {**body, "credential_exceptions": []}),
+        _with_payload(plain, lambda body: {**body, "credential_exceptions": ["unredactable"]}),
+    ]
+    assert [decode_record(token, INDEX).reason for token in tampered] == ["bad_signature"] * 3
 
 
 def test_oversized_frame_is_refused_and_not_appended(paths, start_sink):
