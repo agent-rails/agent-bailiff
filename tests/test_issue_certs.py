@@ -247,16 +247,34 @@ def test_a_first_issue_killed_before_its_switch_is_replaced_on_rerun(certs):
     assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0002"] for name in NAMES)
 
 
-def test_reissue_switches_to_a_new_generation_and_keeps_only_the_previous_one(certs):
+def test_reissue_switches_to_a_new_generation_and_deletes_the_previous_one(certs):
     assert run(certs, "issue") == 0
     first = ca(certs)
     assert run(certs, "issue", "--reissue") == 0
     assert {current(certs, name) for name in NAMES} == {"gen-0002"}
     assert ca(certs) != first
-    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0001", "gen-0002"] for name in NAMES)
+    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0002"] for name in NAMES)
     assert certs_module.check(certs, SERVICES, datetime.datetime.now(datetime.UTC), 30, keys=True) == []
     assert run(certs, "issue", "--reissue") == 0
-    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0002", "gen-0003"] for name in NAMES)
+    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0003"] for name in NAMES)
+
+
+def private_keys(certs):
+    return {
+        path: path.read_bytes() for path in certs.rglob("*") if path.is_file() and b"PRIVATE KEY" in path.read_bytes()
+    }
+
+
+def test_reissue_leaves_no_earlier_private_key_on_disk(certs):
+    assert run(certs, "issue") == 0
+    earlier = set(private_keys(certs).values())
+    assert run(certs, "issue", "--reissue") == 0
+    keys = private_keys(certs)
+    assert len(keys) == len(SERVICES)
+    assert earlier.isdisjoint(keys.values())
+    for service in SERVICES:
+        key = load_pem_private_key((certs / service / "current" / f"{service}.key").read_bytes(), None)
+        assert spki(key.public_key()) == spki(leaf(certs, service).public_key())
 
 
 KILL_BEFORE_SWITCH = """
@@ -286,7 +304,7 @@ def test_a_sigkill_before_the_switch_leaves_the_current_set(certs):
     assert run(certs, "issue") == 0
     assert run(certs, "issue", "--reissue") == 0
     assert {current(certs, name) for name in NAMES} == {"gen-0003"}
-    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0001", "gen-0003"] for name in NAMES)
+    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0003"] for name in NAMES)
 
 
 class FullDisk:

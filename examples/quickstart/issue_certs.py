@@ -2,9 +2,10 @@
 that serves TLS, and discards the CA key, so revoking is rerunning with --reissue. Each service's key lands in its own
 directory (one volume each), readable only by that service's group; the CA and the leaf certificates land in public.
 A complete, valid set is kept on rerun; a partial or mixed set is refused. --reissue writes a new generation in every
-directory and switches each one's current symlink only after every file is on disk. check fails when the set is
-incomplete, does not chain, or expires within the margin, and can probe each served certificate over TLS, including
-the configured upstream's when it is a server in the stack."""
+directory, switches each one's current symlink only after every file is on disk, then deletes every other
+generation, so no earlier key stays on disk. check fails when the set is incomplete, does not chain, names other
+hosts, or expires within the margin, and can probe each served certificate over TLS, including the configured
+upstream's when it is a server in the stack."""
 
 from __future__ import annotations
 
@@ -276,7 +277,7 @@ def issue(
     for directory in folders:
         switch(directory, generation)
     for directory in folders:
-        prune(directory, {generation, *filter(None, [currents[directory]])})
+        prune(directory, {generation})
     return f"issued {generation}"
 
 
