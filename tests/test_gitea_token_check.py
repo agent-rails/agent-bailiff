@@ -680,6 +680,32 @@ def test_credential_check_refuses_a_slow_drip_at_its_wall_clock_deadline(capsys,
     assert elapsed < 2
 
 
+def test_credential_check_refuses_an_alarm_that_fires_as_it_is_armed(capsys, monkeypatch):
+    setitimer = cli.signal.setitimer
+
+    def fire_on_arm(which, seconds):
+        setitimer(which, 0)
+        if seconds:
+            cli.signal.getsignal(cli.signal.SIGALRM)(cli.signal.SIGALRM, None)
+
+    monkeypatch.setattr(cli.signal, "setitimer", fire_on_arm)
+    assert credential_check(None, NEEDLE.encode() + b"\n", api_url="http://127.0.0.1:9/api/v1") == cli.EXIT_REFUSED
+    assert "credential-check refused: deadline_exceeded" in capsys.readouterr().err
+
+
+def test_credential_check_lets_the_check_report_its_own_refusal_just_past_its_deadline(capsys, monkeypatch):
+    def slow_refusal(header, **options):
+        time.sleep(options["timeout"] * 2)
+        raise TokenCheckRefused("provider_unreachable", "the check gave up on its own")
+
+    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(cli, "check_token", slow_refusal)
+    assert credential_check(None, NEEDLE.encode() + b"\n", api_url="http://127.0.0.1:9/api/v1") == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "credential-check refused: provider_unreachable: the check gave up on its own" in err
+    assert "deadline_exceeded" not in err
+
+
 def test_credential_check_fingerprint_matches_put_credential(gitea, capsys):
     gitea.token(["read:repository"])
     assert credential_check(gitea, NEEDLE.encode() + b"\r\n") == 0

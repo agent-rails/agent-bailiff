@@ -116,6 +116,7 @@ EXIT_NO_CREDENTIAL = 2
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
 GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
+CREDENTIAL_CHECK_GRACE_SECONDS = 1.0
 FINGERPRINT_DIGITS = frozenset("0123456789abcdef")
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
@@ -1118,8 +1119,8 @@ def _credential_check(args: argparse.Namespace) -> int:
     if not secret.isascii():
         return _refused("credential-check", "the credential on stdin is not ASCII")
     previous = signal.signal(signal.SIGALRM, _expire_credential_check)
-    signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS)
     try:
+        signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS + CREDENTIAL_CHECK_GRACE_SECONDS)
         result = check_token(
             secret.decode("ascii"),
             api_url=args.api_url,
