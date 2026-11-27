@@ -169,6 +169,7 @@ REPOS = ("demo", "payroll")
 TOKEN_NAME = "bailiff-quickstart"
 TOKEN_NAMES = re.compile(rf"{TOKEN_NAME}(-[0-9a-f]{{16}})?")
 TOKEN_SCOPES = ["read:issue", "read:repository"]
+REACH_SAMPLE = 50
 CHECK_REFUSAL = re.compile(r"agent-bailiff credential-check refused: ([a-z_]+): ")
 REMINT_REASONS = frozenset({"broader_scopes", "token_rejected"})
 PAYROLL_FILE = "salaries.csv"
@@ -1046,10 +1047,10 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
     for label, (method, path, body) in probes.items():
         status, _ = gitea.request(method, path, credential, body)
         reach[label] = probe_outcome(label, status)
-    search = gitea.expect({200}, "GET", "/api/v1/repos/search?limit=50", credential)
+    search = gitea.expect({200}, "GET", f"/api/v1/repos/search?limit={REACH_SAMPLE}", credential)
     return {
         "scopes": TOKEN_SCOPES,
-        "repositories": sorted(repo["full_name"] for repo in search["data"]),
+        f"repositories, a sample of the first {REACH_SAMPLE}": sorted(repo["full_name"] for repo in search["data"]),
         "probes": reach,
     }
 

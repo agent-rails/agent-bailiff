@@ -65,7 +65,7 @@ gitea: created read access for agent on quickstart/payroll
       "read:issue",
       "read:repository"
     ],
-    "repositories": [
+    "repositories, a sample of the first 50": [
       "quickstart/demo",
       "quickstart/payroll"
     ],
@@ -85,7 +85,7 @@ $ docker compose logs --no-log-prefix credential-put
 credential: created
 ```
 
-The probes are real calls made with the token before it is stored, so this is the token's measured reach, not its intended reach. Gitea repository-scoped fine-grained tokens are Enterprise-only, so the token reads both repositories, including `salaries.csv`. The check passes because both private repositories match the binding `gitea/repos/quickstart/*` and the scopes are exactly the upstream config's `required_permissions`; a token with broader scopes or private reach outside the binding is refused, and nothing is stored.
+The probes are real calls made with the token before it is stored, so this is the token's measured reach, not its intended reach. The repository list is a sample of the first 50 the token can see; `credential-check` pages through all of them, and refuses past `--max-repos` (default 1000). Gitea repository-scoped fine-grained tokens are Enterprise-only, so the token reads both repositories, including `salaries.csv`. The check passes because both private repositories match the binding `gitea/repos/quickstart/*` and the scopes are exactly the upstream config's `required_permissions`; a token with broader scopes or private reach outside the binding is refused, and nothing is stored.
 
 ```console
 $ docker compose run --rm -T agent run | tee run.json
