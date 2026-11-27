@@ -1,8 +1,8 @@
 """Quickstart latency baseline. It calls the upstream MCP server directly, with the credential the custodian would
 inject, so the same tool and call counts as `agent.py load` run without the gateway, decide and custodian. The
 difference between the two at each percentile is what bailiff adds at that percentile. It runs as the baseline
-service, which reads the stored credential like bootstrap and reaches the upstream over https, trusting only the
-upstream's configured CA (the install CA for a server in the stack)."""
+service, which reaches the upstream over https, trusting only the upstream's configured CA (the install CA for a
+server in the stack), but not the store, and reads the credential's header value on stdin."""
 
 from __future__ import annotations
 
@@ -160,13 +160,13 @@ def run_baseline(
     }
 
 
-def stored_authorization() -> tuple[str, str, Path | None]:
+def stdin_authorization() -> tuple[str, str, Path | None]:
     import bootstrap
 
     upstream = bootstrap.load_upstream(bootstrap.UPSTREAM_FILE)
-    credential = bootstrap.stored_credential(upstream)
-    if credential is None:
-        raise BaselineFailed("the custodian holds no credential for the upstream")
+    credential = sys.stdin.readline().removesuffix("\n")
+    if not credential:
+        raise BaselineFailed("stdin holds no credential for the upstream")
     return upstream.url, credential, upstream.ca_file
 
 
@@ -178,7 +178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.clients < 1 or args.calls < 2:
         parser.error("--clients must be at least 1 and --calls at least 2")
     try:
-        url, authorization, ca_file = stored_authorization()
+        url, authorization, ca_file = stdin_authorization()
         print(json.dumps(run_baseline(url, authorization, ca_file, args.clients, args.calls, TOOL, ARGUMENTS)))
         return 0
     except (BaselineFailed, OSError, ValueError, http.client.HTTPException) as error:

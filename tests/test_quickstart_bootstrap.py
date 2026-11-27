@@ -1,15 +1,20 @@
 import datetime
+import hashlib
 import http.server
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socketserver
+import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from agent_warrant.identity import encode_public_key
@@ -19,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from cryptography.x509.oid import NameOID
+from test_gitea_token_check import NEEDLE, Drip
 from test_quickstart_stack import b
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
@@ -307,6 +313,19 @@ def test_an_upstream_url_is_https(tmp_path, url):
         ({"binding_resource": "gitea/*/issues"}, "final /\\* segment"),
         ({"routes_file": "../routes.json"}, "a file beside the upstream config"),
         ({"routes_file": ".."}, "a file beside the upstream config"),
+        ({"provider": "github"}, "provider must be one of gitea"),
+        ({"provider": ""}, "provider must be a non-empty ASCII printable string"),
+        ({"provider_api_url": "http://gitea.example.com/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea:3000/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "https://gitea/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://127.0.0.1/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://user:secret@gitea/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea/api/v1?x=1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea:99999/api/v1"}, "provider_api_url Port out of range"),
+        ({"required_permissions": "read:repository"}, "required_permissions must be a list of scope names"),
+        ({"required_permissions": ["read:repository", 7]}, "required_permissions must be a list of scope names"),
+        ({"required_permissions": ["read:issue"]}, "must include read:repository or write:repository"),
+        ({"required_permissions": ["admin"]}, "is not read:<category>, write:<category> or public-only"),
     ],
 )
 def test_an_invalid_upstream_fails_bootstrap(tmp_path, changes, message):
@@ -317,13 +336,20 @@ def test_an_invalid_upstream_fails_bootstrap(tmp_path, changes, message):
         b.load_upstream(path)
 
 
-def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path):
+@pytest.mark.parametrize("field", ["target", "provider", "provider_api_url", "required_permissions"])
+def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path, field):
     path = write_upstream(tmp_path)
     document = json.loads(path.read_text())
-    del document["target"]
+    del document[field]
     path.write_text(json.dumps(document))
-    with pytest.raises(b.BootstrapError, match="exactly the fields"):
+    with pytest.raises(b.BootstrapError, match="exactly the fields .*optionally all of provider"):
         b.load_upstream(path)
+
+
+def test_the_gitea_upstream_names_the_provider_check_and_the_stub_names_none():
+    check = b.load_upstream(GITEA_UPSTREAM).provider_check
+    assert check == b.ProviderCheck("gitea", "http://gitea/api/v1", ("read:issue", "read:repository"))
+    assert b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json").provider_check is None
 
 
 @pytest.mark.parametrize(
@@ -568,18 +594,22 @@ class GiteaHandler(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def gitea_socket():
+def socket_path():
     directory = Path(tempfile.mkdtemp(prefix="bg-", dir="/tmp"))
-    path = directory / "gitea.sock"
-    server = socketserver.ThreadingUnixStreamServer(str(path), GiteaHandler)
+    yield directory / "gitea.sock"
+    shutil.rmtree(directory)
+
+
+@pytest.fixture
+def gitea_socket(socket_path):
+    server = socketserver.ThreadingUnixStreamServer(str(socket_path), GiteaHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield path
+        yield socket_path
     finally:
         server.shutdown()
         server.server_close()
-        shutil.rmtree(directory)
 
 
 def test_gitea_is_reached_over_its_unix_socket(gitea_socket):
@@ -601,3 +631,558 @@ def test_a_missing_gitea_socket_fails_without_waiting(gitea_socket):
 def test_gitea_not_healthy_on_its_socket_fails_bootstrap(gitea_socket):
     with pytest.raises(b.BootstrapError, match="absent.sock was not healthy within 0s"):
         b.Gitea(gitea_socket.with_name("absent.sock")).wait_healthy(0)
+
+
+STORED = "token " + "s" * 40
+MINTED = "token " + "m" * 40
+
+
+def fingerprint(credential):
+    return hashlib.sha256(credential.encode()).hexdigest()
+
+
+class TokenGitea(b.Gitea):
+    def __init__(self, events):
+        super().__init__(b.GITEA_SOCKET)
+        self.tokens = {7: b.TOKEN_NAME, 8: "laptop"}
+        self.deleted = []
+        self.events = events
+        self.demo = {STORED: 200, MINTED: 200}
+        self.page_cap = 50
+        self.lost = None
+        self.last_eight = {7: "s" * 8}
+
+    def wait_healthy(self, seconds):
+        pass
+
+    def request(self, method, path, authorization, body=None):
+        tokens = f"/api/v1/users/{b.AGENT}/tokens"
+        if (method, path) == ("GET", f"/api/v1/repos/{b.ORG}/demo"):
+            return self.demo[authorization], {"permissions": {"pull": True}}
+        if (method, path) == ("POST", tokens):
+            token_id = max(self.tokens) + 1
+            self.tokens[token_id] = body["name"]
+            self.last_eight[token_id] = "m" * 8
+            self.events.append(("minted", token_id))
+            if self.lost is not None:
+                return self.lost()
+            return 201, {"id": token_id, "sha1": "m" * 40}
+        if method == "DELETE" and path.startswith(f"{tokens}/"):
+            token_id = int(path.rsplit("/", 1)[1])
+            del self.tokens[token_id]
+            self.deleted.append(token_id)
+            self.events.append(("deleted", token_id))
+            return 204, None
+        if method == "GET" and urlsplit(path).path == tokens:
+            query = parse_qs(urlsplit(path).query)
+            limit, page = min(int(query.get("limit", ["50"])[0]), self.page_cap), int(query.get("page", ["1"])[0])
+            listed = [self.listed(token_id, name) for token_id, name in self.tokens.items()]
+            return 200, listed[(page - 1) * limit : page * limit]
+        assert method in ("GET", "PATCH")
+        return 200, {}
+
+    def listed(self, token_id, name):
+        last_eight = self.last_eight.get(token_id, f"{token_id:08x}")
+        return {"id": token_id, "name": name} | ({} if last_eight is None else {"token_last_eight": last_eight})
+
+
+class FakeCli:
+    def __init__(self, events=None):
+        self.calls = []
+        self.refused = {}
+        self.put_fails = False
+        self.store = None
+        self.events = [] if events is None else events
+
+    def __call__(self, command, **options):
+        arguments, stdin = tuple(command[3:]), options["input"]
+        self.calls.append((arguments, stdin))
+        if arguments[0] == "credential-check":
+            if stdin in self.refused:
+                stderr = f"agent-bailiff credential-check refused: {self.refused[stdin]}: a detail\n"
+                return subprocess.CompletedProcess(command, 1, "", stderr)
+            document = {"fingerprint": fingerprint(stdin), "login": "agent", "private_repositories": 2}
+            return subprocess.CompletedProcess(command, 0, json.dumps(document), "")
+        if self.put_fails:
+            return subprocess.CompletedProcess(command, 1, "", "agent-bailiff put-credential refused: a detail\n")
+        self.events.append(("stored", stdin))
+        self.store = stdin
+        return subprocess.CompletedProcess(command, 0, "stored\n", "")
+
+    def of(self, command):
+        return [(arguments, stdin) for arguments, stdin in self.calls if arguments[0] == command]
+
+
+@pytest.fixture
+def pair(tmp_path, monkeypatch):
+    handoff = tmp_path / "handoff"
+    handoff.mkdir(mode=0o700)
+    (tmp_path / "password").write_text("admin password")
+    events = []
+    fake = SimpleNamespace(
+        cli=FakeCli(events), stored=None, handoff=handoff, gitea=TokenGitea(events), built=[], events=events
+    )
+    monkeypatch.setattr(b, "HANDOFF", handoff)
+    monkeypatch.setattr(b, "HANDOFF_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(b, "READY_SECONDS", 10)
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 10)
+    monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
+    monkeypatch.setattr(b, "ADMIN_PASSWORD", tmp_path / "password")
+    monkeypatch.setattr(b, "Gitea", lambda base: fake.built.append(base) or fake.gitea)
+    monkeypatch.setattr(b, "seed", lambda gitea, admin: [])
+    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: {})
+    monkeypatch.setattr(b, "stored_credential", lambda upstream: fake.cli.store or fake.stored)
+    monkeypatch.setattr(b.subprocess, "run", fake.cli)
+    return fake
+
+
+@pytest.fixture
+def gitea(pair):
+    return pair.gitea
+
+
+def run_pair():
+    with ThreadPoolExecutor(1) as pool:
+        put = pool.submit(b.main, ["credential"])
+        checked = b.main(["gitea"])
+        return put.result(timeout=30), checked
+
+
+def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(pair, capsys):
+    assert run_pair() == (0, 0)
+    [(arguments, stdin)] = pair.cli.of("credential-check")
+    assert stdin == MINTED
+    assert arguments[1:] == (
+        "--provider", "gitea", "--api-url", "http://gitea/api/v1", "--unix-socket", "/run/gitea/gitea.sock",
+        "--binding-resource", "gitea/repos/quickstart/*", "--required", "read:issue", "--required", "read:repository",
+    )  # fmt: skip
+    [(arguments, stdin)] = pair.cli.of("custodian")
+    assert arguments[:2] == ("custodian", "put-credential")
+    assert arguments[-2:] == ("--expect-fingerprint", fingerprint(MINTED))
+    assert stdin == MINTED
+    lines = capsys.readouterr().out.splitlines()
+    assert "credential: created" in lines and "gitea: created" in lines
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_put(pair, gitea, capsys):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    assert run_pair() == (1, 1)
+    assert gitea.deleted == [9]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+    assert pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: agent-bailiff" in err
+    assert "bootstrap credential refused: bootstrap refused the credential, so nothing is stored" in err
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
+    gitea.demo[MINTED] = 404
+    assert run_pair() == (1, 1)
+    assert gitea.deleted == [9]
+    assert pair.cli.calls == []
+    assert f"the minted credential cannot read {b.ORG}/demo" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["provider_unreachable", "rate_limited", "deadline_exceeded", "bad_response", "outside_binding", "too_many_repos"],
+)
+def test_a_kept_credential_refused_for_another_reason_aborts_without_minting(pair, gitea, capsys, reason):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = reason
+    assert run_pair() == (1, 1)
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and gitea.deleted == []
+    assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED]
+    assert pair.cli.of("custodian") == []
+    assert f"credential-check refused: {reason}: a detail" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("status", [429, 500, 502])
+def test_a_kept_credential_gitea_cannot_answer_for_aborts_without_minting(pair, gitea, capsys, status):
+    pair.stored = STORED
+    gitea.demo[STORED] = status
+    assert run_pair() == (1, 1)
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and pair.cli.calls == []
+    assert f"gitea GET /api/v1/repos/{b.ORG}/demo returned {status}" in capsys.readouterr().err
+
+
+def test_a_kept_credential_is_checked_and_not_put_again(pair, capsys):
+    pair.stored = STORED
+    assert run_pair() == (0, 0)
+    assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED]
+    assert pair.cli.of("custodian") == [] and pair.gitea.deleted == []
+    lines = capsys.readouterr().out.splitlines()
+    assert "credential: kept" in lines and "gitea: kept" in lines
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_kept_credential_retires_every_other_quickstart_token(pair, gitea):
+    gitea.tokens.update({20: f"{b.TOKEN_NAME}-0123456789abcdef", 21: f"{b.TOKEN_NAME}-laptop"})
+    pair.stored = STORED
+    assert run_pair() == (0, 0)
+    assert pair.events == [("deleted", 20)]
+    assert gitea.tokens.keys() == {7, 8, 21} and pair.cli.of("custodian") == []
+
+
+def test_a_kept_credential_whose_old_tokens_cannot_be_retired_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+
+    def unlisted(gitea, agent):
+        raise b.BootstrapError("token list failed")
+
+    monkeypatch.setattr(b, "agent_tokens", unlisted)
+    assert run_pair() == (0, 1)
+    assert f"older {b.TOKEN_NAME} tokens may still be live in gitea: token list failed" in capsys.readouterr().err
+
+
+def test_a_kept_credential_beside_a_token_with_no_last_eight_fails_and_deletes_nothing(pair, gitea, capsys):
+    gitea.tokens[20] = f"{b.TOKEN_NAME}-0123456789abcdef"
+    gitea.last_eight[7] = None
+    pair.stored = STORED
+    assert run_pair() == (0, 1)
+    assert gitea.deleted == []
+    assert "gitea listed token 7 with no token_last_eight" in capsys.readouterr().err
+
+
+def test_a_stored_remint_whose_old_tokens_cannot_be_retired_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def unlisted(gitea, agent):
+        raise b.BootstrapError("token list failed")
+
+    monkeypatch.setattr(b, "agent_tokens", unlisted)
+    assert run_pair() == (0, 1)
+    assert pair.events == [("minted", 9), ("stored", MINTED)]
+    assert f"older {b.TOKEN_NAME} tokens may still be live in gitea: token list failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("reason", ["broader_scopes", "token_rejected"])
+def test_a_kept_credential_the_check_refuses_is_replaced_by_a_checked_one(pair, gitea, capsys, reason):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = reason
+    assert run_pair() == (0, 0)
+    assert [stdin for _, stdin in pair.cli.of("credential-check")] == [STORED, MINTED]
+    assert pair.events == [("minted", 9), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 9} and gitea.tokens[9].startswith(f"{b.TOKEN_NAME}-")
+    [(arguments, stdin)] = pair.cli.of("custodian")
+    assert (arguments[-1], stdin) == (fingerprint(MINTED), MINTED)
+    captured = capsys.readouterr()
+    assert "the stored credential is refused, so a new one is minted" in captured.err
+    assert "credential: created" in captured.out.splitlines()
+
+
+def test_a_refused_remint_deletes_only_the_new_token_and_leaves_the_stored_one_live(pair, gitea, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    pair.cli.refused[MINTED] = "broader_scopes"
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+    assert "bootstrap refused the credential, so nothing is stored" in capsys.readouterr().err
+
+
+def test_a_remint_credential_put_fails_to_store_deletes_only_the_new_token(pair, gitea, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "token_rejected"
+    pair.cli.put_fails = True
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+    assert "credential-put did not store the minted credential, so it is deleted from gitea" in capsys.readouterr().err
+
+
+def test_a_put_that_stores_then_times_out_keeps_the_new_token_and_fails_credential_put(
+    pair, gitea, monkeypatch, capsys
+):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def stored_then_timed_out(command, **options):
+        result = pair.cli(command, **options)
+        if command[3] == "custodian":
+            raise subprocess.TimeoutExpired(command, b.CLI_TIMEOUT_SECONDS)
+        return result
+
+    monkeypatch.setattr(b.subprocess, "run", stored_then_timed_out)
+    assert run_pair() == (1, 0)
+    assert pair.events == [("minted", 9), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 9}
+    err = capsys.readouterr().err
+    assert "did not finish within 60s; the store holds the checked credential anyway, so it is kept" in err
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_both(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 2)
+    write = b.write_handoff
+
+    def disk_full_on_saved(name, text):
+        if name == "saved":
+            raise OSError(28, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", disk_full_on_saved)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("stored", MINTED)]
+    assert gitea.tokens.keys() == {7, 8, 9}
+    err = capsys.readouterr().err
+    assert "bootstrap credential refused: [Errno 28] No space left on device" in err
+    assert "reported no store of the minted credential within 2s, so token 9 stays in gitea" in err
+
+
+def test_a_store_result_that_never_comes_keeps_the_new_token_and_fails_bootstrap(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0.2)
+    monkeypatch.setattr(b, "store_handed_off", lambda upstream, stored: b.wait_for_handoff(("checked",), 10, "unused"))
+    assert run_pair() == (0, 1)
+    assert pair.events == [("minted", 9)]
+    assert gitea.tokens.keys() == {7, 8, 9}
+    assert "within 0.2s, so token 9 stays in gitea until a later run keeps or deletes it" in capsys.readouterr().err
+
+
+def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, gitea, monkeypatch, capsys):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+
+    def unreachable(gitea, credential):
+        raise b.BootstrapError("token reach probe failed")
+
+    monkeypatch.setattr(b, "token_reach", unreachable)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and pair.cli.of("custodian") == []
+    assert "token reach probe failed" in capsys.readouterr().err
+
+
+def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
+    b.export_credential(STORED)
+    b.hand_off("kept", STORED, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == []
+
+
+def test_every_handoff_file_is_owner_read_only(pair):
+    b.export_credential(STORED)
+    b.hand_off("created", MINTED, fingerprint(MINTED))
+    modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
+    assert modes == dict.fromkeys(("stored", "ready", "token", "fingerprint", "checked"), 0o400)
+
+
+def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
+    first, second = b.mint_credential(gitea, "admin"), b.mint_credential(gitea, "admin")
+    assert (first.token_id, second.token_id) == (9, 10) and gitea.deleted == []
+    assert gitea.tokens[9] != gitea.tokens[10]
+    assert all(re.fullmatch(f"{b.TOKEN_NAME}-[0-9a-f]{{16}}", gitea.tokens[token_id]) for token_id in (9, 10))
+
+
+def lose(error):
+    raise error
+
+
+@pytest.mark.parametrize(
+    "lost",
+    [
+        lambda: lose(b.GiteaUnavailable("gitea POST /api/v1/users/agent/tokens did not answer within 10s")),
+        lambda: lose(ConnectionResetError(54, "Connection reset by peer")),
+        lambda: lose(json.JSONDecodeError("Expecting value", "", 0)),
+        lambda: (201, {"id": 9}),
+        lambda: (201, ["m" * 40]),
+    ],
+    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object"],
+)
+def test_a_mint_with_no_clear_answer_deletes_the_token_by_its_name_and_fails(gitea, lost):
+    gitea.lost = lost
+    with pytest.raises((b.BootstrapError, OSError, ValueError)):
+        b.mint_credential(gitea, "admin")
+    assert gitea.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
+
+
+def test_a_stored_remint_retires_every_other_quickstart_token_from_every_page(pair, gitea):
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 121)}
+    gitea.tokens[60] = f"{b.TOKEN_NAME}-0123456789abcdef"
+    gitea.tokens[110] = b.TOKEN_NAME
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    assert run_pair() == (0, 0)
+    assert pair.events == [("minted", 121), ("stored", MINTED), ("deleted", 60), ("deleted", 110)]
+    assert gitea.tokens[121].startswith(f"{b.TOKEN_NAME}-") and len(gitea.tokens) == 119
+
+
+def test_a_stored_remint_spares_tokens_that_only_share_the_quickstart_prefix(pair, gitea):
+    gitea.tokens.update(
+        {20: f"{b.TOKEN_NAME}-laptop", 21: f"{b.TOKEN_NAME}ish", 22: f"{b.TOKEN_NAME}-0123456789ABCDEF"}
+    )
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    assert run_pair() == (0, 0)
+    assert pair.events == [("minted", 23), ("stored", MINTED), ("deleted", 7)]
+    assert gitea.tokens.keys() == {8, 20, 21, 22, 23}
+
+
+def test_the_token_list_refuses_a_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
+    monkeypatch.setattr(b, "MAX_TOKEN_PAGES", 2, raising=False)
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 101)}
+    with pytest.raises(b.BootstrapError, match=f"the gitea token list of {b.AGENT} runs past 2 pages"):
+        b.agent_tokens(gitea, "agent")
+
+
+def test_the_token_list_is_read_past_a_short_page_until_an_empty_one(gitea):
+    gitea.page_cap = 3
+    gitea.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 8)}
+    assert [token["id"] for token in b.agent_tokens(gitea, "agent")] == list(range(1, 8))
+
+
+@pytest.fixture
+def answering(socket_path):
+    answer = SimpleNamespace(status=200, body=b"{}", path=socket_path)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(answer.status)
+            self.send_header("Content-Length", str(len(answer.body)))
+            self.end_headers()
+            self.wfile.write(answer.body)
+
+        def log_message(self, *args):
+            pass
+
+    server = socketserver.ThreadingUnixStreamServer(str(socket_path), Handler)
+    threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
+    yield answer
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize("status", [200, 500])
+def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch, status):
+    monkeypatch.setattr(b, "MAX_GITEA_BYTES", 64, raising=False)
+    answering.status, answering.body = status, json.dumps({"pad": "x" * 64}).encode()
+    with pytest.raises(b.BootstrapError, match="gitea GET /api/v1/user answered more than 64 bytes"):
+        b.Gitea(answering.path).request("GET", "/api/v1/user", None)
+
+
+@pytest.mark.parametrize(
+    ("head", "drip"),
+    [
+        (b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a"),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[", b" "),
+    ],
+    ids=["headers", "body"],
+)
+def test_a_gitea_answer_that_drips_fails_bootstrap_at_its_wall_clock_deadline(monkeypatch, socket_path, head, drip):
+    monkeypatch.setattr(b, "HTTP_TIMEOUT_SECONDS", 0.5, raising=False)
+    server = Drip(head, drip, socket_path)
+    try:
+        started = time.monotonic()
+        with pytest.raises(b.BootstrapError, match=r"gitea GET /user did not answer within 0\.5s"):
+            b.Gitea(socket_path).request("GET", "/user", None)
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert elapsed < 2
+
+
+def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap(monkeypatch):
+    monkeypatch.setattr(b, "CLI_TIMEOUT_SECONDS", 1, raising=False)
+    server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a")
+    try:
+        started = time.monotonic()
+        with pytest.raises(b.BootstrapError, match="credential-check --provider did not finish within 1s"):
+            b.cli(
+                "credential-check", "--provider", "gitea", "--api-url", server.url, "--binding-resource",
+                "gitea/repos/quickstart/*", "--required", "read:repository", stdin=NEEDLE,
+            )  # fmt: skip
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert elapsed < 3
+
+
+def test_a_handoff_file_appears_under_its_name_only_once_it_is_whole_and_synced(pair, monkeypatch):
+    events = []
+    fsync, rename = os.fsync, os.rename
+
+    def synced(fd):
+        events.append(("fsync", os.fstat(fd).st_size))
+        fsync(fd)
+
+    def renamed(source, target):
+        events.append(("rename", Path(target).name, Path(source).read_text(), os.path.lexists(target)))
+        rename(source, target)
+
+    monkeypatch.setattr(b.os, "fsync", synced)
+    monkeypatch.setattr(b.os, "rename", renamed)
+    b.write_handoff("fingerprint", fingerprint(MINTED))
+    assert events == [("fsync", 64), ("rename", "fingerprint", fingerprint(MINTED), False)]
+    assert [entry.name for entry in pair.handoff.iterdir()] == ["fingerprint"]
+    assert (pair.handoff / "fingerprint").stat().st_mode & 0o777 == 0o400
+
+
+def test_a_stored_handoff_bootstrap_cannot_read_writes_the_refused_marker(pair, capsys):
+    pair.stored = "token " + "x" * b.MAX_HANDOFF_BYTES
+    assert run_pair() == (1, 1)
+    err = capsys.readouterr().err
+    assert f"stored is larger than {b.MAX_HANDOFF_BYTES} bytes" in err
+    assert "bootstrap refused the credential, so nothing is stored" in err
+    assert pair.built == [] and pair.cli.calls == []
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
+    pair.stored = STORED
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    assert b.main(["credential"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap handed off no checked credential within 0s" in err
+    assert "run credential-put and bootstrap together" in err
+    assert pair.cli.calls == [] and list(pair.handoff.iterdir()) == []
+
+
+def test_credential_put_ignores_a_stale_checked_handoff_from_an_earlier_run(pair, monkeypatch, capsys):
+    pair.stored = STORED
+    (pair.handoff / "fingerprint").write_text(fingerprint(STORED))
+    (pair.handoff / "checked").write_text("kept")
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    assert b.main(["credential"]) == 1
+    assert "bootstrap handed off no checked credential within 0s" in capsys.readouterr().err
+    assert list(pair.handoff.iterdir()) == []
+
+
+def test_bootstrap_alone_fails_at_the_deadline_naming_credential_put(pair, monkeypatch, capsys):
+    monkeypatch.setattr(b, "READY_SECONDS", 0)
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "credential-put exported no stored credential within 0s" in err
+    assert "run bootstrap together with credential-put" in err
+    assert pair.built == [] and pair.cli.calls == []
+
+
+def test_the_handoff_wait_polls_until_its_deadline_then_fails(pair):
+    ticks = iter([0.0, 0.0, 1.0, 2.0])
+    sleeps = []
+    with pytest.raises(b.BootstrapError, match="^nobody came$"):
+        b.wait_for_handoff(("checked",), 2, "nobody came", clock=lambda: next(ticks), sleep=sleeps.append)
+    assert sleeps == [b.HANDOFF_POLL_SECONDS] * 2
+
+
+def test_the_handoff_wait_returns_the_first_file_that_appears(pair):
+    def sleep(seconds):
+        (pair.handoff / "refused").write_text("")
+
+    assert b.wait_for_handoff(("checked", "refused"), 60, "unused", clock=lambda: 0.0, sleep=sleep) == "refused"
+
+
+@pytest.mark.parametrize("step", ["credential", "gitea"])
+def test_an_upstream_without_a_provider_fails_the_pair(pair, monkeypatch, capsys, step):
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert b.main([step]) == 1
+    assert "stub.json names no provider to check the token against" in capsys.readouterr().err
+    assert list(pair.handoff.iterdir()) == []

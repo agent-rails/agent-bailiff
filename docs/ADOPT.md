@@ -91,6 +91,16 @@ $ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem "$HO
 
 A reissue makes a new CA, so copy it again after one.
 
+For a Gitea upstream, add `provider`, `provider_api_url` and `required_permissions` to the upstream config ([`upstreams/schema.md`](../examples/quickstart/upstreams/schema.md)) and check the token before storing it, from the operator's host, which reaches the provider; the custodian has no network. The check refuses a token with scopes beyond `required_permissions` or private reach outside `binding_resource`, and on a pass prints the token's fingerprint (D25 in [DECISIONS.md](DECISIONS.md)):
+
+```console
+$ agent-bailiff credential-check --provider gitea --api-url https://gitea.example.com/api/v1 \
+    --binding-resource 'gitea/repos/acme/*' --required read:issue --required read:repository < gitea-token.txt
+{"fingerprint": "<sha256>", "login": "acme-bot", "private_repositories": 2, "scopes": ["read:issue", "read:repository"]}
+```
+
+A provider on this host that serves only a Unix socket, as the quickstart's Gitea does, takes `--unix-socket <path>` with an `http://<host>/api/v1` URL; the host is then only the `Host` header. Then pass the printed fingerprint to `put-credential --expect-fingerprint`, which stores nothing unless stdin holds the same token. The check is point-in-time: run it again when the token's user gains access. Use a dedicated bot user that can read only the repositories the bindings cover. `put-credential --accept-broader` stores a refused token, and every release of it is docketed as `broader`.
+
 Store the credential. The custodian reads it from stdin. Keep the token file mode 0600, owned by the operator, and delete it once the command prints `stored`, or pipe the token from a secret manager. The command refuses a credential that echo redaction cannot cover, such as one with a form under 12 characters (D22 in [DECISIONS.md](DECISIONS.md)):
 
 ```console
@@ -245,6 +255,7 @@ $ docker compose --profile "*" down --volumes --remove-orphans
 ## Limits
 
 - The upstream server receives the credential on every allowed call and is trusted with it.
+- `credential-check` covers Gitea only, as the provider reports it at the moment it runs. Nothing proves a stored credential passed it.
 - Upstream tool names, descriptions and results reach the model, and any of them can carry instructions. The task scope bounds what an instructed agent can do. It cannot stop a call that is in scope.
 - The gateway reaches the upstream over a network with no destination filter. Bootstrap refuses a URL that names one of the stack's own components, `localhost`, or a loopback, link-local, unspecified or multicast IP address written in standard form. It does not refuse private ranges, other spellings of an IPv4 address such as `2130706433`, or a hostname that resolves to a local address.
 - With `ca_file` in the upstream config, the gateway trusts only those certificates for the upstream, not the system roots.

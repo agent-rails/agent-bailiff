@@ -15,7 +15,8 @@ EGRESS = {"jaeger": {"trace-ui"}, "gitea-mcp-spike": {"spike"}, "gateway": {"egr
 PUBLISHED = {"jaeger", "gitea-mcp-spike", "gateway"}
 GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
 GITEA_ONLY = (
-    "gitea", "gitea-mcp-tls", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task",
+    "gitea", "gitea-mcp-tls", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "credential-put", "agent-key",
+    "gitea-task",
 )  # fmt: skip
 DOCKET_READERS = ("reader", "archiver", "exporter")
 ISSUERS = ("task-issuer", "gitea-task")
@@ -100,7 +101,66 @@ def test_the_gateway_depends_on_gitea_only_when_its_profile_runs(config):
         "gitea-mcp",
         "gitea-task",
     }
-    assert config["services"]["custodian"]["depends_on"]["bootstrap"]["required"] is False
+    custodian = config["services"]["custodian"]["depends_on"]
+    assert {name: custodian[name] for name in ("bootstrap", "credential-put")} == {
+        name: {"condition": "service_completed_successfully", "required": False}
+        for name in ("bootstrap", "credential-put")
+    }
+
+
+HANDOFF = "/run/bailiff/credential-handoff"
+CUSTODIAN_DATA = "/var/lib/bailiff/custodian"
+
+
+def volume_sources(service):
+    return {volume["target"]: volume.get("source") for volume in service.get("volumes", [])}
+
+
+def test_only_the_offline_credential_put_reaches_the_store(config):
+    service = config["services"]["credential-put"]
+    assert service["network_mode"] == "none"
+    assert service["user"] == "10003:10003"
+    assert service["command"] == ["/app/quickstart/bootstrap.py", "credential"]
+    sources = volume_sources(service)
+    assert sources[CUSTODIAN_DATA] == "custodian-data"
+    assert sources[HANDOFF] == "credential-handoff"
+    assert service["depends_on"]["custodian-init"]["condition"] == "service_completed_successfully"
+
+
+def test_bootstrap_holds_no_store_or_key(config):
+    service = config["services"]["bootstrap"]
+    sources = volume_sources(service)
+    assert CUSTODIAN_DATA not in sources
+    assert "custodian-data" not in sources.values() and "custodian-kek" not in sources.values()
+    assert sources[HANDOFF] == "credential-handoff"
+    admin = next(volume for volume in service["volumes"] if volume.get("source") == "gitea-admin")
+    assert admin["read_only"] is True
+    assert service["depends_on"]["credential-put"]["condition"] == "service_healthy"
+    assert "custodian-init" not in service["depends_on"]
+
+
+def test_the_credential_handoff_lives_in_memory_owned_by_the_pair(config):
+    assert config["volumes"]["credential-handoff"]["driver_opts"] == {
+        "type": "tmpfs",
+        "device": "tmpfs",
+        "o": "uid=10003,gid=10003,mode=0700",
+    }
+    users = {
+        name: service.get("user") for name, service in config["services"].items() if HANDOFF in volume_sources(service)
+    }
+    assert users == {"bootstrap": "10003:10003", "credential-put": "10003:10003"}
+
+
+def test_credential_put_is_healthy_once_it_exports_the_stored_credential(config):
+    test = config["services"]["credential-put"]["healthcheck"]["test"]
+    assert test[0] == "CMD" and test[-1] == f"{HANDOFF}/ready"
+
+
+@pytest.mark.parametrize("name", ["bootstrap", "credential-put"])
+def test_the_credential_pair_takes_no_token_in_argv_or_env(config, name):
+    service = config["services"][name]
+    assert set(service.get("environment", {})) == {"BAILIFF_UPSTREAM"}
+    assert not any("token" in argument.lower() for argument in arguments_of(service))
 
 
 def arguments_of(service):
@@ -421,6 +481,9 @@ def test_the_baseline_reaches_the_upstream_network_with_the_install_ca_under_its
     assert service["profiles"] == ["load"]
     assert service["networks"].keys() == {"upstream"}
     assert service["user"] == config["services"]["bootstrap"]["user"]
+    sources = volume_sources(service)
+    assert CUSTODIAN_DATA not in sources
+    assert "custodian-data" not in sources.values() and "custodian-kek" not in sources.values()
 
 
 def test_bootstrap_reaches_gitea_only_over_the_socket(config):

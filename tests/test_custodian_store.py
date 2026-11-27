@@ -22,7 +22,14 @@ from agent_bailiff.custodian import (
     files,
 )
 from agent_bailiff.custodian.files import create_owned
-from agent_bailiff.custodian.store import CredentialCheck, CredentialProblem, StoredCredential, UnredactableCredential
+from agent_bailiff.custodian.store import (
+    CredentialCheck,
+    CredentialProblem,
+    StoredCredential,
+    UnredactableCredential,
+    decode_exceptions,
+    encode_exceptions,
+)
 
 SECRET = b"Bearer deploy-secret-value"
 SHORT = b"Bearer short-key"
@@ -128,7 +135,7 @@ def test_unwrap_under_another_context_fails(backend):
 
 def test_stored_credential_round_trips_and_is_not_stored_in_plaintext(state, store):
     store.put("tenant-a", "deploy-api", "deploy.example", SECRET)
-    assert store.get("tenant-a", "deploy-api", "deploy.example") == StoredCredential(SECRET, None)
+    assert store.get("tenant-a", "deploy-api", "deploy.example") == StoredCredential(SECRET, frozenset())
     assert SECRET not in (state / "credentials.db").read_bytes()
     assert stat.S_IMODE(os.lstat(state / "credentials.db").st_mode) == 0o600
 
@@ -284,7 +291,7 @@ def test_put_names_the_problem_without_the_credential(store):
 def test_an_accepted_exception_is_stored_with_the_credential_and_logged(state, store, caplog):
     with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
         store.put(*BINDING, SHORT, accept_unredactable=True)
-    assert store.get(*BINDING) == StoredCredential(SHORT, "unredactable")
+    assert store.get(*BINDING) == StoredCredential(SHORT, frozenset({"unredactable"}))
     assert "'deploy-api'" in caplog.text and "unredactable exception" in caplog.text
     assert "short-key" not in caplog.text
     connection = sqlite3.connect(state / "credentials.db")
@@ -292,6 +299,42 @@ def test_an_accepted_exception_is_stored_with_the_credential_and_logged(state, s
         assert connection.execute("SELECT exception FROM credentials").fetchall() == [("unredactable",)]
     finally:
         connection.close()
+
+
+def test_an_accepted_broader_exception_is_stored_with_the_credential_and_logged(state, store, caplog):
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
+        store.put(*BINDING, SECRET, accept_broader=True)
+    assert store.get(*BINDING) == StoredCredential(SECRET, frozenset({"broader"}))
+    assert "'deploy-api'" in caplog.text and "accepted broader exception" in caplog.text
+    assert "deploy-secret-value" not in caplog.text
+    connection = sqlite3.connect(state / "credentials.db")
+    try:
+        assert connection.execute("SELECT exception FROM credentials").fetchall() == [("broader",)]
+    finally:
+        connection.close()
+
+
+def test_both_exceptions_are_stored_as_one_sorted_value(state, store):
+    store.put(*BINDING, SHORT, accept_unredactable=True, accept_broader=True)
+    assert store.get(*BINDING) == StoredCredential(SHORT, frozenset({"broader", "unredactable"}))
+    assert store.check() == CredentialCheck(1, ())
+    connection = sqlite3.connect(state / "credentials.db")
+    try:
+        assert connection.execute("SELECT exception FROM credentials").fetchall() == [("broader,unredactable",)]
+    finally:
+        connection.close()
+
+
+def test_storing_again_without_broader_clears_it(store):
+    store.put(*BINDING, SECRET, accept_broader=True)
+    store.put(*BINDING, SECRET)
+    assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
+
+
+def test_a_broader_exception_alone_does_not_pass_an_unredactable_credential(state, store, backend):
+    insert_unchecked(state / "credentials.db", backend, BINDING, SHORT, "broader")
+    [problem] = store.check().problems
+    assert "has no accepted exception" in problem.problem
 
 
 def test_an_exception_for_a_credential_that_can_be_redacted_is_refused(store):
@@ -304,12 +347,18 @@ def test_an_exception_for_a_credential_that_can_be_redacted_is_refused(store):
 def test_storing_again_without_the_exception_clears_it(store):
     store.put(*BINDING, SHORT, accept_unredactable=True)
     store.put(*BINDING, SECRET)
-    assert store.get(*BINDING) == StoredCredential(SECRET, None)
+    assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
 
 
 @pytest.mark.parametrize(
     ("secret", "accept", "exception"),
-    [(SECRET, False, "unredactable"), (SHORT, True, None), (SHORT, True, "another")],
+    [
+        (SECRET, False, "unredactable"),
+        (SHORT, True, None),
+        (SHORT, True, "another"),
+        (SHORT, True, "unredactable,unredactable"),
+        (SHORT, True, ""),
+    ],
 )
 def test_an_exception_changed_in_the_file_does_not_decrypt(state, store, secret, accept, exception):
     store.put(*BINDING, secret, accept_unredactable=accept)
@@ -319,6 +368,70 @@ def test_an_exception_changed_in_the_file_does_not_decrypt(state, store, secret,
     connection.close()
     with pytest.raises(CredentialUnavailable, match="does not decrypt"):
         store.get(*BINDING)
+
+
+EARLIER_CONTEXTS = {
+    None: b'{"credential_id":"deploy-api","target":"deploy.example","tenant":"tenant-a"}',
+    "unredactable": b'{"credential_id":"deploy-api","exception":"unredactable",'
+    b'"target":"deploy.example","tenant":"tenant-a"}',
+}
+
+
+def test_exceptions_encode_as_a_sorted_comma_joined_set():
+    assert encode_exceptions(frozenset()) is None
+    assert encode_exceptions(frozenset({"unredactable"})) == "unredactable"
+    assert decode_exceptions(None) == frozenset()
+    assert decode_exceptions("unredactable") == frozenset({"unredactable"})
+    both = frozenset({"unredactable", "broader"})
+    assert encode_exceptions(both) == "broader,unredactable"
+    assert decode_exceptions("broader,unredactable") == both
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "unknown",
+        "Unredactable",
+        "unredactable,unredactable",
+        "unredactable,",
+        ",unredactable",
+        " unredactable",
+        b"x",
+        "unredactable,broader",
+        "broader,broader",
+    ],
+)
+def test_a_value_that_is_not_a_canonical_exception_set_is_refused(value):
+    with pytest.raises(ValueError, match="credential exceptions"):
+        decode_exceptions(value)
+
+
+@pytest.mark.parametrize("exceptions", [frozenset({"unknown"}), {"unredactable"}, ("unredactable",)])
+def test_only_a_frozenset_of_known_exceptions_encodes(exceptions):
+    with pytest.raises(ValueError, match="credential exception"):
+        encode_exceptions(exceptions)
+
+
+@pytest.mark.parametrize("exception", [None, "unredactable"])
+def test_a_context_with_at_most_one_exception_is_the_earlier_bytes(exception):
+    assert credential_context(*BINDING, decode_exceptions(exception)) == EARLIER_CONTEXTS[exception]
+
+
+@pytest.mark.parametrize(("secret", "exception"), [(SECRET, None), (SHORT, "unredactable")])
+def test_a_row_written_under_the_earlier_context_decrypts(state, store, backend, secret, exception):
+    context = EARLIER_CONTEXTS[exception]
+    dek = os.urandom(32)
+    nonce = os.urandom(12)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute(
+        "INSERT INTO credentials VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (*BINDING, backend.wrap(dek, context), nonce, AESGCM(dek).encrypt(nonce, secret, context), exception),
+    )
+    connection.commit()
+    connection.close()
+    assert store.get(*BINDING) == StoredCredential(secret, decode_exceptions(exception))
+    assert store.check() == CredentialCheck(1, ())
 
 
 def legacy_store(path, backend, secret):
@@ -341,7 +454,7 @@ def test_opening_an_older_store_adds_the_exception_column_and_keeps_its_credenti
     legacy_store(path, backend, SHORT)
     store = CredentialStore.open(path, backend)
     try:
-        assert store.get(*BINDING) == StoredCredential(SHORT, None)
+        assert store.get(*BINDING) == StoredCredential(SHORT, frozenset())
     finally:
         store.close()
     connection = sqlite3.connect(path)
@@ -392,13 +505,13 @@ def test_concurrent_opens_of_an_older_store_add_the_column_once(state, backend):
     assert columns.count("exception") == 1
     store = CredentialStore.open(path, backend)
     try:
-        assert store.get(*BINDING) == StoredCredential(SECRET, None)
+        assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
     finally:
         store.close()
 
 
 def insert_unchecked(path, backend, binding, secret, exception=None):
-    context = credential_context(*binding, exception)
+    context = credential_context(*binding, decode_exceptions(exception))
     dek = os.urandom(32)
     nonce = os.urandom(12)
     ciphertext = AESGCM(dek).encrypt(nonce, secret, context)

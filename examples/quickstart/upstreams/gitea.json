@@ -7,5 +7,8 @@
   "target": "gitea",
   "binding_resource": "gitea/repos/quickstart/*",
   "routes_file": "gitea-routes.json",
-  "ca_file": "install"
+  "ca_file": "install",
+  "provider": "gitea",
+  "provider_api_url": "http://gitea/api/v1",
+  "required_permissions": ["read:issue", "read:repository"]
 }

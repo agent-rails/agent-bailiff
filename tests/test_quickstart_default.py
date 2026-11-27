@@ -6,7 +6,16 @@ from test_quickstart_stack import b
 
 pytestmark = test_quickstart_stack.pytestmark
 stack = test_quickstart_stack.stack
-GITEA_SERVICES = {"gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task"}
+GITEA_SERVICES = {
+    "gitea",
+    "gitea-mcp",
+    "gitea-secret",
+    "gitea-admin",
+    "bootstrap",
+    "credential-put",
+    "agent-key",
+    "gitea-task",
+}
 
 
 def test_the_default_stack_runs_the_stub_without_gitea(stack):

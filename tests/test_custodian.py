@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -8,11 +9,13 @@ from pathlib import Path
 
 import pytest
 from agent_warrant.chain import delegate
+from agent_warrant.encoding import b64u_decode
 from agent_warrant.identity import encode_public_key
 from agent_warrant.ledger import LedgerUnavailable, TaskLedger
 from agent_warrant.resolver import PinnedResolver
 from agent_warrant.trust import IssuerAllowance, IssuerTrustPolicy, TenantAllowance
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from test_decide import (
     AGENT_KEY,
     BINDINGS,
@@ -48,6 +51,7 @@ from agent_bailiff.custodian import (
     LocalBackend,
     Refused,
     Released,
+    credential_context,
 )
 from agent_bailiff.custodian import custodian as custodian_module
 from agent_bailiff.custodian.bindings import EffectorBinding
@@ -381,6 +385,81 @@ def test_valid_release_returns_the_secret_and_records_a_release_entry(make_custo
     assert (entry.component, entry.tenant, entry.principal) == (CUSTODIAN_ID, TENANT, PRINCIPAL)
     assert result.op_id == clearance.op_id
     assert DEPLOY_SECRET not in (workdir / "docket.log").read_bytes()
+
+
+def test_a_release_without_an_accepted_exception_dockets_none(make_custodian, issue, workdir):
+    request, token = issue()
+    assert isinstance(make_custodian().release(token, request, NOW + 1), Released)
+    [entry] = custodian_entries(workdir)
+    assert entry.credential_exceptions == ()
+    token = (workdir / "docket.log").read_text().splitlines()[-1]
+    assert "credential_exceptions" not in json.loads(b64u_decode(token.split(".")[0]))
+
+
+def test_a_release_dockets_the_accepted_unredactable_exception(make_custodian, issue, workdir, state):
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    store.put(TENANT, "deploy-api", "deploy.example", b"Bearer short-key", accept_unredactable=True)
+    store.close()
+    request, token = issue()
+    custodian = make_custodian()
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    assert custodian.release(token, request, NOW + 2) == Refused("already_issued")
+    entries = custodian_entries(workdir)
+    assert [(entry.decision, entry.credential_exceptions) for entry in entries] == [
+        ("release", ("unredactable",)),
+        ("refuse", ()),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("secret", "options", "exceptions"),
+    [
+        (DEPLOY_SECRET, {"accept_broader": True}, ("broader",)),
+        (b"Bearer short-key", {"accept_broader": True, "accept_unredactable": True}, ("broader", "unredactable")),
+    ],
+)
+def test_a_release_dockets_the_accepted_broader_exception(
+    make_custodian, issue, workdir, state, secret, options, exceptions
+):
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    store.put(TENANT, "deploy-api", "deploy.example", secret, **options)
+    store.close()
+    request, token = issue()
+    assert isinstance(make_custodian().release(token, request, NOW + 1), Released)
+    [entry] = custodian_entries(workdir)
+    assert entry.credential_exceptions == exceptions
+    line = (workdir / "docket.log").read_text().splitlines()[-1]
+    assert json.loads(b64u_decode(line.split(".")[0]))["credential_exceptions"] == list(exceptions)
+
+
+def test_a_broader_exception_alone_does_not_release_an_unredactable_credential(make_custodian, issue, state):
+    custodian = make_custodian()
+    binding = (TENANT, "deploy-api", "deploy.example")
+    context = credential_context(*binding, frozenset({"broader"}))
+    dek = os.urandom(32)
+    nonce = os.urandom(12)
+    wrapped = LocalBackend.load(state / "kek").wrap(dek, context)
+    ciphertext = AESGCM(dek).encrypt(nonce, b"Bearer short-key", context)
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute(
+        "INSERT OR REPLACE INTO credentials VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (*binding, wrapped, nonce, ciphertext, "broader"),
+    )
+    connection.commit()
+    connection.close()
+    request, token = issue()
+    assert custodian.release(token, request, NOW + 1) == Refused("credential_unredactable")
+
+
+@pytest.mark.parametrize("value", ["unredactable,unredactable", "unknown", ""])
+def test_a_stored_exception_that_is_not_canonical_is_unavailable(make_custodian, issue, state, value):
+    custodian = make_custodian()
+    connection = sqlite3.connect(state / "credentials.db")
+    connection.execute("UPDATE credentials SET exception = ?", (value,))
+    connection.commit()
+    connection.close()
+    request, token = issue()
+    assert custodian.release(token, request, NOW + 1) == Refused("credential_unavailable")
 
 
 @pytest.mark.parametrize("token", [None, ""])

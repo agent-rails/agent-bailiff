@@ -179,3 +179,28 @@ def test_invalid_configuration_raises_before_the_token_is_read(pinned, typ, fiel
     for candidate in (token, "malformed"):
         with pytest.raises(error):
             verify(candidate, pinned, typ, fields)
+
+
+def test_an_optional_field_may_be_absent_or_present():
+    assert verify(sign(KEY, "k1", TYP, BODY), PINNED, TYP, FIELDS, optional_fields=("note",)).payload == BODY
+    token = sign(KEY, "k1", TYP, {**BODY, "note": "x"})
+    assert verify(token, PINNED, TYP, FIELDS, optional_fields=("note",)).payload == {**BODY, "note": "x"}
+
+
+def test_an_optional_field_is_signed():
+    payload, signature = split(sign(KEY, "k1", TYP, {**BODY, "note": "x"}))
+    for changed in ({**payload, "note": "y"}, {key: value for key, value in payload.items() if key != "note"}):
+        token = f"{b64u(canonicalize(changed))}.{b64u(signature)}"
+        assert verify(token, PINNED, TYP, FIELDS, optional_fields=("note",)).reason == "bad_signature"
+
+
+def test_a_field_outside_the_optional_set_is_still_refused():
+    token = sign(KEY, "k1", TYP, {**BODY, "extra": 1})
+    assert verify(token, PINNED, TYP, FIELDS, optional_fields=("note",)).reason == "malformed"
+
+
+def test_optional_fields_must_not_overlap_the_allowed_fields():
+    with pytest.raises(ValueError, match="overlap"):
+        verify("x", PINNED, TYP, FIELDS, optional_fields=("cost",))
+    with pytest.raises(ValueError, match="reserved"):
+        verify("x", PINNED, TYP, FIELDS, optional_fields=("kid",))

@@ -313,12 +313,30 @@ services:
     command: ["/app/quickstart/bootstrap.py", "gitea"]
     volumes:
       - *upstreams
-      - custodian-data:/var/lib/bailiff/custodian
       - gitea-admin:/var/lib/bailiff/gitea-admin:ro
       - gitea-run:/run/gitea:ro
+      - credential-handoff:/run/bailiff/credential-handoff
     depends_on:
       gitea-admin:
         condition: service_completed_successfully
+      credential-put:
+        condition: service_healthy
+
+  credential-put:
+    <<: [*bailiff, *once, *offline]
+    profiles: [gitea]
+    user: "10003:10003"
+    command: ["/app/quickstart/bootstrap.py", "credential"]
+    volumes:
+      - *upstreams
+      - custodian-data:/var/lib/bailiff/custodian
+      - credential-handoff:/run/bailiff/credential-handoff
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys; os.lstat(sys.argv[1])", "/run/bailiff/credential-handoff/ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+    depends_on:
       custodian-init:
         condition: service_completed_successfully
 
@@ -331,7 +349,6 @@ services:
     networks: [upstream]
     volumes:
       - *upstreams
-      - custodian-data:/var/lib/bailiff/custodian
       - certs-public:/var/lib/bailiff/certs/public:ro
     depends_on:
       certs:
@@ -447,6 +464,9 @@ services:
       decide:
         condition: service_healthy
       bootstrap:
+        condition: service_completed_successfully
+        required: false
+      credential-put:
         condition: service_completed_successfully
         required: false
 
@@ -671,6 +691,11 @@ volumes:
   issuer-docket: {}
   decide-data: {}
   custodian-data: {}
+  credential-handoff:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=10003,gid=10003,mode=0700
   control-data: {}
   rule-data: {}
   reader-data: {}
