@@ -872,6 +872,40 @@ def test_put_credential_refuses_a_fingerprint_mismatch_and_stores_nothing(deploy
         stored(deployment)
 
 
+PUT_UNDER_FILE_SIZE_LIMIT = (
+    "import os, resource, signal, sys\n"
+    "from agent_bailiff import cli\n"
+    "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+    "limit = os.path.getsize(sys.argv[1])\n"
+    "resource.setrlimit(resource.RLIMIT_FSIZE, (limit, resource.RLIM_INFINITY))\n"
+    "sys.exit(cli.main(sys.argv[2:]))\n"
+)
+
+
+def test_put_credential_refuses_a_store_the_disk_cannot_grow_and_names_it(deployment):
+    directory = deployment.custodian
+    path = directory / "credentials.db"
+    CredentialStore.create(path, LocalBackend.generate(directory / "kek")).close()
+    grown = b"Bearer grown-" + b"g" * 20000
+    arguments = ["custodian", "put-credential", "--config", str(deployment.paths["custodian"])]
+    process = subprocess.run(
+        [sys.executable, "-c", PUT_UNDER_FILE_SIZE_LIMIT, str(path), *arguments, "--tenant", TENANT]
+        + ["--credential-id", "c", "--target", "t"],
+        cwd=ROOT,
+        input=grown + b"\n",
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    err = process.stderr.decode()
+    assert process.returncode == cli.EXIT_REFUSED and process.stdout == b"", err
+    refusal = f"agent-bailiff put-credential refused: cannot write the credential store at {path}: its storage failed"
+    assert err == f"{refusal} (SQLITE_IOERR_WRITE)\n", err
+    assert "Traceback" not in err and b"grown-" not in process.stderr
+    with pytest.raises(CredentialUnavailable):
+        stored(deployment)
+
+
 def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployment, capsys):
     assert put_credential(deployment, SECRET + b"\n", "--accept-unredactable") == cli.EXIT_REFUSED
     assert "can be redacted" in capsys.readouterr().err
