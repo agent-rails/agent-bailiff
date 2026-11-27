@@ -1,13 +1,17 @@
 import datetime
 import hashlib
+import http.server
+import ipaddress
 import json
 import os
 import re
+import shutil
+import socketserver
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -183,7 +187,10 @@ GITEA_UPSTREAM = b.QUICKSTART_UPSTREAMS / "gitea.json"
 
 
 def write_upstream(tmp_path, routes=None, **changes):
-    document = {**json.loads(GITEA_UPSTREAM.read_text()), **changes}
+    document = json.loads(GITEA_UPSTREAM.read_text())
+    if "url" in changes:
+        del document["ca_file"]
+    document.update(changes)
     routes_document = (
         routes if routes is not None else json.loads((b.QUICKSTART_UPSTREAMS / "gitea-routes.json").read_text())
     )
@@ -206,8 +213,21 @@ def test_the_gateway_config_targets_only_the_upstream_url(name):
     upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / name)
     template = json.loads(b.GATEWAY_TEMPLATE.read_text())
     document = b.gateway_document(upstream)
-    assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}}]
+    policies = {"policies": {"backendTLS": {"root": str(b.GATEWAY_CA)}}}
+    assert document["mcp"]["targets"] == [{"name": upstream.target, "mcp": {"host": upstream.url}, **policies}]
     assert {**document, "mcp": {**document["mcp"], "targets": []}} == template
+
+
+def test_the_stub_upstream_is_served_over_https_with_the_install_ca():
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert upstream.url.startswith("https://stub-upstream:")
+    assert upstream.ca_file == b.INSTALL_CA == b.STATE / "certs" / "public" / "current" / "ca.pem"
+
+
+def test_gitea_mcp_is_reached_through_its_tls_sidecar_with_the_install_ca():
+    upstream = b.load_upstream(GITEA_UPSTREAM)
+    assert upstream.url == "https://gitea-mcp-tls:8443/mcp"
+    assert upstream.ca_file == b.INSTALL_CA
 
 
 @pytest.mark.parametrize("name", ["gitea.json", "stub.json"])
@@ -234,6 +254,9 @@ def test_a_gateway_template_with_a_target_is_refused(tmp_path, monkeypatch):
 
 
 def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch):
+    (tmp_path / "install.pem").write_bytes(pem(issue_certificate("quickstart install ca")[0]))
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "install.pem")
+    monkeypatch.setattr(b, "GATEWAY_CA", tmp_path / "ca.pem")
     monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
     monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
     assert b.init_gateway() == "created"
@@ -242,13 +265,13 @@ def test_init_gateway_creates_keeps_and_updates_the_config(tmp_path, monkeypatch
     monkeypatch.setattr(b, "UPSTREAM_FILE", GITEA_UPSTREAM)
     assert b.init_gateway() == "updated"
     written = json.loads((tmp_path / "gateway.json").read_text())
-    assert written["mcp"]["targets"][0]["mcp"]["host"] == "http://gitea-mcp:8080/mcp"
+    assert written["mcp"]["targets"][0]["mcp"]["host"] == "https://gitea-mcp-tls:8443/mcp"
 
 
 @pytest.mark.parametrize(
-    "url", ["http://gitea-mcp:8080/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
+    "url", ["https://mcp-server/mcp", "https://mcp.example.com/mcp", "https://mcp.example.com:8443/mcp"]
 )
-def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url):
+def test_an_upstream_url_is_https(tmp_path, url):
     assert b.load_upstream(write_upstream(tmp_path, url=url)).url == url
 
 
@@ -262,18 +285,22 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"credential_id": "gitea token"}, "credential_id must be a non-empty ASCII printable string"),
         ({"target": 7}, "target must be a non-empty ASCII printable string"),
         ({"service": "k8s"}, r"k8s\.\* tools are routed only from their catalog"),
-        ({"url": "http://mcp.example.com:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://gitea-mcp/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://167772165:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "http://0xa000005:8080/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "ftp://gitea-mcp:21/mcp"}, "http://<compose-service>:<port> or https://"),
-        ({"url": "https:///mcp"}, "http://<compose-service>:<port> or https://"),
+        ({"url": "http://mcp-server:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://mcp.example.com:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://mcp-server/mcp"}, "url must be https://<host>"),
+        ({"url": "http://167772165:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "http://0xa000005:8080/mcp"}, "url must be https://<host>"),
+        ({"url": "ftp://mcp-server:21/mcp"}, "url must be https://<host>"),
+        ({"url": "https:///mcp"}, "url must be https://<host>"),
         ({"url": "https://user:secret@mcp.example.com/mcp"}, "no credentials, query or fragment"),
         ({"url": "https://mcp.example.com/mcp?key=1"}, "no credentials, query or fragment"),
         ({"url": "https://mcp.example.com:99999/mcp"}, "url Port out of range"),
         ({"url": "http://localhost:15000/"}, "must not name the stack's own localhost"),
         ({"url": "http://gateway:8080/mcp"}, "must not name the stack's own gateway"),
         ({"url": "http://custodian:8080/mcp"}, "must not name the stack's own custodian"),
+        ({"url": "http://gitea-mcp:8080/mcp"}, "must not name the stack's own gitea-mcp"),
+        ({"url": "https://gitea:3000/mcp"}, "must not name the stack's own gitea"),
+        ({"url": "http://gitea-mcp-spike:8080/mcp"}, "must not name the stack's own gitea-mcp-spike"),
         ({"url": "https://LocalHost./mcp"}, "must not name the stack's own localhost"),
         ({"url": "https://127.0.0.1/mcp"}, "loopback, link-local, unspecified or multicast"),
         ({"url": "https://[::1]:8443/mcp"}, "loopback, link-local, unspecified or multicast"),
@@ -288,9 +315,13 @@ def test_an_upstream_url_is_a_compose_service_with_a_port_or_https(tmp_path, url
         ({"routes_file": ".."}, "a file beside the upstream config"),
         ({"provider": "github"}, "provider must be one of gitea"),
         ({"provider": ""}, "provider must be a non-empty ASCII printable string"),
-        ({"provider_api_url": "http://gitea.example.com:3000/api/v1"}, "provider_api_url must be http://<compose"),
-        ({"provider_api_url": "http://custodian:3000/api/v1"}, "provider_api_url must not name the stack's own"),
-        ({"provider_api_url": "https://127.0.0.1/api/v1"}, "provider_api_url must not name a loopback"),
+        ({"provider_api_url": "http://gitea.example.com/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea:3000/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "https://gitea/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://127.0.0.1/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://user:secret@gitea/api/v1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea/api/v1?x=1"}, "provider_api_url must be http://gitea/<path>"),
+        ({"provider_api_url": "http://gitea:99999/api/v1"}, "provider_api_url Port out of range"),
         ({"required_permissions": "read:repository"}, "required_permissions must be a list of scope names"),
         ({"required_permissions": ["read:repository", 7]}, "required_permissions must be a list of scope names"),
         ({"required_permissions": ["read:issue"]}, "must include read:repository or write:repository"),
@@ -317,7 +348,7 @@ def test_an_upstream_missing_a_field_fails_bootstrap(tmp_path, field):
 
 def test_the_gitea_upstream_names_the_provider_check_and_the_stub_names_none():
     check = b.load_upstream(GITEA_UPSTREAM).provider_check
-    assert check == b.ProviderCheck("gitea", "http://gitea:3000/api/v1", ("read:issue", "read:repository"))
+    assert check == b.ProviderCheck("gitea", "http://gitea/api/v1", ("read:issue", "read:repository"))
     assert b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json").provider_check is None
 
 
@@ -376,7 +407,7 @@ KEY_USAGES = (
 )  # fmt: skip
 
 
-def issue_certificate(common_name, issuer=None, dns_name=None):
+def issue_certificate(common_name, issuer=None, dns_name=None, ip_address=None, expired=False):
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     signer_name, signer_key = (issuer[0].subject, issuer[1]) if issuer else (subject, key)
@@ -387,8 +418,8 @@ def issue_certificate(common_name, issuer=None, dns_name=None):
         .issuer_name(signer_name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(minutes=5))
-        .not_valid_after(now + datetime.timedelta(days=1))
+        .not_valid_before(now - datetime.timedelta(days=2 if expired else 0, minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=-1 if expired else 1))
         .add_extension(x509.BasicConstraints(ca=issuer is None, path_length=None), critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(signer_key.public_key()), critical=False)
@@ -398,8 +429,11 @@ def issue_certificate(common_name, issuer=None, dns_name=None):
         builder = builder.add_extension(
             x509.KeyUsage(**{**usage, "key_cert_sign": True, "crl_sign": True}), critical=True
         )
-    if dns_name:
-        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+    names = [x509.DNSName(dns_name)] if dns_name else []
+    if ip_address:
+        names.append(x509.IPAddress(ipaddress.ip_address(ip_address)))
+    if names:
+        builder = builder.add_extension(x509.SubjectAlternativeName(names), critical=False)
     return builder.sign(signer_key, hashes.SHA256()), key
 
 
@@ -422,8 +456,8 @@ def write_ca(tmp_path, data, url=HTTPS_URL):
 def test_a_ca_file_is_kept_as_its_certificates_only(tmp_path):
     ca, key = issue_certificate("quickstart test ca")
     upstream = b.load_upstream(write_ca(tmp_path, private_pem(key) + pem(ca)))
-    assert upstream.ca_pem == pem(ca)
-    assert b"PRIVATE KEY" not in upstream.ca_pem
+    assert upstream.ca_file == tmp_path / "ca.pem"
+    assert b.load_upstream_ca(upstream.ca_file) == pem(ca)
 
 
 def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
@@ -434,18 +468,6 @@ def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
     ]
 
 
-def test_the_upstream_ca_goes_to_the_check_only_for_a_provider_on_the_upstream_host(tmp_path, monkeypatch):
-    fake = FakeCli()
-    monkeypatch.setattr(b.subprocess, "run", fake)
-    (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
-    for provider_api_url in ("https://MCP.example.com/api/v1", "https://gitea.example.com/api/v1"):
-        path = write_upstream(tmp_path, url=HTTPS_URL, ca_file="ca.pem", provider_api_url=provider_api_url)
-        b.check_credential(b.load_upstream(path), STORED)
-    first, second = (arguments for arguments, _ in fake.of("credential-check"))
-    assert first[-2:] == ("--ca-file", str(tmp_path / "ca.pem"))
-    assert "--ca-file" not in second
-
-
 @pytest.mark.parametrize(
     "data, url, message",
     [
@@ -453,7 +475,7 @@ def test_the_upstream_ca_goes_to_the_check_only_for_a_provider_on_the_upstream_h
         (b"", HTTPS_URL, "must hold PEM certificates"),
         (b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", HTTPS_URL, "must hold PEM certificates"),
         (b"x" * (64 * 1024 + 1), HTTPS_URL, "larger than 65536 bytes"),
-        (None, "http://stub-upstream:8080/mcp", "ca_file needs an https:// url"),
+        (None, "http://stub-upstream:8080/mcp", "url must be https://<host>"),
     ],
 )
 def test_an_invalid_ca_file_fails_bootstrap(tmp_path, data, url, message):
@@ -486,10 +508,55 @@ def test_init_gateway_writes_keeps_and_removes_the_ca(tmp_path, monkeypatch):
     (upstreams / "ca.pem").write_bytes(pem(other))
     assert b.init_gateway() == "updated"
     assert (tmp_path / "ca.pem").read_bytes() == pem(other)
-    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    public = tmp_path / "public"
+    public.mkdir()
+    monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(public, url="https://mcp.example.com/mcp"))
     assert b.init_gateway() == "updated"
     assert not (tmp_path / "ca.pem").exists()
     assert "policies" not in json.loads((tmp_path / "gateway.json").read_text())["mcp"]["targets"][0]
+
+
+def test_ca_file_install_is_read_only_when_the_gateway_config_is_written(tmp_path, monkeypatch):
+    install, _ = issue_certificate("quickstart install ca")
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "absent.pem")
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "stub.json")
+    assert upstream.ca_file == tmp_path / "absent.pem"
+    monkeypatch.setattr(b, "GATEWAY_CONFIG", tmp_path / "gateway.json")
+    monkeypatch.setattr(b, "GATEWAY_CA", tmp_path / "ca.pem")
+    monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
+    with pytest.raises(b.BootstrapError, match="cannot open .*absent.pem"):
+        b.init_gateway()
+    assert not (tmp_path / "gateway.json").exists()
+    monkeypatch.setattr(b, "INSTALL_CA", tmp_path / "install.pem")
+    (tmp_path / "install.pem").write_bytes(pem(install))
+    assert b.init_gateway() == "created"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(install)
+    reissued, _ = issue_certificate("quickstart reissued ca")
+    (tmp_path / "install.pem").write_bytes(pem(reissued))
+    assert b.init_gateway() == "updated"
+    assert (tmp_path / "ca.pem").read_bytes() == pem(reissued)
+
+
+@pytest.mark.parametrize("host", sorted(b.UPSTREAM_HOSTS) + ["STUB-UPSTREAM.", "GITEA-MCP-TLS."])
+@pytest.mark.parametrize("ca_file", [None, "ca.pem"])
+def test_an_https_url_to_an_in_stack_upstream_without_ca_file_install_fails_bootstrap(tmp_path, host, ca_file):
+    (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
+    changes = {"url": f"https://{host}:8443/mcp"} | ({"ca_file": ca_file} if ca_file else {})
+    with pytest.raises(b.BootstrapError, match=r"an https url to the stack's .* needs ca_file install"):
+        b.load_upstream(write_upstream(tmp_path, **changes))
+
+
+@pytest.mark.parametrize(
+    "url, message",
+    [
+        (HTTPS_URL, "ca_file install is the install CA, which signs only gitea-mcp-tls, stub-upstream"),
+        ("https://203.0.113.7/mcp", "ca_file install is the install CA"),
+        ("http://stub-upstream:8443/mcp", "url must be https://<host>"),
+    ],
+)
+def test_ca_file_install_outside_the_stack_or_over_http_fails_bootstrap(tmp_path, url, message):
+    with pytest.raises(b.BootstrapError, match=message):
+        b.load_upstream(write_upstream(tmp_path, url=url, ca_file="install"))
 
 
 def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypatch):
@@ -506,6 +573,66 @@ def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypat
     assert b.stored_credential(upstream) == "token " + "a" * 40
 
 
+class GiteaHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.answer(200, {"host": self.headers["host"], "authorization": self.headers["authorization"]})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        self.answer(201, {"path": self.path, "body": body})
+
+    def answer(self, status, document):
+        raw = json.dumps(document).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def socket_path():
+    directory = Path(tempfile.mkdtemp(prefix="bg-", dir="/tmp"))
+    yield directory / "gitea.sock"
+    shutil.rmtree(directory)
+
+
+@pytest.fixture
+def gitea_socket(socket_path):
+    server = socketserver.ThreadingUnixStreamServer(str(socket_path), GiteaHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield socket_path
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_gitea_is_reached_over_its_unix_socket(gitea_socket):
+    gitea = b.Gitea(gitea_socket)
+    assert gitea.request("GET", "/api/v1/user", "token abc") == (200, {"host": "gitea", "authorization": "token abc"})
+    assert gitea.expect({201}, "POST", "/api/v1/orgs", None, {"username": "quickstart"}) == {
+        "path": "/api/v1/orgs",
+        "body": {"username": "quickstart"},
+    }
+
+
+def test_a_missing_gitea_socket_fails_without_waiting(gitea_socket):
+    began = time.monotonic()
+    with pytest.raises(FileNotFoundError):
+        b.Gitea(gitea_socket.with_name("absent.sock")).request("GET", "/api/healthz", None)
+    assert time.monotonic() - began < 1
+
+
+def test_gitea_not_healthy_on_its_socket_fails_bootstrap(gitea_socket):
+    with pytest.raises(b.BootstrapError, match="absent.sock was not healthy within 0s"):
+        b.Gitea(gitea_socket.with_name("absent.sock")).wait_healthy(0)
+
+
 STORED = "token " + "s" * 40
 MINTED = "token " + "m" * 40
 
@@ -516,7 +643,7 @@ def fingerprint(credential):
 
 class TokenGitea(b.Gitea):
     def __init__(self, events):
-        super().__init__("http://gitea:3000")
+        super().__init__(b.GITEA_SOCKET)
         self.tokens = {7: b.TOKEN_NAME, 8: "laptop"}
         self.deleted = []
         self.events = events
@@ -626,8 +753,8 @@ def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(p
     [(arguments, stdin)] = pair.cli.of("credential-check")
     assert stdin == MINTED
     assert arguments[1:] == (
-        "--provider", "gitea", "--api-url", "http://gitea:3000/api/v1", "--binding-resource",
-        "gitea/repos/quickstart/*", "--required", "read:issue", "--required", "read:repository",
+        "--provider", "gitea", "--api-url", "http://gitea/api/v1", "--unix-socket", "/run/gitea/gitea.sock",
+        "--binding-resource", "gitea/repos/quickstart/*", "--required", "read:issue", "--required", "read:repository",
     )  # fmt: skip
     [(arguments, stdin)] = pair.cli.of("custodian")
     assert arguments[:2] == ("custodian", "put-credential")
@@ -914,10 +1041,10 @@ def test_the_token_list_is_read_past_a_short_page_until_an_empty_one(gitea):
 
 
 @pytest.fixture
-def answering():
-    answer = SimpleNamespace(status=200, body=b"{}")
+def answering(socket_path):
+    answer = SimpleNamespace(status=200, body=b"{}", path=socket_path)
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(answer.status)
             self.send_header("Content-Length", str(len(answer.body)))
@@ -927,9 +1054,8 @@ def answering():
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = socketserver.ThreadingUnixStreamServer(str(socket_path), Handler)
     threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
-    answer.url = f"http://127.0.0.1:{server.server_port}"
     yield answer
     server.shutdown()
     server.server_close()
@@ -940,7 +1066,7 @@ def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch
     monkeypatch.setattr(b, "MAX_GITEA_BYTES", 64, raising=False)
     answering.status, answering.body = status, json.dumps({"pad": "x" * 64}).encode()
     with pytest.raises(b.BootstrapError, match="gitea GET /api/v1/user answered more than 64 bytes"):
-        b.Gitea(answering.url).request("GET", "/api/v1/user", None)
+        b.Gitea(answering.path).request("GET", "/api/v1/user", None)
 
 
 @pytest.mark.parametrize(
@@ -951,13 +1077,13 @@ def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch
     ],
     ids=["headers", "body"],
 )
-def test_a_gitea_answer_that_drips_fails_bootstrap_at_its_wall_clock_deadline(monkeypatch, head, drip):
+def test_a_gitea_answer_that_drips_fails_bootstrap_at_its_wall_clock_deadline(monkeypatch, socket_path, head, drip):
     monkeypatch.setattr(b, "HTTP_TIMEOUT_SECONDS", 0.5, raising=False)
-    server = Drip(head, drip)
+    server = Drip(head, drip, socket_path)
     try:
         started = time.monotonic()
         with pytest.raises(b.BootstrapError, match=r"gitea GET /user did not answer within 0\.5s"):
-            b.Gitea(server.url).request("GET", "/user", None)
+            b.Gitea(socket_path).request("GET", "/user", None)
         elapsed = time.monotonic() - started
     finally:
         server.close()

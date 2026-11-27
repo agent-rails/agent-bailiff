@@ -437,6 +437,10 @@ def _add_credential_check(commands: argparse._SubParsersAction[argparse.Argument
     )
     check.add_argument("--ca-file", help="CA bundle for an https provider API URL")
     check.add_argument(
+        "--unix-socket",
+        help="reach the provider over this Unix socket instead of the network; the API URL must be http",
+    )
+    check.add_argument(
         "--max-repos", type=int, default=DEFAULT_MAX_REPOS, help="refuse when a repository search reports more"
     )
     check.set_defaults(handler=_credential_check)
@@ -478,6 +482,9 @@ def _add_task_source(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--task-file", type=Path, required=True, help="task.json written by task issue")
     parser.add_argument("--key-dir", type=Path, required=True, help="the agent's own 0700 key directory")
     parser.add_argument("--gateway-url", required=True, help="the agentgateway MCP URL")
+    parser.add_argument(
+        "--gateway-ca", type=Path, help="CA file the gateway's https certificate must chain to, instead of system roots"
+    )
 
 
 def _add_init(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -994,7 +1001,7 @@ def _proxy_keygen(args: argparse.Namespace) -> int:
 def _proxy_tools(args: argparse.Namespace) -> int:
     try:
         state = TaskState.load(args.task_file, args.key_dir)
-        client = BailiffClient(args.gateway_url, state.holder, ToolRoutes(()))
+        client = BailiffClient(args.gateway_url, state.holder, ToolRoutes(()), cafile=args.gateway_ca)
         try:
             tools = client.list_tools()
         finally:
@@ -1009,7 +1016,7 @@ def _proxy_run(args: argparse.Namespace) -> int:
     try:
         warning = check_two_user(os.environ, allow_shared_user=args.allow_shared_user)
         raw = read_routes(args.routes)
-        proxy = StdioProxy(args.task_file, args.key_dir, args.gateway_url, load_routes(raw))
+        proxy = StdioProxy(args.task_file, args.key_dir, args.gateway_url, load_routes(raw), gateway_ca=args.gateway_ca)
     except (SharedAuthority, OSError, ValueError) as exc:
         return _refused("proxy run", exc)
     if warning:
@@ -1127,6 +1134,7 @@ def _credential_check(args: argparse.Namespace) -> int:
             binding_resource=args.binding_resource,
             required=args.required,
             cafile=args.ca_file,
+            unix_socket=args.unix_socket,
             timeout=DEFAULT_TIMEOUT_SECONDS,
             max_repos=args.max_repos,
         )

@@ -13,7 +13,7 @@ RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.t
     && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY agent_bailiff /app/agent_bailiff
 RUN python -c "import agent_bailiff.adapters.agentgateway._proto.ext_mcp_pb2"
-COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/baseline.py examples/quickstart/proxy_bench.py examples/quickstart/rule.py /app/quickstart/
+COPY examples/quickstart/bootstrap.py examples/quickstart/agent.py examples/quickstart/baseline.py examples/quickstart/proxy_bench.py examples/quickstart/rule.py examples/quickstart/issue_certs.py /app/quickstart/
 COPY examples/quickstart/gateway.json /app/quickstart/
 COPY examples/quickstart/upstreams /app/quickstart/upstreams
 COPY examples/quickstart/stub-upstream/server.py /app/quickstart/stub-upstream/
@@ -31,6 +31,10 @@ RUN install -d -m 0755 /pins /var/lib/bailiff /run/bailiff \
     && install -d -o 10006 -g 10006 -m 0755 /var/lib/bailiff/agent-public \
     && install -d -o 10008 -g 10008 -m 0700 /var/lib/bailiff/exporter \
     && install -d -o 10009 -g 20003 -m 0750 /var/lib/bailiff/receipts \
+    && install -d -o 10012 -g 10012 -m 0755 /var/lib/bailiff/certs/public \
+    && install -d -o 10012 -g 20005 -m 0750 /var/lib/bailiff/certs/gateway \
+    && install -d -o 10012 -g 20006 -m 0750 /var/lib/bailiff/certs/stub-upstream \
+    && install -d -o 10012 -g 20007 -m 0750 /var/lib/bailiff/certs/gitea-mcp-tls \
     && install -d -o 10001 -g 20000 -m 0750 /run/bailiff/docket \
     && install -d -o 10002 -g 20002 -m 0750 /run/bailiff/decide \
     && install -d -o 10003 -g 20002 -m 0750 /run/bailiff/custodian \

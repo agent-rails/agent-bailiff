@@ -40,7 +40,6 @@ from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.docket.client import DocketClient, DocketError
 from agent_bailiff.docket.grant import Grant
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
-from agent_bailiff.plain_http import allows_plain_http
 from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
 from agent_bailiff.scope_pattern import is_bounded_resource
@@ -116,6 +115,7 @@ UPSTREAM_FILE = Path(os.environ.get("BAILIFF_UPSTREAM", QUICKSTART_UPSTREAMS / "
 GATEWAY_TEMPLATE = Path(__file__).resolve().parent / "gateway.json"
 GATEWAY_CONFIG = STATE / "gateway" / "gateway.json"
 GATEWAY_CA = STATE / "gateway" / "ca.pem"
+INSTALL_CA = STATE / "certs" / "public" / "current" / "ca.pem"
 MAX_GATEWAY_BYTES = 64 * 1024
 UPSTREAM_VERSION = 1
 MAX_UPSTREAM_BYTES = 64 * 1024
@@ -134,10 +134,12 @@ STACK_HOSTS = frozenset(
         "gateway-init", "bootstrap", "credential-put", "agent-key", "task-issuer", "gitea-task", "gitea-secret",
         "gitea-admin",
         "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
-        "jaeger", "exporter", "rule",
+        "jaeger", "exporter", "rule", "certs", "cert-watch", "gitea", "gitea-mcp", "gitea-mcp-spike", "baseline",
     }
 )  # fmt: skip
+UPSTREAM_HOSTS = frozenset({"stub-upstream", "gitea-mcp-tls"})
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
+INSTALL = "install"
 PROVIDER_FIELDS = frozenset({"provider", "provider_api_url", "required_permissions"})
 PROVIDERS = frozenset({"gitea"})
 TASK_SCOPE = {
@@ -155,7 +157,8 @@ ISSUER_MAX_BUDGET = 100
 LOAD_TASKS = 32
 POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "rules": []}}
 
-GITEA = os.environ.get("GITEA_URL", "http://gitea:3000")
+GITEA_SOCKET = Path("/run/gitea/gitea.sock")
+GITEA_HOST = "gitea"
 GITEA_HEALTH_SECONDS = 120
 HTTP_TIMEOUT_SECONDS = 10
 MAX_GITEA_BYTES = 1 << 20
@@ -207,7 +210,6 @@ class ProviderCheck:
     provider: str
     api_url: str
     required: tuple[str, ...]
-    ca_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -219,7 +221,7 @@ class Upstream:
     target: str
     binding_resource: str
     routes: tuple[dict[str, Any], ...]
-    ca_pem: bytes | None = None
+    ca_file: Path | None = None
     provider_check: ProviderCheck | None = None
 
     @property
@@ -251,38 +253,52 @@ def load_upstream(path: Path) -> Upstream:
     if problem:
         raise BootstrapError(f"{path}: {problem}")
     check_upstream_url(path, text["url"])
+    check_install_ca(path, text["url"], text.get("ca_file"))
     if not HEADER_NAME.fullmatch(text["credential_header"]):
         raise BootstrapError(f"{path}: credential_header must be an HTTP field name token")
     if not is_bounded_resource(text["binding_resource"]):
         raise BootstrapError(f"{path}: binding_resource may hold a wildcard only as a final /* segment")
     routes = load_upstream_routes(beside(path, "routes_file", text["routes_file"]), text["service"])
-    ca_pem = load_upstream_ca(path, text["ca_file"], text["url"]) if "ca_file" in text else None
+    ca_file = upstream_ca_file(path, text["ca_file"]) if "ca_file" in text else None
     provider_check = load_provider_check(path, text, document["required_permissions"]) if "provider" in text else None
     return Upstream(
         text["service"], text["url"], text["credential_id"], text["credential_header"], text["target"],
-        text["binding_resource"], routes, ca_pem, provider_check,
+        text["binding_resource"], routes, ca_file, provider_check,
     )  # fmt: skip
 
 
 def load_provider_check(path: Path, text: dict[str, str], required: Any) -> ProviderCheck:
     if text["provider"] not in PROVIDERS:
         raise BootstrapError(f"{path}: provider must be one of {', '.join(sorted(PROVIDERS))}")
-    check_upstream_url(path, text["provider_api_url"], "provider_api_url")
+    check_provider_api_url(path, text["provider_api_url"])
     if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
         raise BootstrapError(f"{path}: required_permissions must be a list of scope names")
     try:
         permissions = parse_required(required)
     except ValueError as error:
         raise BootstrapError(f"{path}: {error}") from None
-    ca_file = str(beside(path, "ca_file", text["ca_file"])) if ca_applies(text) else None
-    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)), ca_file)
+    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)))
 
 
-def ca_applies(text: dict[str, str]) -> bool:
-    if "ca_file" not in text:
-        return False
-    provider, upstream = urlsplit(text["provider_api_url"]), urlsplit(text["url"])
-    return provider.scheme == "https" and (provider.hostname or "") == (upstream.hostname or "")
+def check_provider_api_url(path: Path, url: str) -> None:
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError as error:
+        raise BootstrapError(f"{path}: provider_api_url {error}") from None
+    if (
+        parts.scheme != "http"
+        or parts.hostname != GITEA_HOST
+        or port is not None
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        raise BootstrapError(
+            f"{path}: provider_api_url must be http://{GITEA_HOST}/<path>, the stack's gitea, "
+            f"which the offline bootstrap reaches only over {GITEA_SOCKET}"
+        )
 
 
 def beside(path: Path, field: str, name: str) -> Path:
@@ -291,10 +307,26 @@ def beside(path: Path, field: str, name: str) -> Path:
     return path.parent / name
 
 
-def load_upstream_ca(path: Path, ca_file: str, url: str) -> bytes:
-    if urlsplit(url).scheme != "https":
-        raise BootstrapError(f"{path}: ca_file needs an https:// url")
+def check_install_ca(path: Path, url: str, ca_file: str | None) -> None:
+    parts = urlsplit(url)
+    host = (parts.hostname or "").rstrip(".")
+    if parts.scheme == "https" and host in UPSTREAM_HOSTS and ca_file != INSTALL:
+        raise BootstrapError(f"{path}: an https url to the stack's {host} needs ca_file {INSTALL}")
+    if ca_file == INSTALL and host not in UPSTREAM_HOSTS:
+        raise BootstrapError(
+            f"{path}: ca_file {INSTALL} is the install CA, which signs only {', '.join(sorted(UPSTREAM_HOSTS))}"
+        )
+
+
+def upstream_ca_file(path: Path, ca_file: str) -> Path:
+    if ca_file == INSTALL:
+        return INSTALL_CA
     ca_path = beside(path, "ca_file", ca_file)
+    load_upstream_ca(ca_path)
+    return ca_path
+
+
+def load_upstream_ca(ca_path: Path) -> bytes:
     try:
         certificates = x509.load_pem_x509_certificates(read_bounded(ca_path, MAX_CA_BYTES))
     except ValueError as error:
@@ -328,7 +360,7 @@ def read_bounded(path: Path, limit: int) -> bytes:
 def check_upstream_url(path: Path, url: str, field: str = "url") -> None:
     try:
         parts = urlsplit(url)
-        port = parts.port
+        _ = parts.port
     except ValueError as error:
         raise BootstrapError(f"{path}: {field} {error}") from None
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
@@ -336,9 +368,7 @@ def check_upstream_url(path: Path, url: str, field: str = "url") -> None:
     check_upstream_host(path, (parts.hostname or "").rstrip("."), field)
     if parts.scheme == "https" and parts.hostname:
         return
-    if parts.scheme == "http" and allows_plain_http(parts.hostname or "") and port:
-        return
-    raise BootstrapError(f"{path}: {field} must be http://<compose-service>:<port> or https://")
+    raise BootstrapError(f"{path}: {field} must be https://<host>[:<port>]; plain http is allowed only on loopback")
 
 
 def check_upstream_host(path: Path, host: str, field: str) -> None:
@@ -528,7 +558,7 @@ def gateway_document(upstream: Upstream) -> dict[str, Any]:
     if document["mcp"]["targets"] != []:
         raise BootstrapError(f"{GATEWAY_TEMPLATE} must leave mcp.targets empty for the upstream config to fill")
     target: dict[str, Any] = {"name": upstream.target, "mcp": {"host": upstream.url}}
-    if upstream.ca_pem is not None:
+    if upstream.ca_file is not None:
         target["policies"] = {"backendTLS": {"root": str(GATEWAY_CA)}}
     document["mcp"]["targets"] = [target]
     return document
@@ -537,16 +567,17 @@ def gateway_document(upstream: Upstream) -> dict[str, Any]:
 def init_gateway() -> str:
     upstream = load_upstream(UPSTREAM_FILE)
     document = gateway_document(upstream)
+    ca_pem = load_upstream_ca(upstream.ca_file) if upstream.ca_file is not None else None
     current_ca = read_bounded(GATEWAY_CA, MAX_CA_BYTES) if GATEWAY_CA.exists() else None
     outcome = "created"
     if GATEWAY_CONFIG.exists():
-        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document and current_ca == upstream.ca_pem:
+        if read_strict(GATEWAY_CONFIG, MAX_GATEWAY_BYTES) == document and current_ca == ca_pem:
             return "kept"
         outcome = "updated"
-    if upstream.ca_pem is not None:
-        write_public_bytes(GATEWAY_CA, upstream.ca_pem)
+    if ca_pem is not None:
+        write_public_bytes(GATEWAY_CA, ca_pem)
     write_public(GATEWAY_CONFIG, document)
-    if upstream.ca_pem is None and current_ca is not None:
+    if ca_pem is None and current_ca is not None:
         GATEWAY_CA.unlink()
     return outcome
 
@@ -632,15 +663,25 @@ def admin_secret() -> str:
     return "kept"
 
 
+class GiteaConnection(http.client.HTTPConnection):
+    def __init__(self, path: Path, timeout: float) -> None:
+        super().__init__(GITEA_HOST, timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(str(self._path))
+        except OSError:
+            sock.close()
+            raise
+        self.sock = sock
+
+
 class Gitea:
-    def __init__(self, base: str) -> None:
-        parts = urlsplit(base)
-        if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise BootstrapError(f"gitea URL {base!r} is not an http or https URL with a host")
-        self._base = base.rstrip("/")
-        self._https = parts.scheme == "https"
-        self._host, self._port = parts.hostname, parts.port
-        self._prefix = parts.path.rstrip("/")
+    def __init__(self, path: Path) -> None:
+        self._path = path
 
     def request(self, method: str, path: str, authorization: str | None, body: Any = None) -> tuple[int, Any]:
         headers = {"accept": "application/json"}
@@ -651,10 +692,10 @@ class Gitea:
             headers["content-type"] = "application/json"
             data = json.dumps(body).encode()
         deadline = Deadline(time.monotonic() + HTTP_TIMEOUT_SECONDS, f"gitea {method} {path}")
-        connection = self._connect(deadline.remaining())
+        connection = GiteaConnection(self._path, deadline.remaining())
         watchdog = None
         try:
-            connection.request(method, self._prefix + path, data, headers)
+            connection.request(method, path, data, headers)
             sock = connection.sock
             watchdog = threading.Timer(deadline.remaining(), shut_down, (sock,))
             watchdog.start()
@@ -675,11 +716,6 @@ class Gitea:
             connection.close()
         return response.status, json.loads(raw) if raw.strip() else None
 
-    def _connect(self, timeout: float) -> http.client.HTTPConnection:
-        if self._https:
-            return http.client.HTTPSConnection(self._host, self._port, timeout=timeout)
-        return http.client.HTTPConnection(self._host, self._port, timeout=timeout)
-
     def expect(self, statuses: set[int], method: str, path: str, authorization: str | None, body: Any = None) -> Any:
         status, document = self.request(method, path, authorization, body)
         if status not in statuses:
@@ -695,7 +731,7 @@ class Gitea:
             except (GiteaUnavailable, OSError):
                 pass
             time.sleep(1)
-        raise BootstrapError(f"gitea at {self._base} was not healthy within {seconds}s")
+        raise BootstrapError(f"gitea at {self._path} was not healthy within {seconds}s")
 
 
 @dataclass(frozen=True)
@@ -720,7 +756,7 @@ class Deadline:
 def read_capped(response: http.client.HTTPResponse, sock: socket.socket, deadline: Deadline) -> bytes:
     chunks: list[bytes] = []
     size = 0
-    while True:
+    while not response.isclosed():
         sock.settimeout(deadline.remaining())
         chunk = response.read(READ_CHUNK_BYTES)
         if not chunk:
@@ -729,6 +765,7 @@ def read_capped(response: http.client.HTTPResponse, sock: socket.socket, deadlin
         if size > MAX_GITEA_BYTES:
             raise BootstrapError(f"{deadline.what} answered more than {MAX_GITEA_BYTES} bytes")
         chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def shut_down(sock: socket.socket) -> None:
@@ -880,10 +917,9 @@ def provider_check(upstream: Upstream) -> ProviderCheck:
 def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
     check = provider_check(upstream)
     required = [argument for name in check.required for argument in ("--required", name)]
-    ca_file = ["--ca-file", check.ca_file] if check.ca_file is not None else []
     output = cli(
-        "credential-check", "--provider", check.provider, "--api-url", check.api_url,
-        "--binding-resource", upstream.binding_resource, *required, *ca_file, stdin=credential,
+        "credential-check", "--provider", check.provider, "--api-url", check.api_url, "--unix-socket", GITEA_SOCKET,
+        "--binding-resource", upstream.binding_resource, *required, stdin=credential,
     )  # fmt: skip
     document = json.loads(output)
     if not isinstance(document, dict) or not isinstance(document.get("fingerprint"), str):
@@ -1087,7 +1123,7 @@ class Checked:
 
 
 def check_and_hand_off(upstream: Upstream, stored: str | None) -> Checked:
-    gitea = Gitea(GITEA)
+    gitea = Gitea(GITEA_SOCKET)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
     gitea.expect({200}, "GET", "/api/v1/user", admin)

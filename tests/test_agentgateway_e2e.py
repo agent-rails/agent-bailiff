@@ -7,6 +7,7 @@ import os
 import platform
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -25,6 +26,7 @@ from test_control_suspension import shared_suspension
 from test_custodian import CUSTODIAN_BINDINGS, DEPLOY_SECRET, NOW, docket_entries
 from test_custodian_echo import Clock
 from test_decide import make_request
+from test_quickstart_bootstrap import issue_certificate, pem, private_pem
 
 from agent_bailiff.adapters.agentgateway.config_check import GatewayExpectations, validate_gateway_config
 from agent_bailiff.adapters.agentgateway.processors import (
@@ -208,7 +210,7 @@ def free_ports(count):
 
 class Gateway:
     def __init__(self, binary, config, directory):
-        self.port = config["mcp"]["port"]
+        self.port = config["gateways"]["default"]["port"] if "gateways" in config else config["mcp"]["port"]
         self.config_path = directory / "gateway.json"
         self.config_path.write_text(json.dumps(config))
         self.log_path = directory / "gateway.log"
@@ -237,8 +239,9 @@ class Gateway:
 
 
 class Agent:
-    def __init__(self, port):
-        self.url = f"http://127.0.0.1:{port}/mcp"
+    def __init__(self, port, context=None):
+        self.url = f"{'https' if context else 'http'}://127.0.0.1:{port}/mcp"
+        self.context = context
         self.session = None
         self.next_id = 1
         status, body = self.post(
@@ -279,7 +282,7 @@ class Agent:
             request_headers["mcp-session-id"] = self.session
         request = urllib.request.Request(self.url, json.dumps(message).encode(), request_headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(request, timeout=15, context=self.context) as response:
                 self.session = response.headers.get("mcp-session-id") or self.session
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as error:
@@ -311,6 +314,20 @@ def agent_headers(request):
     if request.links:
         headers["x-bailiff-links"] = ",".join(request.links)
     return headers
+
+
+def serve_over_tls(config, directory):
+    ca = issue_certificate("e2e gateway ca")
+    leaf, key = issue_certificate("localhost", issuer=ca, dns_name="localhost", ip_address="127.0.0.1")
+    (directory / "gateway-ca.pem").write_bytes(pem(ca[0]))
+    (directory / "gateway.pem").write_bytes(pem(leaf))
+    (directory / "gateway.key").write_bytes(private_pem(key))
+    tls = {"cert": str(directory / "gateway.pem"), "key": str(directory / "gateway.key")}
+    config["gateways"] = {"default": {"port": config["mcp"].pop("port"), "tls": tls}}
+    return ssl.create_default_context(cafile=str(directory / "gateway-ca.pem"))
+
+
+LISTENERS = pytest.mark.parametrize("stack_options", [{}, {"tls": True}], ids=["http", "tls"])
 
 
 @pytest.fixture
@@ -363,11 +380,12 @@ def stack(binary, workdir, private, make_decider, make_custodian, stack_options)
     expected = GatewayExpectations(
         sockets["decide"], sockets["custodian"], sockets["redactor"], ROUTES.services, frozenset({"Authorization"})
     )
+    context = serve_over_tls(config, workdir) if stack_options.get("tls") else None
     assert validate_gateway_config(config, expected) == ()
     gateway = Gateway(binary, config, workdir)
     try:
         yield {
-            "agent": Agent(gateway.port),
+            "agent": Agent(gateway.port, context),
             "upstream": upstream,
             "servers": servers,
             "gateway": gateway,
@@ -385,6 +403,7 @@ def refused(body, reason):
     return body.get("result") == {"content": [{"type": "text", "text": reason}], "isError": True}
 
 
+@LISTENERS
 def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(stack, workdir):
     request = make_request()
     status, body = stack["agent"].call("deploy_service", request.args, agent_headers(request))
@@ -404,6 +423,7 @@ def test_an_allowed_call_gets_the_credential_header_and_a_joined_docket_trace(st
     assert DEPLOY_SECRET.decode() not in stack["gateway"].log()
 
 
+@LISTENERS
 def test_an_echoed_credential_is_redacted_before_the_agent_sees_it(stack, workdir):
     echo = f"token {DEPLOY_SECRET.decode()} and {base64.b64encode(DEPLOY_SECRET).decode()}"
     stack["upstream"].call_result = {"content": [{"type": "text", "text": echo}]}
@@ -418,6 +438,16 @@ def test_an_echoed_credential_is_redacted_before_the_agent_sees_it(stack, workdi
     [release] = [entry for entry in entries if entry.hop == "custodian" and entry.decision == "release"]
     [alert] = [entry for entry in entries if entry.decision == "alert"]
     assert (alert.reason, alert.parent_entry, alert.op_id) == ("credential_echo", release.entry_id, release.op_id)
+
+
+@pytest.mark.parametrize("stack_options", [{"tls": True}])
+def test_the_tls_listener_refuses_plain_http(stack):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
+    url = f"http://127.0.0.1:{stack['gateway'].port}/mcp"
+    request = urllib.request.Request(url, body, {"content-type": "application/json"}, method="POST")
+    with pytest.raises((ConnectionError, http.client.HTTPException, urllib.error.URLError)):
+        urllib.request.urlopen(request, timeout=5)
+    assert stack["upstream"].calls("tools/list") == []
 
 
 def test_a_result_without_an_echo_reaches_the_agent_unchanged(stack):
@@ -859,6 +889,7 @@ def test_an_unreachable_custodian_fails_closed(stack):
     assert stack["upstream"].calls() == []
 
 
+@LISTENERS
 def test_a_call_without_chain_headers_is_refused(stack):
     status, body = stack["agent"].call("deploy_service", {"service": "api"}, {"authorization": AGENT_TOKEN})
     assert refused(body, "malformed_request"), body

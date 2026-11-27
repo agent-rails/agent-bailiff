@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import re
+import socket
 import ssl
 import time
 from collections.abc import Callable, Iterable
@@ -73,6 +74,7 @@ def check_token(
     binding_resource: str,
     required: Iterable[str],
     cafile: str | None = None,
+    unix_socket: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     max_repos: int = DEFAULT_MAX_REPOS,
     clock: Callable[[], float] = time.monotonic,
@@ -81,7 +83,9 @@ def check_token(
     binding = parse_binding(binding_resource)
     if isinstance(max_repos, bool) or not isinstance(max_repos, int) or max_repos < 1:
         raise ValueError("max_repos must be a positive int")
-    provider = Provider(api_url, header_value, cafile=cafile, deadline=clock() + timeout, clock=clock)
+    provider = Provider(
+        api_url, header_value, cafile=cafile, unix_socket=unix_socket, deadline=clock() + timeout, clock=clock
+    )
     scopes, login = fetch_token_info(provider)
     broader = broader_scopes(scopes, permissions)
     if broader:
@@ -262,6 +266,7 @@ class Provider:
         header_value: str,
         *,
         cafile: str | None,
+        unix_socket: str | None,
         deadline: float,
         clock: Callable[[], float],
     ) -> None:
@@ -269,10 +274,13 @@ class Provider:
             raise ValueError("the credential must be printable ASCII with no leading or trailing space or tab")
         parts = parse_transport_url(api_url)
         host = parts.hostname or ""
-        if parts.scheme == "http" and not allows_plain_http(host):
+        if unix_socket is not None and parts.scheme != "http":
+            raise ValueError("a unix socket carries plain http; the provider api url must be http")
+        if parts.scheme == "http" and unix_socket is None and not allows_plain_http(host):
             raise ValueError(f"the provider api url must use https unless its host is {PLAIN_HTTP_HOSTS}")
         if cafile is not None and parts.scheme != "https":
             raise ValueError("a ca file needs an https provider api url")
+        self._unix_socket = unix_socket
         self._https = parts.scheme == "https"
         self._host = host
         self._port = parts.port
@@ -309,6 +317,8 @@ class Provider:
             raise _bad_response("the provider answer is not JSON") from None
 
     def _connect(self, timeout: float) -> http.client.HTTPConnection:
+        if self._unix_socket is not None:
+            return UnixConnection(self._host, self._unix_socket, timeout)
         if self._https:
             return http.client.HTTPSConnection(self._host, self._port, timeout=timeout, context=self._context)
         return http.client.HTTPConnection(self._host, self._port, timeout=timeout)
@@ -340,6 +350,22 @@ class Provider:
         if remaining <= 0:
             raise TokenCheckRefused("deadline_exceeded", "the provider check ran past its deadline")
         return remaining
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, path: str, timeout: float) -> None:
+        super().__init__(host, timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(self._path)
+        except OSError:
+            sock.close()
+            raise
+        self.sock = sock
 
 
 def _check_status(status: int) -> None:

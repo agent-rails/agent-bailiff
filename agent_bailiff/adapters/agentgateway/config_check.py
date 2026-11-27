@@ -16,7 +16,9 @@ from agent_bailiff.custodian.config import MAX_UPSTREAM_TIMEOUT
 from agent_bailiff.custodian.release import RELEASE_HEADER
 from agent_bailiff.plain_http import LOOPBACK_HOSTS, PLAIN_HTTP_HOSTS, allows_plain_http, parse_transport_url
 
-TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies"})
+TOP_LEVEL_KEYS = frozenset({"config", "mcp", "frontendPolicies", "gateways"})
+GATEWAY_LISTENER_KEYS = frozenset({"port", "tls"})
+GATEWAY_TLS_KEYS = frozenset({"cert", "key"})
 CONFIG_KEYS = frozenset({"adminAddr", "statsAddr", "readinessAddr", "logging", "tracing", "metrics", "workerThreads"})
 LOGGING_KEYS = frozenset({"level", "format"})
 MCP_KEYS = frozenset(
@@ -74,6 +76,7 @@ class GatewayExpectations:
     services: frozenset[str]
     credential_headers: frozenset[str]
     effector_services: frozenset[str] = frozenset()
+    stack_hosts: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         sockets = (self.decide_socket, self.custodian_socket, self.redactor_socket)
@@ -86,6 +89,8 @@ class GatewayExpectations:
             raise ValueError("services must be a non-empty set of non-empty str")
         if not all(isinstance(item, str) and HEADER_NAME.fullmatch(item) for item in self.credential_headers):
             raise ValueError("credential_headers must be HTTP field names")
+        if not all(isinstance(item, str) and item for item in self.stack_hosts):
+            raise ValueError("stack_hosts must be a set of non-empty str")
 
 
 def validate_gateway_config(document: object, expected: GatewayExpectations) -> tuple[str, ...]:
@@ -105,13 +110,36 @@ def validate_gateway_config(document: object, expected: GatewayExpectations) -> 
         problems.append("the gateway config must have an mcp object")
         return tuple(problems)
     _only_keys(problems, "mcp", mcp, MCP_KEYS)
+    if "gateways" in document:
+        _check_gateways(problems, document["gateways"], mcp)
     if mcp.get("statefulMode") != "stateless":
         problems.append('mcp.statefulMode must be "stateless"; the stateful event stream reaches upstreams unchecked')
-    _check_targets(problems, mcp.get("targets"), expected.services, expected.effector_services)
+    _check_targets(problems, mcp.get("targets"), expected)
     _check_policies(problems, mcp.get("policies"), expected)
     _check_access_log(problems, document.get("frontendPolicies"))
     _check_credential_headers(problems, document, expected.credential_headers)
     return tuple(problems)
+
+
+def _check_gateways(problems: list[str], gateways: object, mcp: Mapping[str, Any]) -> None:
+    if not isinstance(gateways, dict) or set(gateways) != {"default"}:
+        problems.append("gateways must be an object holding only default")
+        return
+    listener = gateways["default"]
+    if not isinstance(listener, dict) or set(listener) != GATEWAY_LISTENER_KEYS:
+        problems.append("gateways.default must hold only port and tls")
+        return
+    if not _is_valid_target_port(listener["port"]):
+        problems.append("gateways.default.port must be a number from 1 to 65535")
+    tls = listener["tls"]
+    if (
+        not isinstance(tls, dict)
+        or set(tls) != GATEWAY_TLS_KEYS
+        or not all(isinstance(tls[key], str) and tls[key] for key in GATEWAY_TLS_KEYS)
+    ):
+        problems.append("gateways.default.tls must hold only cert and key, each a non-empty path")
+    if "port" in mcp:
+        problems.append("mcp.port must be absent when gateways is set; it would keep a plaintext listener")
 
 
 def _check_logging(problems: list[str], logging: object) -> None:
@@ -157,9 +185,7 @@ def _check_access_log(problems: list[str], frontend: object) -> None:
         )
 
 
-def _check_targets(
-    problems: list[str], targets: object, services: frozenset[str], effector_services: frozenset[str]
-) -> None:
+def _check_targets(problems: list[str], targets: object, expected: GatewayExpectations) -> None:
     if not isinstance(targets, list):
         problems.append("mcp.targets must be a list")
         return
@@ -180,7 +206,7 @@ def _check_targets(
             _only_keys(problems, f"mcp target {name!r} policies", policies, TARGET_POLICY_KEYS)
             if "backendTLS" in policies:
                 _check_backend_tls(problems, name, policies["backendTLS"])
-    for service in sorted(services):
+    for service in sorted(expected.services):
         target = seen.get(service)
         if target is None:
             problems.append(f"gateway-bound service {service!r} has no mcp target")
@@ -193,16 +219,27 @@ def _check_targets(
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
-        if service in effector_services:
-            if not _is_loopback_http(target["mcp"]):
+        try:
+            url = _parse_target_host(target["mcp"])
+        except ValueError as exc:
+            problems.append(f"mcp target {service!r} is malformed: {exc}")
+            continue
+        host = url.hostname or ""
+        if service in expected.effector_services:
+            if url.scheme != "http" or host not in LOOPBACK_HOSTS:
                 problems.append(
-                    f"catalog service {service!r} must target the effector over http on 127.0.0.1, localhost or "
-                    "[::1]; releases and clearances must not leave the host"
+                    f"catalog service {service!r} must target the effector over http on {PLAIN_HTTP_HOSTS}; "
+                    "releases and clearances must not leave the host"
                 )
-        elif not _is_protected_transport(target["mcp"]):
+        elif url.scheme != "https" and not allows_plain_http(host):
             problems.append(
                 f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
                 "a host without a scheme is http, and the released credential must not cross the network in cleartext"
+            )
+        elif _is_stack_host(host, expected.stack_hosts) and not _has_backend_root(target):
+            problems.append(
+                f"gateway-bound service {service!r} targets a host in the stack over https and must set "
+                "policies.backendTLS.root; with the system roots any public CA can vouch for that name"
             )
 
 
@@ -216,21 +253,18 @@ def _check_backend_tls(problems: list[str], name: str, backend_tls: object) -> N
         problems.append(f"mcp target {name!r} policies.backendTLS root must be a non-empty string")
 
 
-def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult | None:
+def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult:
     host = target.get("host")
     if not isinstance(host, str):
-        return None
+        raise ValueError("host must be a string")
     has_scheme = "://" in host
     if has_scheme and ("port" in target or "path" in target):
-        return None
+        raise ValueError("a host with a scheme must not be split into port and path")
     if "port" in target and not _is_valid_target_port(target["port"]):
-        return None
+        raise ValueError("port must be an integer from 1 to 65535")
     if "path" in target and not _is_valid_target_path(target["path"]):
-        return None
-    try:
-        return parse_transport_url(host, bare_host=not has_scheme)
-    except ValueError:
-        return None
+        raise ValueError("path must start with a single / and hold only RFC 3986 path characters")
+    return parse_transport_url(host, bare_host=not has_scheme)
 
 
 def _is_valid_target_port(port: object) -> bool:
@@ -241,16 +275,15 @@ def _is_valid_target_path(path: object) -> bool:
     return isinstance(path, str) and TARGET_PATH.fullmatch(path) is not None
 
 
-def _is_protected_transport(target: Mapping[str, Any]) -> bool:
-    url = _parse_target_host(target)
-    if url is None or url.hostname is None:
-        return False
-    return url.scheme == "https" or allows_plain_http(url.hostname)
+def _is_stack_host(host: str, stack_hosts: frozenset[str]) -> bool:
+    return host.rstrip(".") in {name.lower().rstrip(".") for name in stack_hosts}
 
 
-def _is_loopback_http(target: Mapping[str, Any]) -> bool:
-    url = _parse_target_host(target)
-    return url is not None and url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
+def _has_backend_root(target: Mapping[str, Any]) -> bool:
+    policies = target.get("policies")
+    backend_tls = policies.get("backendTLS") if isinstance(policies, dict) else None
+    root = backend_tls.get("root") if isinstance(backend_tls, dict) else None
+    return isinstance(root, str) and bool(root)
 
 
 def _check_policies(problems: list[str], policies: object, expected: GatewayExpectations) -> None:

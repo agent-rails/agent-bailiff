@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import json
 import os
@@ -7,13 +8,16 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+from test_issue_certs import certs_module
 
 QUICKSTART = Path(__file__).resolve().parents[1] / "examples" / "quickstart"
 COMPOSE_FILE = QUICKSTART / "compose.yaml"
+CERT_WATCH_NOW = Path(__file__).resolve().parent / "fixtures" / "quickstart-cert-watch.compose.yaml"
 IMAGE = "agent-bailiff-quickstart:dev"
 UP_TIMEOUT_SECONDS = 900
 RUN_TIMEOUT_SECONDS = 180
@@ -53,6 +57,8 @@ VOLUMES = {
     "tasks": "/var/lib/bailiff/tasks",
     "docket-receipts": "/var/lib/bailiff/receipts",
     "gateway-config": "/var/lib/bailiff/gateway",
+    "certs-public": "/var/lib/bailiff/certs/public",
+    **{f"certs-{name}": f"/var/lib/bailiff/certs/{name}" for name in certs_module.SERVICES},
 }
 PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
@@ -70,11 +76,35 @@ PRIVATE_VOLUMES = (
     "decide-run",
     "custodian-run",
     "docket-receipts",
+    *(f"certs-{name}" for name in certs_module.SERVICES),
 )
 
 DECIDE = (b.DECIDE_UID, b.LEDGER_GID)
 CUSTODIAN = (b.CUSTODIAN_UID, b.CUSTODIAN_UID)
+CERTS_UID = 10012
+CERT_WATCH_UID = 10015
+STUB_UID = 10011
+SIDECAR_UID = 10013
+GITEA_MCP_UID = 10014
+CERTS = (CERTS_UID, CERTS_UID)
+FIRST = "gen-0001"
 DIRECTORY, FILE, SOCKET = "directory", "file", "socket"
+CERT_ENTRIES = {
+    "certs-public": (*CERTS, 0o755, DIRECTORY),
+    f"certs-public/{FIRST}": (*CERTS, 0o755, DIRECTORY),
+    f"certs-public/{FIRST}/ca.pem": (*CERTS, 0o444, FILE),
+    **{f"certs-public/{FIRST}/{name}.pem": (*CERTS, 0o444, FILE) for name in certs_module.SERVICES},
+    **{
+        entry: values
+        for name, settings in certs_module.SERVICES.items()
+        for entry, values in {
+            f"certs-{name}": (CERTS_UID, settings.gid, 0o750, DIRECTORY),
+            f"certs-{name}/{FIRST}": (*CERTS, 0o755, DIRECTORY),
+            f"certs-{name}/{FIRST}/{name}.pem": (*CERTS, 0o444, FILE),
+            f"certs-{name}/{FIRST}/{name}.key": (CERTS_UID, settings.gid, 0o440, FILE),
+        }.items()
+    },
+}
 EXPECTED_ENTRIES = {
     "pins": (0, 0, 0o755, DIRECTORY),
     "pins/issuer": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
@@ -149,6 +179,8 @@ EXPECTED_ENTRIES = {
     "docket-receipts": (b.ARCHIVER_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
     "gateway-config": (*CUSTODIAN, 0o755, DIRECTORY),
     "gateway-config/gateway.json": (*CUSTODIAN, 0o644, FILE),
+    "gateway-config/ca.pem": (*CUSTODIAN, 0o644, FILE),
+    **CERT_ENTRIES,
 }
 TRANSIENT_ENTRIES = {
     re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
@@ -161,7 +193,15 @@ EXPECTED_IDENTITIES = {
         b.CUSTODIAN_UID,
         {b.CUSTODIAN_UID, b.DOCKET_WRITERS_GID, b.LEDGER_GID, b.GATEWAY_SOCKETS_GID},
     ),
-    "gateway": (b.GATEWAY_UID, b.GATEWAY_UID, {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID}),
+    "gateway": (
+        b.GATEWAY_UID,
+        b.GATEWAY_UID,
+        {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID, certs_module.SERVICES["gateway"].gid},
+    ),
+    "cert-watch": (CERT_WATCH_UID, CERT_WATCH_UID, {CERT_WATCH_UID}),
+    "stub-upstream": (STUB_UID, STUB_UID, {STUB_UID, certs_module.SERVICES["stub-upstream"].gid}),
+    "gitea-mcp-tls": (SIDECAR_UID, SIDECAR_UID, {SIDECAR_UID, certs_module.SERVICES["gitea-mcp-tls"].gid}),
+    "gitea-mcp": (GITEA_MCP_UID, GITEA_MCP_UID, {GITEA_MCP_UID}),
 }
 ONE_SHOTS = (
     "issuer-init",
@@ -175,6 +215,7 @@ ONE_SHOTS = (
     "gitea-secret",
     "gitea-admin",
     "agent-key",
+    "certs",
 )
 CREDENTIAL_PAIR = ("credential-put", "bootstrap")
 CREDENTIAL_SCRIPT = """
@@ -197,7 +238,7 @@ ADMIN_TOKEN_CHECK_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
 import bootstrap as b
-gitea = b.Gitea(b.GITEA)
+gitea = b.Gitea(b.GITEA_SOCKET)
 admin = b.basic(b.ADMIN, b.ADMIN_PASSWORD.read_text().strip())
 body = {"name": "privilege-check-probe", "scopes": ["write:admin"]}
 created = gitea.expect({201}, "POST", f"/api/v1/users/{b.ADMIN}/tokens", admin, body)
@@ -213,7 +254,7 @@ OUTSIDE_REPOSITORY_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
 import bootstrap as b
-gitea = b.Gitea(b.GITEA)
+gitea = b.Gitea(b.GITEA_SOCKET)
 admin = b.basic(b.ADMIN, b.ADMIN_PASSWORD.read_text().strip())
 if sys.argv[1] == "create":
     gitea.expect({201}, "POST", f"/api/v1/admin/users/{b.AGENT}/repos", admin, {"name": "outside", "private": True})
@@ -224,7 +265,7 @@ STORED_WORKS_SCRIPT = """
 import sys
 sys.path.insert(0, "/app/quickstart")
 import bootstrap as b
-print(b.credential_works(b.Gitea(b.GITEA), sys.stdin.read().strip()))
+print(b.credential_works(b.Gitea(b.GITEA_SOCKET), sys.stdin.read().strip()))
 """
 STAT_SCRIPT = """
 import json, os, stat, sys
@@ -260,6 +301,68 @@ for top in sorted(os.listdir("/v")):
             snapshot[path[3:]] = [digest, info.st_mtime_ns, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)]
 json.dump(snapshot, sys.stdout)
 """
+CA_SCRIPT = """
+import json
+print(json.dumps(open("/v/certs-public/current/ca.pem").read()))
+"""
+REACH_SCRIPT = """
+import json, socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5).close()
+    print(json.dumps("connected"))
+except OSError as error:
+    print(json.dumps(type(error).__name__))
+"""
+MCP_SCRIPT = """
+import http.client, json, ssl, sys, time
+context = ssl.create_default_context(cafile="/v/certs-public/current/ca.pem")
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}}})
+headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+for attempt in range(int(sys.argv[3])):
+    try:
+        connection = http.client.HTTPSConnection(sys.argv[1], int(sys.argv[2]), timeout=10, context=context)
+        connection.request("POST", "/mcp", body, headers)
+        response = connection.getresponse()
+        print(json.dumps([response.status, "serverInfo" in response.read().decode()]))
+        break
+    except OSError as error:
+        outcome = type(error).__name__
+        time.sleep(0.5)
+else:
+    print(json.dumps(outcome))
+"""
+HOST_SCRIPT = """
+import http.client, json, ssl, sys
+context = ssl.create_default_context(cafile="/v/certs-public/current/ca.pem")
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}}})
+answers = {}
+for host in sys.argv[1:]:
+    headers = {"host": host, "content-type": "application/json", "accept": "application/json, text/event-stream"}
+    connection = http.client.HTTPSConnection("gitea-mcp-tls", 8443, timeout=10, context=context)
+    connection.request("POST", "/mcp", body, headers)
+    response = connection.getresponse()
+    text = response.read().decode()
+    data = [line[5:] for line in text.splitlines() if line.startswith("data:")] or [text]
+    try:
+        answer = json.loads(data[0])["result"]["serverInfo"]
+    except (ValueError, KeyError, TypeError):
+        answer = text
+    answers[host] = [response.status, answer]
+json.dump(answers, sys.stdout)
+"""
+KEY_SCRIPT = """
+import json, sys
+read = {}
+for name in sys.argv[1:]:
+    try:
+        open(f"/v/certs-{name}/current/{name}.key", "rb").close()
+        read[name] = True
+    except PermissionError:
+        read[name] = False
+json.dump(read, sys.stdout)
+"""
 READ_PROBE = """
 import json, os, sys
 denied = {}
@@ -290,6 +393,8 @@ class Stack:
         self.profiles = tuple(profiles)
         self.files = (COMPOSE_FILE, *files)
         self.jaeger_port, gitea_mcp_port, self.gateway_port = free_ports(3)
+        self.gateway_url = f"https://127.0.0.1:{self.gateway_port}/mcp"
+        self.gateway_ca = None
         self.env = {
             **os.environ,
             "COMPOSE_PROJECT_NAME": project,
@@ -319,11 +424,11 @@ class Stack:
     def container(self, service):
         return self.compose("ps", "--all", "--quiet", service).strip()
 
-    def probe(self, script, user="0:0", arguments=()):
+    def probe(self, script, user="0:0", arguments=(), network="none"):
         mounts = [arg for name in self.volumes for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
         capabilities = ["--cap-add", "DAC_READ_SEARCH"] if user == "0:0" else []
         command = [
-            "docker", "run", "--rm", "--network", "none", "--user", user, "--read-only",
+            "docker", "run", "--rm", "--network", network, "--user", user, "--read-only",
             "--cap-drop", "ALL", *capabilities, *mounts, IMAGE, "-c", script, *arguments,
         ]  # fmt: skip
         result = subprocess.run(command, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=False)
@@ -333,8 +438,12 @@ class Stack:
 
 @contextlib.contextmanager
 def started(stack):
+    host = Path(tempfile.mkdtemp(prefix="bailiff-ca-"))
     try:
+        os.chmod(host, 0o755)
         stack.compose("up", "--build", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
+        stack.gateway_ca = host / "ca.pem"
+        stack.compose("cp", f"cert-watch:{b.INSTALL_CA}", str(stack.gateway_ca))
         yield stack
     finally:
         subprocess.run(
@@ -344,6 +453,7 @@ def started(stack):
             timeout=RUN_TIMEOUT_SECONDS,
             check=False,
         )
+        shutil.rmtree(host)
 
 
 @pytest.fixture(scope="module")
@@ -368,6 +478,9 @@ def identity(container):
 def test_uid_matrix(stack):
     for service, (uid, gid, groups) in EXPECTED_IDENTITIES.items():
         assert identity(stack.container(service)) == {(uid, gid, frozenset(groups))}, service
+
+
+def test_every_volume_entry_has_its_expected_owner_and_mode(stack):
     entries = {path: tuple(values) for path, values in stack.probe(STAT_SCRIPT).items()}
     for path, actual in entries.items():
         if path in EXPECTED_ENTRIES:
@@ -387,6 +500,7 @@ def test_the_agent_uid_reads_no_bailiff_state(stack):
         "agent-public",
         "tasks",
         "gateway-config",
+        "certs-public",
     }
 
 
@@ -396,6 +510,7 @@ def test_the_agent_mounts_no_bailiff_state(stack):
     assert sorted((volume["source"], volume.get("read_only", False)) for volume in agent["volumes"]) == [
         ("agent-data", True),
         ("agent-public", True),
+        ("certs-public", True),
         ("tasks", True),
     ]
     assert list(agent["networks"]) == ["edge"]
@@ -458,6 +573,7 @@ def test_bootstrap_rerun_idempotent(stack):
         ("agent-key", "key"),
     ]:
         assert outputs[service].strip().splitlines()[-1] == f"{step}: kept", outputs[service]
+    assert outputs["certs"].strip().splitlines()[-1] == f"kept {FIRST}", outputs["certs"]
     assert codes == {"credential-put": 0, "bootstrap": 0}, logs
     assert logs["credential-put"].strip().splitlines() == ["credential: kept"], logs
     lines = logs["bootstrap"].strip().splitlines()
@@ -465,6 +581,101 @@ def test_bootstrap_rerun_idempotent(stack):
     assert not any(line.startswith("gitea: created") for line in lines)
     reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential check:", "gitea:"))))
     assert reach["what this token can reach"]["probes"][f"read issues in {b.ORG}/demo"] == "allowed"
+
+
+def reach(stack, network, host, port):
+    attached = f"{stack.project}_{network}"
+    return stack.probe(REACH_SCRIPT, user="65534:65534", arguments=(host, str(port)), network=attached)
+
+
+def test_gitea_is_unreachable_on_the_upstream_network(stack):
+    assert reach(stack, "upstream", "gitea-mcp-tls", 8443) == "connected"
+    assert reach(stack, "upstream", "gitea", 3000) == "gaierror"
+
+
+def test_gitea_listens_on_no_tcp_port(stack):
+    listening = stack.compose("exec", "-T", "gitea", "netstat", "-ltn")
+    assert ":3000 " not in listening, listening
+
+
+def test_gitea_links_to_its_root_url_host_over_the_socket(stack):
+    document = stack.compose(
+        "exec", "-T", "gitea", "curl", "-fsS", "--unix-socket", "/run/gitea/gitea.sock",
+        "http://gitea/.well-known/openid-configuration",
+    )  # fmt: skip
+    assert json.loads(document)["issuer"] == "http://gitea"
+
+
+def initialize(stack, host, port, attempts=1):
+    arguments = (host, str(port), str(attempts))
+    return stack.probe(MCP_SCRIPT, user="65534:65534", arguments=arguments, network=f"{stack.project}_upstream")
+
+
+def test_gitea_mcp_answers_only_through_its_tls_sidecar(stack):
+    assert initialize(stack, "gitea-mcp-tls", 8443) == [200, True]
+    assert reach(stack, "upstream", "gitea-mcp", 8080) == "gaierror"
+    for port in (8080, 15000, 15020, 15021):
+        assert reach(stack, "upstream", "gitea-mcp-tls", port) == "ConnectionRefusedError", port
+
+
+def test_any_host_header_through_the_sidecar_reaches_only_gitea_mcp(stack):
+    hosts = ("gitea-mcp-tls:8443", "evil.example", "stub-upstream:8443", "gitea:3000", "127.0.0.1:15000")
+    answers = stack.probe(HOST_SCRIPT, user="65534:65534", arguments=hosts, network=f"{stack.project}_upstream")
+    status, server = answers[hosts[0]]
+    assert status == 200 and "gitea" in server["name"].lower(), answers
+    assert all(answer == [status, server] for answer in answers.values()), answers
+
+
+@pytest.mark.parametrize("owner", [None, *certs_module.SERVICES])
+def test_each_key_is_readable_only_in_its_owners_group(stack, owner):
+    gid = certs_module.SERVICES[owner].gid if owner else 65534
+    read = stack.probe(KEY_SCRIPT, user=f"65534:{gid}", arguments=tuple(certs_module.SERVICES))
+    assert read == {name: name == owner for name in certs_module.SERVICES}
+
+
+def test_the_sidecar_recovers_with_a_compose_restart(stack):
+    stack.compose("kill", "gitea-mcp-tls")
+    assert initialize(stack, "gitea-mcp-tls", 8443) == "gaierror"
+    stack.compose("restart", "gitea-mcp-tls")
+    assert initialize(stack, "gitea-mcp-tls", 8443, attempts=60) == [200, True]
+
+
+def health(stack, service):
+    output = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .State.Health}}", stack.container(service)],
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=True,
+    ).stdout
+    return json.loads(output)
+
+
+def test_cert_watch_is_healthy_on_a_fresh_set(stack):
+    state = health(stack, "cert-watch")
+    assert state["Status"] == "healthy", state
+    assert state["Log"][-1]["Output"].strip() == "certificates ok", state
+
+
+def test_the_install_ca_is_copied_out_with_compose_cp(stack):
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "ca.pem"
+        stack.compose("cp", "cert-watch:/var/lib/bailiff/certs/public/current/ca.pem", str(target))
+        copied = target.read_text()
+    assert copied == stack.probe(CA_SCRIPT) == stack.gateway_ca.read_text()
+    assert copied.startswith("-----BEGIN CERTIFICATE-----")
+
+
+def cert_snapshot(stack):
+    return {path: values for path, values in stack.probe(SNAPSHOT_SCRIPT).items() if path.startswith("certs-")}
+
+
+def test_a_second_up_keeps_the_certs(stack):
+    before = cert_snapshot(stack)
+    stack.compose("up", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
+    assert cert_snapshot(stack) == before
+    assert len(before) == len(certs_module.SERVICES) * 3 + 1
+    assert stack.compose("logs", "--no-log-prefix", "certs").strip().splitlines()[-1] == f"kept {FIRST}"
 
 
 def test_the_stored_gitea_token_passed_the_check_with_no_exception(stack):
@@ -533,3 +744,17 @@ def test_a_refused_check_fails_compose_up_and_leaves_the_last_passing_token_stor
     assert stack.compose("ps", "--format", "{{.State}}", "custodian").strip() == "running"
     codes, logs = run_credential_pair(stack)
     assert codes == {"credential-put": 0, "bootstrap": 0}, logs
+
+
+def test_cert_watch_turns_unhealthy_on_a_leaf_within_the_margin(stack):
+    stack.compose("stop")
+    issued = stack.compose("run", "--rm", "--no-deps", "certs", "issue", "--reissue", "--days", "20")
+    assert issued.strip().splitlines()[-1] == "issued gen-0002", issued
+    watch = copy.copy(stack)
+    watch.files = (*stack.files, CERT_WATCH_NOW)
+    watch.compose("up", "--detach", "--no-deps", "--wait", "--wait-timeout", "60", "cert-watch", expect=1)
+    state = health(stack, "cert-watch")
+    assert state["Status"] == "unhealthy", state
+    assert state["Log"][-1]["ExitCode"] == 1, state
+    output = state["Log"][-1]["Output"]
+    assert all(f"{name}.pem expires at" in output for name in certs_module.SERVICES), output

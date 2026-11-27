@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -11,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from test_quickstart_bootstrap import issue_certificate, pem, private_pem
 
 from agent_bailiff.client import GatewayError, OutcomeUnknown, Refused, Result
 from agent_bailiff.proxy.agent_key import generate_agent_key
@@ -78,8 +80,10 @@ class FakeGateway:
         self.listed = 0
         self.retries = 0
         self.clients = []
+        self.cafiles = []
 
-    def factory(self, url, holder, routes):
+    def factory(self, url, holder, routes, cafile=None):
+        self.cafiles.append(cafile)
         client = FakeClient(self, holder)
         self.clients.append(client)
         return client
@@ -351,22 +355,36 @@ def test_a_name_routed_on_two_services_is_refused():
         route_services(routes)
 
 
+REMOTE_HTTP = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
+CAFILE_HTTP = "--gateway-ca pins the gateway's TLS certificate; it needs an https gateway url"
+
+
 @pytest.mark.parametrize(
     "url",
     [
+        "http://gateway:8080/mcp",
         "http://gateway.example.com/mcp",
         "http://10.0.0.5:8080/mcp",
     ],
 )
 def test_a_proxy_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, gateway, url):
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+    assert str(refused.value) == REMOTE_HTTP
 
 
-@pytest.mark.parametrize("url", ["http://gateway:abc/mcp", "http://gate\tway/mcp", "http://gateway/mcp?x=1"])
-def test_a_proxy_refuses_a_malformed_gateway_url(task_file, key_dir, gateway, url):
-    with pytest.raises(ValueError, match="url"):
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [
+        ("http://gateway:abc/mcp", "url port must be a number from 1 to 65535"),
+        ("http://gate\tway/mcp", "url must not contain whitespace, control characters or backslashes"),
+        ("http://gateway/mcp?x=1", "url must not carry a query or fragment"),
+    ],
+)
+def test_a_proxy_refuses_a_malformed_gateway_url(task_file, key_dir, gateway, url, reason):
+    with pytest.raises(ValueError) as refused:
         StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+    assert str(refused.value) == reason
 
 
 def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, monkeypatch, capsys):
@@ -376,7 +394,7 @@ def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key
     monkeypatch.setattr("agent_bailiff.client.client.BailiffClient.list_tools", lambda self: pytest.fail("contacted"))
     arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", "http://10.0.0.5/mcp"]
     assert main(["proxy", "tools", *arguments]) == 1
-    assert "proxy tools refused" in capsys.readouterr().err
+    assert f"proxy tools refused: {REMOTE_HTTP}" in capsys.readouterr().err
 
 
 def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_file, key_dir):
@@ -399,7 +417,7 @@ def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_f
         timeout=30,
     )
     assert result.returncode == 1
-    assert "proxy run refused" in result.stderr and "https" in result.stderr
+    assert f"proxy run refused: {REMOTE_HTTP}" in result.stderr
 
 
 class SlowGateway(BaseHTTPRequestHandler):
@@ -415,6 +433,8 @@ class SlowGateway(BaseHTTPRequestHandler):
             return
         if method == "initialize":
             result = {"protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "g", "version": "1"}}
+        elif method == "tools/list":
+            result = {"tools": [LIST_ISSUES]}
         else:
             self.called.set()
             time.sleep(1)
@@ -441,10 +461,127 @@ def slow_gateway():
     server.server_close()
 
 
-def start_proxy(tmp_path, task_file, key_dir, gateway_url):
+@pytest.fixture
+def tls_gateway(tmp_path):
+    ca = issue_certificate("proxy test ca")
+    leaf, key = issue_certificate("gateway", issuer=ca, dns_name="localhost", ip_address="127.0.0.1")
+    (tmp_path / "ca.pem").write_bytes(pem(ca[0]))
+    (tmp_path / "gateway.pem").write_bytes(pem(leaf))
+    (tmp_path / "gateway.key").write_bytes(private_pem(key))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(tmp_path / "gateway.pem", tmp_path / "gateway.key")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowGateway)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    SlowGateway.called = threading.Event()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"https://127.0.0.1:{server.server_address[1]}/mcp", tmp_path / "ca.pem"
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_proxy_passes_its_gateway_ca_to_every_client(task_file, key_dir, gateway, tmp_path):
+    cafile, _ = write_ca(tmp_path)
+    proxy = StdioProxy(
+        task_file, key_dir, "https://127.0.0.1:1/mcp", ROUTES, client_factory=gateway.factory, gateway_ca=cafile
+    )
+    issue(task_file, key_dir, now=int(time.time()))
+    proxy.handle(json.loads(call()))
+    issue(task_file, key_dir, now=int(time.time()))
+    proxy.handle(json.loads(call(request_id=2)))
+    assert gateway.cafiles == [cafile, cafile]
+
+
+def write_ca(directory):
+    ca = issue_certificate("proxy test ca")
+    (directory / "ca.pem").write_bytes(pem(ca[0]))
+    return directory / "ca.pem", ca
+
+
+def test_a_proxy_refuses_a_gateway_ca_with_an_http_gateway_url(task_file, key_dir, gateway, tmp_path):
+    cafile, _ = write_ca(tmp_path)
+    with pytest.raises(ValueError) as refused:
+        StdioProxy(
+            task_file, key_dir, "http://127.0.0.1:1/mcp", ROUTES, client_factory=gateway.factory, gateway_ca=cafile
+        )
+    assert str(refused.value) == CAFILE_HTTP
+
+
+def test_a_proxy_refuses_a_missing_gateway_ca_at_start(task_file, key_dir, gateway, tmp_path):
+    with pytest.raises(FileNotFoundError):
+        StdioProxy(
+            task_file,
+            key_dir,
+            "https://127.0.0.1:1/mcp",
+            ROUTES,
+            client_factory=gateway.factory,
+            gateway_ca=tmp_path / "absent.pem",
+        )
+
+
+def test_proxy_tools_trusts_the_gateway_ca(task_file, key_dir, tls_gateway, capsys):
+    from agent_bailiff.cli import main
+
+    url, cafile = tls_gateway
+    issue(task_file, key_dir, now=int(time.time()))
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", url]
+    assert main(["proxy", "tools", *arguments, "--gateway-ca", str(cafile)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"tools": [LIST_ISSUES]}
+
+
+def test_proxy_tools_without_the_gateway_ca_refuses_the_install_certificate(task_file, key_dir, tls_gateway, capsys):
+    from agent_bailiff.cli import main
+
+    url, _ = tls_gateway
+    issue(task_file, key_dir, now=int(time.time()))
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", url]
+    assert main(["proxy", "tools", *arguments]) == 1
+    assert "proxy tools refused" in capsys.readouterr().err
+
+
+def test_proxy_run_calls_through_a_gateway_the_gateway_ca_vouches_for(tmp_path, task_file, key_dir, tls_gateway):
+    url, cafile = tls_gateway
+    issue(task_file, key_dir, now=int(time.time()))
+    process = start_proxy(tmp_path, task_file, key_dir, url, "--gateway-ca", str(cafile))
+    process.stdin.write(call(owner="demo"))
+    process.stdin.close()
+    reply = json.loads(process.stdout.readline())
+    assert process.wait(timeout=10) == 0
+    assert reply == {"jsonrpc": "2.0", "id": 1, "result": RESULT.result}
+
+
+def test_proxy_run_refuses_a_gateway_ca_with_an_http_gateway_url(tmp_path, task_file, key_dir):
+    cafile, _ = write_ca(tmp_path)
     routes = tmp_path / "routes.json"
     routes.write_text(json.dumps(ROUTE_DOCUMENT))
-    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", gateway_url]
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--routes", str(routes)]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent_bailiff.cli",
+            "proxy",
+            "run",
+            "--allow-shared-user",
+            *arguments,
+            "--gateway-url",
+            "http://127.0.0.1:1/mcp",
+            "--gateway-ca",
+            str(cafile),
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert f"proxy run refused: {CAFILE_HTTP}" in result.stderr
+
+
+def start_proxy(tmp_path, task_file, key_dir, gateway_url, *options):
+    routes = tmp_path / "routes.json"
+    routes.write_text(json.dumps(ROUTE_DOCUMENT))
+    arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", gateway_url, *options]
     process = subprocess.Popen(
         [
             sys.executable,

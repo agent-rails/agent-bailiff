@@ -1,9 +1,35 @@
 # Upgrading
 
+- [Channel authentication](#channel-authentication)
 - [Access log](#access-log)
 - [Credential checks](#credential-checks)
 - [Permission scopes](#permission-scopes)
 - [Docket grants](#docket-grants)
+
+## Channel authentication
+
+The channel authentication release allows plain http only to loopback and moves the quickstart to TLS (D24 in [DECISIONS.md](DECISIONS.md)).
+
+- check-config refuses a gateway-bound target over `http` to a service name, such as `http://gitea-mcp:8080/mcp`, with `gateway-bound service '<name>' must target https, or http only on 127.0.0.1 or [::1]`. It refuses `http://localhost` the same way; write `http://127.0.0.1` or `http://[::1]`. Serve the upstream over TLS and name it with `https://`, with `backendTLS.root` for a private CA.
+- The client and `proxy run` refuse an `http` gateway url to a service name, such as `http://gateway:8080/mcp`, with `an http gateway url must name 127.0.0.1 or [::1]; use https for any other host`, and `http://localhost` the same way. Use `https://` and, for a private CA, `cafile` or `--gateway-ca`.
+- check-config now accepts a top-level `gateways` holding only `default`, with only `port` and `tls` (`cert` and `key`), and no `mcp.port` beside it.
+- check-config now requires `--stack-host HOST` for each upstream host a private CA serves, or `--no-stack-hosts` when there is none, and exits 2 with `one of the arguments --stack-host --no-stack-hosts is required` given neither. Add one to every check-config call; the quickstart's `gateway-check` and `examples/live-run` already pass it.
+
+### Quickstart
+
+`docker compose up --build` adds `certs` and `cert-watch`, and the gateway on `127.0.0.1:18090` answers only TLS. Copy the CA out for host clients:
+
+```console
+$ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem ./ca.pem
+```
+
+Change `--gateway-url http://127.0.0.1:18090/mcp` to `https://127.0.0.1:18090/mcp` and add `--gateway-ca ./ca.pem` to `proxy tools`, `proxy run` and the agent host config. Without `--gateway-ca` the handshake fails against the system roots.
+
+An upstream config must name an `https://` url; bootstrap refuses `http://` with `url must be https://<host>[:<port>]; plain http is allowed only on loopback`. The bundled `stub.json` and `gitea.json` now name `https://stub-upstream:8443/mcp` and `https://gitea-mcp-tls:8443/mcp` with `"ca_file": "install"`, and a copy of either needs the same change. A server you added to the stack must serve TLS itself, with its CA as `ca_file`.
+
+### Rollback
+
+An earlier release refuses a top-level `gateways` key, so its check-config fails the TLS gateway config, and its proxy refuses `--gateway-ca` and its check-config `--stack-host` and `--no-stack-hosts` as unrecognized arguments. Restore the earlier `gateway.json` and upstream configs and drop `--gateway-ca`, `--stack-host` and `--no-stack-hosts`. The certificate volumes are unused by it; `down --volumes` removes them.
 
 ## Access log
 
@@ -33,7 +59,7 @@ Store each listed credential again with the new `put-credential`; the ones it re
 
 ### Provider privilege check
 
-`credential-check` (D25 in [DECISIONS.md](DECISIONS.md)) checks a Gitea token's scopes and reach before it is stored, and `put-credential --accept-broader` stores a token it refused, with a `broader` exception. The `exception` column now holds a sorted, comma-joined set, so a row may carry both `broader` and `unredactable`. A row with one exception is byte-identical to one the earlier release wrote, and stored rows keep decrypting with no migration. Release entries now carry `credential_exceptions` when the set is not empty; an earlier docket reader refuses such an entry, so upgrade every docket reader, exporter and archiver before the custodian. The quickstart's gitea upstream config gains `provider`, `provider_api_url` and `required_permissions`, and its token is stored by the new `credential-put` service; `docker compose up --build` checks a kept token on the first start and replaces it if the check refuses it.
+`credential-check` (D25 in [DECISIONS.md](DECISIONS.md)) checks a Gitea token's scopes and reach before it is stored, and `put-credential --accept-broader` stores a token it refused, with a `broader` exception. The `exception` column now holds a sorted, comma-joined set, so a row may carry both `broader` and `unredactable`. A row with one exception is byte-identical to one the earlier release wrote, and stored rows keep decrypting with no migration. Release entries now carry `credential_exceptions` when the set is not empty; an earlier docket reader refuses such an entry, so upgrade every docket reader, exporter and archiver before the custodian. The quickstart's gitea upstream config gains `provider`, `provider_api_url` (`http://gitea/api/v1`, which bootstrap reaches over Gitea's Unix socket) and `required_permissions`, and its token is stored by the new `credential-put` service; `docker compose up --build` checks a kept token on the first start and replaces it if the check refuses it.
 
 ### Rollback
 

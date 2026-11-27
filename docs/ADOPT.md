@@ -32,7 +32,7 @@ Every directory above the task directory must be owned by the operator or root a
 
 - Operator: Docker Engine 28.3.3 or later, Compose v2.20 or later, `git`, `jq`. On Linux, Engine 28.2.0 to 28.3.2 stops isolating published ports after a firewalld reload, so a host with a route to the bridge network can reach ports published on `127.0.0.1` (CVE-2025-54388).
 - Agent user: Python 3.13 and [uv](https://docs.astral.sh/uv/).
-- The upstream: one Streamable HTTP MCP server that takes one static credential in one request header. It runs either as a service you add to the stack or at an `https://` URL. stdio and SSE servers, OAuth token refresh and more than one upstream are not supported.
+- The upstream: one Streamable HTTP MCP server that takes one static credential in one request header. It is served at an `https://` URL; a server you add to the stack must serve TLS itself, with its CA as `ca_file`, since the gateway reaches no upstream over plain http. stdio and SSE servers, OAuth token refresh and more than one upstream are not supported.
 
 ## 1. Install
 
@@ -83,7 +83,13 @@ $ printf 'UPSTREAM=notes\nBAILIFF_UPSTREAMS=%s\nBAILIFF_TASK_DIR=%s\n' "$HOME/ba
 $ docker compose up --build --detach --wait
 ```
 
-Compose reads `.env` from this directory for every later command. Without these variables it falls back to the bundled stub upstream and `./tasks` without an error, so keep the file. The gateway listens on `127.0.0.1:18090` (`GATEWAY_PORT`). Any local user can connect to that port, but a call goes through only with a valid task and the agent's key.
+Compose reads `.env` from this directory for every later command. Without these variables it falls back to the bundled stub upstream and `./tasks` without an error, so keep the file. The gateway listens on `127.0.0.1:18090` (`GATEWAY_PORT`) over TLS, with a certificate from a CA the stack makes on its first `up` (see the quickstart's [Certificates](../examples/quickstart/README.md#certificates)). Any local user can connect to that port, but a call goes through only with a valid task and the agent's key. Copy the CA out where the agent user can read it:
+
+```console
+$ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem "$HOME/bailiff/ca.pem"
+```
+
+A reissue makes a new CA, so copy it again after one.
 
 For a Gitea upstream, add `provider`, `provider_api_url` and `required_permissions` to the upstream config ([`upstreams/schema.md`](../examples/quickstart/upstreams/schema.md)) and check the token before storing it, from the operator's host, which reaches the provider; the custodian has no network. The check refuses a token with scopes beyond `required_permissions` or private reach outside `binding_resource`, and on a pass prints the token's fingerprint (D25 in [DECISIONS.md](DECISIONS.md)):
 
@@ -93,7 +99,7 @@ $ agent-bailiff credential-check --provider gitea --api-url https://gitea.exampl
 {"fingerprint": "<sha256>", "login": "acme-bot", "private_repositories": 2, "scopes": ["read:issue", "read:repository"]}
 ```
 
-Then pass the printed fingerprint to `put-credential --expect-fingerprint`, which stores nothing unless stdin holds the same token. The check is point-in-time: run it again when the token's user gains access. Use a dedicated bot user that can read only the repositories the bindings cover. `put-credential --accept-broader` stores a refused token, and every release of it is docketed as `broader`.
+A provider on this host that serves only a Unix socket, as the quickstart's Gitea does, takes `--unix-socket <path>` with an `http://<host>/api/v1` URL; the host is then only the `Host` header. Then pass the printed fingerprint to `put-credential --expect-fingerprint`, which stores nothing unless stdin holds the same token. The check is point-in-time: run it again when the token's user gains access. Use a dedicated bot user that can read only the repositories the bindings cover. `put-credential --accept-broader` stores a refused token, and every release of it is docketed as `broader`.
 
 Store the credential. The custodian reads it from stdin. Keep the token file mode 0600, owned by the operator, and delete it once the command prints `stored`, or pipe the token from a secret manager. The command refuses a credential that echo redaction cannot cover, such as one with a form under 12 characters (D22 in [DECISIONS.md](DECISIONS.md)):
 
@@ -155,7 +161,7 @@ A route maps an upstream tool to a tool id and a resource, and the resource is w
 
 ```console
 $ agent-bailiff proxy tools --task-file ~/bailiff/tasks/task.json --key-dir ~/.bailiff-keys \
-    --gateway-url http://127.0.0.1:18090/mcp > tools.json
+    --gateway-url https://127.0.0.1:18090/mcp --gateway-ca ~/bailiff/ca.pem > tools.json
 ```
 
 The operator drafts a route for every tool:
@@ -192,7 +198,8 @@ The agent host launches the proxy over stdio. For Claude Code, add it to `.mcp.j
         "proxy", "run",
         "--task-file", "/home/operator/bailiff/tasks/task.json",
         "--key-dir", "/home/agent/.bailiff-keys",
-        "--gateway-url", "http://127.0.0.1:18090/mcp",
+        "--gateway-url", "https://127.0.0.1:18090/mcp",
+        "--gateway-ca", "/home/operator/bailiff/ca.pem",
         "--routes", "/home/agent/bailiff/notes-routes.json"
       ]
     }

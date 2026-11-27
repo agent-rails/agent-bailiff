@@ -160,35 +160,41 @@ def test_the_cli_prints_the_shipped_catalog_digest(capsys):
     assert capsys.readouterr().out.strip() == OperationCatalog.load(shipped_catalog("kubernetes")).digest
 
 
+CATALOG = (
+    "catalog service 'k8s' must target the effector over http on 127.0.0.1 or [::1]; "
+    "releases and clearances must not leave the host"
+)
+
+
 @pytest.mark.parametrize(
-    ("host", "accepted"),
+    ("host", "problem"),
     [
-        ("http://127.0.0.1:18080/mcp", True),
-        ("http://localhost:18080/mcp", True),
-        ("http://[::1]:18080/mcp", True),
-        ("http://10.0.0.5:18080/mcp", False),
-        ("https://127.0.0.1:18080/mcp", False),
-        ("http://127.0.0.1.evil.example:18080/mcp", False),
-        ("127.0.0.1", True),
-        ("[::1]", True),
-        ("[::1]:18080", True),
-        ("localhost:18080", True),
-        ("::1", False),
-        ("10.0.0.5", False),
-        ("127.0.0.1:abc", False),
-        ("127.0.0.1:99999", False),
-        ("127.0.0.1/@evil.com", False),
-        ("127.0.0.1?@evil.com", False),
-        ("127.0.0.1#@evil.com", False),
-        ("127.0.0.\t1", False),
-        ("http://127.0.0.1:abc/mcp", False),
-        ("http://127.0.0.1:18080/mcp?x=1", False),
-        ("http://127.0.0.1:18080/mcp#x", False),
-        ("http://::1/mcp", False),
-        ("http://127.0.0.1\t/mcp", False),
+        ("http://127.0.0.1:18080/mcp", None),
+        ("http://localhost:18080/mcp", CATALOG),
+        ("http://[::1]:18080/mcp", None),
+        ("http://10.0.0.5:18080/mcp", CATALOG),
+        ("https://127.0.0.1:18080/mcp", CATALOG),
+        ("http://127.0.0.1.evil.example:18080/mcp", CATALOG),
+        ("127.0.0.1", None),
+        ("[::1]", None),
+        ("[::1]:18080", None),
+        ("localhost:18080", CATALOG),
+        ("::1", "url must name a host"),
+        ("10.0.0.5", CATALOG),
+        ("127.0.0.1:abc", "url port must be a number from 1 to 65535"),
+        ("127.0.0.1:99999", "url port must be a number from 1 to 65535"),
+        ("127.0.0.1/@evil.com", "a host without a scheme must be host or host:port"),
+        ("127.0.0.1?@evil.com", "url must not carry a query or fragment"),
+        ("127.0.0.1#@evil.com", "url must not carry a query or fragment"),
+        ("127.0.0.\t1", "url must not contain whitespace, control characters or backslashes"),
+        ("http://127.0.0.1:abc/mcp", "url port must be a number from 1 to 65535"),
+        ("http://127.0.0.1:18080/mcp?x=1", "url must not carry a query or fragment"),
+        ("http://127.0.0.1:18080/mcp#x", "url must not carry a query or fragment"),
+        ("http://::1/mcp", "url must name a host"),
+        ("http://127.0.0.1\t/mcp", "url must not contain whitespace, control characters or backslashes"),
     ],
 )
-def test_check_config_requires_catalog_services_to_target_a_loopback_effector(host, accepted):
+def test_check_config_requires_catalog_services_to_target_a_loopback_effector(host, problem):
     config = gateway_config(upstream=host, credential_headers=["bailiff-release"])
     config["mcp"]["targets"][0]["name"] = "k8s"
     expected = GatewayExpectations(
@@ -199,8 +205,10 @@ def test_check_config_requires_catalog_services_to_target_a_loopback_effector(ho
         frozenset(),
         frozenset({"k8s"}),
     )
-    problems = [problem for problem in validate_gateway_config(config, expected) if "catalog service" in problem]
-    assert (problems == []) is accepted, problems
+    targets = ("catalog service", "mcp target")
+    problems = [found for found in validate_gateway_config(config, expected) if found.startswith(targets)]
+    wanted = [] if problem is None else [problem if problem == CATALOG else f"mcp target 'k8s' is malformed: {problem}"]
+    assert problems == wanted
 
 
 def test_catalog_services_are_the_services_with_catalog_routes():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import random
 import secrets
 import ssl
@@ -183,10 +184,14 @@ class BailiffClient:
         token_bytes: TokenBytes = secrets.token_bytes,
         sleep: Callable[[float], None] = time.sleep,
         jitter: Callable[[], float] = random.random,
+        cafile: str | os.PathLike[str] | None = None,
     ) -> None:
         parts = check_gateway_url(url)
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if cafile is not None and parts.scheme != "https":
+            raise ValueError("cafile pins the gateway's TLS certificate; it needs an https gateway url")
+        self._context = ssl.create_default_context(cafile=cafile) if parts.scheme == "https" else None
         self._parts = parts
         self._path = parts.path or "/"
         self._holder = holder
@@ -230,6 +235,9 @@ class BailiffClient:
         self._ensure_session()
         try:
             exchange = self._exchange(call.body, call.headers, call.request_id)
+        except ssl.SSLCertVerificationError:
+            self._drop_connection()
+            raise
         except (OSError, http.client.HTTPException, _ResponseError) as error:
             self._drop_connection()
             return OutcomeUnknown(f"transport: {type(error).__name__}")
@@ -348,6 +356,9 @@ class BailiffClient:
         for number in range(SETUP_ATTEMPTS):
             try:
                 exchange = attempt()
+            except ssl.SSLCertVerificationError:
+                self._drop_connection()
+                raise
             except (OSError, http.client.HTTPException, _ResponseError) as error:
                 self._drop_connection()
                 if number == SETUP_ATTEMPTS - 1:
@@ -391,9 +402,9 @@ class BailiffClient:
     def _connect(self) -> http.client.HTTPConnection:
         if self._connection is None:
             host = self._parts.hostname or ""
-            if self._parts.scheme == "https":
+            if self._context is not None:
                 self._connection = http.client.HTTPSConnection(
-                    host, self._parts.port, timeout=self._timeout, context=ssl.create_default_context()
+                    host, self._parts.port, timeout=self._timeout, context=self._context
                 )
             else:
                 self._connection = http.client.HTTPConnection(host, self._parts.port, timeout=self._timeout)

@@ -41,7 +41,8 @@ x-gitea-limits: &gitea-limits
 
 x-gitea-mcp: &gitea-mcp
   image: docker.gitea.com/gitea-mcp-server:1.13.0@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18
-  command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea:3000", "-port", "8080"]
+  command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea", "-gitea-unix-socket", "/run/gitea/gitea.sock",
+            "-port", "8080"]
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -49,16 +50,66 @@ x-gitea-mcp: &gitea-mcp
   mem_limit: 128m
   memswap_limit: 128m
   pids_limit: 64
+  volumes:
+    - gitea-run:/run/gitea:ro
   depends_on:
     gitea:
       condition: service_healthy
 
 services:
+  certs:
+    <<: [*bailiff, *once, *offline]
+    user: "10012:10012"
+    group_add: ["20005", "20006", "20007"]
+    entrypoint: ["python", "/app/quickstart/issue_certs.py"]
+    command: ["issue"]
+    volumes:
+      - certs-public:/var/lib/bailiff/certs/public
+      - certs-gateway:/var/lib/bailiff/certs/gateway
+      - certs-stub-upstream:/var/lib/bailiff/certs/stub-upstream
+      - certs-gitea-mcp-tls:/var/lib/bailiff/certs/gitea-mcp-tls
+
+  cert-watch:
+    <<: *bailiff
+    user: "10015:10015"
+    command: ["-c", "import signal, sys; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.pause()"]
+    networks: [upstream]
+    volumes:
+      - *upstreams
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30",
+             "--probe", "stub-upstream=stub-upstream:8443", "--probe", "gateway=gateway:8080",
+             "--probe-upstream", "/etc/bailiff/upstreams/${UPSTREAM:-stub}.json"]
+      interval: 6h
+      timeout: 10s
+      retries: 1
+      start_period: 1m
+      start_interval: 1s
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+      stub-upstream:
+        condition: service_started
+      gateway:
+        condition: service_started
+      gitea-mcp-tls:
+        condition: service_started
+        required: false
+
   stub-upstream:
     <<: *bailiff
     user: "10011:10011"
-    command: ["/app/quickstart/stub-upstream/server.py", "--port", "8080"]
+    group_add: ["20006"]
+    command: ["/app/quickstart/stub-upstream/server.py", "--port", "8443",
+              "--certificate", "/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.pem",
+              "--private-key", "/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.key"]
     networks: [upstream]
+    volumes:
+      - certs-stub-upstream:/var/lib/bailiff/certs/stub-upstream:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   gitea:
     <<: *gitea-limits
@@ -67,29 +118,61 @@ services:
     environment:
       GITEA__database__DB_TYPE: sqlite3
       GITEA__security__INSTALL_LOCK: "true"
-      GITEA__server__ROOT_URL: http://gitea:3000/
+      GITEA__server__PROTOCOL: http+unix
+      GITEA__server__HTTP_ADDR: /run/gitea/gitea.sock
+      GITEA__server__ROOT_URL: http://gitea/
       GITEA__service__DISABLE_REGISTRATION: "true"
     volumes:
       - gitea-data:/var/lib/gitea
       - gitea-config:/etc/gitea
-    networks: [upstream]
+      - gitea-run:/run/gitea
+    network_mode: none
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      test: ["CMD", "curl", "-fsS", "--unix-socket", "/run/gitea/gitea.sock", "http://gitea/api/healthz"]
       interval: 2s
       timeout: 2s
       retries: 30
 
+  gitea-mcp-tls:
+    profiles: [gitea]
+    image: ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b
+    user: "10013:10013"
+    group_add: ["20007"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    command: ["-f", "/etc/agentgateway/gitea-mcp-tls.json"]
+    volumes:
+      - ./gitea-mcp-tls.json:/etc/agentgateway/gitea-mcp-tls.json:ro
+      - certs-gitea-mcp-tls:/var/lib/bailiff/certs/gitea-mcp-tls:ro
+    networks: [upstream]
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+
   gitea-mcp:
     <<: *gitea-mcp
     profiles: [gitea]
-    networks: [upstream]
+    user: "10014:10014"
+    command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea", "-gitea-unix-socket", "/run/gitea/gitea.sock",
+              "-bind", "127.0.0.1", "-port", "8080"]
+    network_mode: service:gitea-mcp-tls
+    depends_on:
+      gitea:
+        condition: service_healthy
+      gitea-mcp-tls:
+        condition: service_started
+        restart: true
 
   gitea-mcp-spike:
     <<: *gitea-mcp
     profiles: [spike]
     ports:
       - "127.0.0.1:${GITEA_MCP_PORT:-18080}:8080"
-    networks: [upstream, spike]
+    networks: [spike]
 
   gitea-secret:
     <<: [*bailiff, *once, *offline]
@@ -217,17 +300,21 @@ services:
     volumes:
       - *upstreams
       - gateway-config:/var/lib/bailiff/gateway
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   bootstrap:
-    <<: [*bailiff, *once]
+    <<: [*bailiff, *once, *offline]
     profiles: [gitea]
     user: "10003:10003"
     group_add: ["20004"]
-    networks: [upstream]
     command: ["/app/quickstart/bootstrap.py", "gitea"]
     volumes:
       - *upstreams
       - gitea-admin:/var/lib/bailiff/gitea-admin:ro
+      - gitea-run:/run/gitea:ro
       - credential-handoff:/run/bailiff/credential-handoff
     depends_on:
       gitea-admin:
@@ -251,6 +338,20 @@ services:
       retries: 30
     depends_on:
       custodian-init:
+        condition: service_completed_successfully
+
+  baseline:
+    <<: [*bailiff, *once]
+    profiles: [load]
+    user: "10003:10003"
+    group_add: ["20004"]
+    command: ["/app/quickstart/baseline.py"]
+    networks: [upstream]
+    volumes:
+      - *upstreams
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    depends_on:
+      certs:
         condition: service_completed_successfully
 
   agent-key:
@@ -388,6 +489,10 @@ services:
       - /run/bailiff/custodian/custodian.sock
       - --redactor-socket
       - /run/bailiff/custodian/redactor.sock
+      - --stack-host
+      - stub-upstream
+      - --stack-host
+      - gitea-mcp-tls
     volumes:
       - custodian-data:/var/lib/bailiff/custodian:ro
       - gateway-config:/var/lib/bailiff/gateway:ro
@@ -400,7 +505,7 @@ services:
   gateway:
     image: ghcr.io/agentgateway/agentgateway:v1.7.0@sha256:60216aafb03d37f94e952ff3d51d2f630a65b10ecaebdc0a864882f92610c45b
     user: "10004:10004"
-    group_add: ["20002"]
+    group_add: ["20002", "20005"]
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -414,8 +519,11 @@ services:
       - gateway-config:/var/lib/bailiff/gateway:ro
       - decide-run:/run/bailiff/decide
       - custodian-run:/run/bailiff/custodian
+      - certs-gateway:/var/lib/bailiff/certs/gateway:ro
     networks: [edge, upstream, egress]
     depends_on:
+      certs:
+        condition: service_completed_successfully
       gateway-check:
         condition: service_completed_successfully
       decide:
@@ -424,6 +532,9 @@ services:
         condition: service_healthy
       stub-upstream:
         condition: service_started
+      gitea-mcp-tls:
+        condition: service_started
+        required: false
       gitea-mcp:
         condition: service_started
         required: false
@@ -441,6 +552,10 @@ services:
       - agent-data:/var/lib/bailiff/agent:ro
       - agent-public:/var/lib/bailiff/agent-public:ro
       - tasks:/var/lib/bailiff/tasks:ro
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
 
   reader:
     <<: [*bailiff, *offline]
@@ -564,6 +679,11 @@ networks:
 
 volumes:
   gitea-data: {}
+  gitea-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=1000,gid=1000,mode=0755,size=1m
   gitea-config: {}
   gitea-admin: {}
   pins: {}
@@ -590,3 +710,7 @@ volumes:
   tasks: {}
   gateway-config: {}
   exporter-data: {}
+  certs-public: {}
+  certs-gateway: {}
+  certs-stub-upstream: {}
+  certs-gitea-mcp-tls: {}

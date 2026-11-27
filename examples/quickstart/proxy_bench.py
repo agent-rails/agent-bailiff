@@ -29,7 +29,8 @@ STATE = Path("/var/lib/bailiff")
 AGENT_KEY = STATE / "agent" / "agent.key"
 LOAD_FILE = STATE / "tasks" / "load.json"
 ROUTES_FILE = Path(__file__).resolve().parent / "upstreams" / "gitea-routes.json"
-GATEWAY_URL = os.environ.get("BAILIFF_GATEWAY_URL", "http://gateway:8080/mcp")
+GATEWAY_URL = os.environ.get("BAILIFF_GATEWAY_URL", "https://gateway:8080/mcp")
+GATEWAY_CA = STATE / "certs" / "public" / "current" / "ca.pem"
 ORG = "quickstart"
 TOOL = "list_issues"
 IN_SCOPE = {"owner": ORG, "repo": "demo"}
@@ -218,6 +219,8 @@ def run_bench(calls: int, percent: int) -> dict[str, Any]:
             str(key_dir),
             "--gateway-url",
             GATEWAY_URL,
+            "--gateway-ca",
+            str(GATEWAY_CA),
             "--routes",
             str(ROUTES_FILE),
         ]

@@ -1,0 +1,5 @@
+services:
+  cert-watch:
+    healthcheck:
+      interval: 1s
+      start_period: 0s

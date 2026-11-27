@@ -2,11 +2,15 @@ import hashlib
 import io
 import json
 import logging
+import shutil
 import socket
+import socketserver
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -22,7 +26,7 @@ SEARCH = "/api/v1/repos/search"
 
 
 class FakeGitea:
-    def __init__(self):
+    def __init__(self, unix_socket=None):
         self.requests = []
         self.routes = {SEARCH: self.search}
         self.private = []
@@ -45,10 +49,14 @@ class FakeGitea:
             def log_message(self, *args):
                 pass
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if unix_socket is None:
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            self.url = f"http://127.0.0.1:{self.server.server_port}/api/v1"
+        else:
+            self.server = socketserver.ThreadingUnixStreamServer(str(unix_socket), Handler)
+            self.url = "http://gitea/api/v1"
         self.thread = threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True)
         self.thread.start()
-        self.url = f"http://127.0.0.1:{self.server.server_port}/api/v1"
 
     def route(self, path, document=None, *, status=200, headers=None, raw=None):
         body = raw if raw is not None else json.dumps(document).encode()
@@ -109,14 +117,19 @@ class Listener:
 
 
 class Drip:
-    def __init__(self, head, drip):
-        self.socket = socket.socket()
-        self.socket.bind(("127.0.0.1", 0))
+    def __init__(self, head, drip, unix_socket=None):
+        if unix_socket is None:
+            self.socket = socket.socket()
+            self.socket.bind(("127.0.0.1", 0))
+            self.url = f"http://127.0.0.1:{self.socket.getsockname()[1]}/api/v1"
+        else:
+            self.socket = socket.socket(socket.AF_UNIX)
+            self.socket.bind(str(unix_socket))
+            self.url = "http://gitea/api/v1"
         self.socket.listen(8)
         self.head, self.drip = head, drip
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
-        self.url = f"http://127.0.0.1:{self.socket.getsockname()[1]}/api/v1"
 
     def _serve(self):
         try:
@@ -141,6 +154,20 @@ class Drip:
 @pytest.fixture
 def gitea():
     fake = FakeGitea()
+    yield fake
+    fake.close()
+
+
+@pytest.fixture
+def unix_socket():
+    directory = Path(tempfile.mkdtemp(prefix="tc-", dir="/tmp"))
+    yield directory / "gitea.sock"
+    shutil.rmtree(directory)
+
+
+@pytest.fixture
+def unix_gitea(unix_socket):
+    fake = FakeGitea(unix_socket)
     yield fake
     fake.close()
 
@@ -807,3 +834,63 @@ def test_credential_check_refuses_a_provider_other_than_gitea(gitea, capsys):
     assert raised.value.code == 2
     assert "argument --provider: invalid choice: 'github'" in capsys.readouterr().err
     assert gitea.requests == []
+
+
+def test_a_check_over_a_unix_socket_reaches_the_provider_named_by_the_url(unix_gitea, unix_socket):
+    unix_gitea.token(["read:repository", "read:issue"])
+    assert check(unix_gitea, unix_socket=str(unix_socket)) == TokenCheck(("read:issue", "read:repository"), "agent", 0)
+    assert len(unix_gitea.requests) == 3
+    assert {(headers["Host"], headers["Authorization"]) for _, headers in unix_gitea.requests} == {("gitea", NEEDLE)}
+
+
+def test_a_unix_socket_needs_an_http_provider_api_url(unix_socket):
+    with pytest.raises(ValueError, match="a unix socket carries plain http"):
+        check_token(
+            NEEDLE, api_url="https://gitea/api/v1", binding_resource=BINDING, required=REQUIRED,
+            unix_socket=str(unix_socket),
+        )  # fmt: skip
+
+
+def test_plain_http_to_a_non_loopback_host_still_needs_the_unix_socket():
+    with pytest.raises(ValueError, match="must use https unless its host is"):
+        check_token(NEEDLE, api_url="http://gitea/api/v1", binding_resource=BINDING, required=REQUIRED)
+
+
+def test_a_missing_unix_socket_is_unreachable(unix_socket):
+    with pytest.raises(TokenCheckRefused) as raised:
+        check_token(
+            NEEDLE, api_url="http://gitea/api/v1", binding_resource=BINDING, required=REQUIRED,
+            unix_socket=str(unix_socket),
+        )  # fmt: skip
+    assert raised.value.reason == "provider_unreachable"
+
+
+def test_a_deadline_reached_while_reading_over_a_unix_socket_is_refused(unix_gitea, unix_socket):
+    unix_gitea.token(["read:repository"])
+    times = iter([100.0, 100.0, 100.0, 110.0])
+    refused = refusal(unix_gitea, unix_socket=str(unix_socket), timeout=10.0, clock=lambda: next(times))
+    assert refused.reason == "deadline_exceeded"
+    assert len(unix_gitea.requests) == 1
+
+
+def test_credential_check_over_a_unix_socket_passes(unix_gitea, unix_socket, capsys):
+    unix_gitea.token(["read:repository", "read:issue"])
+    assert credential_check(unix_gitea, NEEDLE.encode() + b"\n", "--unix-socket", str(unix_socket)) == 0
+    assert json.loads(capsys.readouterr().out)["login"] == "agent"
+    assert {headers["Host"] for _, headers in unix_gitea.requests} == {"gitea"}
+
+
+def test_credential_check_refuses_a_slow_drip_over_a_unix_socket_at_its_wall_clock_deadline(
+    capsys, monkeypatch, unix_socket
+):
+    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.5, raising=False)
+    server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a", unix_socket)
+    try:
+        started = time.monotonic()
+        code = credential_check(None, NEEDLE.encode() + b"\n", "--unix-socket", str(unix_socket), api_url=server.url)
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert code == cli.EXIT_REFUSED
+    assert "credential-check refused: deadline_exceeded" in capsys.readouterr().err
+    assert elapsed < 2

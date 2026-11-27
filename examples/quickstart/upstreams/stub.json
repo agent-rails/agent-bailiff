@@ -1,10 +1,11 @@
 {
   "version": 1,
   "service": "stub",
-  "url": "http://stub-upstream:8080/mcp",
+  "url": "https://stub-upstream:8443/mcp",
   "credential_id": "stub-token",
   "credential_header": "Authorization",
   "target": "stub",
   "binding_resource": "stub/notes/*",
-  "routes_file": "stub-routes.json"
+  "routes_file": "stub-routes.json",
+  "ca_file": "install"
 }

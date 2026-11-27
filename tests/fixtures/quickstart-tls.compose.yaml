@@ -36,6 +36,23 @@ services:
       - --certificate=/certs/tls-stranger.pem
       - --private-key=/certs/tls-stranger.key
 
+  tls-impostor:
+    <<: *tls-stub
+    group_add: ["20006"]
+    command:
+      - /app/quickstart/stub-upstream/server.py
+      - --port=8443
+      - --certificate=/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.pem
+      - --private-key=/var/lib/bailiff/certs/stub-upstream/current/stub-upstream.key
+    volumes:
+      - certs-stub-upstream:/var/lib/bailiff/certs/stub-upstream:ro
+    networks:
+      upstream:
+        aliases: [gitea-mcp-tls]
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+
   gateway:
     depends_on:
       tls-upstream:

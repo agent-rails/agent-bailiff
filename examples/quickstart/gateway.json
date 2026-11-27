@@ -11,8 +11,16 @@
       ]
     }
   },
+  "gateways": {
+    "default": {
+      "port": 8080,
+      "tls": {
+        "cert": "/var/lib/bailiff/certs/gateway/current/gateway.pem",
+        "key": "/var/lib/bailiff/certs/gateway/current/gateway.key"
+      }
+    }
+  },
   "mcp": {
-    "port": 8080,
     "statefulMode": "stateless",
     "targets": [],
     "policies": {

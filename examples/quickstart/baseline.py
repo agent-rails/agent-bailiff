@@ -1,19 +1,22 @@
 """Quickstart latency baseline. It calls the upstream MCP server directly, with the credential the custodian would
 inject, so the same tool and call counts as `agent.py load` run without the gateway, decide and custodian. The
-difference between the two at each percentile is what bailiff adds at that percentile. It runs as the bootstrap
-service, which reaches the upstream network but not the store, and reads the credential's header value on stdin."""
+difference between the two at each percentile is what bailiff adds at that percentile. It runs as the baseline
+service, which reaches the upstream over https, trusting only the upstream's configured CA (the install CA for a
+server in the stack), but not the store, and reads the credential's header value on stdin."""
 
 from __future__ import annotations
 
 import argparse
 import http.client
 import json
+import ssl
 import statistics
 import sys
 import threading
 import time
 from collections import Counter
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -30,13 +33,15 @@ class BaselineFailed(Exception):
 
 
 class DirectClient:
-    def __init__(self, url: str, authorization: str) -> None:
+    def __init__(self, url: str, authorization: str, context: ssl.SSLContext) -> None:
         parts = urlsplit(url)
-        if parts.scheme != "http" or not parts.hostname:
-            raise ValueError("the baseline url must be an http URL")
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("the baseline url must be an https URL")
         self._path = parts.path or "/"
         self._authorization = authorization
-        self._connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=TIMEOUT_SECONDS)
+        self._connection = http.client.HTTPSConnection(
+            parts.hostname, parts.port, timeout=TIMEOUT_SECONDS, context=context
+        )
         self._session: str | None = None
         self._next_id = 1
 
@@ -101,14 +106,21 @@ def percentile(latencies: list[float], fraction: float) -> float:
 
 
 def run_baseline(
-    url: str, authorization: str, clients: int, calls: int, tool: str, arguments: dict[str, Any]
+    url: str,
+    authorization: str,
+    ca_file: Path | None,
+    clients: int,
+    calls: int,
+    tool: str,
+    arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    context = ssl.create_default_context(cafile=ca_file)
     start = threading.Barrier(clients + 1)
     samples: list[list[tuple[float, str]]] = [[] for _ in range(clients)]
     errors: list[BaseException] = []
 
     def drive(index: int) -> None:
-        client = DirectClient(url, authorization)
+        client = DirectClient(url, authorization, context)
         try:
             client.open()
             start.wait()
@@ -148,14 +160,14 @@ def run_baseline(
     }
 
 
-def stdin_authorization() -> tuple[str, str]:
+def stdin_authorization() -> tuple[str, str, Path | None]:
     import bootstrap
 
     upstream = bootstrap.load_upstream(bootstrap.UPSTREAM_FILE)
     credential = sys.stdin.readline().removesuffix("\n")
     if not credential:
         raise BaselineFailed("stdin holds no credential for the upstream")
-    return upstream.url, credential
+    return upstream.url, credential, upstream.ca_file
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -166,8 +178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.clients < 1 or args.calls < 2:
         parser.error("--clients must be at least 1 and --calls at least 2")
     try:
-        url, authorization = stdin_authorization()
-        print(json.dumps(run_baseline(url, authorization, args.clients, args.calls, TOOL, ARGUMENTS)))
+        url, authorization, ca_file = stdin_authorization()
+        print(json.dumps(run_baseline(url, authorization, ca_file, args.clients, args.calls, TOOL, ARGUMENTS)))
         return 0
     except (BaselineFailed, OSError, ValueError, http.client.HTTPException) as error:
         print(f"baseline failed: {error}", file=sys.stderr)

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ from test_control import RESOLVER, TRUST_POLICY, MemoryDocket
 from test_control_suspension import shared_suspension
 from test_custodian import NOW, docket_entries
 from test_decide import AGENT_KEY, CHILD_KEY, DECIDER_ID, make_root
+from test_quickstart_bootstrap import issue_certificate, pem, private_pem
 
 from agent_bailiff.adapters.agentgateway._proto import ext_mcp_pb2
 from agent_bailiff.adapters.agentgateway.calls import read_call
@@ -94,7 +96,7 @@ def initialized(version="2025-11-25", session="s-1"):
 
 
 class Stub:
-    def __init__(self):
+    def __init__(self, context=None):
         self.requests = []
         self.responders = {
             "initialize": [initialized()],
@@ -137,9 +139,12 @@ class Stub:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if context is not None:
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/mcp"
+        scheme = "https" if context is not None else "http"
+        self.url = f"{scheme}://127.0.0.1:{self.server.server_address[1]}/mcp"
 
     def methods(self):
         return [message["method"] for _, message in self.requests]
@@ -824,44 +829,62 @@ def _capture(errors, function, *args):
         errors.append(error)
 
 
+QUERY = "url must not carry a query or fragment"
+PORT = "url port must be a number from 1 to 65535"
+SPACE = "url must not contain whitespace, control characters or backslashes"
+NO_HOST = "url must name a host"
+REMOTE_HTTP = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
+
+
 @pytest.mark.parametrize(
-    "url",
+    ("url", "reason"),
     [
-        "ftp://gateway/mcp",
-        "http:///mcp",
-        "http://gateway/mcp?x=1",
-        "http://gateway/mcp#x",
-        "http://gateway/mcp?",
-        "http://gateway:abc/mcp",
-        "http://gateway:99999/mcp",
-        "http://gate\tway/mcp",
-        "http://gate way/mcp",
-        "http://gateway/mcp\n",
-        "https://gateway:abc/mcp",
-        "https://gate\tway/mcp",
-        "http://::1/mcp",
+        ("ftp://gateway/mcp", "url must be an http or https URL"),
+        ("http:///mcp", NO_HOST),
+        ("http://gateway/mcp?x=1", QUERY),
+        ("http://gateway/mcp#x", QUERY),
+        ("http://gateway/mcp?", QUERY),
+        ("http://gateway:abc/mcp", PORT),
+        ("http://gateway:99999/mcp", PORT),
+        ("http://gate\tway/mcp", SPACE),
+        ("http://gate way/mcp", SPACE),
+        ("http://gateway/mcp\n", SPACE),
+        ("https://gateway:abc/mcp", PORT),
+        ("https://gate\tway/mcp", SPACE),
+        ("http://::1/mcp", NO_HOST),
+        ("http://gateway@10.0.0.5:8080/mcp", "url must be an http or https URL without credentials"),
     ],
 )
-def test_a_bad_gateway_url_is_rejected(url):
-    with pytest.raises(ValueError, match="url"):
+def test_a_bad_gateway_url_is_rejected(url, reason):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == reason
 
 
 @pytest.mark.parametrize(
     "url",
     [
+        "http://gateway:8080/mcp",
+        "http://gateway.local/mcp",
         "http://gateway.example.com/mcp",
         "http://10.0.0.5:8080/mcp",
         "http://[2001:db8::1]:8080/mcp",
         "http://127.0.0.1.evil.example/mcp",
         "http://167772165:8080/mcp",
         "http://0xa000005:8080/mcp",
-        "http://gateway@10.0.0.5:8080/mcp",
     ],
 )
 def test_an_http_gateway_url_to_a_remote_host_is_rejected(url):
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == REMOTE_HTTP
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8080/mcp", "http://LocalHost:8080/mcp", "http://localhost/mcp"])
+def test_an_http_gateway_url_to_localhost_is_rejected(url):
+    with pytest.raises(ValueError) as refused:
+        BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == REMOTE_HTTP
 
 
 @pytest.mark.parametrize(
@@ -870,13 +893,125 @@ def test_an_http_gateway_url_to_a_remote_host_is_rejected(url):
         "https://gateway.example.com/mcp",
         "https://10.0.0.5:8443/mcp",
         "http://127.0.0.1:8080/mcp",
-        "http://localhost:8080/mcp",
         "http://[::1]:8080/mcp",
-        "http://gateway:8080/mcp",
     ],
 )
-def test_an_https_loopback_or_service_name_gateway_url_is_accepted(url):
+def test_an_https_or_loopback_gateway_url_is_accepted(url):
     BailiffClient(url, holder(), ROUTES).close()
+
+
+def write_gateway_ca(directory, leaf_options=None):
+    ca = issue_certificate("client test ca")
+    options = {"dns_name": "localhost", "ip_address": "127.0.0.1"} if leaf_options is None else leaf_options
+    leaf, key = issue_certificate("gateway", issuer=ca, **options)
+    (directory / "ca.pem").write_bytes(pem(ca[0]))
+    (directory / "gateway.pem").write_bytes(pem(leaf))
+    (directory / "gateway.key").write_bytes(private_pem(key))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(directory / "gateway.pem", directory / "gateway.key")
+    return directory / "ca.pem", context
+
+
+@pytest.fixture
+def tls_stub(tmp_path):
+    cafile, context = write_gateway_ca(tmp_path)
+    server = Stub(context)
+    yield server, cafile
+    server.stop()
+
+
+def tls_client(url, cafile, sleeps):
+    return BailiffClient(
+        url,
+        holder(),
+        ROUTES,
+        timeout=2,
+        clock=lambda: NOW,
+        token_bytes=counting_bytes(),
+        sleep=sleeps.append,
+        cafile=cafile,
+    )
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8080/mcp", "http://[::1]:8080/mcp"])
+def test_a_cafile_with_an_http_gateway_url_is_rejected(url, tmp_path):
+    cafile, _ = write_gateway_ca(tmp_path)
+    with pytest.raises(ValueError) as refused:
+        BailiffClient(url, holder(), ROUTES, cafile=cafile)
+    assert str(refused.value) == "cafile pins the gateway's TLS certificate; it needs an https gateway url"
+
+
+def test_a_pinned_gateway_ca_connects_to_a_tls_gateway(tls_stub, sleeps):
+    server, cafile = tls_stub
+    instance = tls_client(server.url, cafile, sleeps)
+    try:
+        assert instance.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+    finally:
+        instance.close()
+    assert server.methods() == ["initialize", "notifications/initialized", "tools/call"]
+
+
+@pytest.mark.parametrize(
+    "leaf_options",
+    [{"dns_name": "gateway.example"}, {"dns_name": "localhost", "ip_address": "127.0.0.1", "expired": True}],
+    ids=["wrong-san", "expired-leaf"],
+)
+def test_a_gateway_certificate_the_pinned_ca_does_not_vouch_for_is_refused(tmp_path, sleeps, leaf_options):
+    cafile, context = write_gateway_ca(tmp_path, leaf_options)
+    server = Stub(context)
+    instance = tls_client(server.url, cafile, sleeps)
+    try:
+        with pytest.raises(ssl.SSLCertVerificationError):
+            instance.call("deploy", "deploy_service", ARGS)
+    finally:
+        instance.close()
+        server.stop()
+    assert server.requests == []
+    assert sleeps == []
+
+
+def test_a_gateway_certificate_from_another_ca_is_refused(tls_stub, tmp_path, sleeps):
+    server, _ = tls_stub
+    other = tmp_path / "other"
+    other.mkdir()
+    cafile, _ = write_gateway_ca(other)
+    instance = tls_client(server.url, cafile, sleeps)
+    try:
+        with pytest.raises(ssl.SSLCertVerificationError):
+            instance.call("deploy", "deploy_service", ARGS)
+        with pytest.raises(ssl.SSLCertVerificationError):
+            instance.list_tools()
+    finally:
+        instance.close()
+    assert server.requests == []
+    assert sleeps == []
+
+
+def test_a_missing_gateway_ca_file_is_refused_before_connecting(tls_stub, tmp_path, sleeps):
+    server, _ = tls_stub
+    with pytest.raises(FileNotFoundError):
+        tls_client(server.url, tmp_path / "absent.pem", sleeps)
+    assert server.requests == []
+
+
+def test_a_client_builds_one_tls_context_for_all_its_connections(tls_stub, sleeps, monkeypatch):
+    server, cafile = tls_stub
+    contexts = []
+    create = ssl.create_default_context
+
+    def counted(*args, **kwargs):
+        contexts.append(create(*args, **kwargs))
+        return contexts[-1]
+
+    monkeypatch.setattr(client_module.ssl, "create_default_context", counted)
+    instance = tls_client(server.url, cafile, sleeps)
+    try:
+        instance.list_tools()
+        instance._drop_connection()
+        assert instance.call("deploy", "deploy_service", ARGS) == Result(DEPLOYED)
+    finally:
+        instance.close()
+    assert len(contexts) == 1
 
 
 PROBE = """

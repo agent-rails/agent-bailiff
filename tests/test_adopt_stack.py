@@ -114,6 +114,8 @@ class Proxy:
                 str(adopter.key_dir),
                 "--gateway-url",
                 adopter.gateway_url,
+                "--gateway-ca",
+                str(adopter.gateway_ca),
                 "--routes",
                 str(routes),
             ],  # fmt: skip
@@ -161,7 +163,8 @@ class Adopter:
         self.task_dir = root / "tasks"
         self.task_file = self.task_dir / "task.json"
         self.routes = root / "routes.json"
-        self.gateway_url = f"http://127.0.0.1:{stack.gateway_port}/mcp"
+        self.gateway_url = stack.gateway_url
+        self.gateway_ca = stack.gateway_ca
         os.chmod(root, 0o755)
         if AGENT_USER:
             subprocess.run(
@@ -243,7 +246,7 @@ def refusal(result, reason):
 def test_routes_generate_drafts_every_upstream_tool(adopter, proxy, tmp_path):
     tools = tmp_path / "tools.json"
     output = cli("proxy", "tools", "--task-file", adopter.task_file, "--key-dir", adopter.key_dir,
-                 "--gateway-url", adopter.gateway_url).stdout  # fmt: skip
+                 "--gateway-url", adopter.gateway_url, "--gateway-ca", adopter.gateway_ca).stdout  # fmt: skip
     tools.write_text(output)
     draft = tmp_path / "routes.json"
     operator_cli("routes", "generate", "--tools", tools, "--service", UPSTREAM.service, "--out", draft)
@@ -401,7 +404,8 @@ def test_the_proxy_run_by_a_user_who_reaches_docker_refuses_without_the_flag(ado
         [
             sys.executable, "-m", "agent_bailiff.cli", "proxy", "run",
             "--task-file", str(adopter.task_file), "--key-dir", str(adopter.key_dir),
-            "--gateway-url", adopter.gateway_url, "--routes", str(adopter.routes),
+            "--gateway-url", adopter.gateway_url, "--gateway-ca", str(adopter.gateway_ca),
+            "--routes", str(adopter.routes),
         ],
         input=b"",
         capture_output=True,
