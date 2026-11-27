@@ -1,7 +1,14 @@
 import datetime
+import http.server
 import ipaddress
 import json
 import os
+import shutil
+import socketserver
+import tempfile
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -525,3 +532,59 @@ def test_stored_credential_returns_the_stored_secret_as_text(tmp_path, monkeypat
     monkeypatch.setattr(b, "load_custodian", lambda path: settings)
     upstream = SimpleNamespace(credential_id="gitea", target="https://gitea.example")
     assert b.stored_credential(upstream) == "token " + "a" * 40
+
+
+class GiteaHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.answer(200, {"host": self.headers["host"], "authorization": self.headers["authorization"]})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        self.answer(201, {"path": self.path, "body": body})
+
+    def answer(self, status, document):
+        raw = json.dumps(document).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def gitea_socket():
+    directory = Path(tempfile.mkdtemp(prefix="bg-", dir="/tmp"))
+    path = directory / "gitea.sock"
+    server = socketserver.ThreadingUnixStreamServer(str(path), GiteaHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield path
+    finally:
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(directory)
+
+
+def test_gitea_is_reached_over_its_unix_socket(gitea_socket):
+    gitea = b.Gitea(gitea_socket)
+    assert gitea.request("GET", "/api/v1/user", "token abc") == (200, {"host": "gitea", "authorization": "token abc"})
+    assert gitea.expect({201}, "POST", "/api/v1/orgs", None, {"username": "quickstart"}) == {
+        "path": "/api/v1/orgs",
+        "body": {"username": "quickstart"},
+    }
+
+
+def test_a_missing_gitea_socket_fails_without_waiting(gitea_socket):
+    began = time.monotonic()
+    with pytest.raises(FileNotFoundError):
+        b.Gitea(gitea_socket.with_name("absent.sock")).request("GET", "/api/healthz", None)
+    assert time.monotonic() - began < 1
+
+
+def test_gitea_not_healthy_on_its_socket_fails_bootstrap(gitea_socket):
+    with pytest.raises(b.BootstrapError, match="absent.sock was not healthy within 0s"):
+        b.Gitea(gitea_socket.with_name("absent.sock")).wait_healthy(0)

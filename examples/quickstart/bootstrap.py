@@ -5,16 +5,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import ipaddress
 import json
 import os
 import secrets
+import socket
 import stat
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -141,7 +141,8 @@ ISSUER_MAX_BUDGET = 100
 LOAD_TASKS = 32
 POLICY = {"id": "quickstart", "version": "1", "document": {"default": "allow", "rules": []}}
 
-GITEA = os.environ.get("GITEA_URL", "http://gitea:3000")
+GITEA_SOCKET = Path("/run/gitea/gitea.sock")
+GITEA_HOST = "gitea"
 GITEA_HEALTH_SECONDS = 120
 HTTP_TIMEOUT_SECONDS = 10
 ADMIN = "quickstart-admin"
@@ -571,9 +572,25 @@ def admin_secret() -> str:
     return "kept"
 
 
+class GiteaConnection(http.client.HTTPConnection):
+    def __init__(self, path: Path, timeout: float) -> None:
+        super().__init__(GITEA_HOST, timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            sock.connect(str(self._path))
+        except OSError:
+            sock.close()
+            raise
+        self.sock = sock
+
+
 class Gitea:
-    def __init__(self, base: str) -> None:
-        self._base = base.rstrip("/")
+    def __init__(self, path: Path) -> None:
+        self._path = path
 
     def request(self, method: str, path: str, authorization: str | None, body: Any = None) -> tuple[int, Any]:
         headers = {"accept": "application/json"}
@@ -583,12 +600,13 @@ class Gitea:
         if body is not None:
             headers["content-type"] = "application/json"
             data = json.dumps(body).encode()
-        request = urllib.request.Request(f"{self._base}{path}", data, headers, method=method)
+        connection = GiteaConnection(self._path, HTTP_TIMEOUT_SECONDS)
         try:
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-                status, raw = response.status, response.read()
-        except urllib.error.HTTPError as error:
-            status, raw = error.code, error.read()
+            connection.request(method, path, data, headers)
+            response = connection.getresponse()
+            status, raw = response.status, response.read()
+        finally:
+            connection.close()
         return status, json.loads(raw) if raw.strip() else None
 
     def expect(self, statuses: set[int], method: str, path: str, authorization: str | None, body: Any = None) -> Any:
@@ -603,10 +621,10 @@ class Gitea:
             try:
                 if self.request("GET", "/api/healthz", None)[0] == 200:
                     return
-            except (urllib.error.URLError, OSError):
+            except (http.client.HTTPException, OSError):
                 pass
             time.sleep(1)
-        raise BootstrapError(f"gitea at {self._base} was not healthy within {seconds}s")
+        raise BootstrapError(f"gitea at {self._path} was not healthy within {seconds}s")
 
 
 def basic(user: str, password: str) -> str:
@@ -720,7 +738,7 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
 
 def bootstrap_gitea() -> str:
     upstream = load_upstream(UPSTREAM_FILE)
-    gitea = Gitea(GITEA)
+    gitea = Gitea(GITEA_SOCKET)
     gitea.wait_healthy(GITEA_HEALTH_SECONDS)
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
     gitea.expect({200}, "GET", "/api/v1/user", admin)

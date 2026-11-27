@@ -283,3 +283,43 @@ def test_cert_watch_probes_the_stub_upstream_and_the_gateway_with_the_install_ca
     assert set(service["networks"]) <= set(config["services"]["gateway"]["networks"])
     assert service["depends_on"]["stub-upstream"]["condition"] == "service_started"
     assert service["depends_on"]["gateway"]["condition"] == "service_started"
+
+
+def test_gitea_serves_http_only_on_a_unix_socket_with_no_network(config):
+    gitea = config["services"]["gitea"]
+    settings = gitea["environment"]
+    assert settings["GITEA__server__PROTOCOL"] == "http+unix"
+    assert settings["GITEA__server__HTTP_ADDR"] == str(b.GITEA_SOCKET)
+    assert gitea["network_mode"] == "none"
+    assert "networks" not in gitea
+    assert gitea["healthcheck"]["test"][:5] == ["CMD", "curl", "-fsS", "--unix-socket", str(b.GITEA_SOCKET)]
+
+
+def test_the_gitea_socket_volume_is_mounted_only_by_gitea_and_its_clients(config):
+    mounts = {
+        name: (volume["target"], volume.get("read_only", False))
+        for name, service in config["services"].items()
+        for volume in service.get("volumes", [])
+        if volume.get("source") == "gitea-run"
+    }
+    socket_dir = str(b.GITEA_SOCKET.parent)
+    assert mounts == {
+        "gitea": (socket_dir, False),
+        "gitea-mcp": (socket_dir, True),
+        "gitea-mcp-spike": (socket_dir, True),
+        "bootstrap": (socket_dir, True),
+    }
+    assert config["volumes"]["gitea-run"]["driver_opts"]["type"] == "tmpfs"
+
+
+@pytest.mark.parametrize("name", GITEA_MCP)
+def test_gitea_mcp_reaches_gitea_over_the_socket_at_the_root_url_host(config, name):
+    arguments = arguments_of(config["services"][name])
+    root_url = config["services"]["gitea"]["environment"]["GITEA__server__ROOT_URL"]
+    assert flag_values(arguments, "-gitea-unix-socket") == {str(b.GITEA_SOCKET)}
+    assert flag_values(arguments, "-host") == {root_url.rstrip("/")} == {f"http://{b.GITEA_HOST}"}
+
+
+def test_bootstrap_reaches_gitea_only_over_the_socket(config):
+    assert config["services"]["bootstrap"]["network_mode"] == "none"
+    assert "networks" not in config["services"]["bootstrap"]

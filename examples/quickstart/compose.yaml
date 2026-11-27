@@ -41,7 +41,8 @@ x-gitea-limits: &gitea-limits
 
 x-gitea-mcp: &gitea-mcp
   image: docker.gitea.com/gitea-mcp-server:1.13.0@sha256:2daf12dfa853bfc21f6f4754bca2612957c2acbc4288b03ddcce81e37f18ea18
-  command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea:3000", "-port", "8080"]
+  command: ["/app/gitea-mcp", "-transport", "http", "-host", "http://gitea", "-gitea-unix-socket", "/run/gitea/gitea.sock",
+            "-port", "8080"]
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -49,6 +50,8 @@ x-gitea-mcp: &gitea-mcp
   mem_limit: 128m
   memswap_limit: 128m
   pids_limit: 64
+  volumes:
+    - gitea-run:/run/gitea:ro
   depends_on:
     gitea:
       condition: service_healthy
@@ -110,14 +113,17 @@ services:
     environment:
       GITEA__database__DB_TYPE: sqlite3
       GITEA__security__INSTALL_LOCK: "true"
-      GITEA__server__ROOT_URL: http://gitea:3000/
+      GITEA__server__PROTOCOL: http+unix
+      GITEA__server__HTTP_ADDR: /run/gitea/gitea.sock
+      GITEA__server__ROOT_URL: http://gitea/
       GITEA__service__DISABLE_REGISTRATION: "true"
     volumes:
       - gitea-data:/var/lib/gitea
       - gitea-config:/etc/gitea
-    networks: [upstream]
+      - gitea-run:/run/gitea
+    network_mode: none
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/healthz"]
+      test: ["CMD", "curl", "-fsS", "--unix-socket", "/run/gitea/gitea.sock", "http://gitea/api/healthz"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -266,16 +272,16 @@ services:
         condition: service_completed_successfully
 
   bootstrap:
-    <<: [*bailiff, *once]
+    <<: [*bailiff, *once, *offline]
     profiles: [gitea]
     user: "10003:10003"
     group_add: ["20004"]
-    networks: [upstream]
     command: ["/app/quickstart/bootstrap.py", "gitea"]
     volumes:
       - *upstreams
       - custodian-data:/var/lib/bailiff/custodian
       - gitea-admin:/var/lib/bailiff/gitea-admin:ro
+      - gitea-run:/run/gitea:ro
     depends_on:
       gitea-admin:
         condition: service_completed_successfully
@@ -597,6 +603,11 @@ networks:
 
 volumes:
   gitea-data: {}
+  gitea-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=1000,gid=1000,mode=0755,size=1m
   gitea-config: {}
   gitea-admin: {}
   pins: {}

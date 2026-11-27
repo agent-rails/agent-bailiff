@@ -251,6 +251,14 @@ CA_SCRIPT = """
 import json
 print(json.dumps(open("/v/certs-public/current/ca.pem").read()))
 """
+REACH_SCRIPT = """
+import json, socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5).close()
+    print(json.dumps("connected"))
+except OSError as error:
+    print(json.dumps(type(error).__name__))
+"""
 READ_PROBE = """
 import json, os, sys
 denied = {}
@@ -312,11 +320,11 @@ class Stack:
     def container(self, service):
         return self.compose("ps", "--all", "--quiet", service).strip()
 
-    def probe(self, script, user="0:0", arguments=()):
+    def probe(self, script, user="0:0", arguments=(), network="none"):
         mounts = [arg for name in self.volumes for arg in ("--volume", f"{self.project}_{name}:/v/{name}:ro")]
         capabilities = ["--cap-add", "DAC_READ_SEARCH"] if user == "0:0" else []
         command = [
-            "docker", "run", "--rm", "--network", "none", "--user", user, "--read-only",
+            "docker", "run", "--rm", "--network", network, "--user", user, "--read-only",
             "--cap-drop", "ALL", *capabilities, *mounts, IMAGE, "-c", script, *arguments,
         ]  # fmt: skip
         result = subprocess.run(command, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS, check=False)
@@ -440,6 +448,29 @@ def test_bootstrap_rerun_idempotent(stack):
     assert not any(line.startswith("gitea: created") for line in lines)
     reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential:", "gitea:"))))
     assert reach["what this token can reach"]["probes"][f"read issues in {b.ORG}/demo"] == "allowed"
+
+
+def reach(stack, network, host, port):
+    attached = f"{stack.project}_{network}"
+    return stack.probe(REACH_SCRIPT, user="65534:65534", arguments=(host, str(port)), network=attached)
+
+
+def test_gitea_is_unreachable_on_the_upstream_network(stack):
+    assert reach(stack, "upstream", "gitea-mcp", 8080) == "connected"
+    assert reach(stack, "upstream", "gitea", 3000) == "gaierror"
+
+
+def test_gitea_listens_on_no_tcp_port(stack):
+    listening = stack.compose("exec", "-T", "gitea", "netstat", "-ltn")
+    assert ":3000 " not in listening, listening
+
+
+def test_gitea_links_to_its_root_url_host_over_the_socket(stack):
+    document = stack.compose(
+        "exec", "-T", "gitea", "curl", "-fsS", "--unix-socket", "/run/gitea/gitea.sock",
+        "http://gitea/.well-known/openid-configuration",
+    )  # fmt: skip
+    assert json.loads(document)["issuer"] == "http://gitea"
 
 
 def health(stack, service):
