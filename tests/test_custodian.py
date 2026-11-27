@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from agent_warrant.chain import delegate
+from agent_warrant.encoding import b64u_decode
 from agent_warrant.identity import encode_public_key
 from agent_warrant.ledger import LedgerUnavailable, TaskLedger
 from agent_warrant.resolver import PinnedResolver
@@ -381,6 +383,30 @@ def test_valid_release_returns_the_secret_and_records_a_release_entry(make_custo
     assert (entry.component, entry.tenant, entry.principal) == (CUSTODIAN_ID, TENANT, PRINCIPAL)
     assert result.op_id == clearance.op_id
     assert DEPLOY_SECRET not in (workdir / "docket.log").read_bytes()
+
+
+def test_a_release_without_an_accepted_exception_dockets_none(make_custodian, issue, workdir):
+    request, token = issue()
+    assert isinstance(make_custodian().release(token, request, NOW + 1), Released)
+    [entry] = custodian_entries(workdir)
+    assert entry.credential_exceptions == ()
+    token = (workdir / "docket.log").read_text().splitlines()[-1]
+    assert "credential_exceptions" not in json.loads(b64u_decode(token.split(".")[0]))
+
+
+def test_a_release_dockets_the_accepted_unredactable_exception(make_custodian, issue, workdir, state):
+    store = CredentialStore.open(state / "credentials.db", LocalBackend.load(state / "kek"))
+    store.put(TENANT, "deploy-api", "deploy.example", b"Bearer short-key", accept_unredactable=True)
+    store.close()
+    request, token = issue()
+    custodian = make_custodian()
+    assert isinstance(custodian.release(token, request, NOW + 1), Released)
+    assert custodian.release(token, request, NOW + 2) == Refused("already_issued")
+    entries = custodian_entries(workdir)
+    assert [(entry.decision, entry.credential_exceptions) for entry in entries] == [
+        ("release", ("unredactable",)),
+        ("refuse", ()),
+    ]
 
 
 @pytest.mark.parametrize("token", [None, ""])

@@ -302,7 +302,7 @@ class Custodian:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
         self._precheck(clearance, now)
-        header_value = self._decrypt(binding)
+        header_value, exceptions = self._decrypt(binding)
         if self._suspension.suspended is not False:
             raise _Refusal("suspended")
         _warn_unredactable(header_value)
@@ -316,6 +316,7 @@ class Custodian:
                 reason="ok",
                 performed=True,
                 credential_tier=TIER,
+                credential_exceptions=exceptions,
                 latency_ms=self._elapsed_ms(started),
             )
             self._record(release_entry)
@@ -517,7 +518,7 @@ class Custodian:
                 raise _Refusal(result)
             self._limiter.record(clearance.tenant, clearance.task, now)
 
-    def _decrypt(self, binding: CredentialBinding) -> str:
+    def _decrypt(self, binding: CredentialBinding) -> tuple[str, tuple[str, ...]]:
         try:
             stored = self._store.get(binding.tenant, binding.credential_id, binding.target)
         except CredentialUnavailable:
@@ -534,7 +535,7 @@ class Custodian:
                 problem,
             )
             raise _Refusal("credential_unredactable")
-        return value
+        return value, () if stored.exception is None else (stored.exception,)
 
     def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str, started: int) -> None:
         key = (clearance.tenant, clearance.task, clearance.op_id, reason)
