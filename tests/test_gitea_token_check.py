@@ -5,6 +5,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -104,6 +105,36 @@ class Listener:
     def close(self):
         for connection in self.accepted:
             connection.close()
+        self.socket.close()
+
+
+class Drip:
+    def __init__(self, head, drip):
+        self.socket = socket.socket()
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen(8)
+        self.head, self.drip = head, drip
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.socket.getsockname()[1]}/api/v1"
+
+    def _serve(self):
+        try:
+            connection, _ = self.socket.accept()
+        except OSError:
+            return
+        with connection:
+            try:
+                connection.recv(65536)
+                connection.sendall(self.head)
+                until = time.monotonic() + 5
+                while time.monotonic() < until:
+                    connection.sendall(self.drip)
+                    time.sleep(0.05)
+            except OSError:
+                return
+
+    def close(self):
         self.socket.close()
 
 
@@ -626,6 +657,27 @@ def test_credential_check_passes_and_prints_the_fingerprint(gitea, capsys):
     }
     assert NEEDLE not in captured.out + captured.err
     assert {headers["Authorization"] for _, headers in gitea.requests} == {NEEDLE}
+
+
+@pytest.mark.parametrize(
+    ("head", "drip"),
+    [
+        (b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a"),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[", b" "),
+    ],
+    ids=["headers", "body"],
+)
+def test_credential_check_refuses_a_slow_drip_at_its_wall_clock_deadline(capsys, monkeypatch, head, drip):
+    monkeypatch.setattr(cli, "DEFAULT_TIMEOUT_SECONDS", 0.5, raising=False)
+    server = Drip(head, drip)
+    try:
+        started = time.monotonic()
+        assert credential_check(None, NEEDLE.encode() + b"\n", api_url=server.url) == cli.EXIT_REFUSED
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert "credential-check refused: deadline_exceeded" in capsys.readouterr().err
+    assert elapsed < 2
 
 
 def test_credential_check_fingerprint_matches_put_credential(gitea, capsys):

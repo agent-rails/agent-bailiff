@@ -22,7 +22,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
-from agent_bailiff.adapters.gitea.token_check import DEFAULT_MAX_REPOS, TokenCheckRefused, check_token
+from agent_bailiff.adapters.gitea.token_check import (
+    DEFAULT_MAX_REPOS,
+    DEFAULT_TIMEOUT_SECONDS,
+    TokenCheckRefused,
+    check_token,
+)
 from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
@@ -1112,6 +1117,8 @@ def _credential_check(args: argparse.Namespace) -> int:
         return EXIT_NO_CREDENTIAL
     if not secret.isascii():
         return _refused("credential-check", "the credential on stdin is not ASCII")
+    previous = signal.signal(signal.SIGALRM, _expire_credential_check)
+    signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS)
     try:
         result = check_token(
             secret.decode("ascii"),
@@ -1119,10 +1126,14 @@ def _credential_check(args: argparse.Namespace) -> int:
             binding_resource=args.binding_resource,
             required=args.required,
             cafile=args.ca_file,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
             max_repos=args.max_repos,
         )
     except (TokenCheckRefused, OSError, ValueError) as exc:
         return _refused("credential-check", exc)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
     document = {
         "fingerprint": _credential_fingerprint(secret),
         "login": result.login,
@@ -1131,6 +1142,10 @@ def _credential_check(args: argparse.Namespace) -> int:
     }
     print(json.dumps(document, sort_keys=True))
     return 0
+
+
+def _expire_credential_check(_signum: int, _frame: object) -> None:
+    raise TokenCheckRefused("deadline_exceeded", "the provider check ran past its deadline")
 
 
 def _check_credentials(args: argparse.Namespace) -> int:
