@@ -674,20 +674,6 @@ def test_a_second_up_keeps_the_certs(stack):
     assert stack.compose("logs", "--no-log-prefix", "certs").strip().splitlines()[-1] == f"kept {FIRST}"
 
 
-def test_cert_watch_turns_unhealthy_on_a_leaf_within_the_margin(stack):
-    stack.compose("stop")
-    issued = stack.compose("run", "--rm", "--no-deps", "certs", "issue", "--reissue", "--days", "20")
-    assert issued.strip().splitlines()[-1] == "issued gen-0002", issued
-    watch = copy.copy(stack)
-    watch.files = (*stack.files, CERT_WATCH_NOW)
-    watch.compose("up", "--detach", "--no-deps", "--wait", "--wait-timeout", "60", "cert-watch", expect=1)
-    state = health(stack, "cert-watch")
-    assert state["Status"] == "unhealthy", state
-    assert state["Log"][-1]["ExitCode"] == 1, state
-    output = state["Log"][-1]["Output"]
-    assert all(f"{name}.pem expires at" in output for name in certs_module.SERVICES), output
-
-
 def test_the_stored_gitea_token_passed_the_check_with_no_exception(stack):
     assert stored_state(stack)["exceptions"] == []
 
@@ -754,3 +740,17 @@ def test_a_refused_check_fails_compose_up_and_leaves_the_last_passing_token_stor
     assert stack.compose("ps", "--format", "{{.State}}", "custodian").strip() == "running"
     codes, logs = run_credential_pair(stack)
     assert codes == {"credential-put": 0, "bootstrap": 0}, logs
+
+
+def test_cert_watch_turns_unhealthy_on_a_leaf_within_the_margin(stack):
+    stack.compose("stop")
+    issued = stack.compose("run", "--rm", "--no-deps", "certs", "issue", "--reissue", "--days", "20")
+    assert issued.strip().splitlines()[-1] == "issued gen-0002", issued
+    watch = copy.copy(stack)
+    watch.files = (*stack.files, CERT_WATCH_NOW)
+    watch.compose("up", "--detach", "--no-deps", "--wait", "--wait-timeout", "60", "cert-watch", expect=1)
+    state = health(stack, "cert-watch")
+    assert state["Status"] == "unhealthy", state
+    assert state["Log"][-1]["ExitCode"] == 1, state
+    output = state["Log"][-1]["Output"]
+    assert all(f"{name}.pem expires at" in output for name in certs_module.SERVICES), output
