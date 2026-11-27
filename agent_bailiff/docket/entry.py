@@ -14,7 +14,7 @@ from agent_bailiff.strict_json import parse_strict_json
 ENTRY_TYP = "agent-bailiff/docket-entry/v1"
 HANDLE_LEVELS = frozenset({"agent_key", "link", "task", "tenant", "root"})
 CREDENTIAL_TIERS = frozenset({"target-bound", "gateway-bound", "exposed", "effector"})
-CREDENTIAL_EXCEPTIONS = frozenset({"unredactable"})
+CREDENTIAL_EXCEPTIONS = frozenset({"broader", "unredactable"})
 
 
 @dataclass(frozen=True)

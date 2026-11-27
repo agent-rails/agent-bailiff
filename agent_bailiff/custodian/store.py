@@ -20,7 +20,8 @@ DEK_BYTES = 32
 NONCE_BYTES = 12
 STORE_LABEL = "credential store"
 UNREDACTABLE = "unredactable"
-EXCEPTIONS = frozenset({UNREDACTABLE})
+BROADER = "broader"
+EXCEPTIONS = frozenset({UNREDACTABLE, BROADER})
 SCHEMA = """
 CREATE TABLE credentials (
     tenant TEXT NOT NULL,
@@ -133,7 +134,14 @@ class CredentialStore:
         return cls(connection, pinned, backend)
 
     def put(
-        self, tenant: str, credential_id: str, target: str, secret: bytes, *, accept_unredactable: bool = False
+        self,
+        tenant: str,
+        credential_id: str,
+        target: str,
+        secret: bytes,
+        *,
+        accept_unredactable: bool = False,
+        accept_broader: bool = False,
     ) -> None:
         if not isinstance(secret, bytes) or not secret:
             raise ValueError("secret must be non-empty bytes")
@@ -145,7 +153,9 @@ class CredentialStore:
             raise UnredactableCredential(f"credential cannot be redacted from results: {problem}")
         if problem is None and accept_unredactable:
             raise ValueError("an unredactable exception was requested for a credential that can be redacted")
-        exceptions = frozenset({UNREDACTABLE}) if problem is not None else frozenset()
+        exceptions = frozenset(
+            name for name, accepted in ((UNREDACTABLE, problem is not None), (BROADER, accept_broader)) if accepted
+        )
         context = credential_context(tenant, credential_id, target, exceptions)
         dek = os.urandom(DEK_BYTES)
         nonce = os.urandom(NONCE_BYTES)
@@ -167,6 +177,14 @@ class CredentialStore:
                 target,
                 UNREDACTABLE,
                 problem,
+            )
+        if accept_broader:
+            logger.warning(
+                "stored credential %r for target %r with an accepted %s exception: "
+                "its provider privilege may exceed the binding",
+                credential_id,
+                target,
+                BROADER,
             )
 
     def get(self, tenant: str, credential_id: str, target: str) -> StoredCredential:

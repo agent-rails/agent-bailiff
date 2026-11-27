@@ -340,17 +340,20 @@ def test_a_record_written_before_credential_exceptions_decodes_with_none():
 
 def test_credential_exceptions_round_trip_through_the_sink(paths, start_sink):
     start_sink()
-    entry = make_entry(1, credential_exceptions=("unredactable",))
+    entry = make_entry(1, credential_exceptions=("broader", "unredactable"))
     record = decide_client(paths).append(entry)
     decoded = decode_record(lines(paths[0])[0], INDEX)
     assert decoded == record
-    assert decoded.entry.credential_exceptions == ("unredactable",)
+    assert decoded.entry.credential_exceptions == ("broader", "unredactable")
     payload = json.loads(b64u_decode(record.token.split(".")[0]))
-    assert payload["credential_exceptions"] == ["unredactable"]
+    assert payload["credential_exceptions"] == ["broader", "unredactable"]
     assert verify_docket(paths[0], WRITERS).ok
 
 
-@pytest.mark.parametrize("value", [[], "unredactable", ["unknown"], ["unredactable", "unredactable"], [""], None])
+@pytest.mark.parametrize(
+    "value",
+    [[], "unredactable", ["unknown"], ["unredactable", "unredactable"], ["unredactable", "broader"], [""], None],
+)
 def test_an_invalid_credential_exceptions_value_is_refused(paths, start_sink, value):
     start_sink()
     token = sign(DECIDE_KEY, "decide-1", ENTRY_TYP, _signed_body(make_entry(1), credential_exceptions=value))
@@ -358,7 +361,7 @@ def test_an_invalid_credential_exceptions_value_is_refused(paths, start_sink, va
     assert_refused(paths, token, "invalid_field")
 
 
-@pytest.mark.parametrize("value", [("unknown",), ("unredactable", "unredactable")])
+@pytest.mark.parametrize("value", [("unknown",), ("unredactable", "unredactable"), ("unredactable", "broader")])
 def test_invalid_credential_exceptions_cannot_be_encoded(value):
     with pytest.raises(ValueError, match="credential_exceptions"):
         encode_record(DECIDE_KEY, "decide-1", "decide", 1, None, make_entry(1, credential_exceptions=value))

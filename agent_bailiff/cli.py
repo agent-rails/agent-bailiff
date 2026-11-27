@@ -338,6 +338,12 @@ def _parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="store a credential echo redaction cannot cover; the exception is recorded with it",
             )
+            put.add_argument(
+                "--accept-broader",
+                action="store_true",
+                help="store a credential whose provider privilege may exceed the binding; "
+                "the exception is recorded with it and docketed at every release",
+            )
             put.set_defaults(handler=_put_credential)
             check = component.add_parser(
                 "check-credentials", help="list stored credentials the custodian would refuse to release"
@@ -1054,6 +1060,7 @@ def _put_credential(args: argparse.Namespace) -> int:
             args.target,
             secret,
             accept_unredactable=args.accept_unredactable,
+            accept_broader=args.accept_broader,
         )
     except UnredactableCredential as exc:
         return _refused("put-credential", f"{exc}; store a longer credential or pass --accept-unredactable")

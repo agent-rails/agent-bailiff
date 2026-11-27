@@ -839,6 +839,14 @@ def test_put_credential_records_an_accepted_exception(deployment, capsys, caplog
     assert stored(deployment) == StoredCredential(b"Bearer short-key", frozenset({"unredactable"}))
 
 
+def test_put_credential_records_an_accepted_broader_exception(deployment, capsys, caplog):
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
+        assert put_credential(deployment, SECRET + b"\n", "--accept-broader") == 0
+    assert capsys.readouterr().out == "stored\n"
+    assert "accepted broader exception" in caplog.text and SECRET.decode() not in caplog.text
+    assert stored(deployment) == StoredCredential(SECRET, frozenset({"broader"}))
+
+
 def test_put_credential_refuses_an_exception_a_credential_does_not_need(deployment, capsys):
     assert put_credential(deployment, SECRET + b"\n", "--accept-unredactable") == cli.EXIT_REFUSED
     assert "can be redacted" in capsys.readouterr().err

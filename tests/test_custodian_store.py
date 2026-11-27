@@ -301,6 +301,42 @@ def test_an_accepted_exception_is_stored_with_the_credential_and_logged(state, s
         connection.close()
 
 
+def test_an_accepted_broader_exception_is_stored_with_the_credential_and_logged(state, store, caplog):
+    with caplog.at_level(logging.WARNING, logger="agent_bailiff.custodian.store"):
+        store.put(*BINDING, SECRET, accept_broader=True)
+    assert store.get(*BINDING) == StoredCredential(SECRET, frozenset({"broader"}))
+    assert "'deploy-api'" in caplog.text and "accepted broader exception" in caplog.text
+    assert "deploy-secret-value" not in caplog.text
+    connection = sqlite3.connect(state / "credentials.db")
+    try:
+        assert connection.execute("SELECT exception FROM credentials").fetchall() == [("broader",)]
+    finally:
+        connection.close()
+
+
+def test_both_exceptions_are_stored_as_one_sorted_value(state, store):
+    store.put(*BINDING, SHORT, accept_unredactable=True, accept_broader=True)
+    assert store.get(*BINDING) == StoredCredential(SHORT, frozenset({"broader", "unredactable"}))
+    assert store.check() == CredentialCheck(1, ())
+    connection = sqlite3.connect(state / "credentials.db")
+    try:
+        assert connection.execute("SELECT exception FROM credentials").fetchall() == [("broader,unredactable",)]
+    finally:
+        connection.close()
+
+
+def test_storing_again_without_broader_clears_it(store):
+    store.put(*BINDING, SECRET, accept_broader=True)
+    store.put(*BINDING, SECRET)
+    assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
+
+
+def test_a_broader_exception_alone_does_not_pass_an_unredactable_credential(state, store, backend):
+    insert_unchecked(state / "credentials.db", backend, BINDING, SHORT, "broader")
+    [problem] = store.check().problems
+    assert "has no accepted exception" in problem.problem
+
+
 def test_an_exception_for_a_credential_that_can_be_redacted_is_refused(store):
     with pytest.raises(ValueError, match="can be redacted"):
         store.put(*BINDING, SECRET, accept_unredactable=True)
@@ -346,6 +382,9 @@ def test_exceptions_encode_as_a_sorted_comma_joined_set():
     assert encode_exceptions(frozenset({"unredactable"})) == "unredactable"
     assert decode_exceptions(None) == frozenset()
     assert decode_exceptions("unredactable") == frozenset({"unredactable"})
+    both = frozenset({"unredactable", "broader"})
+    assert encode_exceptions(both) == "broader,unredactable"
+    assert decode_exceptions("broader,unredactable") == both
 
 
 @pytest.mark.parametrize(
@@ -359,6 +398,8 @@ def test_exceptions_encode_as_a_sorted_comma_joined_set():
         ",unredactable",
         " unredactable",
         b"x",
+        "unredactable,broader",
+        "broader,broader",
     ],
 )
 def test_a_value_that_is_not_a_canonical_exception_set_is_refused(value):
