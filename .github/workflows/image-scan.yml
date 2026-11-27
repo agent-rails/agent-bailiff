@@ -60,6 +60,7 @@ jobs:
             examples/quickstart/baseline.py \
             examples/quickstart/bootstrap.py \
             examples/quickstart/gateway.json \
+            examples/quickstart/issue_certs.py \
             examples/quickstart/proxy_bench.py \
             examples/quickstart/rule.py \
             examples/quickstart/stub-upstream/server.py \
