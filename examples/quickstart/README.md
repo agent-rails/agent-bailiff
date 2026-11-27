@@ -172,7 +172,7 @@ $ docker compose run --rm certs issue --reissue
 $ docker compose up --detach --wait
 ```
 
-A reissue writes a new generation (`gen-0002`) in every volume, then switches each volume's `current` link, then deletes every other generation, so no earlier key stays on disk. A crash before the first switch leaves the old set in use; a crash between two switches leaves a mixed set, which the next `up` refuses, so run the reissue again. There is no live reissue: a service reads its certificate only at start.
+A reissue writes a new generation (`gen-0002`) in every volume, then switches each volume's `current` link, then deletes every other generation, so no earlier key stays on disk. A reissue is not atomic across the volumes: each switch is atomic, the set of four is not, since each service mounts only its own key volume. Instead it fails closed. A crash after the new generation is written leaves a volume with two generations, or volumes on different generations; the next `up` refuses either with the runbook, and `certs issue --reissue` recovers. There is no live reissue: a service reads its certificate only at start.
 
 ## Tracing and the revoke rule
 

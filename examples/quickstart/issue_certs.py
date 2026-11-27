@@ -1,7 +1,8 @@
 """Quickstart TLS certificates, issued offline. issue makes a per-install CA in memory, signs one leaf for each service
 that serves TLS, and discards the CA key, so revoking is rerunning with --reissue. Each service's key lands in its own
 directory (one volume each), readable only by that service's group; the CA and the leaf certificates land in public.
-A complete, valid set is kept on rerun; a partial or mixed set is refused. --reissue writes a new generation in every
+A complete, valid set is kept on rerun; a partial or mixed set, or a directory left with a second generation by an
+interrupted run, is refused. --reissue writes a new generation in every
 directory, switches each one's current symlink only after every file is on disk, then deletes every other
 generation, so no earlier key stays on disk. check fails when the set is incomplete, does not chain, names other
 hosts, or expires within the margin, and can probe each served certificate over TLS, including the configured
@@ -266,6 +267,9 @@ def issue(
     if not reissue and all(currents.values()):
         if len(set(currents.values())) > 1:
             raise CertError(f"the directories point at different generations; {RUNBOOK}")
+        interrupted = [directory.name for directory in folders if len(generations(directory)) > 1]
+        if interrupted:
+            raise CertError(f"{', '.join(interrupted)} hold a generation from an interrupted issue; {RUNBOOK}")
         problems = check(certs, services, now(), 0, keys=True)
         if problems:
             raise CertError(f"{'; '.join(problems)}; {RUNBOOK}")

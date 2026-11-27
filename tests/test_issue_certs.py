@@ -301,10 +301,51 @@ def test_a_sigkill_before_the_switch_leaves_the_current_set(certs):
     assert {current(certs, name) for name in NAMES} == {"gen-0001"}
     assert {name: snapshot(certs / name / "current") for name in NAMES} == before
     assert all((certs / name / "gen-0002").is_dir() for name in NAMES)
-    assert run(certs, "issue") == 0
+    assert run(certs, "issue") == 1
     assert run(certs, "issue", "--reissue") == 0
     assert {current(certs, name) for name in NAMES} == {"gen-0003"}
     assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0003"] for name in NAMES)
+
+
+KILL_AFTER_SWITCH = """
+import importlib.util, os, signal, sys
+spec = importlib.util.spec_from_file_location("issue_certs", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+switch, switched = module.switch, []
+def killing(directory, generation):
+    switch(directory, generation)
+    switched.append(directory)
+    if len(switched) == int(sys.argv[3]):
+        os.kill(os.getpid(), signal.SIGKILL)
+module.switch = killing
+services = {name: module.Service(service.names, os.getgid()) for name, service in module.SERVICES.items()}
+module.main(["--certs", sys.argv[2], "issue", "--reissue"], services)
+"""
+
+
+@pytest.mark.parametrize("switches", range(1, len(NAMES) + 1))
+def test_a_sigkill_after_each_switch_is_refused_on_rerun_and_recovered_by_reissue(certs, capsys, switches):
+    assert run(certs, "issue") == 0
+    result = subprocess.run(
+        [sys.executable, "-c", KILL_AFTER_SWITCH, str(QUICKSTART / "issue_certs.py"), str(certs), str(switches)],
+        capture_output=True,
+        timeout=60,
+    )
+    assert result.returncode == -9, result.stderr
+    assert [current(certs, name) for name in NAMES] == [
+        "gen-0002" if index < switches else "gen-0001" for index in range(len(NAMES))
+    ]
+    interrupted = snapshot(certs)
+    capsys.readouterr()
+    assert run(certs, "issue") == 1
+    assert "docker compose run --rm certs issue --reissue" in capsys.readouterr().err
+    assert snapshot(certs) == interrupted
+    assert run(certs, "issue", "--reissue") == 0
+    assert all(sorted(os.listdir(certs / name)) == ["current", "gen-0003"] for name in NAMES)
+    assert certs_module.check(certs, SERVICES, datetime.datetime.now(datetime.UTC), 30, keys=True) == []
+    assert run(certs, "issue") == 0
 
 
 class FullDisk:

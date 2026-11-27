@@ -42,6 +42,13 @@ def test_d24_records_channel_auth():
     assert text.index("## D24.") < text.index("## Deferred")
 
 
+def test_the_reissue_is_documented_as_not_atomic_and_failing_closed():
+    for path in ("examples/quickstart/README.md", "docs/DECISIONS.md"):
+        text = read(path)
+        assert "A reissue is not atomic across the volumes" in text, path
+        assert "it fails closed" in text, path
+
+
 def test_the_upgrade_guide_covers_channel_auth():
     text = read("docs/UPGRADE.md")
     assert "- [Channel authentication](#channel-authentication)" in text
