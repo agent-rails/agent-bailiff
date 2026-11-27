@@ -12,6 +12,7 @@ PROFILES = ("gitea",)
 
 DECIDE = b.NAMES["decide"]
 CONTROL = b.NAMES["control"]
+CUSTODIAN = b.NAMES["custodian"]
 GRANTER = b.NAMES["issuer-docket"]
 DOCKET = "/var/lib/bailiff/docket/docket.log"
 GRANTS_SCRIPT = """
@@ -117,3 +118,26 @@ def test_docket_grants_lists_the_issued_task_as_granted(stack):
     rows = {row["task"]: row for row in granted_roots(stack)}
     assert rows[task["task_id"]]["status"] == "granted"
     assert rows[task["task_id"]]["issuer"] == b.NAMES["issuer"]
+
+
+def release_exceptions(stack, task_id):
+    rows = [row["entry"] for row in verified_rows(stack, task_id) if row["writer"] == CUSTODIAN]
+    return [row.get("credential_exceptions") for row in rows if row["decision"] == "release"]
+
+
+def test_an_accepted_broader_credential_is_docketed_on_each_release(stack):
+    first = stack.probe("import sys; sys.stdout.write(open('/v/tasks/task.json').read())")["task_id"]
+    assert release_exceptions(stack, first) == [None, None]
+    upstream = b.load_upstream(b.QUICKSTART_UPSTREAMS / "gitea.json")
+    put = [
+        "run", "--rm", "--no-deps", "-T", "--entrypoint", "python", "credential-put", "-m", "agent_bailiff.cli",
+        "custodian", "put-credential", "--config", "/var/lib/bailiff/custodian/config.json", "--tenant", b.TENANT,
+        "--credential-id", upstream.credential_id, "--target", upstream.target, "--accept-broader",
+    ]  # fmt: skip
+    assert stack.compose(*put, stdin=test_quickstart_stack.stored_header(stack)) == "stored\n"
+    assert test_quickstart_stack.stored_state(stack)["exceptions"] == ["broader"]
+    stack.compose("run", "--rm", "--no-deps", "gitea-task")
+    task_id, observed = agent(stack, "run")
+    assert task_id != first
+    assert observed == SCENARIOS
+    assert release_exceptions(stack, task_id) == [["broader"], ["broader"]]
