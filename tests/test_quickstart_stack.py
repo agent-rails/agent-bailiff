@@ -477,6 +477,9 @@ def identity(container):
 def test_uid_matrix(stack):
     for service, (uid, gid, groups) in EXPECTED_IDENTITIES.items():
         assert identity(stack.container(service)) == {(uid, gid, frozenset(groups))}, service
+
+
+def test_every_volume_entry_has_its_expected_owner_and_mode(stack):
     entries = {path: tuple(values) for path, values in stack.probe(STAT_SCRIPT).items()}
     for path, actual in entries.items():
         if path in EXPECTED_ENTRIES:
