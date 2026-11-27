@@ -695,7 +695,7 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: uid=10003,gid=10003,mode=0700
+      o: uid=10003,gid=10003,mode=0700,size=1m,nr_inodes=64
   control-data: {}
   rule-data: {}
   reader-data: {}

@@ -23,8 +23,8 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -42,6 +42,7 @@ from agent_bailiff.custodian.files import OwnedFileError
 from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable
 from agent_bailiff.docket.client import DocketClient, DocketError
 from agent_bailiff.docket.grant import Grant
+from agent_bailiff.docket.socket_dir import open_lock_file, try_lock
 from agent_bailiff.keys import PublicKeyRecord, generate_signing_key, key_id, load_signing_key
 from agent_bailiff.route_generation import service_problem
 from agent_bailiff.routes import ToolRoutes
@@ -94,8 +95,9 @@ READER_ISSUERS = DIRS["reader"] / "issuers.json"
 TASK_FILE = STATE / "tasks" / "task.json"
 LOAD_FILE = STATE / "tasks" / "load.json"
 HANDOFF = RUN / "credential-handoff"
-HANDOFF_FILES = ("stored", "ready", "started", "token", "fingerprint", "checked", "refused")
+HANDOFF_FILES = ("stored", "ready", "started", "token", "fingerprint", "policy", "checked", "refused")
 STORE_RESULTS = ("saved", "unsaved")
+HANDOFF_LOCKS = {"credential-put": ".credential-put.lock", "bootstrap": ".bootstrap.lock"}
 MAX_HANDOFF_BYTES = 4096
 READY_SECONDS = 60
 HANDOFF_SECONDS = 300
@@ -1059,6 +1061,10 @@ def fingerprint_of(credential: str) -> str:
     return hashlib.sha256(credential.encode("ascii")).hexdigest()
 
 
+def policy_of(upstream: Upstream) -> str:
+    return hashlib.sha256(json.dumps(asdict(upstream), sort_keys=True, default=str).encode()).hexdigest()
+
+
 def write_handoff(name: str, text: str) -> None:
     partial = partial_handoff(name)
     fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
@@ -1091,6 +1097,20 @@ def clear_handoff(names: Sequence[str] = (*HANDOFF_FILES, *STORE_RESULTS)) -> No
         partial_handoff(name).unlink(missing_ok=True)
 
 
+@contextlib.contextmanager
+def hold_handoff_lock(service: str) -> Iterator[None]:
+    fd = open_lock_file(HANDOFF / HANDOFF_LOCKS[service])
+    try:
+        if not try_lock(fd):
+            raise BootstrapError(
+                f"another {service} is running on {HANDOFF}; "
+                f"wait for it to exit or stop it: docker compose ps {service}"
+            )
+        yield
+    finally:
+        os.close(fd)
+
+
 def wait_for_handoff(
     names: Sequence[str],
     seconds: float,
@@ -1109,10 +1129,11 @@ def wait_for_handoff(
         sleep(HANDOFF_POLL_SECONDS)
 
 
-def hand_off(outcome: str, credential: str, fingerprint: str) -> None:
+def hand_off(upstream: Upstream, outcome: str, credential: str, fingerprint: str) -> None:
     if outcome == "created":
         write_handoff("token", credential)
     write_handoff("fingerprint", fingerprint)
+    write_handoff("policy", policy_of(upstream))
     write_handoff("checked", outcome)
 
 
@@ -1120,6 +1141,11 @@ def export_credential(stored: str | None) -> None:
     if stored is not None:
         write_handoff("stored", stored)
     write_handoff("ready", "")
+
+
+def report_unsaved(fingerprint: str) -> None:
+    if re.fullmatch("[0-9a-f]{64}", fingerprint):
+        write_handoff("unsaved", fingerprint)
 
 
 def store_handed_off(upstream: Upstream, stored: str | None) -> str:
@@ -1131,9 +1157,18 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
         if wait_for_handoff((awaited, "refused"), HANDOFF_SECONDS, missing) == "refused":
             raise BootstrapError("bootstrap refused the credential, so nothing is stored")
     outcome, fingerprint = read_handoff("checked"), read_handoff("fingerprint")
+    try:
+        policy = read_handoff("policy")
+    except (BootstrapError, ValueError):
+        policy = ""
+    if not hmac.compare_digest(policy_of(upstream), policy):
+        report_unsaved(fingerprint)
+        raise BootstrapError("bootstrap checked the credential under another upstream policy, so nothing is stored")
     if outcome == "kept":
         if stored is None or not hmac.compare_digest(fingerprint_of(stored), fingerprint):
+            report_unsaved(fingerprint)
             raise BootstrapError("bootstrap kept a credential other than the stored one, so nothing is stored")
+        write_handoff("saved", fingerprint)
         return "kept"
     if outcome != "created":
         raise BootstrapError(f"bootstrap handed off an unknown outcome {outcome!r}")
@@ -1146,24 +1181,25 @@ def store_handed_off(upstream: Upstream, stored: str | None) -> str:
     except BaseException as error:
         held = stored_credential(upstream)
         if held is None or not hmac.compare_digest(fingerprint_of(held), fingerprint):
-            write_handoff("unsaved", "")
+            write_handoff("unsaved", fingerprint)
             raise
-        write_handoff("saved", "")
+        write_handoff("saved", fingerprint)
         raise BootstrapError(f"{error}; the store holds the checked credential anyway, so it is kept") from None
-    write_handoff("saved", "")
+    write_handoff("saved", fingerprint)
     return "created"
 
 
 def put_credential() -> str:
-    upstream = load_upstream(UPSTREAM_FILE)
-    provider_check(upstream)
-    stored = stored_credential(upstream)
-    clear_handoff()
-    try:
-        export_credential(stored)
-        return store_handed_off(upstream, stored)
-    finally:
-        clear_handoff(HANDOFF_FILES)
+    with hold_handoff_lock("credential-put"):
+        upstream = load_upstream(UPSTREAM_FILE)
+        provider_check(upstream)
+        stored = stored_credential(upstream)
+        clear_handoff()
+        try:
+            export_credential(stored)
+            return store_handed_off(upstream, stored)
+        finally:
+            clear_handoff(HANDOFF_FILES)
 
 
 def probe_outcome(label: str, status: int) -> str:
@@ -1196,27 +1232,29 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
 
 
 def bootstrap_gitea() -> str:
-    upstream = load_upstream(UPSTREAM_FILE)
-    provider_check(upstream)
-    missing = (
-        f"credential-put exported no stored credential within {READY_SECONDS}s; "
-        "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
-    )
-    wait_for_handoff(("ready",), READY_SECONDS, missing)
-    try:
-        budget = Budget(HANDOFF_SECONDS - HANDOFF_RESERVE_SECONDS)
-        write_handoff("started", "")
-        checked = check_and_hand_off(upstream, take_handoff("stored"), budget)
-    except BaseException:
-        write_handoff("refused", "")
-        raise
-    gitea, minted = checked.gitea, checked.minted
-    if minted is None:
-        retire_credentials(gitea, agent_login(gitea, checked.admin), lambda token: holds(token, checked.credential))
-        return "created" if checked.seeded else "kept"
-    await_store(gitea, minted)
-    retire_credentials(gitea, minted.owner, lambda token: token.get("id") == minted.token_id)
-    return "created"
+    with hold_handoff_lock("bootstrap"):
+        upstream = load_upstream(UPSTREAM_FILE)
+        provider_check(upstream)
+        missing = (
+            f"credential-put exported no stored credential within {READY_SECONDS}s; "
+            "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
+        )
+        wait_for_handoff(("ready",), READY_SECONDS, missing)
+        try:
+            budget = Budget(HANDOFF_SECONDS - HANDOFF_RESERVE_SECONDS)
+            write_handoff("started", "")
+            checked = check_and_hand_off(upstream, take_handoff("stored"), budget)
+        except BaseException:
+            write_handoff("refused", "")
+            raise
+        gitea, minted = checked.gitea, checked.minted
+        if minted is None:
+            await_kept(checked.credential)
+            retire_credentials(gitea, agent_login(gitea, checked.admin), lambda token: holds(token, checked.credential))
+            return "created" if checked.seeded else "kept"
+        await_store(gitea, minted)
+        retire_credentials(gitea, minted.owner, lambda token: token.get("id") == minted.token_id)
+        return "created"
 
 
 @dataclass(frozen=True)
@@ -1241,7 +1279,7 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -
         print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
         print(f"credential check: passed with {check['private_repositories']} private repositories")
         budget.check("the hand-off")
-        hand_off("kept" if minted is None else "created", credential, check["fingerprint"])
+        hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
     except BaseException as error:
         if minted is not None:
             revoke_after(gitea, error, minted)
@@ -1255,10 +1293,28 @@ def await_store(gitea: Gitea, minted: Minted) -> None:
         f"so token {minted.token_id} stays in gitea until a later run keeps or deletes it"
     )
     result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
-    take_handoff(result)
+    named = take_handoff(result)
+    if named is None or not hmac.compare_digest(fingerprint_of(minted.credential), named):
+        raise BootstrapError(
+            f"credential-put reported a store result for another token, so token {minted.token_id} stays in gitea "
+            "until a later run keeps or deletes it"
+        )
     if result == "unsaved":
         revoke_credential(gitea, minted)
         raise BootstrapError("credential-put did not store the minted credential, so it is deleted from gitea")
+
+
+def await_kept(credential: str) -> None:
+    missing = (
+        f"credential-put reported no store of the kept credential within {HANDOFF_SECONDS}s, "
+        "so no other token is retired"
+    )
+    result = wait_for_handoff(STORE_RESULTS, HANDOFF_SECONDS, missing)
+    named = take_handoff(result)
+    if named is None or not hmac.compare_digest(fingerprint_of(credential), named):
+        raise BootstrapError("credential-put reported a store result for another token, so no other token is retired")
+    if result == "unsaved":
+        raise BootstrapError("credential-put did not keep the checked credential, so no other token is retired")
 
 
 def agent_subject() -> str:

@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import hashlib
 import http.server
@@ -793,6 +794,10 @@ def gitea(pair):
     return pair.gitea
 
 
+def handoff_files(pair):
+    return sorted(entry.name for entry in pair.handoff.iterdir() if entry.name not in b.HANDOFF_LOCKS.values())
+
+
 def run_pair():
     with ThreadPoolExecutor(1) as pool:
         put = pool.submit(b.main, ["credential"])
@@ -815,7 +820,7 @@ def test_a_minted_credential_that_passes_the_check_is_put_with_its_fingerprint(p
     assert stdin == MINTED
     lines = capsys.readouterr().out.splitlines()
     assert "credential: created" in lines and "gitea: created" in lines
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_the_upstream_credential_check_bounds_reach_the_check_under_a_longer_subprocess_timeout(
@@ -866,7 +871,7 @@ def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_
     err = capsys.readouterr().err
     assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: agent-bailiff" in err
     assert "bootstrap credential refused: bootstrap refused the credential, so nothing is stored" in err
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
@@ -907,7 +912,7 @@ def test_a_kept_credential_is_checked_and_not_put_again(pair, capsys):
     assert pair.cli.of("custodian") == [] and pair.gitea.deleted == []
     lines = capsys.readouterr().out.splitlines()
     assert "credential: kept" in lines and "gitea: kept" in lines
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_a_kept_credential_retires_every_other_quickstart_token(pair, gitea):
@@ -1004,7 +1009,7 @@ def test_a_put_that_stores_then_times_out_keeps_the_new_token_and_fails_credenti
     assert gitea.tokens.keys() == {8, 9}
     err = capsys.readouterr().err
     assert "did not finish within 60s; the store holds the checked credential anyway, so it is kept" in err
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_a_saved_marker_that_cannot_be_written_keeps_the_new_token_and_fails_both(
@@ -1059,18 +1064,19 @@ def test_a_remint_a_later_bootstrap_step_fails_deletes_only_the_new_token(pair, 
 def test_a_kept_fingerprint_other_than_the_stored_credential_stores_nothing(pair):
     b.export_credential(STORED)
     b.write_handoff("started", "")
-    b.hand_off("kept", STORED, fingerprint(MINTED))
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "kept", STORED, fingerprint(MINTED))
     with pytest.raises(b.BootstrapError, match="kept a credential other than the stored one"):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
     assert pair.cli.calls == []
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(MINTED) and not (pair.handoff / "saved").exists()
 
 
 def test_every_handoff_file_is_owner_read_only(pair):
     b.export_credential(STORED)
     b.write_handoff("started", "")
-    b.hand_off("created", MINTED, fingerprint(MINTED))
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "created", MINTED, fingerprint(MINTED))
     modes = {entry.name: entry.stat().st_mode & 0o777 for entry in pair.handoff.iterdir()}
-    assert modes == dict.fromkeys(("stored", "ready", "started", "token", "fingerprint", "checked"), 0o400)
+    assert modes == dict.fromkeys(("stored", "ready", "started", "token", "fingerprint", "policy", "checked"), 0o400)
 
 
 def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
@@ -1230,7 +1236,7 @@ def test_a_stored_handoff_bootstrap_cannot_read_writes_the_refused_marker(pair, 
     assert f"stored is larger than {b.MAX_HANDOFF_BYTES} bytes" in err
     assert "bootstrap refused the credential, so nothing is stored" in err
     assert pair.built == [] and pair.cli.calls == []
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monkeypatch, capsys):
@@ -1240,7 +1246,7 @@ def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monke
     err = capsys.readouterr().err
     assert "bootstrap did not start within 0s" in err
     assert "run credential-put and bootstrap together" in err
-    assert pair.cli.calls == [] and list(pair.handoff.iterdir()) == []
+    assert pair.cli.calls == [] and handoff_files(pair) == []
 
 
 def test_credential_put_ignores_a_stale_checked_handoff_from_an_earlier_run(pair, monkeypatch, capsys):
@@ -1251,7 +1257,7 @@ def test_credential_put_ignores_a_stale_checked_handoff_from_an_earlier_run(pair
     monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
     assert b.main(["credential"]) == 1
     assert "bootstrap did not start within 0s" in capsys.readouterr().err
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
 
 
 def test_credential_put_names_bootstrap_when_it_starts_but_hands_off_nothing(pair, monkeypatch, capsys):
@@ -1342,7 +1348,7 @@ def test_bootstrap_refuses_rather_than_run_past_the_handoff_budget_when_every_ca
     cleanup = [at for _, _, at, name in charged.calls if name == "cleanup"]
     assert all(at <= 295 + b.CLEANUP_SECONDS for at in cleanup) and len(cleanup) == int(minted)
     assert all(name is not None for *_, name in charged.calls)
-    assert sorted(entry.name for entry in pair.handoff.iterdir()) == ["ready", "refused", "started"]
+    assert handoff_files(pair) == ["ready", "refused", "started"]
     mints = [at for method, path, at, _ in charged.calls if method == "POST" and path.endswith("/tokens")]
     assert len(mints) == int(minted) and all(at <= 295 for at in mints)
     assert [event for event in pair.events if event[0] in ("minted", "deleted")] == (
@@ -1400,7 +1406,7 @@ def test_bootstrap_hands_off_nothing_once_the_budget_is_spent(pair, monkeypatch,
     (pair.handoff / "ready").write_text("")
     assert b.main(["gitea"]) == 1
     assert "none for the hand-off" in capsys.readouterr().err
-    assert sorted(entry.name for entry in pair.handoff.iterdir()) == ["ready", "refused", "started"]
+    assert handoff_files(pair) == ["ready", "refused", "started"]
 
 
 @pytest.mark.parametrize("seconds", [0, -1, math.nan, math.inf])
@@ -1438,4 +1444,209 @@ def test_an_upstream_without_a_provider_fails_the_pair(pair, monkeypatch, capsys
     monkeypatch.setattr(b, "UPSTREAM_FILE", b.QUICKSTART_UPSTREAMS / "stub.json")
     assert b.main([step]) == 1
     assert "stub.json names no provider to check the token against" in capsys.readouterr().err
-    assert list(pair.handoff.iterdir()) == []
+    assert handoff_files(pair) == []
+
+
+def hold(pair, service):
+    fd = b.open_lock_file(pair.handoff / b.HANDOFF_LOCKS[service])
+    assert b.try_lock(fd)
+    return fd
+
+
+def test_a_second_credential_put_refuses_while_one_holds_the_handoff_lock(pair, monkeypatch, capsys):
+    (pair.handoff / "checked").write_text("kept")
+    monkeypatch.setattr(b, "stored_credential", lambda upstream: pytest.fail("the store was read"))
+    fd = hold(pair, "credential-put")
+    try:
+        assert b.main(["credential"]) == 1
+    finally:
+        os.close(fd)
+    assert "bootstrap credential refused: another credential-put is running on " in capsys.readouterr().err
+    assert handoff_files(pair) == ["checked"] and pair.cli.calls == []
+
+
+def test_a_second_bootstrap_refuses_without_writing_refused(pair, capsys):
+    (pair.handoff / "ready").write_text("")
+    fd = hold(pair, "bootstrap")
+    try:
+        assert b.main(["gitea"]) == 1
+    finally:
+        os.close(fd)
+    assert "bootstrap gitea refused: another bootstrap is running on " in capsys.readouterr().err
+    assert handoff_files(pair) == ["ready"] and pair.built == [] and pair.cli.calls == []
+
+
+def test_the_handoff_lock_is_free_again_once_its_holder_exits(pair):
+    with b.hold_handoff_lock("bootstrap"):
+        with pytest.raises(b.BootstrapError, match="another bootstrap is running"):
+            with b.hold_handoff_lock("bootstrap"):
+                pytest.fail("a second bootstrap took the lock")
+        with b.hold_handoff_lock("credential-put"):
+            pass
+    with b.hold_handoff_lock("bootstrap"):
+        pass
+
+
+def test_clear_handoff_never_removes_the_lock_files(pair):
+    for service in b.HANDOFF_LOCKS:
+        with b.hold_handoff_lock(service):
+            pass
+    locks = set(b.HANDOFF_LOCKS.values())
+    inodes = {name: (pair.handoff / name).stat().st_ino for name in locks}
+    b.clear_handoff()
+    assert {name: (pair.handoff / name).stat().st_ino for name in locks} == inodes
+    cleared = {*b.HANDOFF_FILES, *b.STORE_RESULTS}
+    assert not (cleared | {b.partial_handoff(name).name for name in cleared}) & locks
+
+
+def test_the_handoff_lock_is_not_inherited_by_children(pair, monkeypatch):
+    opened = []
+    open_lock_file = b.open_lock_file
+    monkeypatch.setattr(b, "open_lock_file", lambda path: opened.append(open_lock_file(path)) or opened[-1])
+    with b.hold_handoff_lock("credential-put"):
+        assert os.get_inheritable(opened[0]) is False
+
+
+@pytest.mark.parametrize(("step", "service"), [("credential", "credential-put"), ("gitea", "bootstrap")])
+def test_a_symlinked_handoff_lock_refuses_the_run(pair, tmp_path, capsys, step, service):
+    target = tmp_path / "elsewhere"
+    target.write_text("")
+    (pair.handoff / b.HANDOFF_LOCKS[service]).symlink_to(target)
+    assert b.main([step]) == 1
+    assert "symbolic links" in capsys.readouterr().err
+    assert handoff_files(pair) == [] and pair.cli.calls == [] and pair.built == []
+
+
+def test_credential_put_refuses_a_check_made_under_another_upstream(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "created", MINTED, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == []
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(MINTED) and not (pair.handoff / "saved").exists()
+
+
+def test_credential_put_reports_a_kept_check_under_another_upstream_unsaved(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "kept", STORED, fingerprint(STORED))
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == []
+    assert (pair.handoff / "unsaved").read_text() == fingerprint(STORED) and not (pair.handoff / "saved").exists()
+
+
+def plant_symlink(path):
+    path.symlink_to(path.parent / "elsewhere")
+
+
+def plant_oversized(path):
+    path.write_text("0" * (b.MAX_HANDOFF_BYTES + 1))
+
+
+def plant_non_ascii(path):
+    path.write_bytes(b"\xff" * 64)
+
+
+@pytest.mark.parametrize("policy", [None, "", "0" * 64, plant_symlink, plant_oversized, plant_non_ascii])
+def test_a_minted_token_checked_under_another_policy_is_deleted_at_once(pair, gitea, monkeypatch, capsys, policy):
+    pair.stored = STORED
+    pair.cli.refused[STORED] = "broader_scopes"
+    write = b.write_handoff
+
+    def forged_policy(name, text):
+        if name != "policy":
+            write(name, text)
+        elif callable(policy):
+            policy(pair.handoff / name)
+        elif policy is not None:
+            write(name, policy)
+
+    monkeypatch.setattr(b, "write_handoff", forged_policy)
+    assert run_pair() == (1, 1)
+    assert pair.events == [("minted", 9), ("deleted", 9)]
+    assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"} and pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "under another upstream policy, so nothing is stored" in err
+    assert "did not store the minted credential, so it is deleted from gitea" in err
+
+
+def test_a_kept_credential_checked_under_another_policy_retires_nothing(pair, gitea, monkeypatch, capsys):
+    gitea.tokens[20] = f"{b.TOKEN_NAME}-0123456789abcdef"
+    pair.stored = STORED
+    write = b.write_handoff
+    monkeypatch.setattr(b, "write_handoff", lambda name, text: write(name, "0" * 64 if name == "policy" else text))
+    assert run_pair() == (1, 1)
+    assert gitea.deleted == [] and gitea.tokens.keys() == {7, 8, 20}
+    assert pair.cli.of("custodian") == []
+    err = capsys.readouterr().err
+    assert "under another upstream policy, so nothing is stored" in err
+    assert "credential-put did not keep the checked credential, so no other token is retired" in err
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"credential_id": "another-token"},
+        {"target": "elsewhere"},
+        {"binding_resource": "gitea/repos/other/*"},
+        {"max_repos": 5},
+        {"check_timeout_seconds": 3},
+    ],
+)
+def test_the_upstream_policy_changes_with_each_bound_field(tmp_path, changes):
+    base = b.policy_of(b.load_upstream(GITEA_UPSTREAM))
+    assert b.policy_of(b.load_upstream(write_upstream(tmp_path))) == base
+    assert b.policy_of(b.load_upstream(write_upstream(tmp_path, **changes))) != base
+
+
+@pytest.mark.parametrize("result", b.STORE_RESULTS)
+def test_bootstrap_refuses_a_store_result_for_another_token(pair, monkeypatch, result):
+    monkeypatch.setattr(b, "revoke_credential", lambda gitea, minted: pytest.fail("the token was revoked"))
+    b.write_handoff(result, fingerprint(STORED))
+    with pytest.raises(b.BootstrapError, match="a store result for another token, so token 9 stays in gitea"):
+        b.await_store(pair.gitea, b.Minted(MINTED, 9, "agent"))
+    assert handoff_files(pair) == []
+
+
+@pytest.mark.parametrize("result", b.STORE_RESULTS)
+def test_bootstrap_retires_nothing_on_a_kept_store_result_for_another_token(pair, result):
+    b.write_handoff(result, fingerprint(MINTED))
+    with pytest.raises(b.BootstrapError, match="a store result for another token, so no other token is retired"):
+        b.await_kept(STORED)
+    assert handoff_files(pair) == []
+
+
+def test_bootstrap_retires_nothing_when_credential_put_reports_no_kept_store(pair, monkeypatch):
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    with pytest.raises(b.BootstrapError, match="no store of the kept credential within 0s, so no other token"):
+        b.await_kept(STORED)
+
+
+def test_credential_put_reports_a_kept_credential_saved(pair):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "kept", STORED, fingerprint(STORED))
+    assert b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED) == "kept"
+    assert (pair.handoff / "saved").read_text() == fingerprint(STORED) and pair.cli.calls == []
+
+
+@pytest.mark.parametrize(("put_fails", "result"), [(False, "saved"), (True, "unsaved")])
+def test_the_store_result_names_the_stored_fingerprint(pair, put_fails, result):
+    pair.cli.put_fails = put_fails
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(GITEA_UPSTREAM), "created", MINTED, fingerprint(MINTED))
+    with contextlib.suppress(b.BootstrapError, b.InitError):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert (pair.handoff / result).read_text() == fingerprint(MINTED)
+
+
+def test_a_malformed_fingerprint_under_another_policy_is_never_copied_into_a_report(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "created", MINTED, MINTED)
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == [] and not {"saved", "unsaved"} & set(handoff_files(pair))
