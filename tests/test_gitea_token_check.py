@@ -3,6 +3,7 @@ import logging
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -11,18 +12,24 @@ from agent_bailiff.adapters.gitea.token_check import TokenCheck, TokenCheckRefus
 
 NEEDLE = "token needle-0123456789abcdef0123456789abcdef"
 REQUIRED = ("read:issue", "read:repository")
+BINDING = "gitea/repos/quickstart/*"
+SEARCH = "/api/v1/repos/search"
 
 
 class FakeGitea:
     def __init__(self):
         self.requests = []
-        self.routes = {}
+        self.routes = {SEARCH: self.search}
+        self.private = []
+        self.visible = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 owner.requests.append((self.path, dict(self.headers)))
-                status, headers, body = owner.routes.get(self.path.split("?")[0], (404, {}, b"{}"))
+                parts = urlsplit(self.path)
+                route = owner.routes.get(parts.path, (404, {}, b"{}"))
+                status, headers, body = route(parse_qs(parts.query)) if callable(route) else route
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
@@ -45,9 +52,31 @@ class FakeGitea:
     def token(self, scopes, login="agent"):
         self.route("/token", {"id": 1, "name": "quickstart", "scopes": scopes, "user": {"id": 5, "login": login}})
 
+    def search(self, query):
+        items = self.private if query.get("is_private") == ["true"] else self.visible
+        limit, page = int(query["limit"][0]), int(query["page"][0])
+        return page_answer(items[(page - 1) * limit : page * limit], len(items))
+
+    def searches(self):
+        return [path for path, _ in self.requests if path.startswith(SEARCH)]
+
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+
+
+def page_answer(items, total, headers=None):
+    return 200, {"X-Total-Count": str(total), **(headers or {})}, json.dumps({"ok": True, "data": items}).encode()
+
+
+def repo(repo_id, full_name, *, private=True, visibility="public"):
+    owner = full_name.split("/")[0]
+    return {
+        "id": repo_id,
+        "full_name": full_name,
+        "private": private,
+        "owner": {"login": owner, "visibility": visibility},
+    }
 
 
 class Listener:
@@ -90,6 +119,7 @@ def listener():
 
 def check(gitea, header=NEEDLE, **options):
     options.setdefault("required", REQUIRED)
+    options.setdefault("binding_resource", BINDING)
     return check_token(header, api_url=gitea.url, **options)
 
 
@@ -102,10 +132,13 @@ def refusal(gitea, **options):
 
 def test_a_token_within_the_required_permissions_passes(gitea):
     gitea.token(["read:repository", "read:issue"])
-    assert check(gitea) == TokenCheck(("read:issue", "read:repository"), "agent")
-    [(path, headers)] = gitea.requests
-    assert path == "/api/v1/token"
-    assert headers["Authorization"] == NEEDLE
+    assert check(gitea) == TokenCheck(("read:issue", "read:repository"), "agent", 0)
+    assert [path for path, _ in gitea.requests] == [
+        "/api/v1/token",
+        "/api/v1/repos/search?is_private=true&limit=50&page=1",
+        "/api/v1/repos/search?limit=50&page=1",
+    ]
+    assert all(headers["Authorization"] == NEEDLE for _, headers in gitea.requests)
 
 
 @pytest.mark.parametrize(
@@ -204,12 +237,18 @@ def test_proxy_settings_are_ignored(gitea, listener, monkeypatch):
     gitea.token(["read:repository"])
     assert check(gitea).login == "agent"
     assert listener.accepted == []
-    assert len(gitea.requests) == 1
+    assert len(gitea.requests) == 3
 
 
 def test_a_provider_that_does_not_answer_in_time_is_unreachable(listener):
     with pytest.raises(TokenCheckRefused) as raised:
-        check_token(NEEDLE, api_url=f"http://127.0.0.1:{listener.port}/api/v1", required=REQUIRED, timeout=0.2)
+        check_token(
+            NEEDLE,
+            api_url=f"http://127.0.0.1:{listener.port}/api/v1",
+            binding_resource=BINDING,
+            required=REQUIRED,
+            timeout=0.2,
+        )
     assert raised.value.reason == "provider_unreachable"
     assert NEEDLE not in str(raised.value)
 
@@ -220,7 +259,7 @@ def test_a_refused_connection_is_unreachable():
     port = closed.getsockname()[1]
     closed.close()
     with pytest.raises(TokenCheckRefused) as raised:
-        check_token(NEEDLE, api_url=f"http://127.0.0.1:{port}/api/v1", required=REQUIRED)
+        check_token(NEEDLE, api_url=f"http://127.0.0.1:{port}/api/v1", binding_resource=BINDING, required=REQUIRED)
     assert raised.value.reason == "provider_unreachable"
 
 
@@ -292,7 +331,7 @@ def test_an_answer_over_the_byte_cap_without_a_length_is_refused(gitea, monkeypa
 )
 def test_a_provider_url_outside_the_transport_rules_is_refused(api_url):
     with pytest.raises(ValueError, match="url"):
-        check_token(NEEDLE, api_url=api_url, required=REQUIRED)
+        check_token(NEEDLE, api_url=api_url, binding_resource=BINDING, required=REQUIRED)
 
 
 def test_a_ca_file_needs_https(gitea, tmp_path):
@@ -316,3 +355,226 @@ def test_the_credential_never_reaches_a_message_or_log(gitea, caplog):
     refused = refusal(gitea)
     assert refused.reason == "unknown_scope"
     assert NEEDLE not in caplog.text
+
+
+def test_private_reach_inside_the_binding_passes_and_is_counted(gitea):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, "quickstart/payroll"), repo(2, "quickstart/notes")]
+    gitea.visible = [*gitea.private, repo(3, "someone/public", private=False)]
+    assert check(gitea).private_total == 2
+
+
+def test_a_private_repository_outside_the_binding_is_refused_and_named(gitea):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, "quickstart/payroll"), repo(2, "finance/ledger")]
+    refused = refusal(gitea)
+    assert refused.reason == "outside_binding"
+    assert "1 non-public repositories outside gitea/repos/quickstart/*: finance/ledger" in str(refused)
+
+
+def test_reach_outside_the_binding_names_ten_and_the_total(gitea):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(index, f"other/r{index:02d}") for index in range(12)]
+    message = str(refusal(gitea))
+    assert "12 non-public repositories" in message
+    assert "other/r09" in message and "other/r10" not in message
+    assert message.endswith("and 2 more")
+
+
+@pytest.mark.parametrize("visibility", ["limited", "private"])
+def test_a_repository_of_a_non_public_owner_outside_the_binding_is_refused(gitea, visibility):
+    gitea.token(["read:repository"])
+    gitea.visible = [repo(1, "orglimited/p1", private=False, visibility=visibility)]
+    refused = refusal(gitea)
+    assert refused.reason == "outside_binding"
+    assert "orglimited/p1" in str(refused)
+
+
+def test_a_repository_of_a_limited_owner_inside_the_binding_passes(gitea):
+    gitea.token(["read:repository"])
+    gitea.visible = [repo(1, "quickstart/p1", private=False, visibility="limited")]
+    assert check(gitea).private_total == 0
+
+
+def test_a_public_repository_outside_the_binding_is_ignored(gitea):
+    gitea.token(["read:repository"])
+    gitea.visible = [repo(index, f"someone/p{index}", private=False) for index in range(120)]
+    assert check(gitea).private_total == 0
+    assert gitea.searches()[-1] == "/api/v1/repos/search?limit=50&page=3"
+
+
+@pytest.mark.parametrize(
+    ("binding", "name", "inside"),
+    [
+        ("gitea/repos/quickstart/*", "QuickStart/payroll", True),
+        ("gitea/repos/QuickStart/Payroll", "quickstart/PAYROLL", True),
+        ("gitea/repos/quickstart/payroll", "quickstart/notes", False),
+        ("gitea/repos/quickstart/*", "quickstart2/payroll", False),
+    ],
+)
+def test_names_compare_case_folded_against_the_binding_shape(gitea, binding, name, inside):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, name)]
+    if inside:
+        assert check(gitea, binding_resource=binding).private_total == 1
+    else:
+        assert refusal(gitea, binding_resource=binding).reason == "outside_binding"
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "gitea/repos/quickstart",
+        "gitea/repos/*",
+        "gitea/repos/*/*",
+        "gitea/repos/quickstart/a/b",
+        "gitea/repos/quickstart/pay*",
+        "gitea/issues/quickstart/*",
+        "github/repos/quickstart/*",
+        "gitea/repos/quick start/*",
+        5,
+    ],
+)
+def test_a_binding_of_another_shape_is_refused_without_a_request(gitea, binding):
+    with pytest.raises(ValueError, match="binding resource"):
+        check(gitea, binding_resource=binding)
+    assert gitea.requests == []
+
+
+@pytest.mark.parametrize("max_repos", [0, -1, True, "5", 1.5])
+def test_an_item_cap_that_is_not_a_positive_int_is_refused(gitea, max_repos):
+    with pytest.raises(ValueError, match="max_repos"):
+        check(gitea, max_repos=max_repos)
+    assert gitea.requests == []
+
+
+def test_a_search_past_the_item_cap_is_refused_after_one_page(gitea):
+    gitea.token(["read:repository"])
+    gitea.visible = [repo(index, f"someone/p{index}", private=False) for index in range(3)]
+    refused = refusal(gitea, max_repos=2)
+    assert refused.reason == "too_many_repos"
+    assert gitea.searches() == [
+        "/api/v1/repos/search?is_private=true&limit=50&page=1",
+        "/api/v1/repos/search?limit=50&page=1",
+    ]
+
+
+def test_a_search_at_the_item_cap_passes(gitea):
+    gitea.token(["read:repository"])
+    gitea.visible = [repo(index, f"someone/p{index}", private=False) for index in range(3)]
+    assert check(gitea, max_repos=3).private_total == 0
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-Total-Count": "x"}, {"X-Total-Count": "-1"}, {"X-Total-Count": "\u00b2"}],
+)
+def test_a_search_without_a_valid_total_is_refused(gitea, headers):
+    gitea.token(["read:repository"])
+    gitea.routes[SEARCH] = lambda query: (200, headers, b'{"ok": true, "data": []}')
+    assert refusal(gitea).reason == "bad_response"
+
+
+def test_a_search_with_two_totals_is_refused(gitea):
+    gitea.token(["read:repository"])
+
+    class TwoTotals(dict):
+        def items(self):
+            return [("X-Total-Count", "0"), ("X-Total-Count", "0")]
+
+    gitea.routes[SEARCH] = lambda query: (200, TwoTotals(), b'{"ok": true, "data": []}')
+    assert refusal(gitea).reason == "bad_response"
+
+
+def pages(*answers):
+    served = iter(answers)
+    return lambda query: page_answer(*next(served))
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        ((list(range(2)), 3), (list(range(1, 3)), 4)),
+        ((list(range(2)), 3), ([], 3)),
+        ((list(range(2)), 3), (list(range(2)), 3)),
+        ((list(range(3)), 2),),
+        (([], 1),),
+    ],
+    ids=["total-changed", "short", "repeated-page", "more-than-total", "empty-with-total"],
+)
+def test_pages_that_disagree_with_the_total_are_refused(gitea, answers):
+    gitea.token(["read:repository"])
+    gitea.routes[SEARCH] = pages(*(([repo(i, f"quickstart/r{i}") for i in ids], total) for ids, total in answers))
+    assert refusal(gitea).reason == "paging_drift"
+
+
+def test_a_repository_seen_twice_counts_once(gitea):
+    gitea.token(["read:repository"])
+    first = [repo(1, "quickstart/a"), repo(2, "quickstart/b")]
+    second = [repo(2, "quickstart/b"), repo(3, "quickstart/c")]
+    private = pages((first, 3), (second, 3))
+    gitea.routes[SEARCH] = lambda query: private(query) if query.get("is_private") else page_answer([], 0)
+    assert check(gitea).private_total == 3
+
+
+def test_a_repository_that_changes_between_pages_is_refused(gitea):
+    gitea.token(["read:repository"])
+    first = [repo(1, "quickstart/a"), repo(2, "quickstart/b")]
+    second = [repo(2, "finance/b"), repo(3, "quickstart/c")]
+    gitea.routes[SEARCH] = pages((first, 3), (second, 3))
+    assert refusal(gitea).reason == "paging_drift"
+
+
+def test_a_public_repository_in_the_private_search_is_refused(gitea):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, "quickstart/a", private=False)]
+    assert refusal(gitea).reason == "bad_response"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"id": 1, "full_name": "orglimited/p1", "private": False, "owner": {"login": "orglimited"}},
+        {"id": 1, "full_name": "orglimited/p1", "private": False},
+        {"id": 1, "full_name": "orglimited/p1", "private": False, "owner": {"visibility": "secret"}},
+        {"id": 1, "full_name": "orglimited/p1", "private": False, "owner": {"visibility": None}},
+        {"id": True, "full_name": "quickstart/a", "private": False, "owner": {"visibility": "public"}},
+        {"id": 1, "full_name": "quickstart", "private": False, "owner": {"visibility": "public"}},
+        {"id": 1, "full_name": "token needle/a", "private": False, "owner": {"visibility": "public"}},
+        {"id": 1, "full_name": "quickstart/a", "private": "no", "owner": {"visibility": "public"}},
+        "quickstart/a",
+    ],
+)
+def test_a_search_item_without_its_reach_fields_is_refused(gitea, item):
+    gitea.token(["read:repository"])
+    gitea.visible = [item]
+    assert refusal(gitea).reason == "bad_response"
+
+
+@pytest.mark.parametrize("raw", [b"[]", b'{"ok": true}', b'{"data": {}}'])
+def test_a_search_answer_without_a_data_list_is_refused(gitea, raw):
+    gitea.token(["read:repository"])
+    gitea.routes[SEARCH] = lambda query: (200, {"X-Total-Count": "0"}, raw)
+    assert refusal(gitea).reason == "bad_response"
+
+
+def test_a_search_link_header_is_not_followed(gitea):
+    target = FakeGitea()
+    try:
+        gitea.token(["read:repository"])
+        link = {"Link": f'<{target.url}/repos/search?page=2>; rel="next"'}
+        gitea.routes[SEARCH] = lambda query: page_answer([], 0, link)
+        assert check(gitea).private_total == 0
+        assert target.requests == []
+    finally:
+        target.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [(403, "token_rejected"), (429, "rate_limited"), (500, "provider_unreachable")]
+)
+def test_a_search_status_other_than_200_is_refused(gitea, status, reason):
+    gitea.token(["read:repository"])
+    gitea.routes[SEARCH] = lambda query: (status, {}, b"{}")
+    assert refusal(gitea).reason == reason
+    assert len(gitea.searches()) == 1

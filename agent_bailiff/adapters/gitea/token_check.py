@@ -16,6 +16,14 @@ PUBLIC_ONLY = "public-only"
 ACCESS_LEVELS = {"read": 1, "write": 2}
 SCOPE_FORM = re.compile(r"(read|write):([a-z]+)")
 LOGIN_FORM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+NAME = r"[A-Za-z0-9._-]+"
+REPO_FORM = re.compile(rf"({NAME})/({NAME})")
+BINDING_FORM = re.compile(rf"gitea/repos/({NAME})/(\*|{NAME})")
+VISIBILITIES = frozenset({"public", "limited", "private"})
+NON_PUBLIC_VISIBILITIES = frozenset({"limited", "private"})
+PAGE_LIMIT = 50
+DEFAULT_MAX_REPOS = 1000
+MAX_NAMED_REPOS = 10
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_RESPONSE_BYTES = 1 << 20
 READ_CHUNK_BYTES = 65536
@@ -32,18 +40,46 @@ class TokenCheckRefused(Exception):
 class TokenCheck:
     scopes: tuple[str, ...]
     login: str
+    private_total: int
+
+
+@dataclass(frozen=True)
+class Repo:
+    id: int
+    full_name: str
+    private: bool
+    owner_visibility: str
+
+    @property
+    def non_public(self) -> bool:
+        return self.private or self.owner_visibility in NON_PUBLIC_VISIBILITIES
+
+
+@dataclass(frozen=True)
+class Binding:
+    owner: str
+    repo: str | None
+
+    def covers(self, repo: Repo) -> bool:
+        owner, name = repo.full_name.split("/")
+        return owner.casefold() == self.owner and (self.repo is None or name.casefold() == self.repo)
 
 
 def check_token(
     header_value: str,
     *,
     api_url: str,
+    binding_resource: str,
     required: Iterable[str],
     cafile: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    max_repos: int = DEFAULT_MAX_REPOS,
     clock: Callable[[], float] = time.monotonic,
 ) -> TokenCheck:
     permissions = parse_required(required)
+    binding = parse_binding(binding_resource)
+    if isinstance(max_repos, bool) or not isinstance(max_repos, int) or max_repos < 1:
+        raise ValueError("max_repos must be a positive int")
     provider = Provider(api_url, header_value, cafile=cafile, deadline=clock() + timeout, clock=clock)
     scopes, login = fetch_token_info(provider)
     broader = broader_scopes(scopes, permissions)
@@ -51,7 +87,36 @@ def check_token(
         raise TokenCheckRefused(
             "broader_scopes", f"the token holds scopes beyond the required ones: {', '.join(broader)}"
         )
-    return TokenCheck(scopes, login)
+    private = fetch_private_repos(provider, max_repos)
+    visible = fetch_visible_repos(provider, max_repos)
+    outside = outside_binding((*private, *visible), binding)
+    if outside:
+        raise TokenCheckRefused("outside_binding", _outside_detail(outside, binding_resource))
+    return TokenCheck(scopes, login, len(private))
+
+
+def parse_binding(binding_resource: str) -> Binding:
+    match = BINDING_FORM.fullmatch(binding_resource) if isinstance(binding_resource, str) else None
+    if match is None:
+        raise ValueError("the binding resource must be gitea/repos/<owner>/* or gitea/repos/<owner>/<repo>")
+    owner, repo = match.groups()
+    return Binding(owner.casefold(), None if repo == "*" else repo.casefold())
+
+
+def fetch_private_repos(provider: Provider, max_repos: int) -> tuple[Repo, ...]:
+    repos = _search_repos(provider, "is_private=true&", max_repos)
+    if not all(repo.private for repo in repos):
+        raise _bad_response("the private repository search returned a public repository")
+    return repos
+
+
+def fetch_visible_repos(provider: Provider, max_repos: int) -> tuple[Repo, ...]:
+    return _search_repos(provider, "", max_repos)
+
+
+def outside_binding(repos: Iterable[Repo], binding: Binding) -> tuple[Repo, ...]:
+    outside = {repo.id: repo for repo in repos if repo.non_public and not binding.covers(repo)}
+    return tuple(sorted(outside.values(), key=lambda repo: repo.full_name.casefold()))
 
 
 def parse_required(required: Iterable[str]) -> frozenset[str]:
@@ -104,6 +169,81 @@ def fetch_token_info(provider: Provider) -> tuple[tuple[str, ...], str]:
     if not isinstance(login, str) or LOGIN_FORM.fullmatch(login) is None:
         raise _bad_response("the token info names no user login")
     return tuple(sorted(set(scopes))), login
+
+
+def _search_repos(provider: Provider, query: str, max_repos: int) -> tuple[Repo, ...]:
+    seen: dict[int, Repo] = {}
+    total: int | None = None
+    page = 1
+    while True:
+        headers, document = provider.get_with_headers(f"/repos/search?{query}limit={PAGE_LIMIT}&page={page}")
+        page_total = _total_count(headers)
+        if total is None:
+            total = page_total
+            if total > max_repos:
+                raise TokenCheckRefused(
+                    "too_many_repos", f"a repository search reports {total} repositories, more than {max_repos}"
+                )
+        elif page_total != total:
+            raise TokenCheckRefused("paging_drift", "the repository total changed between pages")
+        items = _search_items(document)
+        if not items:
+            break
+        before = len(seen)
+        for item in items:
+            repo = _repo(item)
+            if seen.setdefault(repo.id, repo) != repo:
+                raise TokenCheckRefused("paging_drift", "a repository changed between pages")
+        if len(seen) == before or len(seen) > total:
+            raise TokenCheckRefused("paging_drift", "the repository pages disagree with the reported total")
+        if len(seen) == total:
+            break
+        page += 1
+    if len(seen) != total:
+        raise TokenCheckRefused("paging_drift", "the repository pages disagree with the reported total")
+    return tuple(seen.values())
+
+
+def _total_count(headers: http.client.HTTPMessage) -> int:
+    values = headers.get_all("X-Total-Count") or []
+    if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
+        raise _bad_response("a repository search has no single X-Total-Count")
+    return int(values[0])
+
+
+def _search_items(document: Any) -> list[Any]:
+    items = document.get("data") if isinstance(document, dict) else None
+    if not isinstance(items, list):
+        raise _bad_response("a repository search answer has no data list")
+    return items
+
+
+def _repo(item: Any) -> Repo:
+    if not isinstance(item, dict):
+        raise _bad_response("a repository search item is not an object")
+    repo_id = item.get("id")
+    full_name = item.get("full_name")
+    private = item.get("private")
+    owner = item.get("owner")
+    visibility = owner.get("visibility") if isinstance(owner, dict) else None
+    if isinstance(repo_id, bool) or not isinstance(repo_id, int):
+        raise _bad_response("a repository search item has no id")
+    if not isinstance(full_name, str) or REPO_FORM.fullmatch(full_name) is None:
+        raise _bad_response("a repository search item has no owner/name")
+    if not isinstance(private, bool):
+        raise _bad_response("a repository search item has no private flag")
+    if not isinstance(visibility, str) or visibility not in VISIBILITIES:
+        raise _bad_response("a repository search item has no owner visibility")
+    return Repo(repo_id, full_name, private, visibility)
+
+
+def _outside_detail(outside: tuple[Repo, ...], binding_resource: str) -> str:
+    named = ", ".join(repo.full_name for repo in outside[:MAX_NAMED_REPOS])
+    more = len(outside) - MAX_NAMED_REPOS
+    suffix = f" and {more} more" if more > 0 else ""
+    return (
+        f"the token's user reaches {len(outside)} non-public repositories outside {binding_resource}: {named}{suffix}"
+    )
 
 
 class Provider:
