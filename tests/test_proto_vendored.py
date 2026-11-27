@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -164,7 +166,7 @@ def test_the_image_scan_runs_on_every_pull_request_and_scans_when_an_image_input
     assert "on:\n  pull_request:\n  schedule:\n" in text
     assert '    - cron: "23 5 * * *"\n  workflow_dispatch:\n' in text
     diff = re.search(
-        r'^          changed="\$\(git diff --name-only "origin/\$BASE_REF\.\.\.HEAD" -- \\\n'
+        r'^          changed="\$\(git diff --name-only HEAD\^1 HEAD -- \\\n'
         r'((?:            \S+(?: \\|\)")\n)+)',
         text,
         re.MULTILINE,
@@ -183,11 +185,95 @@ def test_the_image_scan_runs_on_every_pull_request_and_scans_when_an_image_input
     included = re.findall(r"^!(\S+)$", (ROOT / ".dockerignore").read_text(), re.MULTILINE)
     assert included
     assert all(any(path == entry or path.startswith(f"{entry}/") for entry in listed) for path in included), included
-    assert "          persist-credentials: false\n          fetch-depth: 0\n" in text
-    assert "          EVENT: ${{ github.event_name }}\n          BASE_REF: ${{ github.base_ref }}\n" in text
-    assert 'if [ "$EVENT" != pull_request ]; then\n            echo "images=true" >> "$GITHUB_OUTPUT"\n' in text
+    assert "          persist-credentials: false\n          fetch-depth: 2\n" in text
+    assert "      - id: diff\n        env:\n          EVENT: ${{ github.event_name }}\n        run: |\n" in text
     assert "  db:\n    needs: changes\n    if: needs.changes.outputs.images == 'true'\n" in text
     assert "  scan:\n    needs: db\n" in text
+
+
+def changes_script():
+    block = re.search(
+        r"^      - id: diff\n(?:        .*\n)*?        run: \|\n((?:          .*\n)+)",
+        IMAGE_SCAN.read_text(),
+        re.MULTILINE,
+    )
+    assert block
+    return textwrap.dedent(block.group(1))
+
+
+def git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
+        env={"PATH": os.environ["PATH"], "HOME": str(repo), "GIT_CONFIG_NOSYSTEM": "1"},
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+
+def commit_file(repo, path, message):
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"{message}\n")
+    git(repo, "add", path)
+    git(repo, "commit", "--quiet", "--no-gpg-sign", "--message", message)
+
+
+def new_repository(tmp_path, name):
+    repo = tmp_path / name
+    repo.mkdir()
+    git(repo, "init", "--quiet", "--initial-branch", "main")
+    commit_file(repo, "README.md", "base")
+    return repo
+
+
+def merged_pull_request(tmp_path, name, path):
+    repo = new_repository(tmp_path, name)
+    git(repo, "switch", "--quiet", "--create", "pull")
+    commit_file(repo, path, "pull")
+    git(repo, "switch", "--quiet", "main")
+    commit_file(repo, "agent_bailiff/main_only.py", "main")
+    git(repo, "switch", "--quiet", "--detach")
+    git(repo, "merge", "--quiet", "--no-ff", "--no-gpg-sign", "--message", "merge", "pull")
+    return repo
+
+
+def run_changes(repo, event):
+    output = repo.parent / f"{repo.name}-{event}.output"
+    output.touch()
+    result = subprocess.run(
+        ["bash", "-e", "-c", changes_script()],
+        cwd=repo,
+        env={"PATH": os.environ["PATH"], "HOME": str(repo), "EVENT": event, "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    return result.returncode, output.read_text()
+
+
+def test_the_changes_job_skips_the_scan_when_a_pull_request_changes_no_image_input(tmp_path):
+    repo = merged_pull_request(tmp_path, "docs", "docs/guide.md")
+    assert run_changes(repo, "pull_request") == (0, "images=false\n")
+
+
+def test_the_changes_job_scans_when_a_pull_request_changes_an_image_input(tmp_path):
+    repo = merged_pull_request(tmp_path, "image", "agent_bailiff/policy.py")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+def test_the_changes_job_fails_without_the_merge_parent(tmp_path):
+    repo = new_repository(tmp_path, "shallow")
+    returncode, output = run_changes(repo, "pull_request")
+    assert returncode != 0
+    assert output == ""
+
+
+def test_the_changes_job_scans_on_schedule_and_dispatch(tmp_path):
+    repo = new_repository(tmp_path, "scheduled")
+    assert run_changes(repo, "schedule") == (0, "images=true\n")
+    assert run_changes(repo, "workflow_dispatch") == (0, "images=true\n")
 
 
 def test_the_image_scan_builds_and_scans_every_tracked_image_in_its_own_job():

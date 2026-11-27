@@ -23,17 +23,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: 2
       - id: diff
         env:
           EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
         run: |
           if [ "$EVENT" != pull_request ]; then
             echo "images=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed="$(git diff --name-only "origin/$BASE_REF...HEAD" -- \
+          changed="$(git diff --name-only HEAD^1 HEAD -- \
             .dockerignore \
             .github/workflows/image-scan.yml \
             .trivyignore.yaml \
