@@ -31,9 +31,13 @@ agent-bailiff check-credentials: 1 would be refused at release; 3 stored
 
 Store each listed credential again with the new `put-credential`; the ones it refuses need a longer credential or `--accept-unredactable`. Run the check again until it exits 0. Exit 0 covers the stored credentials and the binding table only; the other release checks still run at release.
 
+### Provider privilege check
+
+`credential-check` (D25 in [DECISIONS.md](DECISIONS.md)) checks a Gitea token's scopes and reach before it is stored, and `put-credential --accept-broader` stores a token it refused, with a `broader` exception. The `exception` column now holds a sorted, comma-joined set, so a row may carry both `broader` and `unredactable`. A row with one exception is byte-identical to one the earlier release wrote, and stored rows keep decrypting with no migration. Release entries now carry `credential_exceptions` when the set is not empty; an earlier docket reader refuses such an entry, so upgrade every docket reader, exporter and archiver before the custodian. The quickstart's gitea upstream config gains `provider`, `provider_api_url` and `required_permissions`, and its token is stored by the new `credential-put` service; `docker compose up --build` checks a kept token on the first start and replaces it if the check refuses it.
+
 ### Rollback
 
-An earlier release ignores the `exception` column. It cannot decrypt a credential stored with an exception, because the exception is part of its encryption context, and refuses it as `credential_unavailable`; store it again with the earlier `put-credential`. That leaves the column set, so after upgrading again the custodian refuses the credential as `credential_unavailable` until it is stored again with the new `put-credential`.
+An earlier release ignores the `exception` column, and the release before the provider privilege check reads it as one value. Neither can decrypt a credential stored with a `broader` exception, or with more than one, because the exception is part of its encryption context, and refuses it as `credential_unavailable`; store it again with the earlier `put-credential`. That leaves the column set, so after upgrading again the custodian refuses the credential as `credential_unavailable` until it is stored again with the new `put-credential`.
 
 ## Permission scopes
 
