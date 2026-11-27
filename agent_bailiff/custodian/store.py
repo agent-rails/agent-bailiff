@@ -14,7 +14,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_bailiff.custodian.backend import BackendError, KeyBackend
 from agent_bailiff.custodian.echo import redaction_problem
-from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned
+from agent_bailiff.custodian.files import (
+    OwnedFileError,
+    PinnedFile,
+    connect_owned,
+    database_error_name,
+    raise_database_error,
+)
 
 DEK_BYTES = 32
 NONCE_BYTES = 12
@@ -130,7 +136,7 @@ class CredentialStore:
             _add_exception_column(connection)
         except sqlite3.Error as exc:
             connection.close()
-            raise OwnedFileError(f"the {STORE_LABEL} is not a usable database: {exc}") from None
+            raise_database_error(f"cannot open the {STORE_LABEL} at {path}", exc)
         return cls(connection, pinned, backend)
 
     def put(
@@ -163,13 +169,16 @@ class CredentialStore:
         wrapped = self._backend.wrap(dek, context)
         with self._lock:
             self._pinned.check()
-            self._connection.execute(
-                "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext, exception) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
-                "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
-                "exception = excluded.exception",
-                (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
-            )
+            try:
+                self._connection.execute(
+                    "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext, "
+                    "exception) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
+                    "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
+                    "exception = excluded.exception",
+                    (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
+                )
+            except sqlite3.Error as exc:
+                raise_database_error(f"cannot write the {STORE_LABEL} at {self._pinned.path}", exc)
         if problem is not None:
             logger.warning(
                 "stored credential %r for target %r with an accepted %s exception: %s",
@@ -301,8 +310,12 @@ def _add_exception_column(connection: sqlite3.Connection) -> None:
         if not _has_exception_column(connection):
             connection.execute(ADD_EXCEPTION)
         connection.execute("COMMIT")
-    except BaseException:
-        connection.execute("ROLLBACK")
+    except BaseException as exc:
+        if connection.in_transaction:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error as rollback:
+                exc.add_note(f"the rollback also failed ({database_error_name(rollback)})")
         raise
 
 
