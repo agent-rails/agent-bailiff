@@ -23,10 +23,12 @@ from agent_bailiff.custodian import (
 )
 from agent_bailiff.custodian.files import create_owned
 from agent_bailiff.custodian.store import (
+    ADD_EXCEPTION,
     CredentialCheck,
     CredentialProblem,
     StoredCredential,
     UnredactableCredential,
+    _add_exception_column,
     decode_exceptions,
     encode_exceptions,
 )
@@ -276,7 +278,7 @@ def test_a_put_the_disk_cannot_hold_names_the_store_and_keeps_what_was_stored(st
     )
     output = done.stdout + done.stderr
     assert done.returncode == 3, output
-    assert output.count(f"cannot write the credential store at {path}: ") == 2
+    assert output.count(f"cannot write the credential store at {path}: its storage failed (SQLITE_IOERR_WRITE)") == 2
     assert "Traceback" not in output and "grown-" not in output
     reopened = CredentialStore.open(path, LocalBackend.load(state / "kek"))
     try:
@@ -290,6 +292,12 @@ def test_a_put_the_disk_cannot_hold_names_the_store_and_keeps_what_was_stored(st
 def test_a_migration_the_disk_cannot_hold_names_the_store_and_leaves_it_unmigrated(state, backend):
     path = state / "legacy.db"
     legacy_store(path, backend, SECRET)
+    connection = sqlite3.connect(path)
+    try:
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    finally:
+        connection.close()
+    assert os.path.getsize(path) > page_size
     script = FILE_SIZE_LIMIT + (
         "try:\n"
         "    CredentialStore.open(path, backend)\n"
@@ -298,10 +306,14 @@ def test_a_migration_the_disk_cannot_hold_names_the_store_and_leaves_it_unmigrat
         "    sys.exit(3)\n"
     )
     done = subprocess.run(
-        [sys.executable, "-c", script, str(path), "1024"], capture_output=True, text=True, timeout=30, check=False
+        [sys.executable, "-c", script, str(path), str(page_size)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert done.returncode == 3, done.stdout + done.stderr
-    assert f"the credential store at {path} is not a usable database: " in done.stdout
+    assert done.stdout == f"cannot open the credential store at {path}: its storage failed (SQLITE_IOERR_WRITE)\n"
     connection = sqlite3.connect(path)
     try:
         assert "exception" not in {row[1] for row in connection.execute("PRAGMA table_info(credentials)")}
@@ -312,6 +324,73 @@ def test_a_migration_the_disk_cannot_hold_names_the_store_and_leaves_it_unmigrat
         assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
     finally:
         store.close()
+
+
+def test_a_refused_write_does_not_echo_the_values_it_was_given(state, store):
+    path = state / "credentials.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TRIGGER echo BEFORE INSERT ON credentials BEGIN "
+        "SELECT RAISE(ABORT, NEW.tenant || ':' || hex(NEW.ciphertext) || ':' || hex(NEW.wrapped_dek)); END"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(OwnedFileError) as raised:
+        store.put("tenant-leak-marker", "deploy-api", "deploy.example", SECRET)
+    message = str(raised.value)
+    assert (
+        message == f"cannot write the credential store at {path}: the database refused it (SQLITE_CONSTRAINT_TRIGGER)"
+    )
+    assert "tenant-leak-marker" not in message
+
+
+def test_a_busy_older_store_is_refused_as_busy(state, backend, monkeypatch):
+    path = state / "legacy.db"
+    legacy_store(path, backend, SECRET)
+    monkeypatch.setattr(files, "BUSY_TIMEOUT_SECONDS", 0)
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(OwnedFileError) as raised:
+            CredentialStore.open(path, backend)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    assert str(raised.value) == f"cannot open the credential store at {path}: it is busy (SQLITE_BUSY)"
+
+
+class RollbackFails:
+    in_transaction = True
+
+    def execute(self, sql):
+        if sql == ADD_EXCEPTION:
+            raise sqlite3.OperationalError("disk I/O error")
+        if sql == "ROLLBACK":
+            raise sqlite3.OperationalError("cannot rollback")
+        return iter(())
+
+
+def test_a_failed_rollback_keeps_the_migration_error():
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error") as raised:
+        _add_exception_column(RollbackFails())
+    assert any("rollback also failed" in note for note in raised.value.__notes__)
+
+
+def test_opening_a_file_that_is_not_a_database_names_the_store(state, backend):
+    path = state / "garbage.db"
+    create_owned(path, "credential store", b"not a database " * 512)
+    with pytest.raises(OwnedFileError) as raised:
+        CredentialStore.open(path, backend)
+    assert (
+        str(raised.value) == f"cannot open the credential store at {path}: it is not a usable database (SQLITE_NOTADB)"
+    )
+
+
+def test_a_put_on_a_closed_store_is_a_programming_error(state, backend):
+    store = CredentialStore.create(state / "credentials.db", backend)
+    store.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.put(*BINDING, SECRET)
 
 
 def basic(pair):

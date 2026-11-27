@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent_bailiff.custodian.backend import BackendError, KeyBackend
 from agent_bailiff.custodian.echo import redaction_problem
-from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned
+from agent_bailiff.custodian.files import OwnedFileError, PinnedFile, connect_owned, raise_database_error
 
 DEK_BYTES = 32
 NONCE_BYTES = 12
@@ -130,7 +130,7 @@ class CredentialStore:
             _add_exception_column(connection)
         except sqlite3.Error as exc:
             connection.close()
-            raise OwnedFileError(f"the {STORE_LABEL} at {path} is not a usable database: {exc}") from None
+            raise_database_error(f"cannot open the {STORE_LABEL} at {path}", exc)
         return cls(connection, pinned, backend)
 
     def put(
@@ -172,7 +172,7 @@ class CredentialStore:
                     (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
                 )
             except sqlite3.Error as exc:
-                raise OwnedFileError(f"cannot write the {STORE_LABEL} at {self._pinned.path}: {exc}") from None
+                raise_database_error(f"cannot write the {STORE_LABEL} at {self._pinned.path}", exc)
         if problem is not None:
             logger.warning(
                 "stored credential %r for target %r with an accepted %s exception: %s",
@@ -304,9 +304,12 @@ def _add_exception_column(connection: sqlite3.Connection) -> None:
         if not _has_exception_column(connection):
             connection.execute(ADD_EXCEPTION)
         connection.execute("COMMIT")
-    except BaseException:
+    except BaseException as exc:
         if connection.in_transaction:
-            connection.execute("ROLLBACK")
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error as rollback:
+                exc.add_note(f"the rollback also failed: {rollback}")
         raise
 
 

@@ -899,7 +899,8 @@ def test_put_credential_refuses_a_store_the_disk_cannot_grow_and_names_it(deploy
     )
     err = process.stderr.decode()
     assert process.returncode == cli.EXIT_REFUSED and process.stdout == b"", err
-    assert err.startswith(f"agent-bailiff put-credential refused: cannot write the credential store at {path}: "), err
+    refusal = f"agent-bailiff put-credential refused: cannot write the credential store at {path}: its storage failed"
+    assert err == f"{refusal} (SQLITE_IOERR_WRITE)\n", err
     assert "Traceback" not in err and b"grown-" not in process.stderr
     with pytest.raises(CredentialUnavailable):
         stored(deployment)
