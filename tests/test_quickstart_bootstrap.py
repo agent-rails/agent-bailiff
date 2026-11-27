@@ -351,7 +351,7 @@ KEY_USAGES = (
 )  # fmt: skip
 
 
-def issue_certificate(common_name, issuer=None, dns_name=None, ip_address=None):
+def issue_certificate(common_name, issuer=None, dns_name=None, ip_address=None, expired=False):
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     signer_name, signer_key = (issuer[0].subject, issuer[1]) if issuer else (subject, key)
@@ -362,8 +362,8 @@ def issue_certificate(common_name, issuer=None, dns_name=None, ip_address=None):
         .issuer_name(signer_name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(minutes=5))
-        .not_valid_after(now + datetime.timedelta(days=1))
+        .not_valid_before(now - datetime.timedelta(days=2 if expired else 0, minutes=5))
+        .not_valid_after(now + datetime.timedelta(days=-1 if expired else 1))
         .add_extension(x509.BasicConstraints(ca=issuer is None, path_length=None), critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(signer_key.public_key()), critical=False)
