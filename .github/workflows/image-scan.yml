@@ -100,7 +100,7 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
       - name: Download the vulnerability database
         if: steps.cache.outputs.cache-hit != 'true'
-        run: '"$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
+        run: '"$RUNNER_TEMP/trivy" image --config /dev/null --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
       - name: Check the vulnerability database is fresh
         run: |
           metadata="$RUNNER_TEMP/trivy-cache/db/metadata.json"
@@ -162,7 +162,7 @@ jobs:
           dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
-          "$RUNNER_TEMP/trivy" image --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
+          "$RUNNER_TEMP/trivy" image --config /dev/null --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
           --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
           --exit-code 1 --no-progress "$IMAGE"
 
