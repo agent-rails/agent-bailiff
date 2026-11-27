@@ -87,7 +87,9 @@ jobs:
       - id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/trivy-cache/db
+          path: |
+            ${{ runner.temp }}/trivy-cache/db
+            ${{ runner.temp }}/trivy-cache/java-db
           key: ${{ steps.key.outputs.key }}
       - name: Install trivy
         if: steps.cache.outputs.cache-hit != 'true'
@@ -97,11 +99,14 @@ jobs:
           printf '%s  %s\n' "$TRIVY_SHA256" "$archive" > "$RUNNER_TEMP/trivy.sha256"
           sha256sum --check --strict "$RUNNER_TEMP/trivy.sha256"
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
-      - name: Download the vulnerability database
+      - name: Download the vulnerability databases
         if: steps.cache.outputs.cache-hit != 'true'
-        run: '"$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress'
+        run: |
+          "$RUNNER_TEMP/trivy" image --download-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress
+          "$RUNNER_TEMP/trivy" image --download-java-db-only --cache-dir "$RUNNER_TEMP/trivy-cache" --no-progress
       - name: Check the vulnerability database is fresh
         run: |
+          jq . "$RUNNER_TEMP/trivy-cache/java-db/metadata.json"
           metadata="$RUNNER_TEMP/trivy-cache/db/metadata.json"
           jq . "$metadata"
           updated="$(jq -er .UpdatedAt "$metadata")"
@@ -143,7 +148,9 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/trivy-cache/db
+          path: |
+            ${{ runner.temp }}/trivy-cache/db
+            ${{ runner.temp }}/trivy-cache/java-db
           key: ${{ needs.db.outputs.key }}
           fail-on-cache-miss: true
       - name: Build image
