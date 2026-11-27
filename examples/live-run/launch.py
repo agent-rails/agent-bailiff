@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent.parent
-IMAGE_TAG = "agent-bailiff-live-run:local"
-WEBHOOK_TAG = "agent-bailiff-webhook:live"
+IMAGE_REPO = "agent-bailiff-live-run"
+IMAGE_TAG = f"{IMAGE_REPO}:local"
+WEBHOOK_REPO = "agent-bailiff-webhook"
+WEBHOOK_TAG = f"{WEBHOOK_REPO}:live"
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 DIGEST_REF = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
 ALLOWED_CONTEXTS = frozenset({"orbstack"})
@@ -56,13 +58,16 @@ class RunSpec:
     platform: str = "upstream"
 
 
-def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | None = None) -> str:
+def build_image(
+    docker_context: str, dockerfile: str, tag: str, platform: str | None = None, run_tag: str | None = None
+) -> str:
     target = ["--platform", platform] if platform else []
+    tags = ["-t", tag, *(["-t", run_tag] if run_tag else [])]
     with tempfile.TemporaryDirectory() as scratch:
         iidfile = Path(scratch) / "iid"
         subprocess.run(
             ["docker", "--context", docker_context, "build", *target, "--iidfile", str(iidfile), "-f", dockerfile,
-             "-t", tag, "."],
+             *tags, "."],
             cwd=REPO,
             check=True,
             timeout=1800,
@@ -73,7 +78,7 @@ def build_image(docker_context: str, dockerfile: str, tag: str, platform: str | 
     return image_id
 
 
-def resolve_digest(docker_context: str, image_id: str) -> str:
+def resolve_digest(docker_context: str, image_id: str, repository: str) -> str:
     output = subprocess.run(
         ["docker", "--context", docker_context, "image", "inspect", image_id, "--format", "{{json .RepoDigests}}"],
         capture_output=True,
@@ -82,11 +87,23 @@ def resolve_digest(docker_context: str, image_id: str) -> str:
         timeout=30,
     ).stdout
     digests = json.loads(output) or []
-    if not digests or DIGEST_REF.fullmatch(digests[0]) is None:
+    matching = [
+        digest for digest in digests if DIGEST_REF.fullmatch(digest) is not None and digest.startswith(f"{repository}@")
+    ]
+    if not matching:
         raise RuntimeError(
-            f"{image_id} has no sha256 repo digest ({digests}); the live run needs OrbStack's image store"
+            f"{image_id} has no {repository}@sha256 repo digest ({digests}); the live run needs OrbStack's image store"
         )
-    return str(digests[0])
+    return str(matching[0])
+
+
+def remove_tags(docker_context: str, tags: list[str]) -> None:
+    for tag in tags:
+        removal = subprocess.run(
+            ["docker", "--context", docker_context, "rmi", tag], capture_output=True, text=True, check=False, timeout=60
+        )
+        if removal.returncode != 0:
+            print(f"could not remove image tag {tag}: {removal.stderr.strip()}", file=sys.stderr)
 
 
 def platform_of(context: str) -> str:
@@ -299,44 +316,58 @@ def main() -> None:
         if kubernetes
         else None
     )
-    webhook = None
-    if kubernetes and args.catalog != READ_CATALOG:
-        webhook = resolve_digest(
-            args.docker_context, build_image(args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG)
-        )
-    image = build_image(args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64")
-    spec = RunSpec(
-        script=args.script,
-        context=args.context if kubernetes else None,
-        model=args.model,
-        out=args.out,
-        run_id=secrets.token_hex(4),
-        archiver_uid=args.archiver_uid,
-        docker_context=args.docker_context,
-        webhook_image=webhook,
-        catalog=args.catalog,
-        platform=platform_of(args.context),
-    )
-    process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    run_id = secrets.token_hex(4)
+    run_tags: list[str] = []
     try:
-        stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
-    except subprocess.TimeoutExpired:
-        subprocess.run(
-            ["docker", "--context", spec.docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{spec.run_id}"],
-            timeout=STOP_SECONDS + 30,
-            check=False,
+        webhook = None
+        if kubernetes and args.catalog != READ_CATALOG:
+            run_tags.append(f"{WEBHOOK_REPO}:{run_id}")
+            webhook = resolve_digest(
+                args.docker_context,
+                build_image(
+                    args.docker_context, "deploy/kubernetes/Dockerfile.webhook", WEBHOOK_TAG, run_tag=run_tags[-1]
+                ),
+                WEBHOOK_REPO,
+            )
+        run_tags.append(f"{IMAGE_REPO}:{run_id}")
+        image = build_image(
+            args.docker_context, "examples/live-run/Dockerfile", IMAGE_TAG, "linux/amd64", run_tag=run_tags[-1]
         )
-        process.wait(30)
-        raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
-    if process.returncode != 0:
-        if kubernetes:
-            print(report_lock(args.context, args.docker_context), file=sys.stderr)
-        raise SystemExit(process.returncode)
-    result = read_result(stdout.decode(), spec.run_id)
-    write_result(spec.out, result)
-    print(f"run {spec.run_id}: wrote {spec.out}")
-    if result["status"] != "ok":
-        raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
+        spec = RunSpec(
+            script=args.script,
+            context=args.context if kubernetes else None,
+            model=args.model,
+            out=args.out,
+            run_id=run_id,
+            archiver_uid=args.archiver_uid,
+            docker_context=args.docker_context,
+            webhook_image=webhook,
+            catalog=args.catalog,
+            platform=platform_of(args.context),
+        )
+        process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
+        except subprocess.TimeoutExpired:
+            subprocess.run(
+                ["docker", "--context", spec.docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{spec.run_id}"],
+                timeout=STOP_SECONDS + 30,
+                check=False,
+            )
+            process.wait(30)
+            raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
+        if process.returncode != 0:
+            if kubernetes:
+                print(report_lock(args.context, args.docker_context), file=sys.stderr)
+            raise SystemExit(process.returncode)
+        result = read_result(stdout.decode(), spec.run_id)
+        write_result(spec.out, result)
+        print(f"run {spec.run_id}: wrote {spec.out}")
+        if result["status"] != "ok":
+            raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
+
+    finally:
+        remove_tags(args.docker_context, run_tags)
 
 
 if __name__ == "__main__":
