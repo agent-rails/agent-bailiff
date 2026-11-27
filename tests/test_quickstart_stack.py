@@ -179,6 +179,7 @@ EXPECTED_ENTRIES = {
     "docket-receipts": (b.ARCHIVER_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
     "gateway-config": (*CUSTODIAN, 0o755, DIRECTORY),
     "gateway-config/gateway.json": (*CUSTODIAN, 0o644, FILE),
+    "gateway-config/ca.pem": (*CUSTODIAN, 0o644, FILE),
     **CERT_ENTRIES,
 }
 TRANSIENT_ENTRIES = {
