@@ -355,6 +355,10 @@ def test_a_name_routed_on_two_services_is_refused():
         route_services(routes)
 
 
+REMOTE_HTTP = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
+CAFILE_HTTP = "--gateway-ca pins the gateway's TLS certificate; it needs an https gateway url"
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -364,14 +368,23 @@ def test_a_name_routed_on_two_services_is_refused():
     ],
 )
 def test_a_proxy_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, gateway, url):
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+    assert str(refused.value) == REMOTE_HTTP
 
 
-@pytest.mark.parametrize("url", ["http://gateway:abc/mcp", "http://gate\tway/mcp", "http://gateway/mcp?x=1"])
-def test_a_proxy_refuses_a_malformed_gateway_url(task_file, key_dir, gateway, url):
-    with pytest.raises(ValueError, match="url"):
+@pytest.mark.parametrize(
+    ("url", "reason"),
+    [
+        ("http://gateway:abc/mcp", "url port must be a number from 1 to 65535"),
+        ("http://gate\tway/mcp", "url must not contain whitespace, control characters or backslashes"),
+        ("http://gateway/mcp?x=1", "url must not carry a query or fragment"),
+    ],
+)
+def test_a_proxy_refuses_a_malformed_gateway_url(task_file, key_dir, gateway, url, reason):
+    with pytest.raises(ValueError) as refused:
         StdioProxy(task_file, key_dir, url, ROUTES, client_factory=gateway.factory)
+    assert str(refused.value) == reason
 
 
 def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key_dir, monkeypatch, capsys):
@@ -381,7 +394,7 @@ def test_proxy_tools_refuses_an_http_gateway_url_to_a_remote_host(task_file, key
     monkeypatch.setattr("agent_bailiff.client.client.BailiffClient.list_tools", lambda self: pytest.fail("contacted"))
     arguments = ["--task-file", str(task_file), "--key-dir", str(key_dir), "--gateway-url", "http://10.0.0.5/mcp"]
     assert main(["proxy", "tools", *arguments]) == 1
-    assert "proxy tools refused" in capsys.readouterr().err
+    assert f"proxy tools refused: {REMOTE_HTTP}" in capsys.readouterr().err
 
 
 def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_file, key_dir):
@@ -404,7 +417,7 @@ def test_proxy_run_refuses_an_http_gateway_url_to_a_remote_host(tmp_path, task_f
         timeout=30,
     )
     assert result.returncode == 1
-    assert "proxy run refused" in result.stderr and "https" in result.stderr
+    assert f"proxy run refused: {REMOTE_HTTP}" in result.stderr
 
 
 class SlowGateway(BaseHTTPRequestHandler):
@@ -487,10 +500,11 @@ def write_ca(directory):
 
 def test_a_proxy_refuses_a_gateway_ca_with_an_http_gateway_url(task_file, key_dir, gateway, tmp_path):
     cafile, _ = write_ca(tmp_path)
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         StdioProxy(
             task_file, key_dir, "http://127.0.0.1:1/mcp", ROUTES, client_factory=gateway.factory, gateway_ca=cafile
         )
+    assert str(refused.value) == CAFILE_HTTP
 
 
 def test_a_proxy_refuses_a_missing_gateway_ca_at_start(task_file, key_dir, gateway, tmp_path):
@@ -561,7 +575,7 @@ def test_proxy_run_refuses_a_gateway_ca_with_an_http_gateway_url(tmp_path, task_
         timeout=30,
     )
     assert result.returncode == 1
-    assert "proxy run refused" in result.stderr and "https" in result.stderr
+    assert f"proxy run refused: {CAFILE_HTTP}" in result.stderr
 
 
 def start_proxy(tmp_path, task_file, key_dir, gateway_url, *options):

@@ -829,27 +829,36 @@ def _capture(errors, function, *args):
         errors.append(error)
 
 
+QUERY = "url must not carry a query or fragment"
+PORT = "url port must be a number from 1 to 65535"
+SPACE = "url must not contain whitespace, control characters or backslashes"
+NO_HOST = "url must name a host"
+REMOTE_HTTP = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
+
+
 @pytest.mark.parametrize(
-    "url",
+    ("url", "reason"),
     [
-        "ftp://gateway/mcp",
-        "http:///mcp",
-        "http://gateway/mcp?x=1",
-        "http://gateway/mcp#x",
-        "http://gateway/mcp?",
-        "http://gateway:abc/mcp",
-        "http://gateway:99999/mcp",
-        "http://gate\tway/mcp",
-        "http://gate way/mcp",
-        "http://gateway/mcp\n",
-        "https://gateway:abc/mcp",
-        "https://gate\tway/mcp",
-        "http://::1/mcp",
+        ("ftp://gateway/mcp", "url must be an http or https URL"),
+        ("http:///mcp", NO_HOST),
+        ("http://gateway/mcp?x=1", QUERY),
+        ("http://gateway/mcp#x", QUERY),
+        ("http://gateway/mcp?", QUERY),
+        ("http://gateway:abc/mcp", PORT),
+        ("http://gateway:99999/mcp", PORT),
+        ("http://gate\tway/mcp", SPACE),
+        ("http://gate way/mcp", SPACE),
+        ("http://gateway/mcp\n", SPACE),
+        ("https://gateway:abc/mcp", PORT),
+        ("https://gate\tway/mcp", SPACE),
+        ("http://::1/mcp", NO_HOST),
+        ("http://gateway@10.0.0.5:8080/mcp", "url must be an http or https URL without credentials"),
     ],
 )
-def test_a_bad_gateway_url_is_rejected(url):
-    with pytest.raises(ValueError, match="url"):
+def test_a_bad_gateway_url_is_rejected(url, reason):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == reason
 
 
 @pytest.mark.parametrize(
@@ -863,19 +872,19 @@ def test_a_bad_gateway_url_is_rejected(url):
         "http://127.0.0.1.evil.example/mcp",
         "http://167772165:8080/mcp",
         "http://0xa000005:8080/mcp",
-        "http://gateway@10.0.0.5:8080/mcp",
     ],
 )
 def test_an_http_gateway_url_to_a_remote_host_is_rejected(url):
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == REMOTE_HTTP
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8080/mcp", "http://LocalHost:8080/mcp", "http://localhost/mcp"])
 def test_an_http_gateway_url_to_localhost_is_rejected(url):
-    message = "an http gateway url must name 127.0.0.1 or [::1]; use https for any other host"
-    with pytest.raises(ValueError, match=re.escape(message)):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES)
+    assert str(refused.value) == REMOTE_HTTP
 
 
 @pytest.mark.parametrize(
@@ -927,8 +936,9 @@ def tls_client(url, cafile, sleeps):
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8080/mcp", "http://[::1]:8080/mcp"])
 def test_a_cafile_with_an_http_gateway_url_is_rejected(url, tmp_path):
     cafile, _ = write_gateway_ca(tmp_path)
-    with pytest.raises(ValueError, match="https"):
+    with pytest.raises(ValueError) as refused:
         BailiffClient(url, holder(), ROUTES, cafile=cafile)
+    assert str(refused.value) == "cafile pins the gateway's TLS certificate; it needs an https gateway url"
 
 
 def test_a_pinned_gateway_ca_connects_to_a_tls_gateway(tls_stub, sleeps):

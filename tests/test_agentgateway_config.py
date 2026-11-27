@@ -577,6 +577,20 @@ def test_a_gateway_bound_target_over_https_or_loopback_is_accepted(target):
     assert problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target)) == ()
 
 
+CLEARTEXT = (
+    "gateway-bound service 'deploy' must target https, or http only on 127.0.0.1 or [::1]; "
+    "a host without a scheme is http, and the released credential must not cross the network in cleartext"
+)
+CREDENTIALS = "url must be an http or https URL without credentials"
+NO_HOST = "url must name a host"
+QUERY = "url must not carry a query or fragment"
+URL_PORT = "url port must be a number from 1 to 65535"
+SPACE = "url must not contain whitespace, control characters or backslashes"
+SPLIT = "a host with a scheme must not be split into port and path"
+TARGET_PATH = "path must start with a single / and hold only RFC 3986 path characters"
+TARGET_PORT = "port must be an integer from 1 to 65535"
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -594,52 +608,61 @@ def test_a_gateway_bound_target_over_https_or_loopback_is_accepted(target):
         {"host": "http://127.0.0.1.evil.example/mcp"},
         {"host": "http://167772165:8080/mcp"},
         {"host": "http://0xa000005:8080/mcp"},
-        {"host": "http://gitea-mcp@10.0.0.5:8080/mcp"},
-        {"host": "http://user@gitea-mcp:8080/mcp"},
-        {"host": "ftp://gitea-mcp:21/mcp"},
-        {"host": "https:///mcp"},
         {"host": "mcp.example.com:443"},
         {"host": "10.0.0.5"},
         {"host": "mcp.example.com", "port": 443, "path": "/mcp"},
         {"host": "10.0.0.5", "port": 8080, "path": "/mcp"},
-        {"host": 7},
-        {"host": "gateway#@evil.com"},
-        {"host": "gateway?@evil.com"},
-        {"host": "gateway/@evil.com"},
-        {"host": "gateway:abc"},
-        {"host": "gateway:99999"},
-        {"host": "gate\tway"},
-        {"host": "gate way"},
-        {"host": "gateway\n"},
-        {"host": "gateway\x00"},
-        {"host": "http://gateway:abc/mcp"},
-        {"host": "http://gateway:99999/mcp"},
-        {"host": "http://gate\tway/mcp"},
-        {"host": "http://gateway/mcp?@evil.com"},
-        {"host": "http://gateway/mcp#@evil.com"},
-        {"host": "http://gateway/mcp?"},
-        {"host": "http://gateway/mcp\r\n"},
-        {"host": "https://x", "port": 443, "path": "/"},
-        {"host": "http://gateway", "port": 8080, "path": "/mcp"},
-        {"host": "https://mcp.example.com", "path": "/mcp"},
-        {"host": "gateway", "port": 8080, "path": "@evil.com"},
-        {"host": "gateway", "port": 8080, "path": "mcp"},
-        {"host": "gateway", "port": 8080, "path": "//evil.com/mcp"},
-        {"host": "gateway", "port": 8080, "path": "/mcp?x=1"},
-        {"host": "gateway", "port": 8080, "path": "/mcp#x"},
-        {"host": "gateway", "port": 8080, "path": "/m\\cp"},
-        {"host": "gateway", "port": 8080, "path": "/m cp"},
-        {"host": "gateway", "port": 8080, "path": "/m\u00e9"},
-        {"host": "gateway", "port": 8080, "path": 7},
-        {"host": "gateway", "port": "8080", "path": "/mcp"},
-        {"host": "gateway", "port": True, "path": "/mcp"},
-        {"host": "gateway", "port": 0, "path": "/mcp"},
-        {"host": "gateway", "port": 65536, "path": "/mcp"},
     ],
 )
 def test_a_gateway_bound_target_over_cleartext_to_a_remote_host_is_refused(target):
+    assert problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target)) == (CLEARTEXT,)
+
+
+@pytest.mark.parametrize(
+    ("target", "reason"),
+    [
+        ({"host": "http://gitea-mcp@10.0.0.5:8080/mcp"}, CREDENTIALS),
+        ({"host": "http://user@gitea-mcp:8080/mcp"}, CREDENTIALS),
+        ({"host": "ftp://gitea-mcp:21/mcp"}, "url must be an http or https URL"),
+        ({"host": "https:///mcp"}, NO_HOST),
+        ({"host": 7}, "host must be a string"),
+        ({"host": "gateway#@evil.com"}, QUERY),
+        ({"host": "gateway?@evil.com"}, QUERY),
+        ({"host": "gateway/@evil.com"}, "a host without a scheme must be host or host:port"),
+        ({"host": "gateway:abc"}, URL_PORT),
+        ({"host": "gateway:99999"}, URL_PORT),
+        ({"host": "gate\tway"}, SPACE),
+        ({"host": "gate way"}, SPACE),
+        ({"host": "gateway\n"}, SPACE),
+        ({"host": "gateway\x00"}, SPACE),
+        ({"host": "http://gateway:abc/mcp"}, URL_PORT),
+        ({"host": "http://gateway:99999/mcp"}, URL_PORT),
+        ({"host": "http://gate\tway/mcp"}, SPACE),
+        ({"host": "http://gateway/mcp?@evil.com"}, QUERY),
+        ({"host": "http://gateway/mcp#@evil.com"}, QUERY),
+        ({"host": "http://gateway/mcp?"}, QUERY),
+        ({"host": "http://gateway/mcp\r\n"}, SPACE),
+        ({"host": "https://x", "port": 443, "path": "/"}, SPLIT),
+        ({"host": "http://gateway", "port": 8080, "path": "/mcp"}, SPLIT),
+        ({"host": "https://mcp.example.com", "path": "/mcp"}, SPLIT),
+        ({"host": "gateway", "port": 8080, "path": "@evil.com"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "mcp"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "//evil.com/mcp"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "/mcp?x=1"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "/mcp#x"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "/m\\cp"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "/m cp"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": "/m\u00e9"}, TARGET_PATH),
+        ({"host": "gateway", "port": 8080, "path": 7}, TARGET_PATH),
+        ({"host": "gateway", "port": "8080", "path": "/mcp"}, TARGET_PORT),
+        ({"host": "gateway", "port": True, "path": "/mcp"}, TARGET_PORT),
+        ({"host": "gateway", "port": 0, "path": "/mcp"}, TARGET_PORT),
+        ({"host": "gateway", "port": 65536, "path": "/mcp"}, TARGET_PORT),
+    ],
+)
+def test_a_malformed_gateway_bound_target_is_refused_with_its_reason(target, reason):
     problems = problems_after(lambda config: config["mcp"]["targets"][0].update(mcp=target))
-    assert any("deploy" in problem and "cleartext" in problem for problem in problems), problems
+    assert problems == (f"mcp target 'deploy' is malformed: {reason}",)
 
 
 def test_backend_tls_with_only_a_root_is_accepted():

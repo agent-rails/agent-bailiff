@@ -219,18 +219,24 @@ def _check_targets(problems: list[str], targets: object, expected: GatewayExpect
             )
             continue
         _only_keys(problems, f"mcp target {service!r} mcp", target["mcp"], HTTP_TARGET_KEYS)
+        try:
+            url = _parse_target_host(target["mcp"])
+        except ValueError as exc:
+            problems.append(f"mcp target {service!r} is malformed: {exc}")
+            continue
+        host = url.hostname or ""
         if service in expected.effector_services:
-            if not _is_loopback_http(target["mcp"]):
+            if url.scheme != "http" or host not in LOOPBACK_HOSTS:
                 problems.append(
                     f"catalog service {service!r} must target the effector over http on {PLAIN_HTTP_HOSTS}; "
                     "releases and clearances must not leave the host"
                 )
-        elif not _is_protected_transport(target["mcp"]):
+        elif url.scheme != "https" and not allows_plain_http(host):
             problems.append(
                 f"gateway-bound service {service!r} must target https, or http only on {PLAIN_HTTP_HOSTS}; "
                 "a host without a scheme is http, and the released credential must not cross the network in cleartext"
             )
-        elif _names_stack_host(target["mcp"], expected.stack_hosts) and not _has_backend_root(target):
+        elif _is_stack_host(host, expected.stack_hosts) and not _has_backend_root(target):
             problems.append(
                 f"gateway-bound service {service!r} targets a host in the stack over https and must set "
                 "policies.backendTLS.root; with the system roots any public CA can vouch for that name"
@@ -247,21 +253,18 @@ def _check_backend_tls(problems: list[str], name: str, backend_tls: object) -> N
         problems.append(f"mcp target {name!r} policies.backendTLS root must be a non-empty string")
 
 
-def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult | None:
+def _parse_target_host(target: Mapping[str, Any]) -> urllib.parse.SplitResult:
     host = target.get("host")
     if not isinstance(host, str):
-        return None
+        raise ValueError("host must be a string")
     has_scheme = "://" in host
     if has_scheme and ("port" in target or "path" in target):
-        return None
+        raise ValueError("a host with a scheme must not be split into port and path")
     if "port" in target and not _is_valid_target_port(target["port"]):
-        return None
+        raise ValueError("port must be an integer from 1 to 65535")
     if "path" in target and not _is_valid_target_path(target["path"]):
-        return None
-    try:
-        return parse_transport_url(host, bare_host=not has_scheme)
-    except ValueError:
-        return None
+        raise ValueError("path must start with a single / and hold only RFC 3986 path characters")
+    return parse_transport_url(host, bare_host=not has_scheme)
 
 
 def _is_valid_target_port(port: object) -> bool:
@@ -272,18 +275,8 @@ def _is_valid_target_path(path: object) -> bool:
     return isinstance(path, str) and TARGET_PATH.fullmatch(path) is not None
 
 
-def _is_protected_transport(target: Mapping[str, Any]) -> bool:
-    url = _parse_target_host(target)
-    if url is None or url.hostname is None:
-        return False
-    return url.scheme == "https" or allows_plain_http(url.hostname)
-
-
-def _names_stack_host(target: Mapping[str, Any], stack_hosts: frozenset[str]) -> bool:
-    url = _parse_target_host(target)
-    if url is None or url.hostname is None:
-        return False
-    return url.hostname.rstrip(".") in {host.lower().rstrip(".") for host in stack_hosts}
+def _is_stack_host(host: str, stack_hosts: frozenset[str]) -> bool:
+    return host.rstrip(".") in {name.lower().rstrip(".") for name in stack_hosts}
 
 
 def _has_backend_root(target: Mapping[str, Any]) -> bool:
@@ -291,11 +284,6 @@ def _has_backend_root(target: Mapping[str, Any]) -> bool:
     backend_tls = policies.get("backendTLS") if isinstance(policies, dict) else None
     root = backend_tls.get("root") if isinstance(backend_tls, dict) else None
     return isinstance(root, str) and bool(root)
-
-
-def _is_loopback_http(target: Mapping[str, Any]) -> bool:
-    url = _parse_target_host(target)
-    return url is not None and url.scheme == "http" and url.hostname in LOOPBACK_HOSTS
 
 
 def _check_policies(problems: list[str], policies: object, expected: GatewayExpectations) -> None:

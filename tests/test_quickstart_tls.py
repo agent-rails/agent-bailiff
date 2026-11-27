@@ -1,5 +1,4 @@
 import hashlib
-import http.client
 import json
 import os
 import shutil
@@ -23,6 +22,7 @@ adopter = test_adopt_stack.adopter
 proxy = test_adopt_stack.proxy
 OVERRIDE = Path(__file__).resolve().parent / "fixtures" / "quickstart-tls.compose.yaml"
 GATEWAY_START_SECONDS = 30
+FATAL_DECODE_ERROR_ALERT = b"\x15\x03\x03\x00\x02\x02\x32"
 
 
 def write_tls_files(root):
@@ -115,14 +115,25 @@ def test_the_gateway_serves_its_install_leaf_on_loopback(stack, host):
 
 def test_plain_http_to_the_gateway_gets_no_mcp_answer(stack):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
-    connection = http.client.HTTPConnection("127.0.0.1", stack.gateway_port, timeout=5)
-    try:
-        with pytest.raises((ConnectionError, http.client.HTTPException)):
-            connection.request("POST", "/mcp", body, headers)
-            connection.getresponse().read()
-    finally:
-        connection.close()
+    request = (
+        "POST /mcp HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-type: application/json\r\n"
+        f"content-length: {len(body)}\r\nconnection: close\r\n\r\n{body}"
+    )
+    with socket.create_connection(("127.0.0.1", stack.gateway_port), timeout=5) as raw:
+        raw.sendall(request.encode())
+        answer = b""
+        while chunk := raw.recv(4096):
+            answer += chunk
+    assert answer == FATAL_DECODE_ERROR_ALERT, answer
+
+
+def test_a_client_pinning_the_install_ca_lists_the_tools(stack, adopter, proxy):
+    result = test_adopt_stack.cli(
+        "proxy", "tools", "--task-file", adopter.task_file, "--key-dir", adopter.key_dir,
+        "--gateway-url", adopter.gateway_url, "--gateway-ca", adopter.gateway_ca, check=False,
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    assert any(tool["name"].endswith("write_note") for tool in json.loads(result.stdout)["tools"]), result.stdout
 
 
 @pytest.mark.parametrize("pinned", ["another", "system roots"])
