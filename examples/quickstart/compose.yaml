@@ -54,6 +54,35 @@ x-gitea-mcp: &gitea-mcp
       condition: service_healthy
 
 services:
+  certs:
+    <<: [*bailiff, *once, *offline]
+    user: "10012:10012"
+    group_add: ["20005", "20006", "20007"]
+    entrypoint: ["python", "/app/quickstart/issue_certs.py"]
+    command: ["issue"]
+    volumes:
+      - certs-public:/var/lib/bailiff/certs/public
+      - certs-gateway:/var/lib/bailiff/certs/gateway
+      - certs-stub-upstream:/var/lib/bailiff/certs/stub-upstream
+      - certs-gitea-mcp-tls:/var/lib/bailiff/certs/gitea-mcp-tls
+
+  cert-watch:
+    <<: [*bailiff, *offline]
+    user: "10015:10015"
+    command: ["-c", "import signal, sys; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.pause()"]
+    volumes:
+      - certs-public:/var/lib/bailiff/certs/public:ro
+    healthcheck:
+      test: ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30"]
+      interval: 6h
+      timeout: 10s
+      retries: 1
+      start_period: 1m
+      start_interval: 1s
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+
   stub-upstream:
     <<: *bailiff
     user: "10011:10011"
@@ -564,3 +593,7 @@ volumes:
   tasks: {}
   gateway-config: {}
   exporter-data: {}
+  certs-public: {}
+  certs-gateway: {}
+  certs-stub-upstream: {}
+  certs-gitea-mcp-tls: {}

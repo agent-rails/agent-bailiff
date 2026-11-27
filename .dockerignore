@@ -12,6 +12,7 @@ __pycache__
 !examples/quickstart/baseline.py
 !examples/quickstart/proxy_bench.py
 !examples/quickstart/rule.py
+!examples/quickstart/issue_certs.py
 !examples/quickstart/upstreams/*.json
 !examples/quickstart/gateway.json
 !examples/quickstart/stub-upstream/server.py

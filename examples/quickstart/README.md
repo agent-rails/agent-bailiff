@@ -22,6 +22,8 @@ $ export UPSTREAM=gitea COMPOSE_PROFILES=gitea
 
 | Service | uid | Role |
 | --- | --- | --- |
+| `certs` | 10012 | One-shot, offline: issues the install CA and one leaf each for `gateway`, `stub-upstream` and `gitea-mcp-tls`, or keeps a complete set; see [Certificates](#certificates) |
+| `cert-watch` | 10015 | Mounts the public certificates only; its healthcheck fails when the set is incomplete or a certificate expires within 30 days |
 | `stub-upstream` | 10011 | Default upstream: Streamable HTTP MCP server, refuses a `tools/call` without an `Authorization` header; its `echo_auth` tool returns the credential it received, raw and in base64, so the custodian's redaction can be seen |
 | `gitea`, `gitea-mcp` | image default | `gitea` profile: upstream Git service and its MCP server (`gitea-mcp-server:1.13.0`) |
 | `gateway` | 10004 | agentgateway v1.7.0 with the decide, custodian and redactor processors and the refusal guard, `failClosed` |
@@ -139,6 +141,30 @@ agent-bailiff docket verify: 9 records verified, 9 printed
 ```
 
 The `revoke` record is the operator's; the agent container mounts neither the control key nor the ledger. The refusal after the revoke is not in the docket: decide could not verify the chain, so it logs the refusal instead of recording it.
+
+## Certificates
+
+`certs` runs first on every `up`. On a fresh install it makes a CA in memory, signs one leaf per TLS service, writes them and discards the CA key, so no file holds it. A later run keeps a complete set that chains to that CA and prints `kept gen-0001`. A partial or mixed set is refused with the reissue runbook, and `up` stops there.
+
+Each service's key has its own volume (`certs-gateway`, `certs-stub-upstream`, `certs-gitea-mcp-tls`): the key is mode 0440 in that service's group (20005, 20006, 20007), and the volume's directory is mode 0750 in the same group. The CA and the leaf certificates are in `certs-public`, readable by every uid. `certs` runs offline as its own uid, with no capabilities, in the three key groups. Leaves last 365 days (`--days`) and the CA twice as long.
+
+Copy the CA out for a client on the host:
+
+```console
+$ docker compose cp cert-watch:/var/lib/bailiff/certs/public/current/ca.pem ./ca.pem
+```
+
+`cert-watch` checks the set every 6 hours. `docker compose ps cert-watch` shows `unhealthy` once the set is incomplete, a leaf does not chain to the CA, or a certificate expires within 30 days. The rest of the stack keeps running.
+
+Reissue with the stack stopped. It makes a new CA, so every client needs the new `ca.pem`:
+
+```console
+$ docker compose stop
+$ docker compose run --rm certs issue --reissue
+$ docker compose up --detach --wait
+```
+
+A reissue writes a new generation (`gen-0002`) in every volume, then switches each volume's `current` link. It keeps the previous generation and removes older ones. A crash before the first switch leaves the old set in use; a crash between two switches leaves a mixed set, which the next `up` refuses, so run the reissue again. There is no live reissue: a service reads its certificate only at start.
 
 ## Tracing and the revoke rule
 

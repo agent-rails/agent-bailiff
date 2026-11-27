@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_issue_certs import certs_module
 from test_quickstart_rule import rule_module
 from test_quickstart_stack import b
 
@@ -15,6 +16,16 @@ GITEA_MCP = ("gitea-mcp", "gitea-mcp-spike")
 GITEA_ONLY = ("gitea", "gitea-mcp", "gitea-secret", "gitea-admin", "bootstrap", "agent-key", "gitea-task")
 DOCKET_READERS = ("reader", "archiver", "exporter")
 ISSUERS = ("task-issuer", "gitea-task")
+CERTS = "/var/lib/bailiff/certs"
+CERT_VOLUMES = {
+    "certs-public": f"{CERTS}/public",
+    **{f"certs-{name}": f"{CERTS}/{name}" for name in certs_module.SERVICES},
+}
+CERT_MOUNTS = {
+    "certs": {(volume, False) for volume in CERT_VOLUMES},
+    "cert-watch": {("certs-public", True)},
+}
+OWN_UIDS = ("certs", "cert-watch")
 
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker CLI not installed")
 
@@ -181,3 +192,45 @@ def test_the_gateway_check_names_every_processor_socket(config):
         "--custodian-socket": str(b.SOCKETS["custodian"]),
         "--redactor-socket": str(b.SOCKETS["redactor"]),
     }
+
+
+def test_only_the_certs_init_writes_the_certificates_and_cert_watch_reads_only_the_public_ones(config):
+    mounts = {}
+    for name, service in config["services"].items():
+        for volume in service.get("volumes", []):
+            if volume.get("source") in CERT_VOLUMES:
+                assert volume["target"] == CERT_VOLUMES[volume["source"]], name
+                mounts.setdefault(name, set()).add((volume["source"], volume.get("read_only", False)))
+    assert mounts == CERT_MOUNTS
+
+
+def test_the_certs_init_runs_offline_without_capabilities_in_every_key_group(config):
+    service = config["services"]["certs"]
+    assert service["cap_drop"] == ["ALL"]
+    assert "cap_add" not in service
+    assert service["read_only"] is True
+    assert service["network_mode"] == "none"
+    assert service["group_add"] == [str(settings.gid) for settings in certs_module.SERVICES.values()]
+    assert service["entrypoint"] == ["python", "/app/quickstart/issue_certs.py"]
+    assert service["command"] == ["issue"]
+
+
+@pytest.mark.parametrize("name", OWN_UIDS)
+def test_a_certificate_service_runs_as_a_uid_no_other_service_uses(config, name):
+    uid, gid = config["services"][name]["user"].split(":")
+    assert uid == gid
+    sharing = {
+        other
+        for other, service in config["services"].items()
+        if other != name and service.get("user", "").split(":")[0] == uid
+    }
+    assert sharing == set()
+
+
+def test_cert_watch_checks_the_public_certificates_every_six_hours(config):
+    service = config["services"]["cert-watch"]
+    health = service["healthcheck"]
+    assert health["test"] == ["CMD", "python", "/app/quickstart/issue_certs.py", "check", "--margin-days", "30"]
+    assert health["interval"] == "6h0m0s"
+    assert health["start_period"] and health["start_interval"]
+    assert service["depends_on"]["certs"]["condition"] == "service_completed_successfully"

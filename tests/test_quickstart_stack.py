@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import json
 import os
@@ -7,13 +8,16 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+from test_issue_certs import certs_module
 
 QUICKSTART = Path(__file__).resolve().parents[1] / "examples" / "quickstart"
 COMPOSE_FILE = QUICKSTART / "compose.yaml"
+CERT_WATCH_NOW = Path(__file__).resolve().parent / "fixtures" / "quickstart-cert-watch.compose.yaml"
 IMAGE = "agent-bailiff-quickstart:dev"
 UP_TIMEOUT_SECONDS = 900
 RUN_TIMEOUT_SECONDS = 180
@@ -53,6 +57,8 @@ VOLUMES = {
     "tasks": "/var/lib/bailiff/tasks",
     "docket-receipts": "/var/lib/bailiff/receipts",
     "gateway-config": "/var/lib/bailiff/gateway",
+    "certs-public": "/var/lib/bailiff/certs/public",
+    **{f"certs-{name}": f"/var/lib/bailiff/certs/{name}" for name in certs_module.SERVICES},
 }
 PROFILE_VOLUMES = {"trace": {"exporter-data": "/var/lib/bailiff/exporter"}}
 PRIVATE_VOLUMES = (
@@ -70,11 +76,32 @@ PRIVATE_VOLUMES = (
     "decide-run",
     "custodian-run",
     "docket-receipts",
+    *(f"certs-{name}" for name in certs_module.SERVICES),
 )
 
 DECIDE = (b.DECIDE_UID, b.LEDGER_GID)
 CUSTODIAN = (b.CUSTODIAN_UID, b.CUSTODIAN_UID)
+CERTS_UID = 10012
+CERT_WATCH_UID = 10015
+CERTS = (CERTS_UID, CERTS_UID)
+FIRST = "gen-0001"
 DIRECTORY, FILE, SOCKET = "directory", "file", "socket"
+CERT_ENTRIES = {
+    "certs-public": (*CERTS, 0o755, DIRECTORY),
+    f"certs-public/{FIRST}": (*CERTS, 0o755, DIRECTORY),
+    f"certs-public/{FIRST}/ca.pem": (*CERTS, 0o444, FILE),
+    **{f"certs-public/{FIRST}/{name}.pem": (*CERTS, 0o444, FILE) for name in certs_module.SERVICES},
+    **{
+        entry: values
+        for name, settings in certs_module.SERVICES.items()
+        for entry, values in {
+            f"certs-{name}": (CERTS_UID, settings.gid, 0o750, DIRECTORY),
+            f"certs-{name}/{FIRST}": (*CERTS, 0o755, DIRECTORY),
+            f"certs-{name}/{FIRST}/{name}.pem": (*CERTS, 0o444, FILE),
+            f"certs-{name}/{FIRST}/{name}.key": (CERTS_UID, settings.gid, 0o440, FILE),
+        }.items()
+    },
+}
 EXPECTED_ENTRIES = {
     "pins": (0, 0, 0o755, DIRECTORY),
     "pins/issuer": (b.ISSUER_UID, b.ISSUER_UID, 0o755, DIRECTORY),
@@ -149,6 +176,7 @@ EXPECTED_ENTRIES = {
     "docket-receipts": (b.ARCHIVER_UID, b.DOCKET_READERS_GID, 0o750, DIRECTORY),
     "gateway-config": (*CUSTODIAN, 0o755, DIRECTORY),
     "gateway-config/gateway.json": (*CUSTODIAN, 0o644, FILE),
+    **CERT_ENTRIES,
 }
 TRANSIENT_ENTRIES = {
     re.compile(r"ledger/ledger\.db-(shm|wal)"): (*DECIDE, 0o640, FILE),
@@ -162,6 +190,7 @@ EXPECTED_IDENTITIES = {
         {b.CUSTODIAN_UID, b.DOCKET_WRITERS_GID, b.LEDGER_GID, b.GATEWAY_SOCKETS_GID},
     ),
     "gateway": (b.GATEWAY_UID, b.GATEWAY_UID, {b.GATEWAY_UID, b.GATEWAY_SOCKETS_GID}),
+    "cert-watch": (CERT_WATCH_UID, CERT_WATCH_UID, {CERT_WATCH_UID}),
 }
 ONE_SHOTS = (
     "issuer-init",
@@ -176,6 +205,7 @@ ONE_SHOTS = (
     "gitea-admin",
     "bootstrap",
     "agent-key",
+    "certs",
 )
 STAT_SCRIPT = """
 import json, os, stat, sys
@@ -210,6 +240,10 @@ for top in sorted(os.listdir("/v")):
                 digest = hashlib.sha256(handle.read()).hexdigest()
             snapshot[path[3:]] = [digest, info.st_mtime_ns, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)]
 json.dump(snapshot, sys.stdout)
+"""
+CA_SCRIPT = """
+import json
+print(json.dumps(open("/v/certs-public/current/ca.pem").read()))
 """
 READ_PROBE = """
 import json, os, sys
@@ -338,6 +372,7 @@ def test_the_agent_uid_reads_no_bailiff_state(stack):
         "agent-public",
         "tasks",
         "gateway-config",
+        "certs-public",
     }
 
 
@@ -385,8 +420,61 @@ def test_bootstrap_rerun_idempotent(stack):
         ("agent-key", "key"),
     ]:
         assert outputs[service].strip().splitlines()[-1] == f"{step}: kept", outputs[service]
+    assert outputs["certs"].strip().splitlines()[-1] == f"kept {FIRST}", outputs["certs"]
     lines = outputs["bootstrap"].strip().splitlines()
     assert lines[-2:] == ["credential: kept", "gitea: kept"], outputs["bootstrap"]
     assert not any(line.startswith("gitea: created") for line in lines)
     reach = json.loads("\n".join(line for line in lines if not line.startswith(("credential:", "gitea:"))))
     assert reach["what this token can reach"]["probes"][f"read issues in {b.ORG}/demo"] == "allowed"
+
+
+def health(stack, service):
+    output = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .State.Health}}", stack.container(service)],
+        capture_output=True,
+        text=True,
+        timeout=RUN_TIMEOUT_SECONDS,
+        check=True,
+    ).stdout
+    return json.loads(output)
+
+
+def test_cert_watch_is_healthy_on_a_fresh_set(stack):
+    state = health(stack, "cert-watch")
+    assert state["Status"] == "healthy", state
+    assert state["Log"][-1]["Output"].strip() == "certificates ok", state
+
+
+def test_the_install_ca_is_copied_out_with_compose_cp(stack):
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "ca.pem"
+        stack.compose("cp", "cert-watch:/var/lib/bailiff/certs/public/current/ca.pem", str(target))
+        copied = target.read_text()
+    assert copied == stack.probe(CA_SCRIPT)
+    assert copied.startswith("-----BEGIN CERTIFICATE-----")
+
+
+def cert_snapshot(stack):
+    return {path: values for path, values in stack.probe(SNAPSHOT_SCRIPT).items() if path.startswith("certs-")}
+
+
+def test_a_second_up_keeps_the_certs(stack):
+    before = cert_snapshot(stack)
+    stack.compose("up", "--detach", "--wait", timeout=UP_TIMEOUT_SECONDS)
+    assert cert_snapshot(stack) == before
+    assert len(before) == len(certs_module.SERVICES) * 3 + 1
+    assert stack.compose("logs", "--no-log-prefix", "certs").strip().splitlines()[-1] == f"kept {FIRST}"
+
+
+def test_cert_watch_turns_unhealthy_on_a_leaf_within_the_margin(stack):
+    stack.compose("stop")
+    issued = stack.compose("run", "--rm", "--no-deps", "certs", "issue", "--reissue", "--days", "20")
+    assert issued.strip().splitlines()[-1] == "issued gen-0002", issued
+    watch = copy.copy(stack)
+    watch.files = (*stack.files, CERT_WATCH_NOW)
+    watch.compose("up", "--detach", "--no-deps", "--wait", "--wait-timeout", "60", "cert-watch", expect=1)
+    state = health(stack, "cert-watch")
+    assert state["Status"] == "unhealthy", state
+    assert state["Log"][-1]["ExitCode"] == 1, state
+    output = state["Log"][-1]["Output"]
+    assert all(f"{name}.pem expires at" in output for name in certs_module.SERVICES), output

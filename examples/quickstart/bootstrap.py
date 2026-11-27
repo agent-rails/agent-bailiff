@@ -119,7 +119,7 @@ STACK_HOSTS = frozenset(
         "docket-init",
         "gateway-init", "bootstrap", "agent-key", "task-issuer", "gitea-task", "gitea-secret", "gitea-admin",
         "docket", "decide", "custodian", "gateway-check", "gateway", "agent", "reader", "archiver", "control",
-        "jaeger", "exporter", "rule",
+        "jaeger", "exporter", "rule", "certs", "cert-watch",
     }
 )  # fmt: skip
 UPSTREAM_OPTIONAL_FIELDS = frozenset({"ca_file"})
