@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
+from agent_bailiff.adapters.gitea.token_check import DEFAULT_MAX_REPOS, TokenCheckRefused, check_token
 from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
@@ -106,6 +107,7 @@ EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 EXIT_UNCOUNTED = 3
 EXIT_FORGED_GRANT = 4
+EXIT_NO_CREDENTIAL = 2
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
 GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
@@ -369,6 +371,7 @@ def _parser() -> argparse.ArgumentParser:
         action.set_defaults(handler=_control)
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
+    _add_credential_check(commands)
     _add_proxy(commands)
     _add_routes(commands)
     _add_task(commands)
@@ -413,6 +416,24 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         "--docket-state-dir", type=Path, required=True, help="the docket writer's own 0700 state directory"
     )
     issue.set_defaults(handler=_task_issue)
+
+
+def _add_credential_check(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    check = commands.add_parser(
+        "credential-check",
+        help="check a provider credential read from stdin before put-credential; needs the network, not the store",
+    )
+    check.add_argument("--provider", required=True, choices=("gitea",))
+    check.add_argument("--api-url", required=True, help="the provider API URL, e.g. https://gitea.example/api/v1")
+    check.add_argument("--binding-resource", required=True, help="gitea/repos/<owner>/* or gitea/repos/<owner>/<repo>")
+    check.add_argument(
+        "--required", action="append", required=True, help="a scope the binding needs, e.g. read:repository; repeat"
+    )
+    check.add_argument("--ca-file", help="CA bundle for an https provider API URL")
+    check.add_argument(
+        "--max-repos", type=int, default=DEFAULT_MAX_REPOS, help="refuse when a repository search reports more"
+    )
+    check.set_defaults(handler=_credential_check)
 
 
 def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1081,6 +1102,37 @@ def _put_credential(args: argparse.Namespace) -> int:
     return 0
 
 
+def _credential_check(args: argparse.Namespace) -> int:
+    try:
+        secret = _read_line()
+    except ValueError as exc:
+        return _refused("credential-check", exc)
+    if not secret:
+        print(f"{PROG} credential-check refused: the credential on stdin is empty", file=sys.stderr)
+        return EXIT_NO_CREDENTIAL
+    if not secret.isascii():
+        return _refused("credential-check", "the credential on stdin is not ASCII")
+    try:
+        result = check_token(
+            secret.decode("ascii"),
+            api_url=args.api_url,
+            binding_resource=args.binding_resource,
+            required=args.required,
+            cafile=args.ca_file,
+            max_repos=args.max_repos,
+        )
+    except (TokenCheckRefused, OSError, ValueError) as exc:
+        return _refused("credential-check", exc)
+    document = {
+        "fingerprint": _credential_fingerprint(secret),
+        "login": result.login,
+        "private_repositories": result.private_total,
+        "scopes": list(result.scopes),
+    }
+    print(json.dumps(document, sort_keys=True))
+    return 0
+
+
 def _check_credentials(args: argparse.Namespace) -> int:
     try:
         check = run.check_credentials(load_custodian(args.config))
@@ -1134,14 +1186,18 @@ def _expected_fingerprint(value: str) -> str:
 
 
 def _read_secret() -> bytes:
-    secret = _read_limited(sys.stdin.buffer, MAX_SECRET_BYTES, "secret")
-    for ending in (b"\r\n", b"\n"):
-        if secret.endswith(ending):
-            secret = secret[: -len(ending)]
-            break
+    secret = _read_line()
     if not secret:
         raise ValueError("the secret on stdin is empty")
     return secret
+
+
+def _read_line() -> bytes:
+    line = _read_limited(sys.stdin.buffer, MAX_SECRET_BYTES, "secret")
+    for ending in (b"\r\n", b"\n"):
+        if line.endswith(ending):
+            return line[: -len(ending)]
+    return line
 
 
 def _read_record(source: str) -> str:

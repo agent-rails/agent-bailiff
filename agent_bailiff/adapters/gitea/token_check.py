@@ -14,6 +14,7 @@ from agent_bailiff.strict_json import parse_strict_json
 ALL = "all"
 PUBLIC_ONLY = "public-only"
 ACCESS_LEVELS = {"read": 1, "write": 2}
+REPOSITORY_SCOPES = frozenset({"read:repository", "write:repository"})
 SCOPE_FORM = re.compile(r"(read|write):([a-z]+)")
 LOGIN_FORM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 NAME = r"[A-Za-z0-9._-]+"
@@ -128,6 +129,8 @@ def parse_required(required: Iterable[str]) -> frozenset[str]:
             raise ValueError(
                 f"required permission {_shown(name)} is not read:<category>, write:<category> or public-only"
             )
+    if not permissions & REPOSITORY_SCOPES:
+        raise ValueError("required permissions must include read:repository or write:repository")
     return permissions
 
 

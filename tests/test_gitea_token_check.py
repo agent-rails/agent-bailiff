@@ -1,12 +1,16 @@
+import hashlib
+import io
 import json
 import logging
 import socket
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from agent_bailiff import cli
 from agent_bailiff.adapters.gitea import token_check
 from agent_bailiff.adapters.gitea.token_check import TokenCheck, TokenCheckRefused, broader_scopes, check_token
 
@@ -187,6 +191,13 @@ def test_a_scope_of_unknown_form_is_refused(gitea, scope):
 @pytest.mark.parametrize("required", [["all"], ["repository"], ["read:repository", "admin:x"], "read:repository"])
 def test_required_permissions_of_unknown_form_are_refused(gitea, required):
     with pytest.raises(ValueError, match="required permission"):
+        check(gitea, required=required)
+    assert gitea.requests == []
+
+
+@pytest.mark.parametrize("required", [["read:issue"], ["public-only"], ["write:issue", "read:user"], []])
+def test_required_permissions_without_repository_access_are_refused(gitea, required):
+    with pytest.raises(ValueError, match="must include read:repository or write:repository"):
         check(gitea, required=required)
     assert gitea.requests == []
 
@@ -578,3 +589,132 @@ def test_a_search_status_other_than_200_is_refused(gitea, status, reason):
     gitea.routes[SEARCH] = lambda query: (status, {}, b"{}")
     assert refusal(gitea).reason == reason
     assert len(gitea.searches()) == 1
+
+
+def credential_check(gitea, stdin, *extra, api_url=None):
+    original = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(stdin))
+    try:
+        arguments = ["credential-check", "--provider", "gitea", "--api-url", api_url or gitea.url]
+        arguments += ["--binding-resource", BINDING, "--required", "read:issue", "--required", "read:repository"]
+        return cli.main([*arguments, *extra])
+    finally:
+        sys.stdin = original
+
+
+def test_credential_check_passes_and_prints_the_fingerprint(gitea, capsys):
+    gitea.token(["read:repository", "read:issue"])
+    gitea.private = [repo(1, "quickstart/a")]
+    assert credential_check(gitea, NEEDLE.encode() + b"\n") == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "fingerprint": hashlib.sha256(NEEDLE.encode()).hexdigest(),
+        "login": "agent",
+        "private_repositories": 1,
+        "scopes": ["read:issue", "read:repository"],
+    }
+    assert NEEDLE not in captured.out + captured.err
+    assert {headers["Authorization"] for _, headers in gitea.requests} == {NEEDLE}
+
+
+def test_credential_check_fingerprint_matches_put_credential(gitea, capsys):
+    gitea.token(["read:repository"])
+    assert credential_check(gitea, NEEDLE.encode() + b"\r\n") == 0
+    fingerprint = json.loads(capsys.readouterr().out)["fingerprint"]
+    assert fingerprint == cli._credential_fingerprint(NEEDLE.encode())
+
+
+@pytest.mark.parametrize("stdin", [b"", b"\n", b"\r\n"])
+def test_credential_check_with_an_empty_stdin_exits_2(gitea, capsys, stdin):
+    assert credential_check(gitea, stdin) == cli.EXIT_NO_CREDENTIAL == 2
+    captured = capsys.readouterr()
+    assert captured.out == "" and "the credential on stdin is empty" in captured.err
+    assert gitea.requests == []
+
+
+def test_credential_check_refusal_exits_1_with_the_reason(gitea, capsys):
+    gitea.token(["read:repository", "write:admin"])
+    assert credential_check(gitea, NEEDLE.encode() + b"\n") == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "credential-check refused: broader_scopes" in captured.err and "write:admin" in captured.err
+    assert NEEDLE not in captured.err
+
+
+def test_credential_check_refuses_reach_outside_the_binding(gitea, capsys):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, "other/secret")]
+    assert credential_check(gitea, NEEDLE.encode() + b"\n") == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == "" and "outside_binding" in captured.err and "other/secret" in captured.err
+
+
+def test_credential_check_refuses_past_the_item_cap(gitea, capsys):
+    gitea.token(["read:repository"])
+    gitea.private = [repo(1, "quickstart/a"), repo(2, "quickstart/b")]
+    assert credential_check(gitea, NEEDLE.encode() + b"\n", "--max-repos", "1") == cli.EXIT_REFUSED
+    assert "too_many_repos" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("stdin", "message"),
+    [
+        (NEEDLE.encode() + b"\nsecond line\n", "printable ASCII"),
+        ("token n\u00e9edle".encode() + b"\n", "not ASCII"),
+        (b"x" * (cli.MAX_SECRET_BYTES + 1), "larger than"),
+    ],
+)
+def test_credential_check_refuses_a_stdin_that_is_not_one_header_line(gitea, capsys, stdin, message):
+    assert credential_check(gitea, stdin) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == "" and message in captured.err and "needle" not in captured.err
+    assert gitea.requests == []
+
+
+def test_credential_check_config_refuses_required_without_repository(gitea, capsys):
+    original = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(NEEDLE.encode() + b"\n"))
+    try:
+        arguments = ["credential-check", "--provider", "gitea", "--api-url", gitea.url]
+        code = cli.main([*arguments, "--binding-resource", BINDING, "--required", "read:issue"])
+    finally:
+        sys.stdin = original
+    assert code == cli.EXIT_REFUSED
+    assert "must include read:repository" in capsys.readouterr().err
+    assert gitea.requests == []
+
+
+@pytest.mark.parametrize(
+    ("api_url", "extra", "message"),
+    [
+        ("http://gitea.example.com/api/v1", (), "must use https"),
+        ("ftp://127.0.0.1/api/v1", (), ""),
+        (None, ("--ca-file", "/nonexistent-ca.pem"), "needs an https"),
+    ],
+)
+def test_credential_check_config_follows_the_transport_rules(gitea, capsys, api_url, extra, message):
+    assert credential_check(gitea, NEEDLE.encode() + b"\n", *extra, api_url=api_url) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert captured.out == "" and "credential-check refused" in captured.err and message in captured.err
+    assert gitea.requests == []
+
+
+def test_credential_check_refuses_a_missing_ca_file(capsys):
+    original = sys.stdin
+    sys.stdin = io.TextIOWrapper(io.BytesIO(NEEDLE.encode() + b"\n"))
+    try:
+        arguments = ["credential-check", "--provider", "gitea", "--api-url", "https://gitea.example.com/api/v1"]
+        arguments += ["--binding-resource", BINDING, "--required", "read:repository"]
+        code = cli.main([*arguments, "--ca-file", "/nonexistent-ca.pem"])
+    finally:
+        sys.stdin = original
+    assert code == cli.EXIT_REFUSED
+    assert "credential-check refused" in capsys.readouterr().err
+
+
+def test_credential_check_refuses_a_provider_other_than_gitea(gitea, capsys):
+    with pytest.raises(SystemExit) as raised:
+        credential_check(gitea, NEEDLE.encode(), "--provider", "github")
+    assert raised.value.code == 2
+    assert "argument --provider: invalid choice: 'github'" in capsys.readouterr().err
+    assert gitea.requests == []
