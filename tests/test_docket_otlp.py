@@ -215,6 +215,13 @@ def test_span_attributes_carry_the_record_but_never_arguments(docket):
     assert "bailiff.note" not in attributes
 
 
+def test_span_attributes_carry_credential_exceptions_only_when_present(docket):
+    plain = docket.append("custodian", make_entry(1, trace_id=TRACE))
+    marked = docket.append("custodian", make_entry(2, trace_id=TRACE, credential_exceptions=("unredactable",)))
+    assert "bailiff.credential_exceptions" not in to_span(verified(plain)).attributes
+    assert to_span(verified(marked)).attributes["bailiff.credential_exceptions"] == ["unredactable"]
+
+
 def test_a_release_is_labelled_outcome_unknown(docket):
     record = docket.append("custodian", make_entry(1, trace_id=TRACE, decision="release", performed=True))
     assert to_span(verified(record)).attributes["bailiff.note"] == RELEASED

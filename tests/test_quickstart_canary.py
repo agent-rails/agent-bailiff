@@ -19,12 +19,6 @@ ALLOWED_LOG_SERVICES = {"gitea"}
 UPSTREAM_CASES = ("allowed", "missing issue", "missing repo")
 BASE64_ALIGNMENTS = 3
 CONTROL = 1 + BASE64_ALIGNMENTS
-CREDENTIAL_SCRIPT = """
-import sys
-sys.path.insert(0, "/app/quickstart")
-import bootstrap
-print(bootstrap.stored_credential(bootstrap.load_upstream(bootstrap.UPSTREAM_FILE)))
-"""
 VOLUME_SCAN = """
 import json, os, stat, sys
 needles = [needle.encode() for needle in json.loads(sys.argv[1])]
@@ -76,7 +70,7 @@ json.dump(hits, sys.stdout)
 
 
 def plaintext_credential(stack):
-    output = stack.compose("run", "--rm", "--no-deps", "--entrypoint", "python", "bootstrap", "-c", CREDENTIAL_SCRIPT)
+    output = test_quickstart_stack.stored_header(stack)
     scheme, token = output.strip().split(" ")
     assert scheme == "token" and len(token) >= 40
     return token
@@ -165,7 +159,7 @@ def test_no_surface_holds_the_credential(stack):
     assert only_control(agent) and ["/var/lib/bailiff/tasks/task.json", CONTROL] in agent, agent
     logs = log_hits(stack, [*patterns[:CONTROL], "credential: "])
     assert {service for service, found in logs.items() if found != [CONTROL]} <= ALLOWED_LOG_SERVICES, logs
-    assert logs["bootstrap"] == [CONTROL]
+    assert logs["credential-put"] == [CONTROL]
     entry_id = verified_rows(stack, report["task_id"])[0]["entry"]["entry_id"]
     assert jaeger_hits(stack, [*patterns[:CONTROL], entry_id]) == [CONTROL]
 

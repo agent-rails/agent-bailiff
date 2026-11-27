@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import dataclasses
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -21,6 +22,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from agent_bailiff.adapters.agentgateway.__main__ import main as check_config_main
 from agent_bailiff.adapters.agentgateway.server import ProcessorLocked
+from agent_bailiff.adapters.gitea.token_check import (
+    DEFAULT_MAX_REPOS,
+    DEFAULT_TIMEOUT_SECONDS,
+    TokenCheckRefused,
+    check_token,
+)
 from agent_bailiff.client import BailiffClient, GatewayError
 from agent_bailiff.control.control import LEVELS, ControlRefused, ControlUnrecorded, Outcome
 from agent_bailiff.custodian.backend import BackendError
@@ -105,9 +112,12 @@ EXIT_UNVERIFIED = 2
 EXIT_UNRECORDED = 3
 EXIT_UNCOUNTED = 3
 EXIT_FORGED_GRANT = 4
+EXIT_NO_CREDENTIAL = 2
 TASK_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin", CUSTODIAN_HOP: "--custodian-pin", CONTROL_HOP: "--control-pin"}
 GRANT_ROLE_FLAGS = {DECIDE_HOP: "--decide-pin"}
 MAX_SECRET_BYTES = 65536
+CREDENTIAL_CHECK_GRACE_SECONDS = 1.0
+FINGERPRINT_DIGITS = frozenset("0123456789abcdef")
 TORN_TAIL_HINT = "an append may still be in progress, so run again; if it stays, see Torn tail repair in docs/DOCKET.md"
 LOG_FORMAT = "%(asctime)sZ %(levelname)s %(name)s: %(message)s"
 STARTUP_ERRORS = (
@@ -338,6 +348,17 @@ def _parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="store a credential echo redaction cannot cover; the exception is recorded with it",
             )
+            put.add_argument(
+                "--accept-broader",
+                action="store_true",
+                help="store a credential whose provider privilege may exceed the binding; "
+                "the exception is recorded with it and docketed at every release",
+            )
+            put.add_argument(
+                "--expect-fingerprint",
+                help="refuse unless the credential's sha256, as credential-check prints it, matches; "
+                "this catches a pasted wrong token and proves nothing about the check",
+            )
             put.set_defaults(handler=_put_credential)
             check = component.add_parser(
                 "check-credentials", help="list stored credentials the custodian would refuse to release"
@@ -356,6 +377,7 @@ def _parser() -> argparse.ArgumentParser:
         action.set_defaults(handler=_control)
     for action in (revoke, suspend):
         action.add_argument("--record", required=True, help="file holding one signed docket line, or - for stdin")
+    _add_credential_check(commands)
     _add_proxy(commands)
     _add_routes(commands)
     _add_task(commands)
@@ -400,6 +422,24 @@ def _add_task(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> 
         "--docket-state-dir", type=Path, required=True, help="the docket writer's own 0700 state directory"
     )
     issue.set_defaults(handler=_task_issue)
+
+
+def _add_credential_check(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    check = commands.add_parser(
+        "credential-check",
+        help="check a provider credential read from stdin before put-credential; needs the network, not the store",
+    )
+    check.add_argument("--provider", required=True, choices=("gitea",))
+    check.add_argument("--api-url", required=True, help="the provider API URL, e.g. https://gitea.example/api/v1")
+    check.add_argument("--binding-resource", required=True, help="gitea/repos/<owner>/* or gitea/repos/<owner>/<repo>")
+    check.add_argument(
+        "--required", action="append", required=True, help="a scope the binding needs, e.g. read:repository; repeat"
+    )
+    check.add_argument("--ca-file", help="CA bundle for an https provider API URL")
+    check.add_argument(
+        "--max-repos", type=int, default=DEFAULT_MAX_REPOS, help="refuse when a repository search reports more"
+    )
+    check.set_defaults(handler=_credential_check)
 
 
 def _add_proxy(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -1047,6 +1087,10 @@ def _task_issue(args: argparse.Namespace) -> int:
 def _put_credential(args: argparse.Namespace) -> int:
     try:
         secret = _read_secret()
+        if args.expect_fingerprint is not None and not hmac.compare_digest(
+            _credential_fingerprint(secret), _expected_fingerprint(args.expect_fingerprint)
+        ):
+            return _refused("put-credential", "the credential on stdin does not match --expect-fingerprint")
         run.put_credential(
             load_custodian(args.config),
             args.tenant,
@@ -1054,6 +1098,7 @@ def _put_credential(args: argparse.Namespace) -> int:
             args.target,
             secret,
             accept_unredactable=args.accept_unredactable,
+            accept_broader=args.accept_broader,
         )
     except UnredactableCredential as exc:
         return _refused("put-credential", f"{exc}; store a longer credential or pass --accept-unredactable")
@@ -1061,6 +1106,47 @@ def _put_credential(args: argparse.Namespace) -> int:
         return _refused("put-credential", exc)
     print("stored")
     return 0
+
+
+def _credential_check(args: argparse.Namespace) -> int:
+    try:
+        secret = _read_line()
+    except ValueError as exc:
+        return _refused("credential-check", exc)
+    if not secret:
+        print(f"{PROG} credential-check refused: the credential on stdin is empty", file=sys.stderr)
+        return EXIT_NO_CREDENTIAL
+    if not secret.isascii():
+        return _refused("credential-check", "the credential on stdin is not ASCII")
+    previous = signal.signal(signal.SIGALRM, _expire_credential_check)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, DEFAULT_TIMEOUT_SECONDS + CREDENTIAL_CHECK_GRACE_SECONDS)
+        result = check_token(
+            secret.decode("ascii"),
+            api_url=args.api_url,
+            binding_resource=args.binding_resource,
+            required=args.required,
+            cafile=args.ca_file,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+            max_repos=args.max_repos,
+        )
+    except (TokenCheckRefused, OSError, ValueError) as exc:
+        return _refused("credential-check", exc)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    document = {
+        "fingerprint": _credential_fingerprint(secret),
+        "login": result.login,
+        "private_repositories": result.private_total,
+        "scopes": list(result.scopes),
+    }
+    print(json.dumps(document, sort_keys=True))
+    return 0
+
+
+def _expire_credential_check(_signum: int, _frame: object) -> None:
+    raise TokenCheckRefused("deadline_exceeded", "the provider check ran past its deadline")
 
 
 def _check_credentials(args: argparse.Namespace) -> int:
@@ -1105,15 +1191,29 @@ def _control(args: argparse.Namespace) -> int:
     return 0
 
 
+def _credential_fingerprint(secret: bytes) -> str:
+    return hashlib.sha256(secret).hexdigest()
+
+
+def _expected_fingerprint(value: str) -> str:
+    if len(value) != 64 or not set(value) <= FINGERPRINT_DIGITS:
+        raise ValueError("--expect-fingerprint must be 64 lowercase hex digits")
+    return value
+
+
 def _read_secret() -> bytes:
-    secret = _read_limited(sys.stdin.buffer, MAX_SECRET_BYTES, "secret")
-    for ending in (b"\r\n", b"\n"):
-        if secret.endswith(ending):
-            secret = secret[: -len(ending)]
-            break
+    secret = _read_line()
     if not secret:
         raise ValueError("the secret on stdin is empty")
     return secret
+
+
+def _read_line() -> bytes:
+    line = _read_limited(sys.stdin.buffer, MAX_SECRET_BYTES, "secret")
+    for ending in (b"\r\n", b"\n"):
+        if line.endswith(ending):
+            return line[: -len(ending)]
+    return line
 
 
 def _read_record(source: str) -> str:

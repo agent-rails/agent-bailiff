@@ -14,6 +14,7 @@ from agent_bailiff.strict_json import parse_strict_json
 ENTRY_TYP = "agent-bailiff/docket-entry/v1"
 HANDLE_LEVELS = frozenset({"agent_key", "link", "task", "tenant", "root"})
 CREDENTIAL_TIERS = frozenset({"target-bound", "gateway-bound", "exposed", "effector"})
+CREDENTIAL_EXCEPTIONS = frozenset({"broader", "unredactable"})
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class Entry:
     receipt_digest: str | None = None
     clearance_digest: str | None = None
     credential_tier: str | None = None
+    credential_exceptions: tuple[str, ...] = ()
     reason: str | None = None
     latency_ms: int | None = None
     handles: Mapping[str, str] = field(default_factory=dict)
@@ -80,9 +82,11 @@ class WriterPin:
 REQUIRED_STRINGS = frozenset({"entry_id", "trace_id", "hop", "component", "decision"})
 NON_NEGATIVE_INTEGERS = frozenset({"at"})
 OPTIONAL_INTEGERS = frozenset({"cost", "latency_ms"})
-ENTRY_FIELDS = frozenset(item.name for item in fields(Entry))
+OPTIONAL_ENTRY_FIELDS = frozenset({"credential_exceptions"})
+ENTRY_FIELDS = frozenset(item.name for item in fields(Entry)) - OPTIONAL_ENTRY_FIELDS
 RECORD_BASE = frozenset({"writer", "seq", "prev"})
 RECORD_FIELDS = {ENTRY_TYP: ENTRY_FIELDS | RECORD_BASE, GRANT_TYP: GRANT_FIELDS | RECORD_BASE}
+RECORD_OPTIONAL_FIELDS = {ENTRY_TYP: OPTIONAL_ENTRY_FIELDS, GRANT_TYP: frozenset()}
 
 
 def encode_record(
@@ -104,7 +108,7 @@ def decode_record(token: object, kid_writers: Mapping[str, WriterPin]) -> Record
     if typ not in RECORD_FIELDS:
         return Refused("wrong_typ", "record type is not known")
     pinned = {kid: pin.key for kid, pin in kid_writers.items()}
-    result = verify(token, pinned, typ, RECORD_FIELDS[typ])
+    result = verify(token, pinned, typ, RECORD_FIELDS[typ], optional_fields=RECORD_OPTIONAL_FIELDS[typ])
     if isinstance(result, Refused):
         return result
     body = result.payload
@@ -146,7 +150,7 @@ def _peek_typ(token: str) -> str | Refused:
 def _entry(body: Mapping[str, Any]) -> Entry:
     values = {name: body[name] for name in ENTRY_FIELDS}
     values["links"] = tuple(values["links"])
-    return Entry(**values)
+    return Entry(**values, credential_exceptions=tuple(body.get("credential_exceptions", ())))
 
 
 def _grant(body: Mapping[str, Any]) -> Grant:
@@ -154,9 +158,11 @@ def _grant(body: Mapping[str, Any]) -> Grant:
 
 
 def _entry_body(entry: Entry) -> dict[str, Any]:
-    body = {item.name: getattr(entry, item.name) for item in fields(Entry)}
+    body = {name: getattr(entry, name) for name in ENTRY_FIELDS}
     body["links"] = list(entry.links)
     body["handles"] = dict(entry.handles)
+    if entry.credential_exceptions:
+        body["credential_exceptions"] = list(entry.credential_exceptions)
     return body
 
 
@@ -193,10 +199,21 @@ def _check_entry_body(body: Mapping[str, Any]) -> None:
     tier = body["credential_tier"]
     if tier is not None and tier not in CREDENTIAL_TIERS:
         raise ValueError(f"credential_tier must be one of {', '.join(sorted(CREDENTIAL_TIERS))} or null")
+    if "credential_exceptions" in body:
+        _check_credential_exceptions(body["credential_exceptions"])
     special = REQUIRED_STRINGS | NON_NEGATIVE_INTEGERS | OPTIONAL_INTEGERS | {"performed", "links", "handles"}
     for name in ENTRY_FIELDS - special:
         if body[name] is not None and not _is_text(body[name]):
             raise ValueError(f"{name} must be a non-empty str or null")
+
+
+def _check_credential_exceptions(exceptions: object) -> None:
+    if not isinstance(exceptions, list | tuple) or not exceptions:
+        raise ValueError("credential_exceptions must be a non-empty list when present")
+    if not all(isinstance(name, str) and name in CREDENTIAL_EXCEPTIONS for name in exceptions):
+        raise ValueError(f"credential_exceptions may hold only {', '.join(sorted(CREDENTIAL_EXCEPTIONS))}")
+    if list(exceptions) != sorted(set(exceptions)):
+        raise ValueError("credential_exceptions must be sorted with no duplicates")
 
 
 def _check_handles(handles: object) -> None:

@@ -1,6 +1,6 @@
 # Upstream config, version 1
 
-Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-stub}.json`; set `BAILIFF_UPSTREAMS` to mount another directory as `upstreams/`), in the `decide`, `custodian` and `bootstrap` steps. It sets the routes, the cost table, and the credential bindings for one Streamable HTTP MCP server.
+Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-stub}.json`; set `BAILIFF_UPSTREAMS` to mount another directory as `upstreams/`), in the `decide`, `custodian`, `bootstrap` and `credential-put` steps. It sets the routes, the cost table, and the credential bindings for one Streamable HTTP MCP server.
 
 ```json
 {
@@ -11,7 +11,10 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-
   "credential_header": "Authorization",
   "target": "gitea",
   "binding_resource": "gitea/repos/quickstart/*",
-  "routes_file": "gitea-routes.json"
+  "routes_file": "gitea-routes.json",
+  "provider": "gitea",
+  "provider_api_url": "http://gitea:3000/api/v1",
+  "required_permissions": ["read:issue", "read:repository"]
 }
 ```
 
@@ -23,9 +26,10 @@ Bootstrap reads one upstream config, `BAILIFF_UPSTREAM` (`upstreams/${UPSTREAM:-
 | `credential_id`, `target` | The custodian credential the gateway injects for every route. Store it with `agent-bailiff custodian put-credential --tenant quickstart --credential-id <id> --target <target>`. |
 | `credential_header` | HTTP field name the custodian sets, for example `Authorization`. |
 | `binding_resource` | Resource the credential binding covers; a wildcard only as a final `/*` segment. |
-| `ca_file` | Optional, `https://` only. PEM certificates beside this file; the gateway trusts only these for the upstream, not the system roots. Bootstrap keeps the certificates alone, so a bundled private key is dropped, and fails on a file with none. Without it the gateway uses its system roots. |
+| `ca_file` | Optional, `https://` only. PEM certificates beside this file; the gateway trusts only these for the upstream, not the system roots. Bootstrap keeps the certificates alone, so a bundled private key is dropped, and fails on a file with none. Without it the gateway uses its system roots. When `provider_api_url` is `https://` on the same host as `url`, `credential-check` gets it as `--ca-file` too. |
+| `provider`, `provider_api_url`, `required_permissions` | Optional, all three or none; the `gitea` profile needs them. `provider` is `gitea`. `provider_api_url` follows the `url` rules, for example `http://gitea:3000/api/v1`. `required_permissions` lists the scopes the bindings need and must include `read:repository` or `write:repository`. Before the custodian stores a token, `agent-bailiff credential-check` refuses one with broader scopes or with private reach outside `binding_resource`. |
 | `routes_file` | Route table beside this file: `{"routes": [...]}`, non-empty, every route on `service`, every resource filled. `agent-bailiff routes generate` drafts one from the server's `tools/list`. |
 
-The file is strict JSON of at most 64 KiB with exactly these fields, `ca_file` optional; duplicate keys, symlinks and unknown fields fail bootstrap. Every routed tool costs 1 unit of task budget.
+The file is strict JSON of at most 64 KiB with exactly these fields, `ca_file` and the provider fields optional; duplicate keys, symlinks and unknown fields fail bootstrap. Every routed tool costs 1 unit of task budget.
 
 The gateway reaches only the one configured upstream. It does not follow redirects: a `307` comes back to the agent as `outcome_unknown: http_307`, and the redirect target receives nothing.

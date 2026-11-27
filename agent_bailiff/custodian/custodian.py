@@ -22,7 +22,7 @@ from agent_bailiff.custodian.inflight import InflightFull, InflightRelease, Infl
 from agent_bailiff.custodian.inflight import Reservation as InflightReservation
 from agent_bailiff.custodian.ratelimit import TaskRateLimiter
 from agent_bailiff.custodian.release import RELEASE_HEADER, ReleaseSigner, ReleaseTooLarge
-from agent_bailiff.custodian.store import CredentialStore, CredentialUnavailable, header_value
+from agent_bailiff.custodian.store import UNREDACTABLE, CredentialStore, CredentialUnavailable, header_value
 from agent_bailiff.decide.clearance import Clearance, decode_clearance, verify_clearance
 from agent_bailiff.decide.decider import DocketWriter, SuspensionCheck
 from agent_bailiff.decide.identity import ArgsError, ArgsSnapshot, derive_op_id, request_digest, snapshot_args
@@ -302,7 +302,7 @@ class Custodian:
             self._trip_canary(clearance.tenant, clearance.task, entry, now)
             raise _Refusal("canary")
         self._precheck(clearance, now)
-        header_value = self._decrypt(binding)
+        header_value, exceptions = self._decrypt(binding)
         if self._suspension.suspended is not False:
             raise _Refusal("suspended")
         _warn_unredactable(header_value)
@@ -316,6 +316,7 @@ class Custodian:
                 reason="ok",
                 performed=True,
                 credential_tier=TIER,
+                credential_exceptions=exceptions,
                 latency_ms=self._elapsed_ms(started),
             )
             self._record(release_entry)
@@ -517,7 +518,7 @@ class Custodian:
                 raise _Refusal(result)
             self._limiter.record(clearance.tenant, clearance.task, now)
 
-    def _decrypt(self, binding: CredentialBinding) -> str:
+    def _decrypt(self, binding: CredentialBinding) -> tuple[str, tuple[str, ...]]:
         try:
             stored = self._store.get(binding.tenant, binding.credential_id, binding.target)
         except CredentialUnavailable:
@@ -526,7 +527,7 @@ class Custodian:
         if value is None:
             raise _Refusal("credential_unavailable")
         problem = redaction_problem(value)
-        if problem is not None and stored.exception is None:
+        if problem is not None and UNREDACTABLE not in stored.exceptions:
             logger.warning(
                 "stored credential %r for target %r cannot be redacted from results and has no accepted exception: %s",
                 binding.credential_id,
@@ -534,7 +535,7 @@ class Custodian:
                 problem,
             )
             raise _Refusal("credential_unredactable")
-        return value
+        return value, tuple(sorted(stored.exceptions))
 
     def _record_refusal(self, clearance: Clearance, entry: Entry, reason: str, started: int) -> None:
         key = (clearance.tenant, clearance.task, clearance.op_id, reason)

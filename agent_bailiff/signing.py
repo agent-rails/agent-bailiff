@@ -65,8 +65,12 @@ def verify(
     allowed_fields: Iterable[str],
     *,
     max_chars: int = MAX_TOKEN_CHARS,
+    optional_fields: Iterable[str] = (),
 ) -> VerifyResult:
     fields = _body_fields(allowed_fields)
+    optional = _body_fields(optional_fields)
+    if fields & optional:
+        raise ValueError("allowed_fields and optional_fields must not overlap")
     _check_pinned_keys(pinned_keys)
     if not isinstance(expected_typ, str) or not expected_typ:
         raise ValueError("expected_typ must be a non-empty str")
@@ -86,7 +90,7 @@ def verify(
         payload = strict_decode(
             raw,
             required=RESERVED_FIELDS,
-            optional=fields,
+            optional=fields | optional,
             integer_fields=("v",),
             max_bytes=max_chars,
         )
@@ -111,7 +115,7 @@ def verify(
     missing = sorted(fields - set(payload))
     if missing:
         return Refused("missing_fields", f"missing fields: {', '.join(missing)}")
-    return Verified(payload={name: payload[name] for name in fields}, kid=kid)
+    return Verified(payload={name: payload[name] for name in fields | optional if name in payload}, kid=kid)
 
 
 def token_hash(token: str) -> str:

@@ -20,7 +20,8 @@ DEK_BYTES = 32
 NONCE_BYTES = 12
 STORE_LABEL = "credential store"
 UNREDACTABLE = "unredactable"
-EXCEPTIONS = frozenset({UNREDACTABLE})
+BROADER = "broader"
+EXCEPTIONS = frozenset({UNREDACTABLE, BROADER})
 SCHEMA = """
 CREATE TABLE credentials (
     tenant TEXT NOT NULL,
@@ -49,7 +50,7 @@ class UnredactableCredential(ValueError):
 @dataclass(frozen=True)
 class StoredCredential:
     secret: bytes = field(repr=False)
-    exception: str | None
+    exceptions: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -66,15 +67,35 @@ class CredentialCheck:
     problems: tuple[CredentialProblem, ...]
 
 
-def credential_context(tenant: str, credential_id: str, target: str, exception: str | None = None) -> bytes:
+def encode_exceptions(exceptions: frozenset[str]) -> str | None:
+    if not isinstance(exceptions, frozenset):
+        raise ValueError("credential exceptions must be a frozenset")
+    for name in exceptions:
+        if name not in EXCEPTIONS:
+            raise ValueError(f"unknown credential exception {name!r}")
+    return ",".join(sorted(exceptions)) if exceptions else None
+
+
+def decode_exceptions(value: str | None) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, str):
+        raise ValueError("credential exceptions must be a str")
+    names = value.split(",")
+    exceptions = frozenset(name for name in names if name in EXCEPTIONS)
+    if len(exceptions) != len(names) or encode_exceptions(exceptions) != value:
+        raise ValueError("credential exceptions are not a canonical set of known names")
+    return exceptions
+
+
+def credential_context(tenant: str, credential_id: str, target: str, exceptions: frozenset[str] = frozenset()) -> bytes:
     for name, value in (("tenant", tenant), ("credential_id", credential_id), ("target", target)):
         if not isinstance(value, str) or not value:
             raise ValueError(f"{name} must be a non-empty str")
     fields = {"tenant": tenant, "credential_id": credential_id, "target": target}
-    if exception is not None:
-        if exception not in EXCEPTIONS:
-            raise ValueError(f"unknown credential exception {exception!r}")
-        fields["exception"] = exception
+    encoded = encode_exceptions(exceptions)
+    if encoded is not None:
+        fields["exception"] = encoded
     context: bytes = canonicalize(fields)
     return context
 
@@ -113,7 +134,14 @@ class CredentialStore:
         return cls(connection, pinned, backend)
 
     def put(
-        self, tenant: str, credential_id: str, target: str, secret: bytes, *, accept_unredactable: bool = False
+        self,
+        tenant: str,
+        credential_id: str,
+        target: str,
+        secret: bytes,
+        *,
+        accept_unredactable: bool = False,
+        accept_broader: bool = False,
     ) -> None:
         if not isinstance(secret, bytes) or not secret:
             raise ValueError("secret must be non-empty bytes")
@@ -125,8 +153,10 @@ class CredentialStore:
             raise UnredactableCredential(f"credential cannot be redacted from results: {problem}")
         if problem is None and accept_unredactable:
             raise ValueError("an unredactable exception was requested for a credential that can be redacted")
-        exception = UNREDACTABLE if problem is not None else None
-        context = credential_context(tenant, credential_id, target, exception)
+        exceptions = frozenset(
+            name for name, accepted in ((UNREDACTABLE, problem is not None), (BROADER, accept_broader)) if accepted
+        )
+        context = credential_context(tenant, credential_id, target, exceptions)
         dek = os.urandom(DEK_BYTES)
         nonce = os.urandom(NONCE_BYTES)
         ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
@@ -138,7 +168,7 @@ class CredentialStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
                 "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
                 "exception = excluded.exception",
-                (tenant, credential_id, target, wrapped, nonce, ciphertext, exception),
+                (tenant, credential_id, target, wrapped, nonce, ciphertext, encode_exceptions(exceptions)),
             )
         if problem is not None:
             logger.warning(
@@ -147,6 +177,14 @@ class CredentialStore:
                 target,
                 UNREDACTABLE,
                 problem,
+            )
+        if accept_broader:
+            logger.warning(
+                "stored credential %r for target %r with an accepted %s exception: "
+                "its provider privilege may exceed the binding",
+                credential_id,
+                target,
+                BROADER,
             )
 
     def get(self, tenant: str, credential_id: str, target: str) -> StoredCredential:
@@ -227,7 +265,7 @@ class CredentialStore:
         if value is None:
             return "credential is not printable ASCII with no leading or trailing space or tab"
         problem = redaction_problem(value)
-        if problem is not None and stored.exception is None:
+        if problem is not None and UNREDACTABLE not in stored.exceptions:
             return f"credential cannot be redacted from results and has no accepted exception: {problem}"
         return None
 
@@ -242,12 +280,13 @@ class CredentialStore:
         exception: str | None,
     ) -> StoredCredential:
         try:
-            context = credential_context(tenant, credential_id, target, exception)
+            exceptions = decode_exceptions(exception)
+            context = credential_context(tenant, credential_id, target, exceptions)
             dek = self._backend.unwrap(wrapped, context)
             plaintext: bytes = AESGCM(dek).decrypt(nonce, ciphertext, context)
         except (BackendError, InvalidTag, ValueError):
             raise CredentialUnavailable("credential does not decrypt under its binding") from None
-        return StoredCredential(plaintext, exception)
+        return StoredCredential(plaintext, exceptions)
 
     def close(self) -> None:
         with self._lock:

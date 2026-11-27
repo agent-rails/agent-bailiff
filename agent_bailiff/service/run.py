@@ -218,10 +218,18 @@ def put_credential(
     secret: bytes,
     *,
     accept_unredactable: bool = False,
+    accept_broader: bool = False,
 ) -> None:
     store = CredentialStore.open(settings.credentials, LocalBackend.load(settings.kek))
     try:
-        store.put(tenant, credential_id, target, secret, accept_unredactable=accept_unredactable)
+        store.put(
+            tenant,
+            credential_id,
+            target,
+            secret,
+            accept_unredactable=accept_unredactable,
+            accept_broader=accept_broader,
+        )
     finally:
         store.close()
 
