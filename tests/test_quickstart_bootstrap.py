@@ -1535,7 +1535,19 @@ def test_credential_put_reports_nothing_for_a_kept_check_under_another_upstream(
     assert pair.cli.calls == [] and not {"saved", "unsaved"} & set(handoff_files(pair))
 
 
-@pytest.mark.parametrize("policy", [None, "", "0" * 64])
+def plant_symlink(path):
+    path.symlink_to(path.parent / "elsewhere")
+
+
+def plant_oversized(path):
+    path.write_text("0" * (b.MAX_HANDOFF_BYTES + 1))
+
+
+def plant_non_ascii(path):
+    path.write_bytes(b"\xff" * 64)
+
+
+@pytest.mark.parametrize("policy", [None, "", "0" * 64, plant_symlink, plant_oversized, plant_non_ascii])
 def test_a_minted_token_checked_under_another_policy_is_deleted_at_once(pair, gitea, monkeypatch, capsys, policy):
     pair.stored = STORED
     pair.cli.refused[STORED] = "broader_scopes"
@@ -1544,6 +1556,8 @@ def test_a_minted_token_checked_under_another_policy_is_deleted_at_once(pair, gi
     def forged_policy(name, text):
         if name != "policy":
             write(name, text)
+        elif callable(policy):
+            policy(pair.handoff / name)
         elif policy is not None:
             write(name, policy)
 
@@ -1590,3 +1604,12 @@ def test_the_store_result_names_the_stored_fingerprint(pair, put_fails, result):
     with contextlib.suppress(b.BootstrapError, b.InitError):
         b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
     assert (pair.handoff / result).read_text() == fingerprint(MINTED)
+
+
+def test_a_malformed_fingerprint_under_another_policy_is_never_copied_into_a_report(pair, tmp_path):
+    b.export_credential(STORED)
+    b.write_handoff("started", "")
+    b.hand_off(b.load_upstream(write_upstream(tmp_path, target="elsewhere")), "created", MINTED, MINTED)
+    with pytest.raises(b.BootstrapError, match="under another upstream policy, so nothing is stored"):
+        b.store_handed_off(b.load_upstream(GITEA_UPSTREAM), STORED)
+    assert pair.cli.calls == [] and not {"saved", "unsaved"} & set(handoff_files(pair))
