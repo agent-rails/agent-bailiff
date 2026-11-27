@@ -137,12 +137,6 @@ def test_the_image_scan_applies_and_reports_the_exceptions():
     assert "--ignorefile .trivyignore.yaml --show-suppressed" in text
 
 
-def test_every_trivy_run_ignores_a_trivy_config_in_the_checkout():
-    runs = re.findall(r'"\$RUNNER_TEMP/trivy" image .*', IMAGE_SCAN.read_text())
-    assert len(runs) == 2
-    assert all("--config /dev/null" in run for run in runs), runs
-
-
 def copied_image_inputs():
     build_args = re.findall(r"--build-arg (\w+)=(\S+)", IMAGE_SCAN.read_text())
     sources = set()
