@@ -43,6 +43,8 @@ def write_tls_files(root):
     for name, host in (("tls", "tls-upstream"), ("stranger", "tls-stranger")):
         document = {**stub, "url": f"https://{host}:8443/mcp", "ca_file": "ca.pem"}
         (upstreams / f"{name}.json").write_text(json.dumps(document))
+    impostor = {**stub, "url": "https://gitea-mcp-tls:8443/mcp"}
+    (upstreams / "impostor.json").write_text(json.dumps(impostor))
     return certs, upstreams
 
 
@@ -183,5 +185,22 @@ def test_an_upstream_outside_the_configured_ca_is_refused(stack, adopter):
             assert "invalid peer certificate: UnknownIssuer" in stack.compose("logs", "--no-log-prefix", "gateway")
         finally:
             stranger.close()
+    finally:
+        point_gateway(stack, "tls")
+
+
+def test_an_install_leaf_for_another_stack_name_is_refused(stack, adopter):
+    point_gateway(stack, "impostor")
+    try:
+        adopter.issue()
+        impostor = Proxy(adopter, adopter.routes)
+        try:
+            result = impostor.call("write_note", note="allowed", text="never")
+            assert result["isError"] is True, result
+            assert calls(stack, "tls-impostor") == []
+            refusal = 'name \\"gitea-mcp-tls\\"; certificate is only valid for DnsName(\\"stub-upstream\\")'
+            assert refusal in stack.compose("logs", "--no-log-prefix", "gateway")
+        finally:
+            impostor.close()
     finally:
         point_gateway(stack, "tls")
