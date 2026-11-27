@@ -799,6 +799,16 @@ def test_credential_put_alone_fails_at_the_deadline_naming_bootstrap(pair, monke
     assert pair.cli.calls == [] and list(pair.handoff.iterdir()) == []
 
 
+def test_credential_put_ignores_a_stale_checked_handoff_from_an_earlier_run(pair, monkeypatch, capsys):
+    pair.stored = STORED
+    (pair.handoff / "fingerprint").write_text(fingerprint(STORED))
+    (pair.handoff / "checked").write_text("kept")
+    monkeypatch.setattr(b, "HANDOFF_SECONDS", 0)
+    assert b.main(["credential"]) == 1
+    assert "bootstrap handed off no checked credential within 0s" in capsys.readouterr().err
+    assert list(pair.handoff.iterdir()) == []
+
+
 def test_bootstrap_alone_fails_at_the_deadline_naming_credential_put(pair, monkeypatch, capsys):
     monkeypatch.setattr(b, "READY_SECONDS", 0)
     assert b.main(["gitea"]) == 1

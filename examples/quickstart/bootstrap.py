@@ -894,6 +894,7 @@ def put_credential() -> str:
     upstream = load_upstream(UPSTREAM_FILE)
     provider_check(upstream)
     stored = stored_credential(upstream)
+    clear_handoff()
     try:
         export_credential(stored)
         return store_handed_off(upstream, stored)
