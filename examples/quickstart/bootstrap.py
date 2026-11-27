@@ -197,6 +197,7 @@ class ProviderCheck:
     provider: str
     api_url: str
     required: tuple[str, ...]
+    ca_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -263,7 +264,15 @@ def load_provider_check(path: Path, text: dict[str, str], required: Any) -> Prov
         permissions = parse_required(required)
     except ValueError as error:
         raise BootstrapError(f"{path}: {error}") from None
-    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)))
+    ca_file = str(beside(path, "ca_file", text["ca_file"])) if ca_applies(text) else None
+    return ProviderCheck(text["provider"], text["provider_api_url"], tuple(sorted(permissions)), ca_file)
+
+
+def ca_applies(text: dict[str, str]) -> bool:
+    if "ca_file" not in text:
+        return False
+    provider, upstream = urlsplit(text["provider_api_url"]), urlsplit(text["url"])
+    return provider.scheme == "https" and (provider.hostname or "") == (upstream.hostname or "")
 
 
 def beside(path: Path, field: str, name: str) -> Path:
@@ -758,9 +767,10 @@ def provider_check(upstream: Upstream) -> ProviderCheck:
 def check_credential(upstream: Upstream, credential: str) -> dict[str, Any]:
     check = provider_check(upstream)
     required = [argument for name in check.required for argument in ("--required", name)]
+    ca_file = ["--ca-file", check.ca_file] if check.ca_file is not None else []
     output = cli(
         "credential-check", "--provider", check.provider, "--api-url", check.api_url,
-        "--binding-resource", upstream.binding_resource, *required, stdin=credential,
+        "--binding-resource", upstream.binding_resource, *required, *ca_file, stdin=credential,
     )  # fmt: skip
     document = json.loads(output)
     if not isinstance(document, dict) or not isinstance(document.get("fingerprint"), str):

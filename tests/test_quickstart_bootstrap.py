@@ -432,6 +432,18 @@ def test_a_ca_file_points_the_gateway_target_at_the_copied_ca(tmp_path):
     ]
 
 
+def test_the_upstream_ca_goes_to_the_check_only_for_a_provider_on_the_upstream_host(tmp_path, monkeypatch):
+    fake = FakeCli()
+    monkeypatch.setattr(b.subprocess, "run", fake)
+    (tmp_path / "ca.pem").write_bytes(pem(issue_certificate("quickstart test ca")[0]))
+    for provider_api_url in ("https://MCP.example.com/api/v1", "https://gitea.example.com/api/v1"):
+        path = write_upstream(tmp_path, url=HTTPS_URL, ca_file="ca.pem", provider_api_url=provider_api_url)
+        b.check_credential(b.load_upstream(path), STORED)
+    first, second = (arguments for arguments, _ in fake.of("credential-check"))
+    assert first[-2:] == ("--ca-file", str(tmp_path / "ca.pem"))
+    assert "--ca-file" not in second
+
+
 @pytest.mark.parametrize(
     "data, url, message",
     [
