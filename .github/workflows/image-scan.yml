@@ -151,8 +151,9 @@ jobs:
           docker build "${build[@]}" --tag "$IMAGE" .
       - name: Check libzstd1
         run: |
-          status="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${db:Status-Abbrev} ${Version}' libzstd1)"
+          status="$(docker run --rm --entrypoint dpkg-query "$IMAGE" --show --showformat='${db:Status-Abbrev} ${Version}\n' libzstd1)"
           echo "libzstd1 $status"
+          test "$(wc -l <<< "$status")" -eq 1
           test "${status:0:4}" = "ii  "
           dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image

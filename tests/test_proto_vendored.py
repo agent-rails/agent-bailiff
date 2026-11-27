@@ -234,8 +234,9 @@ def test_the_image_scan_checks_libzstd_in_the_built_image():
     text = IMAGE_SCAN.read_text()
     assert f"LIBZSTD_FLOOR: {LIBZSTD_FLOOR}\n" in text
     assert (
-        '--entrypoint dpkg-query "$IMAGE" --show --showformat=\'${db:Status-Abbrev} ${Version}\' libzstd1)"\n'
+        '--entrypoint dpkg-query "$IMAGE" --show --showformat=\'${db:Status-Abbrev} ${Version}\\n\' libzstd1)"\n'
         '          echo "libzstd1 $status"\n'
+        '          test "$(wc -l <<< "$status")" -eq 1\n'
         '          test "${status:0:4}" = "ii  "\n'
         '          dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"\n'
     ) in text
