@@ -5,19 +5,21 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import os
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -157,6 +159,7 @@ GITEA = os.environ.get("GITEA_URL", "http://gitea:3000")
 GITEA_HEALTH_SECONDS = 120
 HTTP_TIMEOUT_SECONDS = 10
 MAX_GITEA_BYTES = 1 << 20
+READ_CHUNK_BYTES = 1 << 16
 TOKEN_PAGE_LIMIT = 50
 MAX_TOKEN_PAGES = 20
 ADMIN = "quickstart-admin"
@@ -177,6 +180,10 @@ INJECTION_BODY = (
 
 
 class BootstrapError(Exception):
+    pass
+
+
+class GiteaUnavailable(BootstrapError):
     pass
 
 
@@ -625,7 +632,13 @@ def admin_secret() -> str:
 
 class Gitea:
     def __init__(self, base: str) -> None:
+        parts = urlsplit(base)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise BootstrapError(f"gitea URL {base!r} is not an http or https URL with a host")
         self._base = base.rstrip("/")
+        self._https = parts.scheme == "https"
+        self._host, self._port = parts.hostname, parts.port
+        self._prefix = parts.path.rstrip("/")
 
     def request(self, method: str, path: str, authorization: str | None, body: Any = None) -> tuple[int, Any]:
         headers = {"accept": "application/json"}
@@ -635,15 +648,35 @@ class Gitea:
         if body is not None:
             headers["content-type"] = "application/json"
             data = json.dumps(body).encode()
-        request = urllib.request.Request(f"{self._base}{path}", data, headers, method=method)
+        deadline = Deadline(time.monotonic() + HTTP_TIMEOUT_SECONDS, f"gitea {method} {path}")
+        connection = self._connect(deadline.remaining())
+        watchdog = None
         try:
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
-                status, raw = response.status, response.read(MAX_GITEA_BYTES + 1)
-        except urllib.error.HTTPError as error:
-            status, raw = error.code, error.read(MAX_GITEA_BYTES + 1)
-        if len(raw) > MAX_GITEA_BYTES:
-            raise BootstrapError(f"gitea {method} {path} answered more than {MAX_GITEA_BYTES} bytes")
-        return status, json.loads(raw) if raw.strip() else None
+            connection.request(method, self._prefix + path, data, headers)
+            sock = connection.sock
+            watchdog = threading.Timer(deadline.remaining(), shut_down, (sock,))
+            watchdog.start()
+            sock.settimeout(deadline.remaining())
+            response = connection.getresponse()
+            raw = read_capped(response, sock, deadline)
+        except OSError as error:
+            if isinstance(error, TimeoutError) or deadline.passed():
+                raise GiteaUnavailable(deadline.late) from None
+            raise
+        except http.client.HTTPException:
+            if deadline.passed():
+                raise GiteaUnavailable(deadline.late) from None
+            raise GiteaUnavailable(f"gitea {method} {path} sent a malformed answer") from None
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            connection.close()
+        return response.status, json.loads(raw) if raw.strip() else None
+
+    def _connect(self, timeout: float) -> http.client.HTTPConnection:
+        if self._https:
+            return http.client.HTTPSConnection(self._host, self._port, timeout=timeout)
+        return http.client.HTTPConnection(self._host, self._port, timeout=timeout)
 
     def expect(self, statuses: set[int], method: str, path: str, authorization: str | None, body: Any = None) -> Any:
         status, document = self.request(method, path, authorization, body)
@@ -657,10 +690,48 @@ class Gitea:
             try:
                 if self.request("GET", "/api/healthz", None)[0] == 200:
                     return
-            except (urllib.error.URLError, OSError):
+            except (GiteaUnavailable, OSError):
                 pass
             time.sleep(1)
         raise BootstrapError(f"gitea at {self._base} was not healthy within {seconds}s")
+
+
+@dataclass(frozen=True)
+class Deadline:
+    at: float
+    what: str
+
+    @property
+    def late(self) -> str:
+        return f"{self.what} did not answer within {HTTP_TIMEOUT_SECONDS}s"
+
+    def passed(self) -> bool:
+        return time.monotonic() >= self.at
+
+    def remaining(self) -> float:
+        remaining = self.at - time.monotonic()
+        if remaining <= 0:
+            raise GiteaUnavailable(self.late)
+        return remaining
+
+
+def read_capped(response: http.client.HTTPResponse, sock: socket.socket, deadline: Deadline) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        sock.settimeout(deadline.remaining())
+        chunk = response.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > MAX_GITEA_BYTES:
+            raise BootstrapError(f"{deadline.what} answered more than {MAX_GITEA_BYTES} bytes")
+        chunks.append(chunk)
+
+
+def shut_down(sock: socket.socket) -> None:
+    with contextlib.suppress(OSError):
+        sock.shutdown(socket.SHUT_RDWR)
 
 
 def basic(user: str, password: str) -> str:

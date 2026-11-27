@@ -805,6 +805,27 @@ def test_a_gitea_answer_over_the_byte_cap_fails_bootstrap(answering, monkeypatch
         b.Gitea(answering.url).request("GET", "/api/v1/user", None)
 
 
+@pytest.mark.parametrize(
+    ("head", "drip"),
+    [
+        (b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a"),
+        (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n[", b" "),
+    ],
+    ids=["headers", "body"],
+)
+def test_a_gitea_answer_that_drips_fails_bootstrap_at_its_wall_clock_deadline(monkeypatch, head, drip):
+    monkeypatch.setattr(b, "HTTP_TIMEOUT_SECONDS", 0.5, raising=False)
+    server = Drip(head, drip)
+    try:
+        started = time.monotonic()
+        with pytest.raises(b.BootstrapError, match=r"gitea GET /user did not answer within 0\.5s"):
+            b.Gitea(server.url).request("GET", "/user", None)
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert elapsed < 2
+
+
 def test_a_cli_call_that_outlives_its_timeout_fails_bootstrap(monkeypatch):
     monkeypatch.setattr(b, "CLI_TIMEOUT_SECONDS", 1, raising=False)
     server = Drip(b"HTTP/1.1 200 OK\r\nX-Drip: ", b"a")
