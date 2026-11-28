@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import errno
 import hashlib
 import http.server
 import ipaddress
@@ -8,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import tempfile
@@ -674,6 +676,26 @@ def test_gitea_not_healthy_on_its_socket_fails_bootstrap(gitea_socket):
         b.Gitea(gitea_socket.with_name("absent.sock")).wait_healthy(0)
 
 
+def test_a_request_whose_connect_and_send_both_stall_ends_at_its_deadline(socket_path, monkeypatch):
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    connect = b.GiteaConnection.connect
+
+    def slow_connect(connection):
+        time.sleep(0.6)
+        connect(connection)
+
+    monkeypatch.setattr(b.GiteaConnection, "connect", slow_connect)
+    began = time.monotonic()
+    try:
+        with pytest.raises(b.GiteaUnavailable, match="did not answer within 1s"):
+            b.Gitea(socket_path).send("POST", "/api/v1/orgs", {}, b"x" * (8 << 20), 1)
+    finally:
+        listener.close()
+    assert time.monotonic() - began < 1.3
+
+
 STORED = "token " + "s" * 40
 MINTED = "token " + "m" * 40
 
@@ -692,6 +714,7 @@ class TokenGitea(b.Gitea):
         self.page_cap = 50
         self.lost = None
         self.last_eight = {7: "s" * 8}
+        self.newest_first = False
 
     def wait_healthy(self, seconds):
         pass
@@ -717,7 +740,9 @@ class TokenGitea(b.Gitea):
         if method == "GET" and urlsplit(path).path == tokens:
             query = parse_qs(urlsplit(path).query)
             limit, page = min(int(query.get("limit", ["50"])[0]), self.page_cap), int(query.get("page", ["1"])[0])
-            listed = [self.listed(token_id, name) for token_id, name in self.tokens.items()]
+            listed = [self.listed(token_id, name) for token_id, name in sorted(self.tokens.items())]
+            if self.newest_first:
+                listed.reverse()
             return 200, listed[(page - 1) * limit : page * limit]
         assert method in ("GET", "PATCH")
         return 200, {}
@@ -762,6 +787,7 @@ SEED, TOKEN_REACH = b.seed, b.token_reach
 def short_handoff(monkeypatch, tmp_path, seconds):
     monkeypatch.setattr(b, "HANDOFF_SECONDS", seconds)
     monkeypatch.setattr(b, "HANDOFF_RESERVE_SECONDS", 0)
+    monkeypatch.setattr(b, "HANDOFF_WRITE_SECONDS", 0.1)
     monkeypatch.setattr(b, "CREDENTIAL_CHECK_GRACE_SECONDS", 0)
     monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, check_timeout_seconds=1))
 
@@ -872,6 +898,114 @@ def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_
     assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed: agent-bailiff" in err
     assert "bootstrap credential refused: bootstrap refused the credential, so nothing is stored" in err
     assert handoff_files(pair) == []
+
+
+def test_refused_is_written_before_cleanup_deletes_the_token(pair, gitea, monkeypatch):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    delete, seen = b.delete_token, []
+
+    def watched(*args):
+        seen.append((pair.handoff / "refused").exists())
+        delete(*args)
+
+    monkeypatch.setattr(b, "delete_token", watched)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert seen == [True] and gitea.deleted == [9]
+
+
+def test_cleanup_still_runs_when_the_refused_marker_cannot_be_written(pair, gitea, monkeypatch, capsys):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    write = b.write_handoff
+
+    def full(name, text):
+        if name == "refused":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", full)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert gitea.deleted == [9]
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed" in err
+    assert "bootstrap gitea: the refused mark may not be written: OSError: [Errno 28] No space left on device" in err
+
+
+def test_a_refused_mark_that_cannot_be_written_keeps_the_reason_and_the_live_token_note(
+    pair, gitea, monkeypatch, capsys
+):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    write = b.write_handoff
+
+    def full(name, text):
+        if name == "refused":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", full)
+    monkeypatch.setattr(b, "delete_token", lambda *_: lose(b.GiteaUnavailable("gitea down")))
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed" in err
+    assert "bootstrap gitea: token 9 may still be live in gitea: gitea down" in err
+
+
+def test_a_checked_mark_that_cannot_be_written_deletes_the_minted_token(pair, gitea, monkeypatch, capsys):
+    pair.stored = None
+    write = b.write_handoff
+
+    def full(name, text):
+        if name == "checked":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", full)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert gitea.deleted == [9]
+    assert "bootstrap gitea refused: [Errno 28] No space left on device" in capsys.readouterr().err
+
+
+def test_bootstrap_refuses_to_start_beside_a_checked_mark_from_another_run(pair, gitea, monkeypatch, capsys):
+    pair.stored = None
+    (pair.handoff / "checked").write_text("created")
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert gitea.events == [] and gitea.deleted == []
+    assert "a checked mark from another bootstrap run is in the hand-off" in capsys.readouterr().err
+    assert not (pair.handoff / "started").exists()
+
+
+def test_an_interrupt_after_the_checked_mark_deletes_nothing(pair, gitea, monkeypatch):
+    pair.stored = None
+    write = b.write_handoff
+
+    def interrupted(name, text):
+        write(name, text)
+        if name == "checked":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(b, "write_handoff", interrupted)
+    (pair.handoff / "ready").write_text("")
+    with pytest.raises(KeyboardInterrupt) as raised:
+        b.main(["gitea"])
+    assert (pair.handoff / "checked").exists() and (pair.handoff / "refused").exists()
+    assert gitea.deleted == []
+    assert raised.value.__notes__ == ["token 9 was handed off and stays in gitea until a later run keeps or deletes it"]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_during_cleanup_keeps_the_refusal_and_notes_it(pair, gitea, monkeypatch, capsys, interrupt):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    monkeypatch.setattr(b, "delete_token", lambda *_: lose(interrupt()))
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed" in err
+    assert f"bootstrap gitea: token 9 may still be live in gitea: cleanup interrupted by {interrupt.__name__}" in err
+    assert gitea.deleted == []
 
 
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
@@ -1080,7 +1214,10 @@ def test_every_handoff_file_is_owner_read_only(pair):
 
 
 def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
-    first, second = b.mint_credential(gitea, "admin"), b.mint_credential(gitea, "admin")
+    first, second = (
+        b.mint_credential(gitea, "admin", b.PendingMint()),
+        b.mint_credential(gitea, "admin", b.PendingMint()),
+    )
     assert (first.token_id, second.token_id) == (9, 10) and gitea.deleted == []
     assert gitea.tokens[9] != gitea.tokens[10]
     assert all(re.fullmatch(f"{b.TOKEN_NAME}-[0-9a-f]{{16}}", gitea.tokens[token_id]) for token_id in (9, 10))
@@ -1098,13 +1235,18 @@ def lose(error):
         lambda: lose(json.JSONDecodeError("Expecting value", "", 0)),
         lambda: (201, {"id": 9}),
         lambda: (201, ["m" * 40]),
+        lambda: (201, {"id": True, "sha1": "m" * 40}),
+        lambda: (201, {"id": 0, "sha1": "m" * 40}),
     ],
-    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object"],
+    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object", "bool-id", "zero-id"],
 )
 def test_a_mint_with_no_clear_answer_deletes_the_token_by_its_name_and_fails(gitea, lost):
     gitea.lost = lost
-    with pytest.raises((b.BootstrapError, OSError, ValueError)):
-        b.mint_credential(gitea, "admin")
+    pending = b.PendingMint()
+    with pytest.raises((b.BootstrapError, OSError, ValueError)) as raised:
+        b.mint_credential(gitea, "admin", pending)
+    pending.clean_up(raised.value)
+    assert not hasattr(raised.value, "__notes__")
     assert gitea.events == [("minted", 9), ("deleted", 9)]
     assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
 
@@ -1129,6 +1271,18 @@ def test_a_stored_remint_spares_tokens_that_only_share_the_quickstart_prefix(pai
     assert run_pair() == (0, 0)
     assert pair.events == [("minted", 23), ("stored", MINTED), ("deleted", 7)]
     assert gitea.tokens.keys() == {8, 20, 21, 22, 23}
+
+
+@pytest.mark.parametrize("token_id", ["1/../x", True, 0, -1, None, 1.5, "7"])
+def test_a_listed_token_without_a_valid_id_fails_without_a_delete_or_its_value(gitea, token_id):
+    gitea.listed = lambda _, name: {"id": token_id, "name": name, "token_last_eight": "s" * 8}
+    with pytest.raises(b.BootstrapError) as raised:
+        b.retire_credentials(gitea, "agent", lambda token: False)
+    with pytest.raises(b.BootstrapError) as named:
+        b.delete_named(gitea, "agent", b.TOKEN_NAME)
+    assert gitea.deleted == []
+    for error in (raised.value, named.value):
+        assert "gitea named a token with no valid id" in str(error) and repr(token_id) not in str(error)
 
 
 def test_the_token_list_refuses_a_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
@@ -1363,8 +1517,10 @@ def test_a_lost_mint_cleanup_stops_at_its_own_deadline_and_keeps_the_mint_error(
     charged = ChargedGitea(pair.events, clock)
     charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
     charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    pending = b.PendingMint()
     with pytest.raises(b.GiteaUnavailable) as raised:
-        b.mint_credential(charged, "admin")
+        b.mint_credential(charged, "admin", pending)
+    pending.clean_up(raised.value)
     assert raised.value.args == ("the mint was lost",)
     [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
     cleanup = [at for _, _, at, _ in charged.calls if at > lost_at]
@@ -1374,11 +1530,45 @@ def test_a_lost_mint_cleanup_stops_at_its_own_deadline_and_keeps_the_mint_error(
     assert f"of the {b.CLEANUP_SECONDS}s cleanup budget is left" in note
 
 
+def test_a_lost_mint_is_deleted_on_the_page_that_names_it_and_the_listing_stops(pair, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget
+    monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
+    charged = ChargedGitea(pair.events, clock)
+    charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
+    charged.answers.newest_first = True
+    charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    pending = b.PendingMint()
+    with pytest.raises(b.GiteaUnavailable) as raised:
+        b.mint_credential(charged, "admin", pending)
+    pending.clean_up(raised.value)
+    assert not hasattr(raised.value, "__notes__")
+    assert pair.events == [("minted", 1001), ("deleted", 1001)]
+    [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
+    listed = [path for method, path, at, _ in charged.calls if method == "GET" and "/tokens?" in path and at > lost_at]
+    assert len(listed) == 1
+
+
+def test_a_lost_mint_gitea_does_not_list_is_noted_as_maybe_live(gitea):
+    gitea.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    pending = b.PendingMint()
+    with pytest.raises(b.GiteaUnavailable) as raised:
+        b.mint_credential(gitea, "admin", pending)
+    del gitea.tokens[9]
+    pending.clean_up(raised.value)
+    [note] = raised.value.__notes__
+    assert note.startswith(f"token {b.TOKEN_NAME}-") and note.endswith(
+        "may still be live in gitea: gitea did not list it, so a later successful run retires it"
+    )
+
+
 def test_a_failed_revoke_keeps_the_refusal_and_notes_the_live_token(pair, gitea, monkeypatch):
     pair.cli.refused[MINTED] = "token_rejected"
     monkeypatch.setattr(b, "delete_token", lambda *_: lose(b.GiteaUnavailable("the delete was lost")))
+    pending = b.PendingMint()
     with pytest.raises(b.CliFailed, match="credential-check") as raised:
-        b.checked_credential(gitea, "admin", b.load_upstream(GITEA_UPSTREAM), None, b.Budget(295))
+        b.checked_credential(gitea, "admin", b.load_upstream(GITEA_UPSTREAM), None, b.Budget(295), pending)
+    pending.clean_up(raised.value)
     assert raised.value.__notes__ == ["token 9 may still be live in gitea: the delete was lost"]
 
 
@@ -1396,16 +1586,20 @@ def test_bootstrap_prints_the_notes_of_a_refusal(pair, monkeypatch, capsys):
     ]
 
 
-def test_bootstrap_hands_off_nothing_once_the_budget_is_spent(pair, monkeypatch, capsys):
+@pytest.mark.parametrize("left", [0, 0.5], ids=["spent", "sub-second"])
+def test_bootstrap_hands_off_nothing_with_less_than_a_second_left(pair, monkeypatch, capsys, left):
+    seconds = b.HANDOFF_SECONDS - b.HANDOFF_RESERVE_SECONDS
+    spent = 1000.0 if left == 0 else seconds - left
     clock = SimpleNamespace(now=0.0)
     budget = b.Budget
     monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
-    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: setattr(clock, "now", 1000.0) or {})
+    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: setattr(clock, "now", spent) or {})
     pair.stored = STORED
     (pair.handoff / "stored").write_text(STORED)
     (pair.handoff / "ready").write_text("")
     assert b.main(["gitea"]) == 1
-    assert "none for the hand-off" in capsys.readouterr().err
+    shortfall = f"{left:g}s of the {seconds:g}s hand-off budget is left, less than the 1s the hand-off needs"
+    assert shortfall in capsys.readouterr().err
     assert handoff_files(pair) == ["ready", "refused", "started"]
 
 
