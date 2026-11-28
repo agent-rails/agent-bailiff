@@ -265,8 +265,24 @@ def test_the_changes_job_scans_when_a_pull_request_changes_any_other_path(tmp_pa
     assert run_changes(repo, "pull_request") == (0, "images=true\n")
 
 
-def test_the_changes_job_scans_when_a_pull_request_moves_an_image_input_into_docs(tmp_path):
-    repo = merged_pull_request(tmp_path, "moved", "docs/rule.py", moved_from="examples/quickstart/rule.py")
+@pytest.mark.parametrize("path", ["docs/rule.py", "tests/rule.py"])
+def test_the_changes_job_scans_when_a_pull_request_moves_an_image_input_into_docs_or_tests(tmp_path, path):
+    repo = merged_pull_request(tmp_path, "moved", path, moved_from="examples/quickstart/rule.py")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+def test_the_changes_job_scans_when_a_pull_request_deletes_an_image_input(tmp_path):
+    repo = new_repository(tmp_path, "deleted")
+    commit_file(repo, "examples/quickstart/rule.py", "base")
+    git(repo, "rm", "--quiet", "examples/quickstart/rule.py")
+    git(repo, "commit", "--quiet", "--no-gpg-sign", "--message", "pull")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+def test_the_changes_job_scans_a_case_variant_of_an_excluded_directory(tmp_path):
+    repo = new_repository(tmp_path, "case")
+    git(repo, "config", "core.ignorecase", "false")
+    commit_file(repo, "Docs/guide.md", "pull")
     assert run_changes(repo, "pull_request") == (0, "images=true\n")
 
 
