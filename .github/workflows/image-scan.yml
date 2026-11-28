@@ -133,7 +133,7 @@ jobs:
           dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
-          "$RUNNER_TEMP/trivy" image --config /dev/null --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
+          "$RUNNER_TEMP/trivy" image --config /dev/null --secret-config "" --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
           --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
           --exit-code 1 --no-progress "$IMAGE"
 

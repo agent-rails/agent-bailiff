@@ -145,6 +145,13 @@ def test_every_trivy_run_ignores_a_trivy_config_in_the_checkout():
     assert all("--config /dev/null" in run for run in runs), runs
 
 
+def test_the_image_scan_ignores_a_secret_config_in_the_checkout():
+    runs = re.findall(r'"\$RUNNER_TEMP/trivy" image .*', IMAGE_SCAN.read_text())
+    scans = [run for run in runs if "--download-db-only" not in run]
+    assert len(scans) == 1
+    assert '--config /dev/null --secret-config "" ' in scans[0], scans
+
+
 def excluded_from_the_changes():
     diff = re.search(
         r"^changed=\"\$\(git diff --name-only HEAD\^1 HEAD -- \. \\\n((?:  ':\(exclude\)[^']+'(?: \\|\)\")\n)+)",
