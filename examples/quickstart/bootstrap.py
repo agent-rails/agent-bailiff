@@ -779,11 +779,12 @@ class Gitea:
         connection = GiteaConnection(self._path, deadline.remaining())
         watchdog = None
         try:
-            connection.request(method, path, data, headers)
+            connection.connect()
             sock = connection.sock
             watchdog = threading.Timer(deadline.remaining(), shut_down, (sock,))
             watchdog.start()
             sock.settimeout(deadline.remaining())
+            connection.request(method, path, data, headers)
             response = connection.getresponse()
             raw = read_capped(response, sock, deadline)
         except OSError as error:

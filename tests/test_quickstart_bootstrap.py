@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import tempfile
@@ -672,6 +673,26 @@ def test_a_missing_gitea_socket_fails_without_waiting(gitea_socket):
 def test_gitea_not_healthy_on_its_socket_fails_bootstrap(gitea_socket):
     with pytest.raises(b.BootstrapError, match="absent.sock was not healthy within 0s"):
         b.Gitea(gitea_socket.with_name("absent.sock")).wait_healthy(0)
+
+
+def test_a_request_whose_connect_and_send_both_stall_ends_at_its_deadline(socket_path, monkeypatch):
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+    connect = b.GiteaConnection.connect
+
+    def slow_connect(connection):
+        time.sleep(0.6)
+        connect(connection)
+
+    monkeypatch.setattr(b.GiteaConnection, "connect", slow_connect)
+    began = time.monotonic()
+    try:
+        with pytest.raises(b.GiteaUnavailable, match="did not answer within 1s"):
+            b.Gitea(socket_path).send("POST", "/api/v1/orgs", {}, b"x" * (8 << 20), 1)
+    finally:
+        listener.close()
+    assert time.monotonic() - began < 1.3
 
 
 STORED = "token " + "s" * 40
