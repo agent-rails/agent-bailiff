@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import errno
 import hashlib
 import http.server
 import ipaddress
@@ -898,6 +899,36 @@ def test_a_minted_credential_the_check_refuses_is_deleted_from_gitea_before_any_
     assert handoff_files(pair) == []
 
 
+def test_refused_is_written_before_cleanup_deletes_the_token(pair, gitea, monkeypatch):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    delete, seen = b.delete_token, []
+
+    def watched(*args):
+        seen.append((pair.handoff / "refused").exists())
+        delete(*args)
+
+    monkeypatch.setattr(b, "delete_token", watched)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert seen == [True] and gitea.deleted == [9]
+
+
+def test_cleanup_still_runs_when_the_refused_marker_cannot_be_written(pair, gitea, monkeypatch, capsys):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    write = b.write_handoff
+
+    def full(name, text):
+        if name == "refused":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        write(name, text)
+
+    monkeypatch.setattr(b, "write_handoff", full)
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert gitea.deleted == [9]
+    assert "No space left on device" in capsys.readouterr().err
+
+
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
     gitea.demo[MINTED] = 404
     assert run_pair() == (1, 1)
@@ -1104,7 +1135,10 @@ def test_every_handoff_file_is_owner_read_only(pair):
 
 
 def test_each_mint_names_its_token_uniquely_and_deletes_nothing(pair, gitea):
-    first, second = b.mint_credential(gitea, "admin"), b.mint_credential(gitea, "admin")
+    first, second = (
+        b.mint_credential(gitea, "admin", b.PendingMint()),
+        b.mint_credential(gitea, "admin", b.PendingMint()),
+    )
     assert (first.token_id, second.token_id) == (9, 10) and gitea.deleted == []
     assert gitea.tokens[9] != gitea.tokens[10]
     assert all(re.fullmatch(f"{b.TOKEN_NAME}-[0-9a-f]{{16}}", gitea.tokens[token_id]) for token_id in (9, 10))
@@ -1129,8 +1163,11 @@ def lose(error):
 )
 def test_a_mint_with_no_clear_answer_deletes_the_token_by_its_name_and_fails(gitea, lost):
     gitea.lost = lost
-    with pytest.raises((b.BootstrapError, OSError, ValueError)):
-        b.mint_credential(gitea, "admin")
+    pending = b.PendingMint()
+    with pytest.raises((b.BootstrapError, OSError, ValueError)) as raised:
+        b.mint_credential(gitea, "admin", pending)
+    pending.clean_up(raised.value)
+    assert not hasattr(raised.value, "__notes__")
     assert gitea.events == [("minted", 9), ("deleted", 9)]
     assert gitea.tokens == {7: b.TOKEN_NAME, 8: "laptop"}
 
@@ -1401,8 +1438,10 @@ def test_a_lost_mint_cleanup_stops_at_its_own_deadline_and_keeps_the_mint_error(
     charged = ChargedGitea(pair.events, clock)
     charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
     charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    pending = b.PendingMint()
     with pytest.raises(b.GiteaUnavailable) as raised:
-        b.mint_credential(charged, "admin")
+        b.mint_credential(charged, "admin", pending)
+    pending.clean_up(raised.value)
     assert raised.value.args == ("the mint was lost",)
     [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
     cleanup = [at for _, _, at, _ in charged.calls if at > lost_at]
@@ -1420,8 +1459,10 @@ def test_a_lost_mint_is_deleted_on_the_page_that_names_it_and_the_listing_stops(
     charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
     charged.answers.newest_first = True
     charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    pending = b.PendingMint()
     with pytest.raises(b.GiteaUnavailable) as raised:
-        b.mint_credential(charged, "admin")
+        b.mint_credential(charged, "admin", pending)
+    pending.clean_up(raised.value)
     assert not hasattr(raised.value, "__notes__")
     assert pair.events == [("minted", 1001), ("deleted", 1001)]
     [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
@@ -1432,8 +1473,10 @@ def test_a_lost_mint_is_deleted_on_the_page_that_names_it_and_the_listing_stops(
 def test_a_failed_revoke_keeps_the_refusal_and_notes_the_live_token(pair, gitea, monkeypatch):
     pair.cli.refused[MINTED] = "token_rejected"
     monkeypatch.setattr(b, "delete_token", lambda *_: lose(b.GiteaUnavailable("the delete was lost")))
+    pending = b.PendingMint()
     with pytest.raises(b.CliFailed, match="credential-check") as raised:
-        b.checked_credential(gitea, "admin", b.load_upstream(GITEA_UPSTREAM), None, b.Budget(295))
+        b.checked_credential(gitea, "admin", b.load_upstream(GITEA_UPSTREAM), None, b.Budget(295), pending)
+    pending.clean_up(raised.value)
     assert raised.value.__notes__ == ["token 9 may still be live in gitea: the delete was lost"]
 
 

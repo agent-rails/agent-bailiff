@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -932,20 +932,44 @@ def agent_login(gitea: Gitea, admin: str) -> str:
     return basic(AGENT, password)
 
 
-def mint_credential(gitea: Gitea, admin: str) -> Minted:
+@dataclass
+class PendingMint:
+    gitea: Gitea | None = None
+    owner: str = field(default="", repr=False)
+    name: str = ""
+    token_id: int | None = None
+
+    def record_name(self, gitea: Gitea, owner: str, name: str) -> None:
+        self.gitea, self.owner, self.name = gitea, owner, name
+
+    def record_id(self, token_id: int) -> None:
+        self.token_id = token_id
+
+    def clean_up(self, error: BaseException) -> None:
+        if self.gitea is None:
+            return
+        cleanup = self.gitea.for_cleanup()
+        label = f"token {self.name}" if self.token_id is None else f"token {self.token_id}"
+        try:
+            if self.token_id is None:
+                delete_named(cleanup, self.owner, self.name)
+            else:
+                delete_token(cleanup, self.owner, self.token_id)
+        except Exception as failure:
+            error.add_note(f"{label} may still be live in gitea: {failure}")
+
+
+def mint_credential(gitea: Gitea, admin: str, pending: PendingMint) -> Minted:
     agent = agent_login(gitea, admin)
     name = f"{TOKEN_NAME}-{secrets.token_hex(8)}"
-    try:
-        created = gitea.expect(
-            {201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, {"name": name, "scopes": TOKEN_SCOPES}
-        )
-        if not isinstance(created, dict) or not isinstance(created.get("sha1"), str):
-            raise BootstrapError(f"gitea minted token {name} with no sha1")
-        minted_id = valid_token_id(created)
-    except BaseException as error:
-        clean_up(gitea, error, f"token {name}", lambda cleanup: delete_named(cleanup, agent, name))
-        raise
-    return Minted(f"token {created['sha1']}", minted_id, agent)
+    pending.record_name(gitea, agent, name)
+    created = gitea.expect(
+        {201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, {"name": name, "scopes": TOKEN_SCOPES}
+    )
+    if not isinstance(created, dict) or not isinstance(created.get("sha1"), str):
+        raise BootstrapError(f"gitea minted token {name} with no sha1")
+    pending.record_id(valid_token_id(created))
+    return Minted(f"token {created['sha1']}", created["id"], agent)
 
 
 def agent_token_pages(gitea: Gitea, agent: str) -> Iterator[list[dict[str, Any]]]:
@@ -975,19 +999,8 @@ def valid_token_id(token: dict[str, Any]) -> int:
     return value
 
 
-def clean_up(gitea: Gitea, error: BaseException, token: str, remove: Callable[[Gitea], None]) -> None:
-    try:
-        remove(gitea.for_cleanup())
-    except Exception as failure:
-        error.add_note(f"{token} may still be live in gitea: {failure}")
-
-
 def revoke_credential(gitea: Gitea, minted: Minted) -> None:
     delete_token(gitea, minted.owner, minted.token_id)
-
-
-def revoke_after(gitea: Gitea, error: BaseException, minted: Minted) -> None:
-    clean_up(gitea, error, f"token {minted.token_id}", lambda cleanup: revoke_credential(cleanup, minted))
 
 
 def retire_credentials(gitea: Gitea, owner: str, keeps: Callable[[dict[str, Any]], bool]) -> None:
@@ -1045,7 +1058,7 @@ def check_credential(upstream: Upstream, credential: str, budget: Budget) -> dic
 
 
 def checked_credential(
-    gitea: Gitea, admin: str, upstream: Upstream, stored: str | None, budget: Budget
+    gitea: Gitea, admin: str, upstream: Upstream, stored: str | None, budget: Budget, pending: PendingMint
 ) -> tuple[str, Any, Minted | None]:
     if stored is not None and credential_works(gitea, stored):
         try:
@@ -1056,14 +1069,10 @@ def checked_credential(
             print(f"the stored credential is refused, so a new one is minted: {refusal}", file=sys.stderr)
     check = provider_check(upstream)
     budget.require(check.timeout_seconds + CREDENTIAL_CHECK_GRACE_SECONDS, "the check of a minted credential")
-    minted = mint_credential(gitea, admin)
-    try:
-        if not credential_works(gitea, minted.credential):
-            raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
-        return minted.credential, check_credential(upstream, minted.credential, budget), minted
-    except BaseException as error:
-        revoke_after(gitea, error, minted)
-        raise
+    minted = mint_credential(gitea, admin, pending)
+    if not credential_works(gitea, minted.credential):
+        raise BootstrapError(f"the minted credential cannot read {ORG}/demo")
+    return minted.credential, check_credential(upstream, minted.credential, budget), minted
 
 
 def remints(refusal: CliFailed) -> bool:
@@ -1254,12 +1263,16 @@ def bootstrap_gitea() -> str:
             "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
         )
         wait_for_handoff(("ready",), READY_SECONDS, missing)
+        pending = PendingMint()
         try:
             budget = Budget(HANDOFF_SECONDS - HANDOFF_RESERVE_SECONDS)
             write_handoff("started", "")
-            checked = check_and_hand_off(upstream, take_handoff("stored"), budget)
-        except BaseException:
-            write_handoff("refused", "")
+            checked = check_and_hand_off(upstream, take_handoff("stored"), budget, pending)
+        except BaseException as error:
+            try:
+                write_handoff("refused", "")
+            finally:
+                pending.clean_up(error)
             raise
         gitea, minted = checked.gitea, checked.minted
         if minted is None:
@@ -1280,7 +1293,7 @@ class Checked:
     seeded: bool
 
 
-def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -> Checked:
+def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget, pending: PendingMint) -> Checked:
     gitea = Gitea(GITEA_SOCKET, budget)
     gitea.wait_healthy(budget.cap(GITEA_HEALTH_SECONDS, "the gitea health wait"))
     admin = basic(ADMIN, ADMIN_PASSWORD.read_text().strip())
@@ -1288,16 +1301,11 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget) -
     created = seed(gitea, admin)
     for item in created:
         print(f"gitea: created {item}")
-    credential, check, minted = checked_credential(gitea, admin, upstream, stored, budget)
-    try:
-        print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
-        print(f"credential check: passed with {check['private_repositories']} private repositories")
-        budget.check("the hand-off")
-        hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
-    except BaseException as error:
-        if minted is not None:
-            revoke_after(gitea, error, minted)
-        raise
+    credential, check, minted = checked_credential(gitea, admin, upstream, stored, budget, pending)
+    print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
+    print(f"credential check: passed with {check['private_repositories']} private repositories")
+    budget.check("the hand-off")
+    hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
     return Checked(gitea.without_budget(), admin, credential, minted, bool(created))
 
 
