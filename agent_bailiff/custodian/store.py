@@ -18,6 +18,7 @@ from agent_bailiff.custodian.files import (
     OwnedFileError,
     PinnedFile,
     connect_owned,
+    connect_pinned,
     database_error_name,
     raise_database_error,
 )
@@ -119,15 +120,24 @@ def header_value(secret: bytes) -> str | None:
 
 
 class CredentialStore:
-    def __init__(self, connection: sqlite3.Connection, pinned: PinnedFile, backend: KeyBackend) -> None:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        writer: sqlite3.Connection,
+        pinned: PinnedFile,
+        backend: KeyBackend,
+    ) -> None:
         self._connection = connection
+        self._writer = writer
         self._pinned = pinned
         self._backend = backend
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
 
     @classmethod
     def create(cls, path: Path, backend: KeyBackend) -> CredentialStore:
-        return cls(*connect_owned(path, STORE_LABEL, SCHEMA), backend)
+        connection, pinned = connect_owned(path, STORE_LABEL, SCHEMA)
+        return cls._with_writer(connection, pinned, backend)
 
     @classmethod
     def open(cls, path: Path, backend: KeyBackend) -> CredentialStore:
@@ -137,7 +147,16 @@ class CredentialStore:
         except sqlite3.Error as exc:
             connection.close()
             raise_database_error(f"cannot open the {STORE_LABEL} at {path}", exc)
-        return cls(connection, pinned, backend)
+        return cls._with_writer(connection, pinned, backend)
+
+    @classmethod
+    def _with_writer(cls, connection: sqlite3.Connection, pinned: PinnedFile, backend: KeyBackend) -> CredentialStore:
+        try:
+            writer = connect_pinned(pinned)
+        except BaseException:
+            connection.close()
+            raise
+        return cls(connection, writer, pinned, backend)
 
     def put(
         self,
@@ -167,10 +186,10 @@ class CredentialStore:
         nonce = os.urandom(NONCE_BYTES)
         ciphertext = AESGCM(dek).encrypt(nonce, secret, context)
         wrapped = self._backend.wrap(dek, context)
-        with self._lock:
+        with self._write_lock:
             self._pinned.check()
             try:
-                self._connection.execute(
+                self._writer.execute(
                     "INSERT INTO credentials (tenant, credential_id, target, wrapped_dek, nonce, ciphertext, "
                     "exception) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant, credential_id, target) DO UPDATE SET "
                     "wrapped_dek = excluded.wrapped_dek, nonce = excluded.nonce, ciphertext = excluded.ciphertext, "
@@ -298,7 +317,8 @@ class CredentialStore:
         return StoredCredential(plaintext, exceptions)
 
     def close(self) -> None:
-        with self._lock:
+        with self._write_lock, self._lock:
+            self._writer.close()
             self._connection.close()
 
 

@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -354,6 +355,67 @@ def test_a_busy_older_store_is_refused_as_busy(state, backend, monkeypatch):
         writer.execute("ROLLBACK")
         writer.close()
     assert str(raised.value) == f"cannot open the credential store at {path}: it is busy (SQLITE_BUSY)"
+
+
+def hold_write_lock(path):
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    return writer
+
+
+def release_write_lock(writer):
+    writer.execute("ROLLBACK")
+    writer.close()
+
+
+def test_a_put_waiting_on_another_writer_does_not_block_reads(state, backend, monkeypatch):
+    path = state / "credentials.db"
+    seeded = CredentialStore.create(path, backend)
+    seeded.put(*BINDING, SECRET)
+    seeded.close()
+    monkeypatch.setattr(files, "BUSY_TIMEOUT_SECONDS", 3)
+    store = CredentialStore.open(path, backend)
+    writer = hold_write_lock(path)
+    waiting = threading.Thread(target=lambda: outcome.append(put_outcome(store)))
+    outcome = []
+    try:
+        waiting.start()
+        time.sleep(0.3)
+        started = time.monotonic()
+        assert store.get(*BINDING) == StoredCredential(SECRET, frozenset())
+        assert store.check([BINDING]) == CredentialCheck(1, ())
+        assert time.monotonic() - started < 1
+    finally:
+        waiting.join()
+        release_write_lock(writer)
+        store.close()
+    assert outcome == [f"cannot write the credential store at {path}: it is busy (SQLITE_BUSY)"]
+
+
+def put_outcome(store):
+    try:
+        store.put("tenant-a", "other-api", "deploy.example", SECRET)
+    except OwnedFileError as exc:
+        return str(exc)
+    return None
+
+
+def test_a_put_refused_as_busy_writes_nothing_and_succeeds_once_the_writer_is_done(state, backend, monkeypatch):
+    path = state / "credentials.db"
+    monkeypatch.setattr(files, "BUSY_TIMEOUT_SECONDS", 0.2)
+    store = CredentialStore.create(path, backend)
+    try:
+        writer = hold_write_lock(path)
+        try:
+            assert put_outcome(store) == f"cannot write the credential store at {path}: it is busy (SQLITE_BUSY)"
+        finally:
+            release_write_lock(writer)
+        with pytest.raises(CredentialUnavailable, match="no credential"):
+            store.get("tenant-a", "other-api", "deploy.example")
+        assert put_outcome(store) is None
+        assert store.get("tenant-a", "other-api", "deploy.example") == StoredCredential(SECRET, frozenset())
+    finally:
+        store.close()
 
 
 class RollbackFails:

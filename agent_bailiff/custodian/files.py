@@ -172,18 +172,8 @@ def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.C
     if schema is not None:
         create_owned(path, label, b"")
     pinned = pin_owned(path, label)
+    connection = _open_connection(path, label)
     try:
-        connection = sqlite3.connect(
-            f"file:{quote(str(path.absolute()), safe='/')}?mode=rw",
-            uri=True,
-            timeout=BUSY_TIMEOUT_SECONDS,
-            isolation_level=None,
-            check_same_thread=False,
-        )
-    except sqlite3.Error as exc:
-        raise_database_error(f"cannot open the {label} at {path}", exc)
-    try:
-        connection.execute("PRAGMA synchronous = FULL")
         if schema is not None:
             connection.executescript(schema)
         connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
@@ -196,6 +186,35 @@ def connect_owned(path: Path, label: str, schema: str | None) -> tuple[sqlite3.C
         connection.close()
         raise
     return connection, pinned
+
+
+def connect_pinned(pinned: PinnedFile) -> sqlite3.Connection:
+    connection = _open_connection(pinned.path, pinned.label)
+    try:
+        pinned.check()
+    except OwnedFileError:
+        connection.close()
+        raise
+    return connection
+
+
+def _open_connection(path: Path, label: str) -> sqlite3.Connection:
+    try:
+        connection = sqlite3.connect(
+            f"file:{quote(str(path.absolute()), safe='/')}?mode=rw",
+            uri=True,
+            timeout=BUSY_TIMEOUT_SECONDS,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+    except sqlite3.Error as exc:
+        raise_database_error(f"cannot open the {label} at {path}", exc)
+    try:
+        connection.execute("PRAGMA synchronous = FULL")
+    except sqlite3.Error as exc:
+        connection.close()
+        raise_database_error(f"cannot open the {label} at {path}", exc)
+    return connection
 
 
 def _open_owned(path: Path, label: str, flags: int) -> int:
