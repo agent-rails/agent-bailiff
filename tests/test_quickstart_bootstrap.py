@@ -713,6 +713,7 @@ class TokenGitea(b.Gitea):
         self.page_cap = 50
         self.lost = None
         self.last_eight = {7: "s" * 8}
+        self.newest_first = False
 
     def wait_healthy(self, seconds):
         pass
@@ -738,7 +739,9 @@ class TokenGitea(b.Gitea):
         if method == "GET" and urlsplit(path).path == tokens:
             query = parse_qs(urlsplit(path).query)
             limit, page = min(int(query.get("limit", ["50"])[0]), self.page_cap), int(query.get("page", ["1"])[0])
-            listed = [self.listed(token_id, name) for token_id, name in self.tokens.items()]
+            listed = [self.listed(token_id, name) for token_id, name in sorted(self.tokens.items())]
+            if self.newest_first:
+                listed.reverse()
             return 200, listed[(page - 1) * limit : page * limit]
         assert method in ("GET", "PATCH")
         return 200, {}
@@ -1160,7 +1163,7 @@ def test_a_listed_token_without_a_valid_id_fails_without_a_delete_or_its_value(g
     with pytest.raises(b.BootstrapError) as raised:
         b.retire_credentials(gitea, "agent", lambda token: False)
     with pytest.raises(b.BootstrapError) as named:
-        b.delete_tokens(gitea, "agent", b.named(b.TOKEN_NAME))
+        b.delete_named(gitea, "agent", b.TOKEN_NAME)
     assert gitea.deleted == []
     for error in (raised.value, named.value):
         assert "gitea named a token with no valid id" in str(error) and repr(token_id) not in str(error)
@@ -1407,6 +1410,23 @@ def test_a_lost_mint_cleanup_stops_at_its_own_deadline_and_keeps_the_mint_error(
     [note] = raised.value.__notes__
     assert note.startswith(f"token {b.TOKEN_NAME}-") and "may still be live in gitea: " in note
     assert f"of the {b.CLEANUP_SECONDS}s cleanup budget is left" in note
+
+
+def test_a_lost_mint_is_deleted_on_the_page_that_names_it_and_the_listing_stops(pair, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    budget = b.Budget
+    monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
+    charged = ChargedGitea(pair.events, clock)
+    charged.answers.tokens = {token_id: f"laptop-{token_id}" for token_id in range(1, 1001)}
+    charged.answers.newest_first = True
+    charged.answers.lost = lambda: lose(b.GiteaUnavailable("the mint was lost"))
+    with pytest.raises(b.GiteaUnavailable) as raised:
+        b.mint_credential(charged, "admin")
+    assert not hasattr(raised.value, "__notes__")
+    assert pair.events == [("minted", 1001), ("deleted", 1001)]
+    [lost_at] = [at for method, path, at, _ in charged.calls if method == "POST"]
+    listed = [path for method, path, at, _ in charged.calls if method == "GET" and "/tokens?" in path and at > lost_at]
+    assert len(listed) == 1
 
 
 def test_a_failed_revoke_keeps_the_refusal_and_notes_the_live_token(pair, gitea, monkeypatch):

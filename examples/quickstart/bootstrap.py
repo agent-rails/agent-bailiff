@@ -943,26 +943,29 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
             raise BootstrapError(f"gitea minted token {name} with no sha1")
         minted_id = valid_token_id(created)
     except BaseException as error:
-        clean_up(gitea, error, f"token {name}", lambda cleanup: delete_tokens(cleanup, agent, named(name)))
+        clean_up(gitea, error, f"token {name}", lambda cleanup: delete_named(cleanup, agent, name))
         raise
     return Minted(f"token {created['sha1']}", minted_id, agent)
 
 
-def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
-    tokens: list[Any] = []
+def agent_token_pages(gitea: Gitea, agent: str) -> Iterator[list[dict[str, Any]]]:
     for page in range(1, MAX_TOKEN_PAGES + 1):
         path = f"/api/v1/users/{AGENT}/tokens?limit={TOKEN_PAGE_LIMIT}&page={page}"
         batch = gitea.expect({200}, "GET", path, agent)
         if not isinstance(batch, list):
             raise BootstrapError(f"gitea GET {path} returned no token list")
         if not batch:
-            return tokens
+            return
         for token in batch:
             if not isinstance(token, dict) or not isinstance(token.get("name"), str):
                 raise BootstrapError("gitea listed a token with no name")
             valid_token_id(token)
-        tokens.extend(batch)
+        yield batch
     raise BootstrapError(f"the gitea token list of {AGENT} runs past {MAX_TOKEN_PAGES} pages")
+
+
+def agent_tokens(gitea: Gitea, agent: str) -> list[dict[str, Any]]:
+    return [token for page in agent_token_pages(gitea, agent) for token in page]
 
 
 def valid_token_id(token: dict[str, Any]) -> int:
@@ -970,10 +973,6 @@ def valid_token_id(token: dict[str, Any]) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise BootstrapError("gitea named a token with no valid id")
     return value
-
-
-def named(name: str) -> Callable[[dict[str, Any]], bool]:
-    return lambda token: token["name"] == name
 
 
 def clean_up(gitea: Gitea, error: BaseException, token: str, remove: Callable[[Gitea], None]) -> None:
@@ -1009,6 +1008,14 @@ def delete_tokens(gitea: Gitea, owner: str, doomed: Callable[[dict[str, Any]], b
     for token in agent_tokens(gitea, owner):
         if doomed(token):
             delete_token(gitea, owner, token["id"])
+
+
+def delete_named(gitea: Gitea, owner: str, name: str) -> None:
+    for page in agent_token_pages(gitea, owner):
+        for token in page:
+            if token["name"] == name:
+                delete_token(gitea, owner, token["id"])
+                return
 
 
 def delete_token(gitea: Gitea, owner: str, token_id: int) -> None:
