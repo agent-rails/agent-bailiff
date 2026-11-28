@@ -1269,6 +1269,8 @@ def bootstrap_gitea() -> str:
             "run bootstrap together with credential-put: docker compose --profile gitea up bootstrap"
         )
         wait_for_handoff(("ready",), READY_SECONDS, missing)
+        if os.path.lexists(HANDOFF / "checked"):
+            raise BootstrapError("a checked mark from another bootstrap run is in the hand-off; restart credential-put")
         pending = PendingMint()
         try:
             budget = Budget(HANDOFF_SECONDS - HANDOFF_RESERVE_SECONDS)

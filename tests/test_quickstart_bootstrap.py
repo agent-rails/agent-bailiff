@@ -968,6 +968,16 @@ def test_a_checked_mark_that_cannot_be_written_deletes_the_minted_token(pair, gi
     assert "bootstrap gitea refused: [Errno 28] No space left on device" in capsys.readouterr().err
 
 
+def test_bootstrap_refuses_to_start_beside_a_checked_mark_from_another_run(pair, gitea, monkeypatch, capsys):
+    pair.stored = None
+    (pair.handoff / "checked").write_text("created")
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    assert gitea.events == [] and gitea.deleted == []
+    assert "a checked mark from another bootstrap run is in the hand-off" in capsys.readouterr().err
+    assert not (pair.handoff / "started").exists()
+
+
 def test_an_interrupt_after_the_checked_mark_deletes_nothing(pair, gitea, monkeypatch):
     pair.stored = None
     write = b.write_handoff
