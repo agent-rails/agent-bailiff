@@ -946,9 +946,6 @@ class PendingMint:
     def record_id(self, token_id: int) -> None:
         self.token_id = token_id
 
-    def release(self) -> None:
-        self.gitea = None
-
     def clean_up(self, error: BaseException) -> None:
         if self.gitea is None:
             return
@@ -959,8 +956,7 @@ class PendingMint:
                 delete_token(cleanup, self.owner, self.token_id)
             elif not delete_named(cleanup, self.owner, self.name):
                 error.add_note(
-                    f"{label} was not listed by gitea; if gitea minted it late, "
-                    "the next run that stores or keeps a token deletes it"
+                    f"{label} may still be live in gitea: gitea did not list it, so a later successful run retires it"
                 )
         except Exception as failure:
             error.add_note(f"{label} may still be live in gitea: {failure}")
@@ -1162,12 +1158,11 @@ def wait_for_handoff(
         sleep(HANDOFF_POLL_SECONDS)
 
 
-def hand_off(upstream: Upstream, outcome: str, credential: str, fingerprint: str, pending: PendingMint) -> None:
+def hand_off(upstream: Upstream, outcome: str, credential: str, fingerprint: str) -> None:
     if outcome == "created":
         write_handoff("token", credential)
     write_handoff("fingerprint", fingerprint)
     write_handoff("policy", policy_of(upstream))
-    pending.release()
     write_handoff("checked", outcome)
 
 
@@ -1283,8 +1278,13 @@ def bootstrap_gitea() -> str:
             try:
                 write_handoff("refused", "")
             except BaseException as failure:
-                error.add_note(f"the refused mark was not written: {failure}")
-            pending.clean_up(error)
+                error.add_note(f"the refused mark may not be written: {type(failure).__name__}: {failure}")
+            if not os.path.lexists(HANDOFF / "checked"):
+                pending.clean_up(error)
+            elif pending.token_id is not None:
+                error.add_note(
+                    f"token {pending.token_id} was handed off and stays in gitea until a later run keeps or deletes it"
+                )
             raise
         gitea, minted = checked.gitea, checked.minted
         if minted is None:
@@ -1317,7 +1317,7 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget, p
     print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
     print(f"credential check: passed with {check['private_repositories']} private repositories")
     budget.require(HANDOFF_WRITE_SECONDS, "the hand-off")
-    hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"], pending)
+    hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
     return Checked(gitea.without_budget(), admin, credential, minted, bool(created))
 
 
