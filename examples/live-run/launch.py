@@ -384,9 +384,21 @@ def report_lock(context: str, docker_context: str) -> str:
 
 
 def write_result(path: Path, result: dict[str, Any]) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as file:
-        json.dump(result, file, indent=2)
+    data = json.dumps(result, separators=(",", ":")).encode()
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def end_on_sigterm(signum: int, frame: Any) -> None:

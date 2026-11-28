@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import signal
@@ -517,6 +518,25 @@ def test_the_result_file_is_private_and_never_overwritten(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         launch.write_result(path, {"run_id": "r2"})
+    assert json.loads(path.read_text()) == {"run_id": "r1"}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_a_result_that_cannot_be_serialised_leaves_no_file(tmp_path):
+    path = tmp_path / "result.json"
+    with pytest.raises(TypeError):
+        launch.write_result(path, {"run_id": "r1", "final": {"x": object()}})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_write_leaves_neither_the_result_nor_a_temporary_file(tmp_path, monkeypatch):
+    def full(descriptor):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(launch.os, "fsync", full)
+    with pytest.raises(OSError, match="No space left"):
+        launch.write_result(tmp_path / "result.json", {"run_id": "r1"})
+    assert list(tmp_path.iterdir()) == []
 
 
 def fake_docker(monkeypatch, built):
@@ -1013,3 +1033,13 @@ def test_a_line_nested_past_the_parser_is_refused_and_writes_nothing(monkeypatch
     with pytest.raises(RuntimeError, match="not compact result JSON"):
         launch.main()
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("depth", [900, 5000])
+def test_a_nested_result_is_written_as_the_compact_line_it_came_in(monkeypatch, tmp_path, depth):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    line = nested(depth)
+    container_child(monkeypatch, fake, printing(line))
+    launch.main()
+    assert fake.out.read_bytes() == line.rstrip(b"\n")
+    assert list(tmp_path.iterdir()) == [fake.out]
