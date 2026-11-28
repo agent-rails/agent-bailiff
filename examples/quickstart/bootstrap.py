@@ -939,16 +939,13 @@ def mint_credential(gitea: Gitea, admin: str) -> Minted:
         created = gitea.expect(
             {201}, "POST", f"/api/v1/users/{AGENT}/tokens", agent, {"name": name, "scopes": TOKEN_SCOPES}
         )
-        if (
-            not isinstance(created, dict)
-            or not isinstance(created.get("sha1"), str)
-            or not isinstance(created.get("id"), int)
-        ):
-            raise BootstrapError(f"gitea minted token {name} with no id or sha1")
+        if not isinstance(created, dict) or not isinstance(created.get("sha1"), str):
+            raise BootstrapError(f"gitea minted token {name} with no sha1")
+        minted_id = valid_token_id(created)
     except BaseException as error:
         clean_up(gitea, error, f"token {name}", lambda cleanup: delete_tokens(cleanup, agent, named(name)))
         raise
-    return Minted(f"token {created['sha1']}", created["id"], agent)
+    return Minted(f"token {created['sha1']}", minted_id, agent)
 
 
 def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
@@ -960,8 +957,19 @@ def agent_tokens(gitea: Gitea, agent: str) -> list[Any]:
             raise BootstrapError(f"gitea GET {path} returned no token list")
         if not batch:
             return tokens
+        for token in batch:
+            if not isinstance(token, dict) or not isinstance(token.get("name"), str):
+                raise BootstrapError("gitea listed a token with no name")
+            valid_token_id(token)
         tokens.extend(batch)
     raise BootstrapError(f"the gitea token list of {AGENT} runs past {MAX_TOKEN_PAGES} pages")
+
+
+def valid_token_id(token: dict[str, Any]) -> int:
+    value = token.get("id")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise BootstrapError("gitea named a token with no valid id")
+    return value
 
 
 def named(name: str) -> Callable[[dict[str, Any]], bool]:
@@ -993,19 +1001,17 @@ def retire_credentials(gitea: Gitea, owner: str, keeps: Callable[[dict[str, Any]
 def holds(token: dict[str, Any], credential: str) -> bool:
     last_eight = token.get("token_last_eight")
     if not isinstance(last_eight, str):
-        raise BootstrapError(f"gitea listed token {token.get('id')} with no token_last_eight")
+        raise BootstrapError(f"gitea listed token {token['id']} with no token_last_eight")
     return last_eight == credential[-8:]
 
 
 def delete_tokens(gitea: Gitea, owner: str, doomed: Callable[[dict[str, Any]], bool]) -> None:
     for token in agent_tokens(gitea, owner):
-        if not isinstance(token, dict) or not isinstance(token.get("name"), str):
-            raise BootstrapError("gitea listed a token with no name")
         if doomed(token):
             delete_token(gitea, owner, token["id"])
 
 
-def delete_token(gitea: Gitea, owner: str, token_id: Any) -> None:
+def delete_token(gitea: Gitea, owner: str, token_id: int) -> None:
     gitea.expect({204}, "DELETE", f"/api/v1/users/{AGENT}/tokens/{token_id}", owner)
 
 

@@ -1119,8 +1119,10 @@ def lose(error):
         lambda: lose(json.JSONDecodeError("Expecting value", "", 0)),
         lambda: (201, {"id": 9}),
         lambda: (201, ["m" * 40]),
+        lambda: (201, {"id": True, "sha1": "m" * 40}),
+        lambda: (201, {"id": 0, "sha1": "m" * 40}),
     ],
-    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object"],
+    ids=["unavailable", "reset", "not-json", "no-sha1", "not-an-object", "bool-id", "zero-id"],
 )
 def test_a_mint_with_no_clear_answer_deletes_the_token_by_its_name_and_fails(gitea, lost):
     gitea.lost = lost
@@ -1150,6 +1152,18 @@ def test_a_stored_remint_spares_tokens_that_only_share_the_quickstart_prefix(pai
     assert run_pair() == (0, 0)
     assert pair.events == [("minted", 23), ("stored", MINTED), ("deleted", 7)]
     assert gitea.tokens.keys() == {8, 20, 21, 22, 23}
+
+
+@pytest.mark.parametrize("token_id", ["1/../x", True, 0, -1, None, 1.5, "7"])
+def test_a_listed_token_without_a_valid_id_fails_without_a_delete_or_its_value(gitea, token_id):
+    gitea.listed = lambda _, name: {"id": token_id, "name": name, "token_last_eight": "s" * 8}
+    with pytest.raises(b.BootstrapError) as raised:
+        b.retire_credentials(gitea, "agent", lambda token: False)
+    with pytest.raises(b.BootstrapError) as named:
+        b.delete_tokens(gitea, "agent", b.named(b.TOKEN_NAME))
+    assert gitea.deleted == []
+    for error in (raised.value, named.value):
+        assert "gitea named a token with no valid id" in str(error) and repr(token_id) not in str(error)
 
 
 def test_the_token_list_refuses_a_list_longer_than_its_page_bound(pair, gitea, monkeypatch):
