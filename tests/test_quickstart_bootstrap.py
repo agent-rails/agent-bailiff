@@ -929,6 +929,18 @@ def test_cleanup_still_runs_when_the_refused_marker_cannot_be_written(pair, gite
     assert "No space left on device" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupt_during_cleanup_keeps_the_refusal_and_notes_it(pair, gitea, monkeypatch, capsys, interrupt):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    monkeypatch.setattr(b, "delete_token", lambda *_: lose(interrupt()))
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed" in err
+    assert f"bootstrap gitea: token 9 may still be live in gitea: cleanup interrupted by {interrupt.__name__}" in err
+    assert gitea.deleted == []
+
+
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
     gitea.demo[MINTED] = 404
     assert run_pair() == (1, 1)

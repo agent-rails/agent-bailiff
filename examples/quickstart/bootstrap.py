@@ -957,6 +957,8 @@ class PendingMint:
                 delete_token(cleanup, self.owner, self.token_id)
         except Exception as failure:
             error.add_note(f"{label} may still be live in gitea: {failure}")
+        except BaseException as interrupt:
+            error.add_note(f"{label} may still be live in gitea: cleanup interrupted by {type(interrupt).__name__}")
 
 
 def mint_credential(gitea: Gitea, admin: str, pending: PendingMint) -> Minted:
