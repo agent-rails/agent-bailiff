@@ -36,38 +36,9 @@ jobs:
             echo "images=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed="$(git diff --name-only HEAD^1 HEAD -- \
-            .dockerignore \
-            .github/workflows/image-scan.yml \
-            .trivyignore.yaml \
-            LICENSE \
-            README.md \
-            agent_bailiff \
-            deploy/gke/Dockerfile.minter \
-            deploy/gke/mint_tokens.py \
-            deploy/kubernetes/Dockerfile.webhook \
-            deploy/kubernetes/webhook-requirements.txt \
-            examples/live-run/Dockerfile \
-            examples/live-run/entrypoint.sh \
-            examples/live-run/kubernetes.py \
-            examples/live-run/package-lock.json \
-            examples/live-run/package.json \
-            examples/live-run/run.py \
-            examples/live-run/shim.py \
-            examples/live-run/upstream.py \
-            examples/quickstart/Dockerfile \
-            examples/quickstart/agent.py \
-            examples/quickstart/baseline.py \
-            examples/quickstart/bootstrap.py \
-            examples/quickstart/gateway.json \
-            examples/quickstart/issue_certs.py \
-            examples/quickstart/proxy_bench.py \
-            examples/quickstart/rule.py \
-            examples/quickstart/stub-upstream/server.py \
-            examples/quickstart/trace-requirements.txt \
-            examples/quickstart/upstreams \
-            pyproject.toml \
-            requirements-ci.txt)"
+          changed="$(git diff --name-only HEAD^1 HEAD -- . \
+            ':(exclude)docs' \
+            ':(exclude)tests')"
           echo "$changed"
           if [ -n "$changed" ]; then
             echo "images=true" >> "$GITHUB_OUTPUT"
@@ -162,7 +133,7 @@ jobs:
           dpkg --compare-versions "${status:4}" ge "$LIBZSTD_FLOOR"
       - name: Scan image
         run: >-
-          "$RUNNER_TEMP/trivy" image --config /dev/null --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
+          "$RUNNER_TEMP/trivy" image --config /dev/null --secret-config "" --cache-dir "$RUNNER_TEMP/trivy-cache" --skip-db-update --skip-java-db-update
           --severity HIGH,CRITICAL --ignore-unfixed --ignorefile .trivyignore.yaml --show-suppressed
           --exit-code 1 --no-progress "$IMAGE"
 

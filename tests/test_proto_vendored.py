@@ -9,6 +9,8 @@ import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "adapters" / "agentgateway" / "scripts" / "generate_proto.sh"
 PROTO = ROOT / "adapters" / "agentgateway" / "proto" / "ext_mcp.proto"
@@ -143,55 +145,39 @@ def test_every_trivy_run_ignores_a_trivy_config_in_the_checkout():
     assert all("--config /dev/null" in run for run in runs), runs
 
 
-def copied_image_inputs():
-    build_args = re.findall(r"--build-arg (\w+)=(\S+)", IMAGE_SCAN.read_text())
-    sources = set()
-    for path in tracked_image_files():
-        text = (ROOT / path).read_text().replace("\\\n", " ")
-        values = [*re.findall(r"^ARG (\w+)=(\S+)", text, re.MULTILINE), *build_args]
-        for instruction in re.findall(r"^(?:COPY|ADD) (.+)$", text, re.MULTILINE):
-            words = instruction.split()
-            if any(word.startswith("--from=") for word in words):
-                continue
-            for source in [word for word in words if not word.startswith("--")][:-1]:
-                if "://" in source:
-                    continue
-                names = re.findall(r"\$\{(\w+)\}", source)
-                assert len(names) <= 1, source
-                if not names:
-                    sources.add(source)
-                    continue
-                expanded = {value for name, value in values if name == names[0]}
-                assert expanded, source
-                sources.update(source.replace(f"${{{names[0]}}}", value) for value in expanded)
-    return sources
+def test_the_image_scan_ignores_a_secret_config_in_the_checkout():
+    runs = re.findall(r'"\$RUNNER_TEMP/trivy" image .*', IMAGE_SCAN.read_text())
+    scans = [run for run in runs if "--download-db-only" not in run]
+    assert len(scans) == 1
+    assert '--config /dev/null --secret-config "" ' in scans[0], scans
 
 
-def test_the_image_scan_runs_on_every_pull_request_and_scans_when_an_image_input_changes():
+def excluded_from_the_changes():
+    diff = re.search(
+        r"^changed=\"\$\(git diff --name-only HEAD\^1 HEAD -- \. \\\n((?:  ':\(exclude\)[^']+'(?: \\|\)\")\n)+)",
+        changes_script(),
+        re.MULTILINE,
+    )
+    assert diff
+    excluded = re.findall(r"^  ':\(exclude\)([^']+)'(?: \\|\)\")$", diff.group(1), re.MULTILINE)
+    assert len(excluded) == len(diff.group(1).splitlines())
+    return excluded
+
+
+def test_the_image_scan_runs_on_every_pull_request_and_scans_unless_it_changes_only_docs_or_tests():
     text = IMAGE_SCAN.read_text()
     assert "on:\n  pull_request:\n  schedule:\n" in text
     assert '    - cron: "23 5 * * *"\n  workflow_dispatch:\n' in text
     assert "\nconcurrency:\n  group: image-scan-${{ github.ref }}\n  cancel-in-progress: true\n\n" in text
-    diff = re.search(
-        r'^          changed="\$\(git diff --name-only HEAD\^1 HEAD -- \\\n'
-        r'((?:            \S+(?: \\|\)")\n)+)',
-        text,
-        re.MULTILINE,
-    )
-    assert diff
-    listed = re.findall(r"^            ([^\s)]+)(?: \\|\)\")$", diff.group(1), re.MULTILINE)
-    assert len(listed) == len(diff.group(1).splitlines())
-    assert set(listed) == {
-        *copied_image_inputs(),
-        *tracked_image_files(),
-        ".dockerignore",
-        ".github/workflows/image-scan.yml",
-        ".trivyignore.yaml",
-        "pyproject.toml",
-    }
-    included = re.findall(r"^!(\S+)$", (ROOT / ".dockerignore").read_text(), re.MULTILINE)
+    excluded = excluded_from_the_changes()
+    assert excluded == ["docs", "tests"]
+    ignored = (ROOT / ".dockerignore").read_text().splitlines()
+    included = [line[1:] for line in ignored if line.startswith("!")]
     assert included
-    assert all(any(path == entry or path.startswith(f"{entry}/") for entry in listed) for path in included), included
+    for path in excluded:
+        assert path in ignored
+        assert not any(entry.split("/")[0] == path for entry in included), included
+        assert not any(image.split("/")[0] == path for image in tracked_image_files())
     assert "          persist-credentials: false\n          fetch-depth: 2\n" in text
     assert "      - id: diff\n        env:\n          EVENT: ${{ github.event_name }}\n        run: |\n" in text
     assert "  db:\n    needs: changes\n    if: needs.changes.outputs.images == 'true'\n" in text
@@ -234,10 +220,17 @@ def new_repository(tmp_path, name):
     return repo
 
 
-def merged_pull_request(tmp_path, name, path):
+def merged_pull_request(tmp_path, name, path, moved_from=None):
     repo = new_repository(tmp_path, name)
+    if moved_from:
+        commit_file(repo, moved_from, "base")
     git(repo, "switch", "--quiet", "--create", "pull")
-    commit_file(repo, path, "pull")
+    if moved_from:
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        git(repo, "mv", moved_from, path)
+        git(repo, "commit", "--quiet", "--no-gpg-sign", "--message", "pull")
+    else:
+        commit_file(repo, path, "pull")
     git(repo, "switch", "--quiet", "main")
     commit_file(repo, "agent_bailiff/main_only.py", "main")
     git(repo, "switch", "--quiet", "--detach")
@@ -260,9 +253,37 @@ def run_changes(repo, event):
     return result.returncode, output.read_text()
 
 
-def test_the_changes_job_skips_the_scan_when_a_pull_request_changes_no_image_input(tmp_path):
-    repo = merged_pull_request(tmp_path, "docs", "docs/guide.md")
+@pytest.mark.parametrize("path", ["docs/guide.md", "tests/test_policy.py"])
+def test_the_changes_job_skips_the_scan_when_a_pull_request_changes_only_docs_or_tests(tmp_path, path):
+    repo = merged_pull_request(tmp_path, "skipped", path)
     assert run_changes(repo, "pull_request") == (0, "images=false\n")
+
+
+@pytest.mark.parametrize("path", ["trivy-secret.yaml", "scripts/build.sh", "docsite/guide.md", ".github/CODEOWNERS"])
+def test_the_changes_job_scans_when_a_pull_request_changes_any_other_path(tmp_path, path):
+    repo = merged_pull_request(tmp_path, "other", path)
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+@pytest.mark.parametrize("path", ["docs/rule.py", "tests/rule.py"])
+def test_the_changes_job_scans_when_a_pull_request_moves_an_image_input_into_docs_or_tests(tmp_path, path):
+    repo = merged_pull_request(tmp_path, "moved", path, moved_from="examples/quickstart/rule.py")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+def test_the_changes_job_scans_when_a_pull_request_deletes_an_image_input(tmp_path):
+    repo = new_repository(tmp_path, "deleted")
+    commit_file(repo, "examples/quickstart/rule.py", "base")
+    git(repo, "rm", "--quiet", "examples/quickstart/rule.py")
+    git(repo, "commit", "--quiet", "--no-gpg-sign", "--message", "pull")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
+
+
+def test_the_changes_job_scans_a_case_variant_of_an_excluded_directory(tmp_path):
+    repo = new_repository(tmp_path, "case")
+    git(repo, "config", "core.ignorecase", "false")
+    commit_file(repo, "Docs/guide.md", "pull")
+    assert run_changes(repo, "pull_request") == (0, "images=true\n")
 
 
 def test_the_changes_job_scans_when_a_pull_request_changes_an_image_input(tmp_path):
