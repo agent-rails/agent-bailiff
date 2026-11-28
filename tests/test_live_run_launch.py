@@ -13,6 +13,8 @@ import launch  # noqa: E402
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
 IMAGE_ID = "sha256:" + "c" * 64
+REAL_POPEN = subprocess.Popen
+READ_OUTPUT = launch.read_output
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
 CERT_USER = {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}
 
@@ -506,7 +508,7 @@ class FakeLaunch:
         self.rmi_raises = rmi_raises
         self.token_sizes = []
         self.returncode = returncode
-        self.communicate = None
+        self.read_output = None
         self.wait = lambda timeout: 0
         self.stop_raises = None
         self.lock_raises = None
@@ -515,6 +517,7 @@ class FakeLaunch:
         self.out = tmp_path / "result.json"
         monkeypatch.setattr(launch.subprocess, "run", self.run)
         monkeypatch.setattr(launch.subprocess, "Popen", self.popen)
+        monkeypatch.setattr(launch, "read_output", self.output)
         monkeypatch.setattr(launch.secrets, "token_hex", self.token_hex)
         monkeypatch.setenv(launch.TOKEN_VARIABLE, "token")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -562,12 +565,15 @@ class FakeLaunch:
     def popen(self, command, **options):
         self.commands.append(command)
         self.popen_calls.append(command)
-        result = {"run_id": "r1", "status": "ok", "failures": []}
         process = type("Process", (), {})()
         process.returncode = self.returncode
-        process.communicate = self.communicate or (lambda data, timeout: (json.dumps(result).encode(), b""))
         process.wait = self.wait
         return process
+
+    def output(self, process, data, limit, seconds):
+        if self.read_output is not None:
+            return self.read_output(process, data, limit, seconds)
+        return json.dumps({"run_id": "r1", "status": "ok", "failures": []}).encode()
 
     def where(self, word):
         return [command for command in self.commands if word in command]
@@ -647,7 +653,7 @@ def test_a_run_tag_id_is_eight_random_bytes(monkeypatch, tmp_path):
     assert fake.token_sizes == [8]
 
 
-def sigterm_self(data, timeout):
+def sigterm_self(*args):
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -657,7 +663,7 @@ def stderr_keeps_webhook_tag(capsys):
 
 def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_handler(monkeypatch, tmp_path):
     fake = FakeLaunch(monkeypatch, tmp_path, "run")
-    fake.communicate = sigterm_self
+    fake.read_output = sigterm_self
     sentinel = lambda signum, frame: None  # noqa: E731
     original = signal.signal(signal.SIGTERM, sentinel)
     try:
@@ -670,13 +676,13 @@ def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_hand
     assert len(fake.where("rmi")) == 1
 
 
-def raise_timeout(data, timeout):
-    raise subprocess.TimeoutExpired("docker", timeout)
+def raise_timeout(*args):
+    raise subprocess.TimeoutExpired("docker", launch.RUN_SECONDS)
 
 
 def test_sigterm_during_a_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = sigterm_self
+    fake.read_output = sigterm_self
     with pytest.raises(SystemExit) as stop:
         launch.main()
     assert stop.value.code == 143
@@ -686,7 +692,7 @@ def test_sigterm_during_a_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_
 
 def test_a_timed_out_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
     with pytest.raises(SystemExit, match="was stopped"):
         launch.main()
     assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-live-run:r1"]]
@@ -695,7 +701,7 @@ def test_a_timed_out_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path,
 
 def test_a_failing_docker_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
     fake.stop_raises = subprocess.TimeoutExpired("docker", 330)
     with pytest.raises(subprocess.TimeoutExpired):
         launch.main()
@@ -705,7 +711,7 @@ def test_a_failing_docker_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, caps
 
 def test_a_failing_wait_after_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
 
     def wait(timeout):
         raise subprocess.TimeoutExpired("docker", timeout)
@@ -818,3 +824,92 @@ def test_a_build_that_writes_no_iidfile_is_refused(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "run", lambda command, **options: None)
     with pytest.raises(RuntimeError, match="image ID"):
         launch.build_image("orbstack", "Dockerfile", "t:1")
+
+
+def container_child(monkeypatch, fake, script):
+    children = []
+
+    def popen(command, **options):
+        fake.commands.append(command)
+        fake.popen_calls.append(command)
+        child = REAL_POPEN([sys.executable, "-c", script], **options)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    fake.read_output = READ_OUTPUT
+    return children
+
+
+FLOOD = """
+import os, sys
+sys.stdin.buffer.read()
+try:
+    for _ in range(64):
+        os.write(1, b"A" * 65536)
+except OSError:
+    pass
+"""
+
+
+def test_a_container_that_floods_stdout_is_stopped_and_refused(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    children = container_child(monkeypatch, fake, FLOOD)
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    [child] = children
+    assert stop.value.code == f"run r1 wrote more than {launch.STDOUT_BYTES} bytes to stdout and was stopped"
+    assert fake.where("stop") == [["docker", "--context", "orbstack", "stop", "--time", "300", "bl-r1"]]
+    assert child.poll() is not None
+    assert not fake.out.exists()
+
+
+def child(script):
+    return REAL_POPEN([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+
+ECHO = "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"
+
+
+def test_the_bundle_reaches_the_container_and_its_stdout_is_returned():
+    data = os.urandom(1 << 18)
+    process = child(ECHO)
+    assert READ_OUTPUT(process, data, len(data), 30) == data
+    assert process.returncode == 0
+
+
+@pytest.mark.parametrize(("size", "refused"), [(4096, False), (4097, True)])
+def test_stdout_past_the_limit_is_refused(size, refused):
+    process = child(f"import os, sys; sys.stdin.buffer.read(); os.write(1, b'A' * {size})")
+    if not refused:
+        assert READ_OUTPUT(process, b"x", 4096, 30) == b"A" * size
+        return
+    with pytest.raises(launch.OutputLimitExceeded, match="more than 4096 bytes"):
+        READ_OUTPUT(process, b"x", 4096, 30)
+    process.wait(30)
+
+
+def test_an_endless_stdout_is_refused_once_past_the_limit():
+    process = child("import os\nwhile True:\n    os.write(1, b'A' * 65536)")
+    try:
+        with pytest.raises(launch.OutputLimitExceeded):
+            READ_OUTPUT(process, b"x", 1 << 20, 30)
+    finally:
+        process.kill()
+        process.wait(30)
+
+
+def test_a_container_past_the_deadline_times_out():
+    process = child("import time; time.sleep(30)")
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            READ_OUTPUT(process, b"x", 4096, 0.2)
+    finally:
+        process.kill()
+        process.wait(30)
+
+
+def test_a_container_that_exits_before_reading_the_bundle_still_returns_its_exit():
+    process = child("import sys; sys.stdin.close(); sys.exit(3)")
+    assert READ_OUTPUT(process, os.urandom(1 << 18), 4096, 30) == b""
+    assert process.returncode == 3

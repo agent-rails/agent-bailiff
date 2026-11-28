@@ -10,10 +10,13 @@ import json
 import os
 import re
 import secrets
+import select
+import selectors
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +46,12 @@ TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 LOCK = "agent-bailiff-lock"
 RUN_SECONDS = 3600
 STOP_SECONDS = 300
+STDOUT_BYTES = 1 << 20
+READ_BYTES = 1 << 16
+
+
+class OutputLimitExceeded(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -259,6 +268,52 @@ def container_command(spec: RunSpec, image: str) -> list[str]:
     return [*command, "--context", spec.context, "--webhook-image", spec.webhook_image]
 
 
+def read_output(process: subprocess.Popen[bytes], data: bytes, limit: int, seconds: float) -> bytes:
+    if process.stdin is None or process.stdout is None:
+        raise RuntimeError("the container needs piped stdin and stdout")
+    deadline = time.monotonic() + seconds
+    output = bytearray()
+    sent = 0
+    with selectors.DefaultSelector() as selector:
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, seconds)
+                for key, _ in selector.select(remaining):
+                    if key.fileobj is process.stdin:
+                        try:
+                            sent += os.write(key.fd, data[sent : sent + select.PIPE_BUF])
+                        except BrokenPipeError:
+                            sent = len(data)
+                        if sent == len(data):
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
+                        continue
+                    chunk = os.read(key.fd, min(READ_BYTES, limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(process.stdout)
+                    output += chunk
+                    if len(output) > limit:
+                        raise OutputLimitExceeded(f"the container wrote more than {limit} bytes to stdout")
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+    process.wait(max(0.0, deadline - time.monotonic()))
+    return bytes(output)
+
+
+def stop_container(docker_context: str, run_id: str, process: subprocess.Popen[bytes]) -> None:
+    subprocess.run(
+        ["docker", "--context", docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{run_id}"],
+        timeout=STOP_SECONDS + 30,
+        check=False,
+    )
+    process.wait(30)
+
+
 def read_result(stdout: str, run_id: str) -> dict[str, Any]:
     lines = stdout.strip().splitlines()
     if not lines:
@@ -371,15 +426,15 @@ def launch() -> None:
             run_tags.remove(held_tag)
         process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
-            stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
+            stdout = read_output(process, stdin_bundle(token, kubeconfig), STDOUT_BYTES, RUN_SECONDS)
         except subprocess.TimeoutExpired:
-            subprocess.run(
-                ["docker", "--context", spec.docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{spec.run_id}"],
-                timeout=STOP_SECONDS + 30,
-                check=False,
-            )
-            process.wait(30)
+            stop_container(spec.docker_context, spec.run_id, process)
             raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
+        except OutputLimitExceeded:
+            stop_container(spec.docker_context, spec.run_id, process)
+            raise SystemExit(
+                f"run {spec.run_id} wrote more than {STDOUT_BYTES} bytes to stdout and was stopped"
+            ) from None
         if process.returncode != 0:
             if kubernetes:
                 print(report_lock(args.context, args.docker_context), file=sys.stderr)
