@@ -103,6 +103,7 @@ READY_SECONDS = 60
 HANDOFF_SECONDS = 300
 HANDOFF_RESERVE_SECONDS = 5
 CLEANUP_SECONDS = 30
+HANDOFF_WRITE_SECONDS = 1
 HANDOFF_POLL_SECONDS = 0.5
 CLI_TIMEOUT_SECONDS = 60
 
@@ -1306,7 +1307,7 @@ def check_and_hand_off(upstream: Upstream, stored: str | None, budget: Budget, p
     credential, check, minted = checked_credential(gitea, admin, upstream, stored, budget, pending)
     print(json.dumps({"what this token can reach": token_reach(gitea, credential)}, indent=2))
     print(f"credential check: passed with {check['private_repositories']} private repositories")
-    budget.check("the hand-off")
+    budget.require(HANDOFF_WRITE_SECONDS, "the hand-off")
     hand_off(upstream, "kept" if minted is None else "created", credential, check["fingerprint"])
     return Checked(gitea.without_budget(), admin, credential, minted, bool(created))
 

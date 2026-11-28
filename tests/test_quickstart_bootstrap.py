@@ -787,6 +787,7 @@ SEED, TOKEN_REACH = b.seed, b.token_reach
 def short_handoff(monkeypatch, tmp_path, seconds):
     monkeypatch.setattr(b, "HANDOFF_SECONDS", seconds)
     monkeypatch.setattr(b, "HANDOFF_RESERVE_SECONDS", 0)
+    monkeypatch.setattr(b, "HANDOFF_WRITE_SECONDS", 0.1)
     monkeypatch.setattr(b, "CREDENTIAL_CHECK_GRACE_SECONDS", 0)
     monkeypatch.setattr(b, "UPSTREAM_FILE", write_upstream(tmp_path, check_timeout_seconds=1))
 
@@ -1506,16 +1507,20 @@ def test_bootstrap_prints_the_notes_of_a_refusal(pair, monkeypatch, capsys):
     ]
 
 
-def test_bootstrap_hands_off_nothing_once_the_budget_is_spent(pair, monkeypatch, capsys):
+@pytest.mark.parametrize("left", [0, 0.5], ids=["spent", "sub-second"])
+def test_bootstrap_hands_off_nothing_with_less_than_a_second_left(pair, monkeypatch, capsys, left):
+    seconds = b.HANDOFF_SECONDS - b.HANDOFF_RESERVE_SECONDS
+    spent = 1000.0 if left == 0 else seconds - left
     clock = SimpleNamespace(now=0.0)
     budget = b.Budget
     monkeypatch.setattr(b, "Budget", lambda seconds, **options: budget(seconds, clock=lambda: clock.now, **options))
-    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: setattr(clock, "now", 1000.0) or {})
+    monkeypatch.setattr(b, "token_reach", lambda gitea, credential: setattr(clock, "now", spent) or {})
     pair.stored = STORED
     (pair.handoff / "stored").write_text(STORED)
     (pair.handoff / "ready").write_text("")
     assert b.main(["gitea"]) == 1
-    assert "none for the hand-off" in capsys.readouterr().err
+    shortfall = f"{left:g}s of the {seconds:g}s hand-off budget is left, less than the 1s the hand-off needs"
+    assert shortfall in capsys.readouterr().err
     assert handoff_files(pair) == ["ready", "refused", "started"]
 
 
