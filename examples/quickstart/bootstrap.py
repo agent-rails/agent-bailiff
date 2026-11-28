@@ -16,6 +16,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -201,6 +202,23 @@ class BootstrapError(Exception):
 
 class GiteaUnavailable(BootstrapError):
     pass
+
+
+class Stopped(BaseException):
+    pass
+
+
+def raise_stopped(signum: int, _frame: object) -> None:
+    raise Stopped(f"stopped by {signal.Signals(signum).name}")
+
+
+@contextlib.contextmanager
+def stop_on_sigterm() -> Iterator[None]:
+    previous = signal.signal(signal.SIGTERM, raise_stopped)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 class CliFailed(BootstrapError):
@@ -1261,7 +1279,7 @@ def token_reach(gitea: Gitea, credential: str) -> dict[str, Any]:
 
 
 def bootstrap_gitea() -> str:
-    with hold_handoff_lock("bootstrap"):
+    with stop_on_sigterm(), hold_handoff_lock("bootstrap"):
         upstream = load_upstream(UPSTREAM_FILE)
         provider_check(upstream)
         missing = (
@@ -1446,7 +1464,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         outcome = COMMANDS[args.step]()
-    except (BootstrapError, InitError, OwnedFileError, BackendError, DocketError, OSError, ValueError) as error:
+    except (
+        BootstrapError,
+        InitError,
+        OwnedFileError,
+        BackendError,
+        DocketError,
+        OSError,
+        ValueError,
+        Stopped,
+    ) as error:
         print(f"bootstrap {args.step} refused: {error}", file=sys.stderr)
         for note in getattr(error, "__notes__", ()):
             print(f"bootstrap {args.step}: {note}", file=sys.stderr)
