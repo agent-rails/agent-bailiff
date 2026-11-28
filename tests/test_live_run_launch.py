@@ -3,12 +3,14 @@ import os
 import signal
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "live-run"))
 import launch  # noqa: E402
+import run  # noqa: E402
 
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
@@ -26,6 +28,22 @@ def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contex
         "clusters": [{"name": context, "cluster": entry}],
         "users": [{"name": context, "user": CERT_USER if user is None else user}],
     }
+
+
+MARKER = "\x1b]0;MARKER\x07"
+
+
+def printing(stdout):
+    return f"import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write({stdout!r})"
+
+
+def result_line(**fields):
+    result = {"run_id": "r1", "status": "ok", "failures": [], "model": "m", "outcomes": [], "final": {}}
+    return (json.dumps({**result, **fields}, separators=(",", ":")) + "\n").encode()
+
+
+def host_text(error):
+    return "".join(traceback.format_exception(error))
 
 
 @pytest.fixture
@@ -419,24 +437,27 @@ def test_the_kubernetes_command_needs_a_context():
         launch.container_command(spec("kubernetes", context=None), DIGEST)
 
 
-@pytest.mark.parametrize("status", ["ok", "failed"])
-def test_the_result_is_the_last_compact_line(status):
-    stdout = f'progress\n{{"run_id":"r1","status":"{status}","final":{{}}}}\n'
+@pytest.mark.parametrize(("failures", "status"), [([], "ok"), (["docket verifies"], "failed")])
+def test_the_result_is_the_harness_last_compact_line(capsys, failures, status):
+    print("ok")
+    run.print_result("r1", "m", [run.Outcome("s", "p")], {"docket verifies": True}, failures)
+    stdout = capsys.readouterr().out.encode()
     assert launch.read_result(stdout, "r1")["status"] == status
 
 
 @pytest.mark.parametrize(
     ("stdout", "message"),
     [
-        ("", "printed no result"),
-        ('{\n  "run_id": "r1",\n  "status": "ok"\n}\n', "not compact result JSON"),
-        ('{"run_id":"r2","status":"ok"}', "not a result for run r1"),
-        ('{"run_id":"r1"}', "not a result for run r1"),
-        ('["r1"]', "not a result for run r1"),
+        (b"", "printed no result"),
+        (b'{\n  "run_id": "r1",\n  "status": "ok"\n}\n', "not compact result JSON"),
+        (result_line(run_id="r2"), "not a result for run r1"),
+        (b'{"run_id":"r1"}', "not a result for run r1"),
+        (b'["r1"]', "not a result for run r1"),
+        (result_line(status="done"), "does not follow"),
     ],
-    ids=["empty", "pretty", "wrong-run", "no-status", "not-object"],
+    ids=["empty", "pretty", "wrong-run", "no-status", "not-object", "unknown-status"],
 )
-def test_a_result_other_than_an_ok_line_for_this_run_is_refused(stdout, message):
+def test_a_result_other_than_a_result_line_for_this_run_is_refused(stdout, message):
     with pytest.raises(RuntimeError, match=message):
         launch.read_result(stdout, "r1")
 
@@ -573,7 +594,7 @@ class FakeLaunch:
     def output(self, process, data, limit, seconds):
         if self.read_output is not None:
             return self.read_output(process, data, limit, seconds)
-        return json.dumps({"run_id": "r1", "status": "ok", "failures": []}).encode()
+        return result_line()
 
     def where(self, word):
         return [command for command in self.commands if word in command]
@@ -913,3 +934,50 @@ def test_a_container_that_exits_before_reading_the_bundle_still_returns_its_exit
     process = child("import sys; sys.stdin.close(); sys.exit(3)")
     assert READ_OUTPUT(process, os.urandom(1 << 18), 4096, 30) == b""
     assert process.returncode == 3
+
+
+def test_a_last_line_that_is_not_json_is_refused_without_echoing_it(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(f"progress\n{MARKER} not json\n".encode()))
+    with pytest.raises(RuntimeError, match="not compact result JSON") as refused:
+        launch.main()
+    assert "MARKER" not in host_text(refused.value)
+    assert not fake.out.exists()
+
+
+def test_failed_checks_are_counted_not_echoed(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(result_line(status="failed", failures=[MARKER, "docket verifies"])))
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    assert stop.value.code == f"run r1 failed 2 checks, listed under failures in {fake.out}"
+    assert "MARKER" not in capsys.readouterr().err
+    assert json.loads(fake.out.read_text())["failures"] == [MARKER, "docket verifies"]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b'{"run_id":"r1","status":"ok"}\n',
+        result_line(failures=["docket verifies"]),
+        result_line(status="failed"),
+        result_line(status="failed", failures=[1]),
+        result_line(extra=True),
+        result_line(model="\u00e9").replace(b"\\u00e9", "\u00e9".encode()),
+    ],
+    ids=[
+        "ok-without-failures",
+        "ok-with-failures",
+        "failed-without-failures",
+        "failure-not-text",
+        "extra-key",
+        "not-ascii",
+    ],
+)
+def test_a_line_that_is_not_the_harness_result_shape_is_refused(monkeypatch, tmp_path, stdout):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(stdout))
+    with pytest.raises(RuntimeError) as refused:
+        launch.main()
+    assert "MARKER" not in host_text(refused.value)
+    assert not fake.out.exists()

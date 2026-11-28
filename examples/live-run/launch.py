@@ -48,6 +48,7 @@ RUN_SECONDS = 3600
 STOP_SECONDS = 300
 STDOUT_BYTES = 1 << 20
 READ_BYTES = 1 << 16
+RESULT_KEYS = frozenset({"run_id", "status", "failures", "model", "outcomes", "final"})
 
 
 class OutputLimitExceeded(RuntimeError):
@@ -314,16 +315,24 @@ def stop_container(docker_context: str, run_id: str, process: subprocess.Popen[b
     process.wait(30)
 
 
-def read_result(stdout: str, run_id: str) -> dict[str, Any]:
+def read_result(stdout: bytes, run_id: str) -> dict[str, Any]:
     lines = stdout.strip().splitlines()
     if not lines:
         raise RuntimeError("the harness printed no result")
     try:
-        result = json.loads(lines[-1])
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"the last stdout line is not compact result JSON: {lines[-1][:200]!r}") from error
-    if not isinstance(result, dict) or result.get("run_id") != run_id or result.get("status") not in ("ok", "failed"):
-        raise RuntimeError(f"the result is not a result for run {run_id}")
+        result = json.loads(lines[-1].decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("the last stdout line is not compact result JSON") from None
+    if not isinstance(result, dict) or set(result) != RESULT_KEYS or result["run_id"] != run_id:
+        raise RuntimeError(f"the last stdout line is not a result for run {run_id}")
+    failures = result["failures"]
+    if (
+        result["status"] not in ("ok", "failed")
+        or not isinstance(failures, list)
+        or not all(isinstance(failure, str) for failure in failures)
+        or (result["status"] == "ok") == bool(failures)
+    ):
+        raise RuntimeError(f"the result for run {run_id} has a status that does not follow its failures")
     return result
 
 
@@ -439,14 +448,16 @@ def launch() -> None:
             if kubernetes:
                 print(report_lock(args.context, args.docker_context), file=sys.stderr)
             raise SystemExit(process.returncode)
-        result = read_result(stdout.decode(), spec.run_id)
+        result = read_result(stdout, spec.run_id)
         if held_tag is not None:
             run_tags.insert(0, held_tag)
             held_tag = None
         write_result(spec.out, result)
         print(f"run {spec.run_id}: wrote {spec.out}")
         if result["status"] != "ok":
-            raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
+            raise SystemExit(
+                f"run {spec.run_id} failed {len(result['failures'])} checks, listed under failures in {spec.out}"
+            )
 
     finally:
         handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
