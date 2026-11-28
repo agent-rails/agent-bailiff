@@ -1,18 +1,23 @@
+import errno
 import json
 import os
 import signal
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples" / "live-run"))
 import launch  # noqa: E402
+import run  # noqa: E402
 
 DIGEST = "agent-bailiff-live-run@sha256:" + "a" * 64
 WEBHOOK = "agent-bailiff-webhook@sha256:" + "b" * 64
 IMAGE_ID = "sha256:" + "c" * 64
+REAL_POPEN = subprocess.Popen
+READ_OUTPUT = launch.read_output
 PRODUCTION = ("do-fra1-core-infra-prod", "gke_onstack-infra_europe-west1-b_onstack-infra")
 CERT_USER = {"client-certificate-data": "Y2VydA==", "client-key-data": "a2V5"}
 
@@ -24,6 +29,26 @@ def view(context="orbstack", server="https://127.0.0.1:26443", user=None, contex
         "clusters": [{"name": context, "cluster": entry}],
         "users": [{"name": context, "user": CERT_USER if user is None else user}],
     }
+
+
+MARKER = "\x1b]0;MARKER\x07"
+
+
+def printing(stdout):
+    return f"import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write({stdout!r})"
+
+
+def result_line(**fields):
+    result = {"run_id": "r1", "status": "ok", "failures": [], "model": "m", "outcomes": [], "final": {}}
+    return (json.dumps({**result, **fields}, separators=(",", ":")) + "\n").encode()
+
+
+def nested(depth):
+    return result_line(final=[]).replace(b'"final":[]', b'"final":' + b"[" * depth + b"]" * depth)
+
+
+def host_text(error):
+    return "".join(traceback.format_exception(error))
 
 
 @pytest.fixture
@@ -417,26 +442,49 @@ def test_the_kubernetes_command_needs_a_context():
         launch.container_command(spec("kubernetes", context=None), DIGEST)
 
 
-@pytest.mark.parametrize("status", ["ok", "failed"])
-def test_the_result_is_the_last_compact_line(status):
-    stdout = f'progress\n{{"run_id":"r1","status":"{status}","final":{{}}}}\n'
+@pytest.mark.parametrize(("failures", "status"), [([], "ok"), (["docket verifies"], "failed")])
+def test_the_result_is_the_harness_last_compact_line(capsys, failures, status):
+    print("ok")
+    run.print_result("r1", "m", [run.Outcome("s", "p")], {"docket verifies": True}, failures)
+    stdout = capsys.readouterr().out.encode()
     assert launch.read_result(stdout, "r1")["status"] == status
 
 
 @pytest.mark.parametrize(
     ("stdout", "message"),
     [
-        ("", "printed no result"),
-        ('{\n  "run_id": "r1",\n  "status": "ok"\n}\n', "not compact result JSON"),
-        ('{"run_id":"r2","status":"ok"}', "not a result for run r1"),
-        ('{"run_id":"r1"}', "not a result for run r1"),
-        ('["r1"]', "not a result for run r1"),
+        (b"", "printed no result"),
+        (b'{\n  "run_id": "r1",\n  "status": "ok"\n}\n', "not compact result JSON"),
+        (result_line(run_id="r2"), "not a result for run r1"),
+        (b'{"run_id":"r1"}', "not a result for run r1"),
+        (b'["r1"]', "not a result for run r1"),
+        (result_line(status="done"), "does not follow"),
     ],
-    ids=["empty", "pretty", "wrong-run", "no-status", "not-object"],
+    ids=["empty", "pretty", "wrong-run", "no-status", "not-object", "unknown-status"],
 )
-def test_a_result_other_than_an_ok_line_for_this_run_is_refused(stdout, message):
+def test_a_result_other_than_a_result_line_for_this_run_is_refused(stdout, message):
     with pytest.raises(RuntimeError, match=message):
         launch.read_result(stdout, "r1")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        result_line(failures=["docket verifies"]).replace(b"}\n", b',"failures":[]}\n'),
+        result_line(final={"a": 1}).replace(b'{"a":1}', b'{"a":1,"a":2}'),
+        result_line(final={"x": float("nan")}),
+        result_line(final={"x": float("inf")}),
+        result_line(final={"x": float("-inf")}),
+        result_line(final={"x": 1.0}).replace(b"1.0", b"1e400"),
+        nested(100000),
+    ],
+    ids=["duplicate-key", "nested-duplicate-key", "nan", "infinity", "minus-infinity", "overflow", "deep"],
+)
+def test_a_line_json_would_read_ambiguously_or_not_at_all_is_refused(stdout):
+    with pytest.raises(RuntimeError, match="not compact result JSON") as refused:
+        launch.read_result(stdout, "r1")
+    assert refused.value.__cause__ is None
+    assert refused.value.__suppress_context__
 
 
 def lock_state(monkeypatch, owner, running):
@@ -470,6 +518,25 @@ def test_the_result_file_is_private_and_never_overwritten(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         launch.write_result(path, {"run_id": "r2"})
+    assert json.loads(path.read_text()) == {"run_id": "r1"}
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_a_result_that_cannot_be_serialised_leaves_no_file(tmp_path):
+    path = tmp_path / "result.json"
+    with pytest.raises(TypeError):
+        launch.write_result(path, {"run_id": "r1", "final": {"x": object()}})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_write_leaves_neither_the_result_nor_a_temporary_file(tmp_path, monkeypatch):
+    def full(descriptor):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(launch.os, "fsync", full)
+    with pytest.raises(OSError, match="No space left"):
+        launch.write_result(tmp_path / "result.json", {"run_id": "r1"})
+    assert list(tmp_path.iterdir()) == []
 
 
 def fake_docker(monkeypatch, built):
@@ -506,7 +573,7 @@ class FakeLaunch:
         self.rmi_raises = rmi_raises
         self.token_sizes = []
         self.returncode = returncode
-        self.communicate = None
+        self.read_output = None
         self.wait = lambda timeout: 0
         self.stop_raises = None
         self.lock_raises = None
@@ -515,6 +582,7 @@ class FakeLaunch:
         self.out = tmp_path / "result.json"
         monkeypatch.setattr(launch.subprocess, "run", self.run)
         monkeypatch.setattr(launch.subprocess, "Popen", self.popen)
+        monkeypatch.setattr(launch, "read_output", self.output)
         monkeypatch.setattr(launch.secrets, "token_hex", self.token_hex)
         monkeypatch.setenv(launch.TOKEN_VARIABLE, "token")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -562,12 +630,15 @@ class FakeLaunch:
     def popen(self, command, **options):
         self.commands.append(command)
         self.popen_calls.append(command)
-        result = {"run_id": "r1", "status": "ok", "failures": []}
         process = type("Process", (), {})()
         process.returncode = self.returncode
-        process.communicate = self.communicate or (lambda data, timeout: (json.dumps(result).encode(), b""))
         process.wait = self.wait
         return process
+
+    def output(self, process, data, limit, seconds):
+        if self.read_output is not None:
+            return self.read_output(process, data, limit, seconds)
+        return result_line()
 
     def where(self, word):
         return [command for command in self.commands if word in command]
@@ -647,7 +718,7 @@ def test_a_run_tag_id_is_eight_random_bytes(monkeypatch, tmp_path):
     assert fake.token_sizes == [8]
 
 
-def sigterm_self(data, timeout):
+def sigterm_self(*args):
     os.kill(os.getpid(), signal.SIGTERM)
 
 
@@ -657,7 +728,7 @@ def stderr_keeps_webhook_tag(capsys):
 
 def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_handler(monkeypatch, tmp_path):
     fake = FakeLaunch(monkeypatch, tmp_path, "run")
-    fake.communicate = sigterm_self
+    fake.read_output = sigterm_self
     sentinel = lambda signum, frame: None  # noqa: E731
     original = signal.signal(signal.SIGTERM, sentinel)
     try:
@@ -670,13 +741,13 @@ def test_sigterm_ends_the_launch_with_143_removes_the_tags_and_restores_the_hand
     assert len(fake.where("rmi")) == 1
 
 
-def raise_timeout(data, timeout):
-    raise subprocess.TimeoutExpired("docker", timeout)
+def raise_timeout(*args):
+    raise subprocess.TimeoutExpired("docker", launch.RUN_SECONDS)
 
 
 def test_sigterm_during_a_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = sigterm_self
+    fake.read_output = sigterm_self
     with pytest.raises(SystemExit) as stop:
         launch.main()
     assert stop.value.code == 143
@@ -686,7 +757,7 @@ def test_sigterm_during_a_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_
 
 def test_a_timed_out_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
     with pytest.raises(SystemExit, match="was stopped"):
         launch.main()
     assert fake.where("rmi") == [["docker", "--context", "orbstack", "rmi", "agent-bailiff-live-run:r1"]]
@@ -695,7 +766,7 @@ def test_a_timed_out_kubernetes_run_keeps_the_webhook_tag(monkeypatch, tmp_path,
 
 def test_a_failing_docker_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
     fake.stop_raises = subprocess.TimeoutExpired("docker", 330)
     with pytest.raises(subprocess.TimeoutExpired):
         launch.main()
@@ -705,7 +776,7 @@ def test_a_failing_docker_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, caps
 
 def test_a_failing_wait_after_stop_keeps_the_webhook_tag(monkeypatch, tmp_path, capsys):
     fake = FakeLaunch(monkeypatch, tmp_path, "kubernetes")
-    fake.communicate = raise_timeout
+    fake.read_output = raise_timeout
 
     def wait(timeout):
         raise subprocess.TimeoutExpired("docker", timeout)
@@ -818,3 +889,157 @@ def test_a_build_that_writes_no_iidfile_is_refused(monkeypatch):
     monkeypatch.setattr(launch.subprocess, "run", lambda command, **options: None)
     with pytest.raises(RuntimeError, match="image ID"):
         launch.build_image("orbstack", "Dockerfile", "t:1")
+
+
+def container_child(monkeypatch, fake, script):
+    children = []
+
+    def popen(command, **options):
+        fake.commands.append(command)
+        fake.popen_calls.append(command)
+        child = REAL_POPEN([sys.executable, "-c", script], **options)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(launch.subprocess, "Popen", popen)
+    fake.read_output = READ_OUTPUT
+    return children
+
+
+FLOOD = """
+import os, sys
+sys.stdin.buffer.read()
+try:
+    for _ in range(64):
+        os.write(1, b"A" * 65536)
+except OSError:
+    pass
+"""
+
+
+def test_a_container_that_floods_stdout_is_stopped_and_refused(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    children = container_child(monkeypatch, fake, FLOOD)
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    [child] = children
+    assert stop.value.code == f"run r1 wrote more than {launch.STDOUT_BYTES} bytes to stdout and was stopped"
+    assert fake.where("stop") == [["docker", "--context", "orbstack", "stop", "--time", "300", "bl-r1"]]
+    assert child.poll() is not None
+    assert not fake.out.exists()
+
+
+def child(script):
+    return REAL_POPEN([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+
+ECHO = "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"
+
+
+def test_the_bundle_reaches_the_container_and_its_stdout_is_returned():
+    data = os.urandom(1 << 18)
+    process = child(ECHO)
+    assert READ_OUTPUT(process, data, len(data), 30) == data
+    assert process.returncode == 0
+
+
+@pytest.mark.parametrize(("size", "refused"), [(4096, False), (4097, True)])
+def test_stdout_past_the_limit_is_refused(size, refused):
+    process = child(f"import os, sys; sys.stdin.buffer.read(); os.write(1, b'A' * {size})")
+    if not refused:
+        assert READ_OUTPUT(process, b"x", 4096, 30) == b"A" * size
+        return
+    with pytest.raises(launch.OutputLimitExceeded, match="more than 4096 bytes"):
+        READ_OUTPUT(process, b"x", 4096, 30)
+    process.wait(30)
+
+
+def test_an_endless_stdout_is_refused_once_past_the_limit():
+    process = child("import os\nwhile True:\n    os.write(1, b'A' * 65536)")
+    try:
+        with pytest.raises(launch.OutputLimitExceeded):
+            READ_OUTPUT(process, b"x", 1 << 20, 30)
+    finally:
+        process.kill()
+        process.wait(30)
+
+
+def test_a_container_past_the_deadline_times_out():
+    process = child("import time; time.sleep(30)")
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            READ_OUTPUT(process, b"x", 4096, 0.2)
+    finally:
+        process.kill()
+        process.wait(30)
+
+
+def test_a_container_that_exits_before_reading_the_bundle_still_returns_its_exit():
+    process = child("import sys; sys.stdin.close(); sys.exit(3)")
+    assert READ_OUTPUT(process, os.urandom(1 << 18), 4096, 30) == b""
+    assert process.returncode == 3
+
+
+def test_a_last_line_that_is_not_json_is_refused_without_echoing_it(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(f"progress\n{MARKER} not json\n".encode()))
+    with pytest.raises(RuntimeError, match="not compact result JSON") as refused:
+        launch.main()
+    assert "MARKER" not in host_text(refused.value)
+    assert not fake.out.exists()
+
+
+def test_failed_checks_are_counted_not_echoed(monkeypatch, tmp_path, capsys):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(result_line(status="failed", failures=[MARKER, "docket verifies"])))
+    with pytest.raises(SystemExit) as stop:
+        launch.main()
+    assert stop.value.code == f"run r1 failed 2 checks, listed under failures in {fake.out}"
+    assert "MARKER" not in capsys.readouterr().err
+    assert json.loads(fake.out.read_text())["failures"] == [MARKER, "docket verifies"]
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        b'{"run_id":"r1","status":"ok"}\n',
+        result_line(failures=["docket verifies"]),
+        result_line(status="failed"),
+        result_line(status="failed", failures=[1]),
+        result_line(extra=True),
+        result_line(model="\u00e9").replace(b"\\u00e9", "\u00e9".encode()),
+    ],
+    ids=[
+        "ok-without-failures",
+        "ok-with-failures",
+        "failed-without-failures",
+        "failure-not-text",
+        "extra-key",
+        "not-ascii",
+    ],
+)
+def test_a_line_that_is_not_the_harness_result_shape_is_refused(monkeypatch, tmp_path, stdout):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(stdout))
+    with pytest.raises(RuntimeError) as refused:
+        launch.main()
+    assert "MARKER" not in host_text(refused.value)
+    assert not fake.out.exists()
+
+
+def test_a_line_nested_past_the_parser_is_refused_and_writes_nothing(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(nested(100000)))
+    with pytest.raises(RuntimeError, match="not compact result JSON"):
+        launch.main()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("depth", [900, 5000])
+def test_a_nested_result_is_written_as_the_compact_line_it_came_in(monkeypatch, tmp_path, depth):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    line = nested(depth)
+    container_child(monkeypatch, fake, printing(line))
+    launch.main()
+    assert fake.out.read_bytes() == line.rstrip(b"\n")
+    assert list(tmp_path.iterdir()) == [fake.out]

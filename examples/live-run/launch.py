@@ -7,13 +7,17 @@ import argparse
 import base64
 import binascii
 import json
+import math
 import os
 import re
 import secrets
+import select
+import selectors
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +47,13 @@ TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 LOCK = "agent-bailiff-lock"
 RUN_SECONDS = 3600
 STOP_SECONDS = 300
+STDOUT_BYTES = 1 << 20
+READ_BYTES = 1 << 16
+RESULT_KEYS = frozenset({"run_id", "status", "failures", "model", "outcomes", "final"})
+
+
+class OutputLimitExceeded(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -259,16 +270,93 @@ def container_command(spec: RunSpec, image: str) -> list[str]:
     return [*command, "--context", spec.context, "--webhook-image", spec.webhook_image]
 
 
-def read_result(stdout: str, run_id: str) -> dict[str, Any]:
+def read_output(process: subprocess.Popen[bytes], data: bytes, limit: int, seconds: float) -> bytes:
+    if process.stdin is None or process.stdout is None:
+        raise RuntimeError("the container needs piped stdin and stdout")
+    deadline = time.monotonic() + seconds
+    output = bytearray()
+    sent = 0
+    with selectors.DefaultSelector() as selector:
+        try:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            selector.register(process.stdin, selectors.EVENT_WRITE)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, seconds)
+                for key, _ in selector.select(remaining):
+                    if key.fileobj is process.stdin:
+                        try:
+                            sent += os.write(key.fd, data[sent : sent + select.PIPE_BUF])
+                        except BrokenPipeError:
+                            sent = len(data)
+                        if sent == len(data):
+                            selector.unregister(process.stdin)
+                            process.stdin.close()
+                        continue
+                    chunk = os.read(key.fd, min(READ_BYTES, limit + 1 - len(output)))
+                    if not chunk:
+                        selector.unregister(process.stdout)
+                    output += chunk
+                    if len(output) > limit:
+                        raise OutputLimitExceeded(f"the container wrote more than {limit} bytes to stdout")
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+    process.wait(max(0.0, deadline - time.monotonic()))
+    return bytes(output)
+
+
+def stop_container(docker_context: str, run_id: str, process: subprocess.Popen[bytes]) -> None:
+    subprocess.run(
+        ["docker", "--context", docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{run_id}"],
+        timeout=STOP_SECONDS + 30,
+        check=False,
+    )
+    process.wait(30)
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document = dict(pairs)
+    if len(document) != len(pairs):
+        raise ValueError("duplicate key")
+    return document
+
+
+def reject_constant(name: str) -> float:
+    raise ValueError(f"{name} is not JSON")
+
+
+def read_finite(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError("number out of range")
+    return number
+
+
+def read_result(stdout: bytes, run_id: str) -> dict[str, Any]:
     lines = stdout.strip().splitlines()
     if not lines:
         raise RuntimeError("the harness printed no result")
     try:
-        result = json.loads(lines[-1])
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"the last stdout line is not compact result JSON: {lines[-1][:200]!r}") from error
-    if not isinstance(result, dict) or result.get("run_id") != run_id or result.get("status") not in ("ok", "failed"):
-        raise RuntimeError(f"the result is not a result for run {run_id}")
+        result = json.loads(
+            lines[-1].decode("ascii"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_constant,
+            parse_float=read_finite,
+        )
+    except (ValueError, RecursionError):
+        raise RuntimeError("the last stdout line is not compact result JSON") from None
+    if not isinstance(result, dict) or set(result) != RESULT_KEYS or result["run_id"] != run_id:
+        raise RuntimeError(f"the last stdout line is not a result for run {run_id}")
+    failures = result["failures"]
+    if (
+        result["status"] not in ("ok", "failed")
+        or not isinstance(failures, list)
+        or not all(isinstance(failure, str) for failure in failures)
+        or (result["status"] == "ok") == bool(failures)
+    ):
+        raise RuntimeError(f"the result for run {run_id} has a status that does not follow its failures")
     return result
 
 
@@ -296,9 +384,21 @@ def report_lock(context: str, docker_context: str) -> str:
 
 
 def write_result(path: Path, result: dict[str, Any]) -> None:
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as file:
-        json.dump(result, file, indent=2)
+    data = json.dumps(result, separators=(",", ":")).encode()
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.link(temporary, path)
+    finally:
+        os.unlink(temporary)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def end_on_sigterm(signum: int, frame: Any) -> None:
@@ -371,27 +471,29 @@ def launch() -> None:
             run_tags.remove(held_tag)
         process = subprocess.Popen(container_command(spec, image), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         try:
-            stdout, _ = process.communicate(stdin_bundle(token, kubeconfig), timeout=RUN_SECONDS)
+            stdout = read_output(process, stdin_bundle(token, kubeconfig), STDOUT_BYTES, RUN_SECONDS)
         except subprocess.TimeoutExpired:
-            subprocess.run(
-                ["docker", "--context", spec.docker_context, "stop", "--time", str(STOP_SECONDS), f"bl-{spec.run_id}"],
-                timeout=STOP_SECONDS + 30,
-                check=False,
-            )
-            process.wait(30)
+            stop_container(spec.docker_context, spec.run_id, process)
             raise SystemExit(f"run {spec.run_id} passed {RUN_SECONDS} s and was stopped") from None
+        except OutputLimitExceeded:
+            stop_container(spec.docker_context, spec.run_id, process)
+            raise SystemExit(
+                f"run {spec.run_id} wrote more than {STDOUT_BYTES} bytes to stdout and was stopped"
+            ) from None
         if process.returncode != 0:
             if kubernetes:
                 print(report_lock(args.context, args.docker_context), file=sys.stderr)
             raise SystemExit(process.returncode)
-        result = read_result(stdout.decode(), spec.run_id)
+        result = read_result(stdout, spec.run_id)
         if held_tag is not None:
             run_tags.insert(0, held_tag)
             held_tag = None
         write_result(spec.out, result)
         print(f"run {spec.run_id}: wrote {spec.out}")
         if result["status"] != "ok":
-            raise SystemExit(f"run {spec.run_id} failed its checks: {', '.join(result['failures'])}")
+            raise SystemExit(
+                f"run {spec.run_id} failed {len(result['failures'])} checks, listed under failures in {spec.out}"
+            )
 
     finally:
         handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
