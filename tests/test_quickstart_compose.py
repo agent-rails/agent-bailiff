@@ -493,3 +493,9 @@ def test_the_baseline_reaches_the_upstream_network_with_the_install_ca_under_its
 def test_bootstrap_reaches_gitea_only_over_the_socket(config):
     assert config["services"]["bootstrap"]["network_mode"] == "none"
     assert "networks" not in config["services"]["bootstrap"]
+
+
+def test_bootstrap_stops_within_a_grace_period_its_token_cleanup_fits(config):
+    grace = config["services"]["bootstrap"]["stop_grace_period"]
+    assert re.fullmatch(r"\d+s", grace), grace
+    assert b.CLEANUP_SECONDS + b.HANDOFF_WRITE_SECONDS < int(grace[:-1])
