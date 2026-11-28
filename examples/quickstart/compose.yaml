@@ -311,6 +311,7 @@ services:
     user: "10003:10003"
     group_add: ["20004"]
     command: ["/app/quickstart/bootstrap.py", "gitea"]
+    stop_grace_period: 45s
     volumes:
       - *upstreams
       - gitea-admin:/var/lib/bailiff/gitea-admin:ro

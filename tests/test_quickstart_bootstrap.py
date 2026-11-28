@@ -9,9 +9,11 @@ import math
 import os
 import re
 import shutil
+import signal
 import socket
 import socketserver
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1006,6 +1008,84 @@ def test_an_interrupt_during_cleanup_keeps_the_refusal_and_notes_it(pair, gitea,
     assert "bootstrap gitea refused: agent-bailiff credential-check --provider failed" in err
     assert f"bootstrap gitea: token 9 may still be live in gitea: cleanup interrupted by {interrupt.__name__}" in err
     assert gitea.deleted == []
+
+
+def test_a_stop_during_cleanup_keeps_the_refusal_and_notes_it(pair, gitea, monkeypatch, capsys):
+    pair.cli.refused[MINTED] = "broader_scopes"
+    monkeypatch.setattr(b, "delete_token", lambda *_: lose(b.Stopped("stopped by SIGTERM")))
+    (pair.handoff / "ready").write_text("")
+    assert b.main(["gitea"]) == 1
+    err = capsys.readouterr().err
+    assert "bootstrap gitea: token 9 may still be live in gitea: cleanup interrupted by Stopped" in err
+    assert gitea.deleted == []
+
+
+TESTS = Path(__file__).resolve().parent
+SIGTERM_SCRIPT = """
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from test_quickstart_bootstrap import GITEA_UPSTREAM, FakeCli, TokenGitea, b
+work, stage = Path(sys.argv[2]), sys.argv[3]
+class Logged(list):
+    def append(self, event):
+        super().append(event)
+        with (work / "events").open("a") as log:
+            log.write(json.dumps(event) + "\\n")
+def blocked(command, **options):
+    (work / "checking").write_text("")
+    time.sleep(60)
+events = Logged()
+gitea = TokenGitea(events)
+b.HANDOFF, b.HANDOFF_POLL_SECONDS, b.HANDOFF_SECONDS = work / "handoff", 0.01, 100
+b.UPSTREAM_FILE, b.ADMIN_PASSWORD = GITEA_UPSTREAM, work / "password"
+b.Gitea = lambda base, budget=None: gitea
+b.seed = lambda gitea, admin: []
+b.token_reach = lambda gitea, credential: {}
+b.stored_credential = lambda upstream: None
+b.subprocess.run = blocked if stage == "check" else FakeCli(events)
+sys.exit(b.main(["gitea"]))
+"""
+
+
+def stop_bootstrap(tmp_path, stage, mark):
+    (tmp_path / "handoff").mkdir(mode=0o700)
+    (tmp_path / "handoff" / "ready").write_text("")
+    (tmp_path / "password").write_text("admin password")
+    process = subprocess.Popen(
+        [sys.executable, "-c", SIGTERM_SCRIPT, str(TESTS), str(tmp_path), stage],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not mark.exists():
+            assert process.poll() is None, process.communicate()
+            assert time.monotonic() < deadline, f"bootstrap never reached {mark.name}"
+            time.sleep(0.01)
+        process.send_signal(signal.SIGTERM)
+        _, err = process.communicate(timeout=30)
+    finally:
+        process.kill()
+        process.wait()
+    events = [tuple(json.loads(line)) for line in (tmp_path / "events").read_text().splitlines()]
+    return process.returncode, err, events
+
+
+def test_a_sigterm_while_a_minted_token_is_pending_refuses_and_deletes_it(tmp_path):
+    returncode, err, events = stop_bootstrap(tmp_path, "check", tmp_path / "checking")
+    assert returncode == 1
+    assert "bootstrap gitea refused: stopped by SIGTERM" in err
+    assert (tmp_path / "handoff" / "refused").exists()
+    assert events == [("minted", 9), ("deleted", 9)]
+
+
+def test_a_sigterm_after_the_checked_mark_keeps_the_handed_off_token(tmp_path):
+    returncode, err, events = stop_bootstrap(tmp_path, "store", tmp_path / "handoff" / "checked")
+    assert returncode == 1
+    assert "bootstrap gitea refused: stopped by SIGTERM" in err
+    assert events == [("minted", 9)]
 
 
 def test_a_minted_credential_that_cannot_read_the_repository_is_deleted_from_gitea(pair, gitea, capsys):
