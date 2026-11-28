@@ -42,6 +42,10 @@ def result_line(**fields):
     return (json.dumps({**result, **fields}, separators=(",", ":")) + "\n").encode()
 
 
+def nested(depth):
+    return result_line(final=[]).replace(b'"final":[]', b'"final":' + b"[" * depth + b"]" * depth)
+
+
 def host_text(error):
     return "".join(traceback.format_exception(error))
 
@@ -460,6 +464,26 @@ def test_the_result_is_the_harness_last_compact_line(capsys, failures, status):
 def test_a_result_other_than_a_result_line_for_this_run_is_refused(stdout, message):
     with pytest.raises(RuntimeError, match=message):
         launch.read_result(stdout, "r1")
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        result_line(failures=["docket verifies"]).replace(b"}\n", b',"failures":[]}\n'),
+        result_line(final={"a": 1}).replace(b'{"a":1}', b'{"a":1,"a":2}'),
+        result_line(final={"x": float("nan")}),
+        result_line(final={"x": float("inf")}),
+        result_line(final={"x": float("-inf")}),
+        result_line(final={"x": 1.0}).replace(b"1.0", b"1e400"),
+        nested(100000),
+    ],
+    ids=["duplicate-key", "nested-duplicate-key", "nan", "infinity", "minus-infinity", "overflow", "deep"],
+)
+def test_a_line_json_would_read_ambiguously_or_not_at_all_is_refused(stdout):
+    with pytest.raises(RuntimeError, match="not compact result JSON") as refused:
+        launch.read_result(stdout, "r1")
+    assert refused.value.__cause__ is None
+    assert refused.value.__suppress_context__
 
 
 def lock_state(monkeypatch, owner, running):
@@ -981,3 +1005,11 @@ def test_a_line_that_is_not_the_harness_result_shape_is_refused(monkeypatch, tmp
         launch.main()
     assert "MARKER" not in host_text(refused.value)
     assert not fake.out.exists()
+
+
+def test_a_line_nested_past_the_parser_is_refused_and_writes_nothing(monkeypatch, tmp_path):
+    fake = FakeLaunch(monkeypatch, tmp_path, "run")
+    container_child(monkeypatch, fake, printing(nested(100000)))
+    with pytest.raises(RuntimeError, match="not compact result JSON"):
+        launch.main()
+    assert list(tmp_path.iterdir()) == []

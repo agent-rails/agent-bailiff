@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import json
+import math
 import os
 import re
 import secrets
@@ -315,13 +316,36 @@ def stop_container(docker_context: str, run_id: str, process: subprocess.Popen[b
     process.wait(30)
 
 
+def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    document = dict(pairs)
+    if len(document) != len(pairs):
+        raise ValueError("duplicate key")
+    return document
+
+
+def reject_constant(name: str) -> float:
+    raise ValueError(f"{name} is not JSON")
+
+
+def read_finite(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError("number out of range")
+    return number
+
+
 def read_result(stdout: bytes, run_id: str) -> dict[str, Any]:
     lines = stdout.strip().splitlines()
     if not lines:
         raise RuntimeError("the harness printed no result")
     try:
-        result = json.loads(lines[-1].decode("ascii"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        result = json.loads(
+            lines[-1].decode("ascii"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_constant,
+            parse_float=read_finite,
+        )
+    except (ValueError, RecursionError):
         raise RuntimeError("the last stdout line is not compact result JSON") from None
     if not isinstance(result, dict) or set(result) != RESULT_KEYS or result["run_id"] != run_id:
         raise RuntimeError(f"the last stdout line is not a result for run {run_id}")
